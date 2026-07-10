@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Agent Harness Dashboard</title>
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --fg:#e6edf3; --accent:#2f81f7; --green:#3fb950; --red:#f85149; }
+    body { background:var(--bg); color:var(--fg); font-family:ui-monospace,monospace; margin:0; padding:2rem; }
+    h1 { font-size:1.4rem; }
+    .panel { background:var(--panel); border:1px solid #30363d; border-radius:8px; padding:1.25rem; margin-bottom:1rem; max-width:720px; }
+    label { display:block; margin:.6rem 0 .2rem; font-size:.85rem; color:#8b949e; }
+    input, textarea { width:100%; background:#0d1117; color:var(--fg); border:1px solid #30363d; border-radius:6px; padding:.5rem; box-sizing:border-box; }
+    textarea { min-height:110px; }
+    button { margin-top:.8rem; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:.55rem 1.1rem; cursor:pointer; }
+    .flash.success { color:var(--green); }
+    .flash.error { color:var(--red); }
+  </style>
+</head>
+<body>
+  <h1>🧰 Agent Harness — Task Dashboard</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="flash {{ category }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  <div class="panel">
+    <h2>Queue a new agent task</h2>
+    <form method="post" action="{{ url_for('new_task') }}">
+      <label for="title">Title</label>
+      <input id="title" name="title" placeholder="Add rate limiter to API" required>
+      <label for="spec">Spec / acceptance criteria</label>
+      <textarea id="spec" name="spec" placeholder="- Requests capped at 60/min per client&#10;- 429 with Retry-After header&#10;- Unit + integration tests" required></textarea>
+      <button type="submit">Queue task → review loop</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Gates</h2>
+    <p>API: <code>{{ api_base }}</code> · Gate suite: ruff · black · mypy --strict · unit · integration · coverage ≥ 80% · branch-name</p>
+  </div>
+</body>
+</html>
