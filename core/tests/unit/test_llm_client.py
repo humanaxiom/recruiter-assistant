@@ -7,6 +7,14 @@ Ported from hris ``packages/pipeline/src/pipeline/llm/client.py``
 that could invoke a retry patches ``LLMClient._sleep_backoff`` so the
 suite runs instantly; circuit-breaker tests patch ``time.monotonic`` with
 a fake, settable clock instead of sleeping real seconds.
+
+── Round 2 (merge-blocking re-audit) addition ──────────────────────────────
+* Finding 4 (MEDIUM): ``_strip_nuls`` recurses over parsed LLM JSON with no
+  depth bound. Deeply nested JSON (reachable within ``max_tokens`` via
+  ``[[[...]]]``, and the résumé is prompt-injectable) can trip a
+  ``RecursionError`` in the ``_strip_nuls(json.loads(...))`` chain, which is
+  neither ``JSONDecodeError`` nor ``ValidationError`` — it must not escape
+  ``chat_json`` uncaught.
 """
 
 from __future__ import annotations
@@ -421,6 +429,46 @@ async def test_chat_json_strips_nul_bytes_from_llm_string_output() -> None:
 
     assert "\x00" not in result.name
     assert len(calls) == 1
+    await llm.aclose()
+
+
+# ── Finding 4 round 2 (MEDIUM): `_strip_nuls` unbounded recursion ───────
+#
+# `_strip_nuls` recurses over parsed LLM JSON with no depth bound. Deeply
+# nested JSON (reachable within max_tokens via `[[[...]]]`, and the résumé
+# is prompt-injectable) trips a RecursionError somewhere in the
+# `_strip_nuls(json.loads(...))` chain. RecursionError is neither
+# JSONDecodeError nor ValidationError, so today it escapes chat_json's
+# except clauses entirely — and from there, escapes parse_resume uncaught,
+# stranding the row and burning an arq retry storm.
+
+
+@pytest.mark.asyncio
+async def test_chat_json_deeply_nested_json_never_lets_recursionerror_escape() -> None:
+    depth = 5000  # comfortably past CPython's default ~1000 recursion limit
+    nested = "[" * depth + '"a\x00b"' + "]" * depth
+    outcomes: list[Exception | httpx.Response] = [
+        _ok_chat_response(nested),
+        _ok_chat_response(nested),
+    ]
+    transport, calls = _sequenced_transport(outcomes)
+    llm = _client(transport)
+
+    try:
+        with pytest.raises(LLMOutputInvalidError):
+            await llm.chat_json(
+                [{"role": "user", "content": "give me json"}],
+                _Widget,
+                max_retries=1,
+            )
+    except RecursionError:
+        pytest.fail(
+            "RecursionError escaped chat_json — deeply nested LLM JSON must be "
+            "handled (caught + converted to LLMOutputInvalidError), not "
+            "propagate out of the task"
+        )
+
+    assert len(calls) == 2
     await llm.aclose()
 
 

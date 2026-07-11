@@ -26,11 +26,24 @@ Covers:
 
 ``src.worker.resume_tasks`` does not exist yet — RED half of the TDD cycle;
 this whole file is expected to fail at collection (ImportError).
+
+── Round 2 (merge-blocking re-audit) additions ─────────────────────────────
+* Finding 3 (MAJOR): a PERMANENT embedding failure (``LLMOutputInvalidError``
+  from ``embedder.embed`` — a dim/count mismatch) must funnel through
+  ``record_parse_failure`` -> "failed", exactly like the core-LLM failure
+  does, not escape ``parse_resume`` uncaught. Covers both the summary-embed
+  call and the chunk-embed call (``_embed_batched``) separately.
+* Finding 6 (MEDIUM): the outbox payload must not carry raw chunk TEXT
+  (``parsed.chunks[].text`` / ``parsed.cover_letter_chunks[].text``) — header
+  chunks contain the candidate's name/email/phone verbatim, so shipping
+  chunk text in the unencrypted ``outbox`` jsonb still leaks identity even
+  though round 1 dropped the structured ``candidate`` block.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -344,6 +357,125 @@ async def test_resume_parsed_validation_error_is_caught_not_raised() -> None:
     enqueue.assert_not_awaited()
 
 
+# ── Finding 3 (MAJOR, round 2): a PERMANENT embedding failure must not ──────
+# escape parse_resume uncaught ───────────────────────────────────────────
+#
+# LLMClient.embed raises LLMOutputInvalidError on a count mismatch AND on
+# the expected_dim check — a PERMANENT per-document error, exactly like a
+# core-LLM chat_json failure. The embedding calls (summary embed, chunk
+# embeds via _embed_batched) are today UNguarded: the exception escapes
+# parse_resume uncaught, stranding the row uploaded/parsing with a NULL
+# failure_reason. (A transient LLMUnavailableError is NOT asserted here —
+# it may still escape so arq retries a genuine outage.)
+
+
+@pytest.mark.asyncio
+async def test_summary_embed_permanent_failure_records_failure_and_returns_failed() -> (
+    None
+):
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4()))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=LLMOutputInvalidError("768-d contract violated"))
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        # Today LLMOutputInvalidError escapes uncaught right here — that IS
+        # the bug. The assertions below are what the fix must satisfy.
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chunk_embed_permanent_failure_records_failure_and_returns_failed() -> (
+    None
+):
+    """Same guarantee for the CHUNK embed call (`_embed_batched`), separable
+    from the summary embed: the summary embed succeeds, the chunk-batch
+    embed raises."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4()))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(
+            side_effect=[[[0.1] * 8], LLMOutputInvalidError("count mismatch")]
+        )
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
 # ── parse_resume: happy path ────────────────────────────────────────────
 
 
@@ -547,6 +679,105 @@ async def test_outbox_payload_parsed_dict_excludes_candidate_block() -> None:
     assert "chunk_embs" in payload
     assert payload["prompt_version"] == "resume_core_v1+resume_skills_v2"
     assert str(payload["job_id"]) == str(job_id)
+
+
+# ── Finding 6 (MEDIUM, round 2): outbox must not carry raw chunk TEXT ─────
+#
+# Round 1 dropped the structured `candidate` block, but the same payload
+# still ships `parsed.chunks[].text` / `parsed.cover_letter_chunks[].text` —
+# raw résumé text whose header chunks contain the candidate's name/email/
+# phone verbatim. So candidate identity is still in the unencrypted
+# `outbox` jsonb. The fix drops chunk TEXT from the outbox `parsed` dict
+# too — ids-only (or absent) is fine; the payload still needs `chunk_embs`
+# keyed by chunk id plus the structured skills/experience/education/summary.
+# `resumes.parsed` (the system of record) keeps full chunk text — that's an
+# integration concern, not asserted here.
+
+
+@pytest.mark.asyncio
+async def test_outbox_payload_never_carries_raw_chunk_text_pii() -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace", email="ada@example.com"),
+        summary="Backend engineer.",
+        experience=[Experience(company="Acme", title="Engineer")],
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(
+            id="c_001",
+            section="header",
+            page=0,
+            text="SENTINEL_HEADER_PII Ada Lovelace ada@example.com 555-0100",
+        ),
+        ResumeChunk(id="c_002", section="skills", page=0, text="Python, SQL"),
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8, [0.3] * 8]])
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    enqueue.assert_awaited_once()
+    payload = enqueue.await_args.kwargs["payload"]
+
+    dumped = json.dumps(payload, default=str)
+    assert "SENTINEL_HEADER_PII" not in dumped, (
+        "raw chunk text (candidate PII carried by header chunks) leaked "
+        "into the unencrypted outbox payload"
+    )
+
+    parsed_dict = payload["parsed"]
+    for key in ("chunks", "cover_letter_chunks"):
+        if key in parsed_dict:
+            for row in parsed_dict[key]:
+                assert "text" not in row, (
+                    f"outbox parsed.{key}[] still carries chunk TEXT — "
+                    "ids-only is fine, raw text is not"
+                )
+
+    assert "chunk_embs" in payload
+    assert set(payload["chunk_embs"]) == {"c_001", "c_002"}
+    assert payload["summary_emb"] == [0.1] * 8
+    assert payload["prompt_version"] == "resume_core_v1+resume_skills_v2"
+    assert str(payload["job_id"]) == str(job_id)
+    assert "skills" in parsed_dict
+    assert "experience" in parsed_dict
+    assert "education" in parsed_dict
+    assert "summary" in parsed_dict
 
 
 # ── _drop_smeared_years ──────────────────────────────────────────────────

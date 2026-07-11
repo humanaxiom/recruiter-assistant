@@ -12,10 +12,22 @@ The NUL-stripping tests guard a real production bug: Postgres ``text``/
 ``jsonb`` reject U+0000. An unstripped NUL crashes the DB write, leaves
 the resume ``status='uploaded'``, and a reconcile cron re-queues it
 forever, burning an LLM pass every time.
+
+── Round 2 (merge-blocking re-audit) additions ─────────────────────────────
+* Finding 1 (HIGH): the DOCX decompression-bomb guard must enforce a REAL
+  decompression ceiling by streaming actual bytes, not by trusting the
+  zip's self-declared (and forgeable) central-directory ``file_size``.
+* Finding 2 (MAJOR): a malformed PDF that trips MuPDF's page-tree reader
+  must surface as the typed ``UnsupportedMimeError``, never a bare
+  ``RuntimeError``/internal MuPDF exception that escapes uncaught.
+* Finding 5 (LOW): the 300/301-page cap boundary test already exists below
+  (unchanged) — Finding 2's fix (wrapping the MuPDF page-tree access)
+  subsumes the ``getattr(doc, "page_count", 0)`` fail-open.
 """
 
 from __future__ import annotations
 
+import struct
 import zipfile
 from collections.abc import Iterator
 from io import BytesIO
@@ -113,6 +125,71 @@ def _make_bomb_docx_bytes(uncompressed_size: int) -> bytes:
         zf.writestr("[Content_Types].xml", "<Types/>")
         zf.writestr("word/document.xml", payload)
     return buf.getvalue()
+
+
+def _patch_zip_member_declared_size(
+    blob: bytes, member_name: str, declared_size: int
+) -> bytes:
+    """Rewrite BOTH the local file header's and the central directory
+    record's uncompressed-size ("file_size") field for ``member_name`` to
+    ``declared_size``, leaving the compressed bytes and CRC32 untouched. A
+    real unzip of the member still yields its full, TRUE decompressed
+    content — only the size the zip self-reports is a lie. This is exactly
+    what fools a central-directory-trusting guard
+    (``sum(info.file_size for info in zf.infolist())``).
+    """
+    data = bytearray(blob)
+    name_bytes = member_name.encode("utf-8")
+
+    with zipfile.ZipFile(BytesIO(bytes(data))) as zf:
+        info = zf.getinfo(member_name)
+    # Local file header: signature(4) + 18 bytes of fixed fields ->
+    # uncompressed size sits at offset +22.
+    struct.pack_into("<I", data, info.header_offset + 22, declared_size)
+
+    # Central directory record: signature(4) + fixed fields -> uncompressed
+    # size ("file_size") sits at +24, filename length at +28, filename at +46.
+    sig = b"PK\x01\x02"
+    idx = 0
+    patched_cd = False
+    while True:
+        idx = data.find(sig, idx)
+        if idx == -1:
+            break
+        name_len = struct.unpack_from("<H", data, idx + 28)[0]
+        if bytes(data[idx + 46 : idx + 46 + name_len]) == name_bytes:
+            struct.pack_into("<I", data, idx + 24, declared_size)
+            patched_cd = True
+            break
+        idx += 4
+    assert patched_cd, f"central directory record for {member_name!r} not found"
+    return bytes(data)
+
+
+def _make_bomb_docx_bytes_with_lying_header(
+    actual_uncompressed_size: int, declared_size: int
+) -> bytes:
+    """A real zip whose ``word/document.xml`` member ACTUALLY decompresses to
+    ``actual_uncompressed_size`` bytes, but whose local + central-directory
+    headers are rewritten to declare only ``declared_size`` bytes. The CRC32
+    is untouched (it matches the real payload), so a genuine unzip /
+    ``Document()`` call still succeeds and yields the full, true content —
+    the exact "lying header" decompression bomb security proved (198 MB peak
+    allocation despite a declared 50 bytes).
+    """
+    payload = "0" * actual_uncompressed_size  # highly compressible: tiny on disk
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", payload)
+    blob = _patch_zip_member_declared_size(
+        buf.getvalue(), "word/document.xml", declared_size
+    )
+    with zipfile.ZipFile(BytesIO(blob)) as zf:
+        forged = zf.getinfo("word/document.xml").file_size
+        assert forged == declared_size
+        assert forged < actual_uncompressed_size
+    return blob
 
 
 # ── Fake fitz document (precise control over blocks/geometry) ───────────────
@@ -338,7 +415,38 @@ def test_extract_text_raises_on_decompression_bomb_docx() -> None:
         extract_text(blob, MIME_DOCX)
 
 
+# ── Finding 1 (HIGH, round 2): the guard must not trust a LYING header ──────
+#
+# Security proved 198 MB peak allocation despite a forged central-directory
+# ``file_size`` of 50 bytes. ``_docx_decompressed_size`` today just sums the
+# declared ``ZipInfo.file_size`` from the central directory — an attacker who
+# controls the zip controls that number independently of the real
+# decompressed payload. The guard must enforce a REAL decompression ceiling
+# by streaming each member and aborting once cumulative ACTUAL decompressed
+# bytes exceed the cap, not by trusting the header.
+
+
+def test_extract_text_raises_on_docx_bomb_with_forged_small_declared_header() -> None:
+    """``word/document.xml`` genuinely decompresses to 60 MB (> the 50 MB
+    cap), but its local + central-directory headers LIE and declare only 50
+    bytes. A CD-trusting guard reads the lie, passes, and hands the bomb to
+    ``Document()`` — which then genuinely inflates the full 60 MB. This must
+    still raise ``InputTooLargeError``."""
+    blob = _make_bomb_docx_bytes_with_lying_header(
+        actual_uncompressed_size=60_000_000, declared_size=50
+    )
+    with pytest.raises(InputTooLargeError):
+        extract_text(blob, MIME_DOCX)
+
+
 # ── Finding 3c: PDF page-count cap (300) ─────────────────────────────────────
+#
+# Finding 5 (LOW, round 2): these same two tests also pin the page-count
+# cap's fail-open — ``getattr(doc, "page_count", 0)`` only intercepts
+# ``AttributeError``, but a corrupt page tree makes the ``page_count``
+# property RAISE ``RuntimeError`` instead, crashing the guard line itself.
+# Finding 2's fix (wrapping the MuPDF page-tree access) subsumes this; no
+# separate test is added here beyond the existing 300/301 boundary below.
 
 
 def test_extract_text_raises_when_pdf_exceeds_page_cap() -> None:
@@ -351,3 +459,65 @@ def test_extract_text_accepts_pdf_at_exactly_the_page_cap() -> None:
     blob = _make_pdf_with_pages(300)
     result = extract_text(blob, MIME_PDF)
     assert len(result.pages) == 300
+
+
+# ── Finding 2 (MAJOR, round 2): malformed PDF must raise a TYPED error ──────
+#
+# MuPDF-backed properties (``doc.page_count``) and page iteration execute C
+# code that can raise an internal, UNTYPED exception on a malformed PDF —
+# a bare ``RuntimeError`` (e.g. "code=7: Invalid number of pages") from the
+# ``page_count`` property, or (confirmed against the real PyMuPDF used here)
+# ``pymupdf.mupdf.FzErrorFormat`` ("cycle in page tree") from the per-page
+# iteration loop. NEITHER is one of the typed errors (``UnsupportedMimeError``
+# / ``EncryptedPdfError`` / ``InputTooLargeError``) that ``parse_resume``
+# catches. Left unguarded, that exception escapes ``extract_text`` ->
+# ``parse_resume`` uncaught, stranding the resume row with a NULL
+# ``failure_reason`` and causing an arq retry storm on the same bytes
+# forever. The fix wraps the MuPDF access broadly (``except Exception`` ->
+# ``UnsupportedMimeError``), not a special case for one error string — these
+# three DIFFERENT malformed-PDF shapes, tripping TWO different MuPDF code
+# paths (``page_count`` access and per-page iteration), all must hit the
+# same fix.
+
+_MALFORMED_PDF_HUGE_COUNT_EMPTY_KIDS = (
+    b"%PDF-1.4\n"
+    b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [] /Count 999999 >>\nendobj\n"
+    b"trailer\n<< /Size 3 /Root 1 0 R >>\n"
+    b"%%EOF"
+)
+
+# A Pages node whose own Kids array points back at itself. ``page_count``
+# access succeeds, but the per-page iteration loop (`for i, page in
+# enumerate(doc): ...` — wrapped only in a `finally`, never an `except`)
+# detects the cycle and raises `pymupdf.mupdf.FzErrorFormat("cycle in page
+# tree")`, a DIFFERENT untyped exception than Finding 2's other fixture, from
+# a DIFFERENT code path (confirmed against the real PyMuPDF dependency
+# pinned in requirements.txt).
+_MALFORMED_PDF_CIRCULAR_PAGE_TREE = (
+    b"%PDF-1.4\n"
+    b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 >>\nendobj\n"
+    b"trailer\n<< /Size 3 /Root 1 0 R >>\n"
+    b"%%EOF"
+)
+
+_MALFORMED_PDF_GARBAGE_AFTER_HEADER = b"%PDF-1.7\n" + (
+    b"\x00\xff\xee not xref not obj just garbage bytes " * 5
+)
+
+
+@pytest.mark.parametrize(
+    "bad_pdf",
+    [
+        _MALFORMED_PDF_HUGE_COUNT_EMPTY_KIDS,
+        _MALFORMED_PDF_CIRCULAR_PAGE_TREE,
+        _MALFORMED_PDF_GARBAGE_AFTER_HEADER,
+    ],
+    ids=["huge_count_empty_kids", "circular_page_tree", "garbage_after_header"],
+)
+def test_extract_text_raises_typed_error_not_bare_runtimeerror_on_malformed_pdf(
+    bad_pdf: bytes,
+) -> None:
+    with pytest.raises(UnsupportedMimeError):
+        extract_text(bad_pdf, MIME_PDF)
