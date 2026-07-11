@@ -19,7 +19,9 @@ The working copy now holds the **ranking-domain foundation** (Phase 0) on the te
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phase 0 (seed & infra) complete and merged to `main` via PR #1** (merge commit `8b2b47c`, merged 2026-07-11), CI green. **Phase 1 (storage) complete and green on `feat/phase-1-storage`** (not yet merged). `main` contains Phase 0; Phase 1 awaits merge.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phase 0 (seed & infra) complete and merged to `main` via PR #1** (merge commit `8b2b47c`, merged 2026-07-11), CI green. **Phase 1 (storage) complete and green on `feat/phase-1-storage`** (not yet merged). **Phase 2 (schemas) complete and green on `feat/phase-2-schemas`** (not yet merged). `main` contains Phase 0; Phases 1 and 2 await merge.
+
+**Phase 2 landed** (two commits — red `1645178` → green `5bbf7c2`): the pydantic **v2** contract layer in `core/src/schemas/` — three modules + an `__init__` re-export (`from src.schemas import JobCreate, ResumeParsed, MatchWeights, …`), the contracts Phases 3–6 code against (API DTOs, strict LLM `chat_json` schemas, jsonb shapes, ranking weights). `jobs.py` = job DTOs + `Skill`/`Education`/`JDExtracted`; `resumes.py` = parse shapes + resume DTOs + the `_coerce_year`/`_drop_invalid_rows`/`_coerce_*` lossy validators; `matching.py` = `MatchWeights` (+ `DEFAULT_WEIGHTS`) + score/evidence/shortlist shapes. Pure data models — no I/O. **Review workflow + Taleo/JD-comments CUT and not importable** (`PipelineStage`/`DispositionReason`/`ShortlistDecision*`/`StageTransition*` deleted; `ShortlistEntry` drops `current_decision`/`current_stage`, keeps blind-review `blinded`/`display_label`; `JobListItem` drops `comment_count`/`source`/`external_last_seen_at`; no `approval_required_2nd_review`) — a merge-blocking cut guard enforces it. **Three DDL-alignment deviations**: `created_by`/`uploaded_by` are `str | None` (nullable TEXT actor labels), `JobCreate.blind_review` defaults `True` (blind-by-default), no `approval_required_2nd_review`. **`MatchWeights` is the ranking-weight contract** (0.6/0.3/0.1 top; 0.40/0.25/0.10/0.15/0.10 sub; `evidence_verify_fuzz=0.85`; frozen; sums-to-1.0 validator). Gates: offline green — ruff (no `--fix`), black, mypy --strict, **486 unit tests, 97.52% coverage**; reviewer APPROVE, security PASS, ranking-evals PASS (incl. a weight-validator mutation test). The GREEN step was completed by the coordinator directly after a coder subagent hit a session limit mid-port (`matching.py` + `__init__.py` hand-authored, re-verified by reviewer + evals). Security flagged a **redaction-boundary contract for Phase 5**: `ResumeOut`/`ResumeListItem` can serialize decrypted PII with `blinded=True`, so Phase 5 redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before DTO construction (the schema can't enforce it). Details: [docs/activity/phase-2-schemas.md](docs/activity/phase-2-schemas.md); rationale: [docs/adr/006-*.md](docs/adr/006-schema-port-trim-ddl-alignment.md).
 
 **Phase 1 landed** (four commits — red → green → red-harden → green-harden): the filesystem `BlobStore` (`core/src/storage/blob_store.py`) exists — async `put`/`get`/`delete`/`exists`/`list_keys` over `settings.storage_dir`, stdlib-only (`pathlib`/`asyncio`/`os`, IO via `asyncio.to_thread`), replacing MinIO. `BlobNotFound` / `InvalidBlobKey` exceptions. Security core: the `_resolve` guard rejects `..` segments, absolute/Windows-drive/backslash keys, empty/root/null-byte keys, and symlink escapes (realpath + `is_relative_to`); blobs are `0o600` and store-created dirs `0o700` (PIPEDA/FIPPA — blobs-at-rest are permission-gated, distinct from the pgcrypto-encrypted PII *columns*); `list_keys` realpath-filters escaping symlinks out of listings. Wired onto `app.state.blob_store` (with a `get_blob_store` dependency) and worker `ctx["blob_store"]`; **no call site invokes it yet** — the upload/fetch/flush sites are ported in Phases 3–6. Gates: offline green — ruff (no `--fix`), black, mypy --strict, **240 unit tests, 99.46% coverage**; all three merge-blocking gates passed (reviewer APPROVED, security PASS, ranking-evals PASS with a guard-mutation test). Details: [docs/activity/phase-1-storage.md](docs/activity/phase-1-storage.md); rationale: [docs/adr/005-*.md](docs/adr/005-filesystem-blobstore-interface-path-safety.md).
 
@@ -32,7 +34,7 @@ The working copy now holds the **ranking-domain foundation** (Phase 0) on the te
 
 **Note on `core/src/gates/`:** the deleted `gates/` was the template demo's *product-code* gate-runner, not the build harness. `make gates`, CI, `.claude/`, and pre-commit are all intact. The Phase 0 checklist's "keep gates" meant the build suite.
 
-**Not started:** Phase 2 onward — see below.
+**Not started:** Phase 3 onward — see below.
 
 **Decisions locked:** template-first port · filesystem storage (MinIO dropped — community edition archived 2026-04-25) · keep Neo4j (load-bearing) · v1 includes cover-letter/motivation, reverse-match, a minimal Flask viewer, and blind-review redaction ON by default.
 
@@ -64,15 +66,18 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); TDD (failing tests first); offline only (no cloud endpoints — local Ollama/OpenAI-compatible client); config via settings; a single red gate = not done. Privacy: PII never enters embeddings; anonymization non-destructive; PIPEDA/FIPPA.
 
-## Immediate next step — Phase 2 (Schemas)
+## Immediate next step — Phase 3 (Ingest + parse)
 
-Port the pydantic schemas: `resumes`, `matching` (**minus review types** — drop `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*`; drop `ShortlistEntry.current_decision/current_stage`), and `jobs` (`Skill`, `JDExtracted`). hris source paths are in **Appendix A** of the plan. Then Phases 3–7 per the plan table.
+Port the ingest/parse pipeline: `parsing/{extract,chunk}` (PyMuPDF/python-docx), the LLM client + Redis embed cache, `parse_resume`/`parse_job`, cover-letter parse, and **PII encryption on parse** (`pii.py`, pgcrypto). hris source paths are in **Appendix A** of the plan. These schemas are the parse targets: `JDExtracted` (job parse), `ResumeParsed`/`ResumeCore`/`ResumeSkill*` (resume parse), `CoverLetterParsed` (cover-letter parse). Then Phases 4–7 per the plan table.
 
-**Phase 1 is done** — the filesystem `BlobStore` exists and is wired (see Current state). One of the two Phase-0 carried-forward security criteria is closed by it:
-1. **Path-traversal rejection — DONE in Phase 1.** `BlobStore._resolve` rejects `..`, absolute paths, null-byte keys, and symlink escapes before any IO.
-2. **STRICT PII-key GUC read — now a Phase 3 acceptance criterion, NOT Phase 1.** It concerns `pii.py` (the PII read path), which lands in Phase 3. Wire `settings.pii_key` into `app.pii_key` with `current_setting('app.pii_key')` **without** `missing_ok=true` — a missing_ok read of an unset key yields NULL → NULL ciphertext → silent data loss. Fail loud. Do this in Phase 3.
+**Phases 1 and 2 are done** (see Current state). Carried-forward criteria to apply in Phase 3:
+1. **Path-traversal rejection — DONE in Phase 1.** `BlobStore._resolve` rejects `..`, absolute paths, null-byte keys, and symlink escapes before any IO. Nothing further needed.
+2. **STRICT PII-key GUC read — a Phase 3 acceptance criterion.** It concerns `pii.py` (the PII read path). Wire `settings.pii_key` into `app.pii_key` with `current_setting('app.pii_key')` **without** `missing_ok=true` — a missing_ok read of an unset key yields NULL → NULL ciphertext → silent data loss. Fail loud.
+3. **Per-field `max_length` on LLM string fields — a Phase 3 acceptance criterion** (Phase 2 security low). Add belt-and-braces caps on the free-text LLM-output fields at the ingest boundary.
 
-hris source paths for every phase are in **Appendix A** of the plan; Phase 0 architecture rationale is in **ADR-004**, Phase 1's in **ADR-005**.
+Carried further: the **Phase 5 redaction-boundary contract** (Phase 2 security, ADR-006 §4) — `ResumeOut`/`ResumeListItem` can serialize decrypted PII with `blinded=True`, so Phase 5 redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before DTO construction (the schema can't enforce it). And the **Phase 6 `JobOut.blind_review` fail-open** note (Phase 2 security low) — the DTO defaults `blind_review` to `False`, so a route must set it explicitly from the row.
+
+hris source paths for every phase are in **Appendix A** of the plan; architecture rationale: Phase 0 in **ADR-004**, Phase 1 in **ADR-005**, Phase 2 in **ADR-006**.
 
 ## Trigger prompt (paste into a new session)
 
@@ -81,29 +86,33 @@ Resume the recruiter-assistant build. Working dir C:\repos\recruiter-assistant
 (origin github.com/humanaxiom/recruiter-assistant). Read HANDOFF.md and
 docs/EXTRACTION_PLAN.md first — they are the source of truth for state,
 decisions, environment quirks, and the hris source-file map (Appendix A).
-Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md.
+Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md,
+Phase 2 in docs/adr/006-*.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
 cover-letter/reverse-match/minimal viewer/blind-default). Phase 0 (seed & infra)
 is complete and merged to main via PR #1 (merge commit 8b2b47c), CI green. Phase 1
 (storage) is complete and green on feat/phase-1-storage (240 unit tests, 99.46%
-coverage; reviewer/security/ranking-evals all green) — the filesystem BlobStore
-exists and is wired, but no call site invokes it yet. Phase 2 is next.
+coverage). Phase 2 (schemas) is complete and green on feat/phase-2-schemas (486
+unit tests, 97.52% coverage; reviewer/security/ranking-evals all green) — the
+pydantic contract layer (core/src/schemas: jobs/resumes/matching) exists, review
+workflow cut, MatchWeights = the ranking-weight contract. Phase 3 is next.
 
-Start Phase 2 (Schemas): port the pydantic schemas — resumes, matching (minus
-review types: PipelineStage, DispositionReason, ShortlistDecision*,
-StageTransition*; drop ShortlistEntry.current_decision/current_stage), and jobs
-(Skill, JDExtracted) — via the TDD subagent loop using the data-pipeline and
-ranking-evals subagents.
+Start Phase 3 (Ingest + parse): port parsing/{extract,chunk} (PyMuPDF/python-docx),
+the LLM client + Redis embed cache, parse_resume/parse_job, cover-letter parse, and
+PII encryption on parse (pii.py, pgcrypto) — via the TDD subagent loop using the
+data-pipeline and ranking-evals subagents. Parse targets are the Phase 2 schemas:
+JDExtracted, ResumeParsed/ResumeCore/ResumeSkill*, CoverLetterParsed.
 
-Carried-forward security criteria status: (1) path-traversal rejection is DONE in
-Phase 1's BlobStore._resolve; (2) STRICT current_setting('app.pii_key') with NO
-missing_ok is a PHASE 3 acceptance criterion (it concerns pii.py, not the store) —
-carry it to Phase 3, don't apply it in Phase 2. NULL key → NULL ciphertext →
-silent data loss, so fail loud when pii.py lands.
+Phase 3 acceptance criteria carried forward: (1) STRICT current_setting('app.pii_key')
+with NO missing_ok — NULL key → NULL ciphertext → silent data loss, fail loud;
+(2) per-field max_length on the LLM string fields at the ingest boundary. Further
+out: Phase 5 redaction MUST mask candidate.*/candidate_name/cover_letter_text before
+building ResumeOut (schema can't enforce it, ADR-006 §4); Phase 6 must set
+JobOut.blind_review explicitly (the DTO defaults it False, fail-open).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Do Phase 2 on a feat/ branch, land make gates green, then check in
-with me before Phase 3.
+HANDOFF.md. Do Phase 3 on a feat/ branch, land make gates green, then check in
+with me before Phase 4.
 ```
