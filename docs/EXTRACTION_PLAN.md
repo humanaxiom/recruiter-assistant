@@ -68,6 +68,48 @@ Template roles (planner · tester · coder · reviewer · security · docs) plus
 
 Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (ReviewLoop) → reviewer + security + ranking-evals (all merge-blocking) → docs. Security enforces PIPEDA/FIPPA, offline-egress, and the PII-not-in-embeddings invariant on every diff.
 
-## Open item
+## Current status & next step
 
-**Repo:** this working copy currently tracks `agent-harness-template`. Before Phase 0 commits, create the `recruiter-assistant` repo from the template and repoint `origin` so the real project has its own history.
+**As of this writing — planning complete, no product code written yet.**
+
+Done:
+- Repo created: **`github.com/humanaxiom/recruiter-assistant`** (private). Local `origin` repointed here. Frozen template stays at `adamsalah13/agent-harness-template`.
+- This plan + the `data-pipeline` and `ranking-evals` subagents committed to `main`.
+- The 4 decisions above are locked.
+
+Not started:
+- **Phase 0 and everything after.** The repo still contains the *template's demo app* (`core/src/agents/` = planner/coder/etc. as product code). That demo is what Phase 0+ replaces with the ranking domain. Do **not** confuse it with `.claude/agents/` (the build subagents).
+
+**Immediate next step — Phase 0 (seed & infra):**
+1. Rebrand the scaffold: `core/pyproject.toml` name, README/title, compose container names → `recruiter-assistant`.
+2. `docker-compose.yml`: keep pg/neo4j/redis/ollama; **no MinIO**; add a `./data` volume for the filesystem BlobStore.
+3. Settings: storage dir, 768-d embedding contract, LLM base url, Neo4j creds (align with template's `settings.py`).
+4. Schema-on-startup: replace the template's SQLAlchemy `create_all` demo with **asyncpg idempotent DDL** for `jobs, resumes (+PII cols), shortlist_entries, outbox`, plus the Neo4j bootstrap (4× 768-d cosine vector indexes + skill-graph constraints).
+5. Remove the template demo (`core/src/agents/` planner/coder/etc., `core/src/memory` if unused by ranking) — but keep `gates/`, `settings`, the `.claude/` build harness, Makefile, CI.
+6. Land Phase 0 green through the TDD subagent loop.
+
+Then Phases 1–7 per the table above.
+
+## Appendix A — hris source file map (minimal port set)
+
+Exact paths in `C:\repos\hris` to port from (avoids re-exploring). Everything here is confirmed free of review/JD coupling except where noted.
+
+**Schemas** (`packages/schemas/src/schemas/`): `resumes.py`, `matching.py` (drop review types: `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*`; drop `ShortlistEntry.current_decision/current_stage`), `jobs.py` (`Skill`, `JDExtracted`).
+
+**Pipeline — port near-verbatim** (`packages/pipeline/src/pipeline/`): `config.py`; `llm/{client.py, cache.py}`; `parsing/{extract.py, chunk.py}`; `matching/{orchestrator.py, stages.py, config.py}`. (Do NOT copy `pipeline/bank/`, `pipeline/quality/`, `pipeline/sources/` — those are JD-Harmonizer.)
+
+**Prompts** (`packages/prompts/.../templates/`): `resume_core_v1`, `resume_skills_v2`, `shortlist_evidence_v1` (+`_v2`), `cover_letter_v1` (+`_v2`) — each `.system.j2` + `.user.j2`.
+
+**Worker** (`apps/worker/src/worker/`): `resume_tasks.py` (`parse_resume`, `project_to_graph`, `_build_summary_text` — the PII-exclusion point), `tasks.py` (`parse_job`), `shortlist_task.py`, `reverse_match_task.py` (v1 includes reverse match), `skill_normalize.py`, `skill_category_task.py`, `neo4j_bootstrap.py` (4 vector indexes, 768-d cosine: `resume_summary_idx`, `job_summary_idx`, `skill_emb_idx`, `chunk_emb_idx`; nodes Job/Resume/ResumeChunk/Skill/Company/Institution; rels HAS_CHUNK/HAS_SKILL/REQUIRES/SHORTLISTED), `main.py` + `config.py` (prune to ranking jobs only).
+
+**API services** (`apps/api/src/api/services/`): `pii.py` (pgcrypto `pgp_sym_encrypt`, session key `app.pii_key`), `redaction.py` (`redact_text`, `pseudonym` — blind default ON), `resume_service.py` (upload/store/encrypt — **replace MinIO calls with BlobStore**), `match_service.py`, `shortlist_service.py` (**trim**: keep `persist_shortlist`/`list_for_job`/`get_one`/`export_rows`; drop `record_decision`/`transition_stage` and strip the `shortlist_decisions`/`stage_transitions` sub-selects & joins from read/export SQL).
+
+**API routes** (`apps/api/src/api/routes/`): `resumes.py`, `shortlist.py` (**trim**: keep generate/list/get/export; drop `/decision`, `/stage`, the `collab_service` import, and review CSV columns), `jobs.py` (minus the JD-comments block; keep `jd_import_service.extract_jd_text` — used by plain job creation), reverse-match route.
+
+**Infra glue**: `apps/api/src/api/minio_client.py` → **replace** with `storage/BlobStore`; `apps/api/src/api/{arq.py, db/session.py, config.py}` → adapt to template settings. Skill data: `infra/skills/{aliases.yaml, categories.yaml}`.
+
+**Postgres DDL reference** (`apps/api/migrations/versions/` — read the raw SQL, re-express as startup DDL): `0002` jobs+outbox, `0003` resumes+PII (BYTEA name/email/phone, `candidate_email_hash`), `0004` `shortlist_entries` (split from `shortlist_decisions`), `0013` cover-letter cols, `0015` `reverse_match_entries`.
+
+**MinIO → filesystem**: MinIO is used only in `resume_service.py` (put/remove) and `resume_tasks.py` `_fetch_blob` (get). Replace with `BlobStore.{put,get,delete}` over `./data/resumes/{id}`. The `resume-previews` bucket is unused — ignore it.
+
+**Contract invariants (enforce in review/evals):** 768-d `nomic-embed-text` cosine everywhere (must match Neo4j indexes); embeddings exclude name/email/phone; evidence quotes verified ≥0.85 against cited chunk or blanked; weights only via `MatchWeights` from settings.
