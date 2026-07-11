@@ -1,7 +1,14 @@
 # ADR-002: Neo4j as Agent Memory, Postgres as Transaction Ledger
 
-**Status:** Accepted
+**Status:** Accepted — partially superseded by [ADR-004](004-phase-0-storage-schema-embedding-contract.md)
 **Date:** 2026-07-09
+
+> **Note (2026-07-10):** This ADR describes the template's demo app, which Phase 0
+> removed. The store-by-access-pattern split (Postgres transactional · Neo4j graph +
+> vector · Redis broker) still holds, but the specifics are superseded: the Postgres
+> tables are no longer SQLAlchemy models created via `create_all` (now raw asyncpg +
+> idempotent DDL, ADR-004), and the Neo4j graph is the ranking domain (jobs / resumes /
+> skills), not the agent-lineage model shown below.
 
 ## Context
 
