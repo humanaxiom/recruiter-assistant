@@ -12,6 +12,7 @@ from src.pipeline.llm.client import (
     LLMClient,
     LLMOutputInvalidError,
     LLMUnavailableError,
+    validation_error_digest,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "LLMClient",
     "LLMOutputInvalidError",
     "LLMUnavailableError",
+    "validation_error_digest",
 ]

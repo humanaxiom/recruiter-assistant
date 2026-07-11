@@ -12,8 +12,14 @@ Reliability features baked in:
   the validator error appended, so a model that produced *almost*-valid
   JSON gets one shot to correct itself before we raise
 
-Privacy: prompt content is NEVER logged unless ``debug_llm=True``.
-Resume content goes into prompts; treat it as PII.
+Privacy: prompt/response BODIES are never logged — no log site in this
+module emits them, under any setting. Résumé content goes into prompts and
+must be treated as PII: what we log is a prompt HASH plus status/latency/
+token counts, and validation failures are logged/raised as a PII-FREE digest
+(field path + error type only — pydantic v2 embeds the offending input value
+in ``str(ValidationError)``, which for a résumé IS the candidate's name/phone/
+email). ``debug_llm`` is a reserved, currently INERT flag: it turns nothing
+on today.
 
 Ported from hris ``packages/pipeline/src/pipeline/llm/client.py``
 (``phase3-source-dossier.md`` §3). Behaviorally verbatim — only the
@@ -58,6 +64,52 @@ class LLMOutputInvalidError(RuntimeError):
     """Model produced non-JSON or schema-invalid JSON after the retry budget."""
 
 
+def validation_error_digest(exc: ValidationError) -> str:
+    """A PII-FREE one-line digest of a pydantic ``ValidationError``.
+
+    MERGE-BLOCKING PRIVACY INVARIANT: ``str(ValidationError)`` in pydantic v2
+    embeds ``input_value=...`` — the offending value itself. On the résumé
+    path that value IS the candidate's name/phone/email, and a wrong-typed
+    field from a small local model is the ROUTINE failure (it is the reason
+    the self-correction retry exists). Left as ``str(exc)``, that PII lands in
+    the log line, in the raised ``LLMOutputInvalidError``, and — via
+    ``record_parse_failure`` — in the CLEARTEXT ``resumes.failure_reason``
+    column, right next to the pgcrypto-encrypted columns.
+
+    This digest keeps only what is actually diagnostic — the field path and
+    the error type (``candidate.phone: string_type``) — and never the value.
+    The full, unredacted error may still go into the RETRY PROMPT (in-memory,
+    sent to a local model, never persisted): that is what lets the model
+    self-correct. Only the logged/raised/persisted path gets this digest.
+    """
+    parts = [f"{'.'.join(str(p) for p in e['loc'])}: {e['type']}" for e in exc.errors()]
+    return "; ".join(parts)[:500]
+
+
+def _strip_nuls(value: Any) -> Any:
+    """Recursively strip U+0000 from LLM-parsed JSON.
+
+    ``extract._sanitize`` strips NULs from DOCUMENT text, but LLM output never
+    passes through it and ``json.loads`` happily accepts a ``\\u0000`` escape.
+    Postgres ``text``/``jsonb`` reject U+0000 (``UntranslatableCharacterError``
+    / ``CharacterNotInRepertoireError``), so a single NUL in the model's output
+    raises INSIDE the write transaction — uncaught, straight into an arq retry
+    loop that re-runs the whole LLM pipeline. The résumé is attacker-supplied
+    and goes verbatim into the prompt, so prompt injection (or a looping model)
+    can trigger it on demand.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {
+            (k.replace("\x00", "") if isinstance(k, str) else k): _strip_nuls(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_strip_nuls(v) for v in value]
+    return value
+
+
 class LLMClient:
     """Async OpenAI-compatible client with retries, circuit breaker, JSON mode.
 
@@ -79,6 +131,7 @@ class LLMClient:
         breaker_cooldown_s: float = 30.0,
         debug_llm: bool = False,
         native_chat: bool = False,
+        expected_dim: int | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
@@ -91,7 +144,16 @@ class LLMClient:
         self._max_retries = max_retries
         self._breaker_threshold = breaker_threshold
         self._breaker_cooldown_s = breaker_cooldown_s
+        # RESERVED, INERT: nothing reads this. It exists so a future verbose
+        # mode has a settings-sourced switch to hang off; today NO log site in
+        # this module emits prompt or response bodies regardless of its value.
         self._debug = debug_llm
+        # 768-d is a hard contract: it must equal the `vector.dimensions` of the
+        # Neo4j indexes (both are sourced from settings.llm_embedding_dim). When
+        # set, embed() rejects any vector of a different length — otherwise a
+        # mis-pointed llm_model_embedding produces vectors that only blow up
+        # much later, at Neo4j write time.
+        self._expected_dim = expected_dim
 
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=timeout_s)
@@ -192,19 +254,29 @@ class LLMClient:
         times, each time appending the validator error so the model has
         a chance to self-correct. Raises ``LLMOutputInvalidError`` on
         final failure.
+
+        Two DIFFERENT renderings of the same failure, deliberately:
+
+        * ``prompt_error`` — the full, unredacted error. Goes ONLY into the
+          retry prompt: in-memory, sent to the local model, never persisted.
+          Redacting it here would gut the self-correction loop.
+        * ``safe_error`` — a PII-free digest (see ``validation_error_digest``).
+          This is the ONLY rendering that is logged, raised, and — via
+          ``record_parse_failure`` — written to ``resumes.failure_reason``.
         """
         attempt_messages: list[dict[str, str]] = list(messages)
-        last_error: str | None = None
+        prompt_error: str | None = None
+        safe_error: str | None = None
 
         for attempt in range(max_retries + 1):
-            if last_error is not None and attempt > 0:
+            if prompt_error is not None and attempt > 0:
                 attempt_messages = [
                     *attempt_messages,
                     {
                         "role": "user",
                         "content": (
                             "Your previous response failed validation: "
-                            f"{last_error}. Return ONLY valid JSON matching "
+                            f"{prompt_error}. Return ONLY valid JSON matching "
                             "the schema. No prose, no fences."
                         ),
                     },
@@ -216,20 +288,25 @@ class LLMClient:
                 json_mode=True,
             )
             try:
-                obj = json.loads(self._extract_json(raw))
+                obj = _strip_nuls(json.loads(self._extract_json(raw)))
                 return schema.model_validate(obj)
-            except (json.JSONDecodeError, ValidationError) as exc:
-                last_error = str(exc)[:500]
-                log.warning(
-                    "llm.json_invalid",
-                    extra={
-                        "attempt": attempt,
-                        "error": last_error,
-                        "prompt_hash": self._prompt_hash(attempt_messages),
-                    },
-                )
+            except json.JSONDecodeError as exc:
+                # JSONDecodeError's str() is "msg: line L column C (char N)" —
+                # position only, never the document body. Safe as-is.
+                prompt_error = safe_error = str(exc)[:500]
+            except ValidationError as exc:
+                prompt_error = str(exc)[:500]
+                safe_error = validation_error_digest(exc)
+            log.warning(
+                "llm.json_invalid",
+                extra={
+                    "attempt": attempt,
+                    "error": safe_error,  # PII-free digest only — never str(exc)
+                    "prompt_hash": self._prompt_hash(attempt_messages),
+                },
+            )
 
-        raise LLMOutputInvalidError(last_error or "no detail")
+        raise LLMOutputInvalidError(safe_error or "no detail")
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
@@ -246,6 +323,15 @@ class LLMClient:
             vec = item.get("embedding")
             if not isinstance(vec, list):
                 raise LLMOutputInvalidError("embedding entry missing 'embedding' list")
+            if self._expected_dim is not None and len(vec) != self._expected_dim:
+                # Fail HERE, at the source, not in Phase 4 at Neo4j write time:
+                # the index dimension is fixed at bootstrap from the same
+                # settings value this is checked against.
+                raise LLMOutputInvalidError(
+                    f"embedding model {self._emb!r} returned a {len(vec)}-d vector; "
+                    f"expected {self._expected_dim}-d (must match the Neo4j "
+                    f"vector indexes)"
+                )
             out.append([float(x) for x in vec])
         return out
 
@@ -377,10 +463,10 @@ class LLMClient:
         error: str | None = None,
         ok: bool = False,
     ) -> None:
-        # Never log raw prompt content — only the hash, status, latency,
-        # and token counts. `debug_llm` stays False by default (see
-        # class docstring); this method has no branch that logs prompt
-        # bodies even when debug_llm is True, by design.
+        # Never log raw prompt content — only the hash, status, latency, and
+        # token counts. This holds UNCONDITIONALLY: there is no debug_llm
+        # branch here (the flag is inert, see __init__), so no setting can
+        # turn prompt/response bodies into log lines.
         log.info(
             "llm.attempt",
             extra={

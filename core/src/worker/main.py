@@ -74,6 +74,11 @@ async def startup(ctx: dict[str, Any]) -> None:
         breaker_cooldown_s=s.llm_breaker_cooldown_s,
         debug_llm=s.debug_llm,
         native_chat=s.llm_ollama_native,
+        # The 768-d contract, enforced at the source: the same settings value
+        # bootstrap_neo4j_schema builds the vector indexes from. A model that
+        # returns a different width now fails at embed() instead of surfacing
+        # as an opaque Neo4j write error in Phase 4.
+        expected_dim=s.llm_embedding_dim,
     )
     ctx["llm"] = llm
 

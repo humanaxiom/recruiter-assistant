@@ -40,14 +40,21 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Record
+from pydantic import ValidationError
 
-from src.pipeline.llm import CachedEmbedder, LLMClient, LLMOutputInvalidError
+from src.pipeline.llm import (
+    CachedEmbedder,
+    LLMClient,
+    LLMOutputInvalidError,
+    validation_error_digest,
+)
 from src.pipeline.parsing import (
     MIME_DOCX,
     MIME_PDF,
     MIME_RTF,
     MIME_TXT,
     EncryptedPdfError,
+    InputTooLargeError,
     UnsupportedMimeError,
     chunk_resume,
     extract_text,
@@ -71,6 +78,11 @@ log = logging.getLogger(__name__)
 # ResumeParsed.skills is capped at 80; cap the merge at the same number so the
 # model_validate below never has to silently truncate.
 _MAX_SKILLS = 80
+
+# Embed in batches instead of one giant POST. A 200-chunk résumé in a single
+# request is a multi-MB body that Ollama has to hold whole, and one slow/failed
+# request loses the entire document's embeddings; 64 keeps each call bounded.
+_EMBED_BATCH_SIZE = 64
 
 _RESUME_META_SQL = (
     "SELECT blob_key, mime_type, status, job_id, "
@@ -230,6 +242,7 @@ async def _parse_cover_letter(
     except (
         UnsupportedMimeError,
         EncryptedPdfError,
+        InputTooLargeError,
         BlobNotFound,
         InvalidBlobKey,
     ) as exc:
@@ -253,6 +266,26 @@ async def _parse_cover_letter(
         return cl_chunks, CoverLetterParsed()
 
     return cl_chunks, cl_parsed
+
+
+# ---------------- embeddings ----------------
+
+
+async def _embed_batched(
+    embedder: CachedEmbedder, texts: list[str]
+) -> list[list[float]]:
+    """Embed ``texts`` in bounded batches, preserving input order.
+
+    One document must never produce a single enormous POST: a 200-chunk résumé
+    (the ``ResumeParsed.chunks`` cap) at 4 000 chars/chunk is an ~800 KB body
+    that the local model has to hold whole, and one failure loses every vector
+    for the document. Batching also lets the CachedEmbedder's Redis read-through
+    serve partial hits without re-embedding the rest.
+    """
+    out: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        out.extend(await embedder.embed(texts[start : start + _EMBED_BATCH_SIZE]))
+    return out
 
 
 # ---------------- parse_resume ----------------
@@ -296,7 +329,7 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
         # Extract + chunk are CPU-bound — run them off the event loop.
         try:
             extracted = await asyncio.to_thread(extract_text, blob, meta["mime_type"])
-        except (UnsupportedMimeError, EncryptedPdfError) as exc:
+        except (UnsupportedMimeError, EncryptedPdfError, InputTooLargeError) as exc:
             await resume_service.record_parse_failure(
                 conn, resume_id=resume_id, reason=f"text extraction failed: {exc}"
             )
@@ -346,25 +379,40 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
         )
 
         # Build from dicts so ResumeParsed's lossy row-dropping validator runs.
-        cleaned_parsed = ResumeParsed.model_validate(
-            {
-                "candidate": core.candidate.model_dump(),
-                "summary": core.summary,
-                "total_years_experience": core.total_years_experience,
-                "skills": [s.model_dump() for s in merged],
-                "experience": [e.model_dump() for e in core.experience],
-                "education": [e.model_dump() for e in core.education],
-                "chunks": [c.model_dump() for c in chunks],
-                "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
-            }
-        )
+        # The lossy validator only drops bad LIST ROWS — a violated LIST CAP
+        # (e.g. >200 chunks) or a bad scalar still raises. Uncaught, that
+        # ValidationError escapes the task entirely: record_parse_failure never
+        # runs, the row is stranded uploaded/parsing with a NULL failure_reason,
+        # and arq re-runs this whole expensive LLM pipeline on every retry.
+        try:
+            cleaned_parsed = ResumeParsed.model_validate(
+                {
+                    "candidate": core.candidate.model_dump(),
+                    "summary": core.summary,
+                    "total_years_experience": core.total_years_experience,
+                    "skills": [s.model_dump() for s in merged],
+                    "experience": [e.model_dump() for e in core.experience],
+                    "education": [e.model_dump() for e in core.education],
+                    "chunks": [c.model_dump() for c in chunks],
+                    "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
+                }
+            )
+        except ValidationError as exc:
+            # PII-FREE digest only: str(ValidationError) embeds input_value —
+            # here that is the candidate's own name/phone/email, and
+            # failure_reason is a CLEARTEXT column.
+            await resume_service.record_parse_failure(
+                conn,
+                resume_id=resume_id,
+                reason=f"parsed schema invalid: {validation_error_digest(exc)}",
+            )
+            return "failed"
 
         # The embedding text NEVER carries name/email/phone/location — embeddings
         # are PII-equivalent under PIPEDA/FIPPA. See _build_summary_text.
         summary_text = _build_summary_text(cleaned_parsed)
         [summary_emb] = await embedder.embed([summary_text])
-        chunk_texts = [c.text for c in chunks]
-        chunk_embs_list = await embedder.embed(chunk_texts)
+        chunk_embs_list = await _embed_batched(embedder, [c.text for c in chunks])
         chunk_embs = {chunks[i].id: chunk_embs_list[i] for i in range(len(chunks))}
 
         # Encrypt PII + write back + enqueue the outbox row, all atomic.
@@ -397,7 +445,13 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 aggregate_id=resume_id,
                 event_type="resume.parsed",
                 payload={
-                    "parsed": cleaned_parsed.model_dump(),
+                    # NO `candidate` block. Phase 4 projects this payload into
+                    # Neo4j and needs skills/experience/embeddings, NOT identity
+                    # — `resumes` (pgcrypto-encrypted) is the system of record
+                    # for PII, and the outbox is an unencrypted jsonb table.
+                    # `resumes.parsed` KEEPS its candidate block; only the event
+                    # payload drops it.
+                    "parsed": cleaned_parsed.model_dump(exclude={"candidate"}),
                     "summary_emb": summary_emb,
                     "chunk_embs": chunk_embs,
                     "prompt_version": prompt_version,

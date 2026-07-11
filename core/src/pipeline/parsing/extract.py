@@ -13,6 +13,7 @@ structlog -> stdlib logging conversion changed.
 from __future__ import annotations
 
 import logging
+import zipfile
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Literal
@@ -29,6 +30,22 @@ MIME_TXT = "text/plain"
 
 ExtractionMethod = Literal["pymupdf", "docx", "rtf", "text", "ocr"]
 
+# ── Bounded input (this module is the TRUST BOUNDARY) ───────────────────────
+#
+# extract_text() is the first code to touch attacker-supplied bytes, so it has
+# to be safe STANDALONE — it cannot lean on an upload-side byte cap that does
+# not exist yet (Phase 6). The worker runs max_jobs=4, so an unbounded parse is
+# four concurrent bombs away from taking the box down.
+#
+# Each cap is a MAXIMUM: a blob of exactly _MAX_BLOB_BYTES, or a PDF of exactly
+# _MAX_PDF_PAGES, is ACCEPTED.
+_MAX_BLOB_BYTES = 10 * 1024 * 1024  # matches hris's store_uploaded_blob cap
+_MAX_PDF_PAGES = 300
+# A 10 MB DOCX at a 1000:1 compression ratio inflates to ~10 GB inside lxml.
+# The zip's central directory declares the decompressed size of every member up
+# front, so we can reject the bomb WITHOUT inflating a single byte of it.
+_MAX_DOCX_DECOMPRESSED_BYTES = 50 * 1024 * 1024
+
 
 class UnsupportedMimeError(ValueError):
     """Mime type isn't one of the allowed inputs."""
@@ -36,6 +53,11 @@ class UnsupportedMimeError(ValueError):
 
 class EncryptedPdfError(RuntimeError):
     """PDF requires a password we don't have."""
+
+
+class InputTooLargeError(ValueError):
+    """Input exceeds a hard bound: raw bytes, PDF pages, or — for DOCX — the
+    size it would occupy once decompressed (the zip-bomb case)."""
 
 
 @dataclass(frozen=True)
@@ -75,7 +97,14 @@ def extract_text(blob: bytes, mime: str) -> ExtractedText:
 
     Async callers should run this in a thread pool
     (`asyncio.to_thread(extract_text, blob, mime)`).
+
+    Raises ``InputTooLargeError`` for a blob over ``_MAX_BLOB_BYTES``, checked
+    BEFORE any parser is handed the bytes.
     """
+    if len(blob) > _MAX_BLOB_BYTES:
+        raise InputTooLargeError(
+            f"blob is {len(blob)} bytes; the cap is {_MAX_BLOB_BYTES}"
+        )
     if mime == MIME_PDF:
         result = _extract_pdf(blob)
     elif mime == MIME_DOCX:
@@ -149,6 +178,18 @@ def _extract_pdf(blob: bytes) -> ExtractedText:
         doc.close()
         raise EncryptedPdfError("pdf is password-protected")
 
+    # A PDF stays small on disk while declaring an enormous page tree, and the
+    # loop below extracts text + block geometry for EVERY page. Bound it before
+    # the loop starts. (getattr: a real fitz Document always exposes page_count;
+    # the default keeps an absent attribute a no-op rather than an AttributeError
+    # crash on the trust boundary.)
+    page_count = int(getattr(doc, "page_count", 0) or 0)
+    if page_count > _MAX_PDF_PAGES:
+        doc.close()
+        raise InputTooLargeError(
+            f"pdf has {page_count} pages; the cap is {_MAX_PDF_PAGES}"
+        )
+
     pages: list[PageText] = []
     warnings: list[str] = []
     try:
@@ -186,11 +227,34 @@ def _extract_pdf(blob: bytes) -> ExtractedText:
 # ---------------- DOCX ----------------
 
 
+def _docx_decompressed_size(blob: bytes) -> int:
+    """Sum the DECLARED uncompressed size of every member of the DOCX zip.
+
+    Read from the central directory — nothing is inflated, so this is cheap and
+    bomb-safe. XXE is separately mitigated (python-docx sets
+    ``resolve_entities=False``); this is the decompression-bomb half.
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(blob)) as zf:
+            return sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        raise UnsupportedMimeError(f"docx parse failed: {exc}") from exc
+
+
 def _extract_docx(blob: bytes) -> ExtractedText:
     """python-docx — flat paragraph stream. DOCX has no real pages, so
     everything goes into page_no=0 and the UI surfaces 'Document' as
     the page label.
     """
+    declared = _docx_decompressed_size(blob)
+    if declared > _MAX_DOCX_DECOMPRESSED_BYTES:
+        # A few-KB upload that inflates to gigabytes inside lxml. Reject it
+        # BEFORE Document() gets the bytes — python-docx has no size guard.
+        raise InputTooLargeError(
+            f"docx declares {declared} decompressed bytes; the cap is "
+            f"{_MAX_DOCX_DECOMPRESSED_BYTES}"
+        )
+
     try:
         doc = Document(BytesIO(blob))
     except Exception as exc:
@@ -245,6 +309,7 @@ __all__ = [
     "EncryptedPdfError",
     "ExtractedText",
     "ExtractionMethod",
+    "InputTooLargeError",
     "PageText",
     "TextBlock",
     "UnsupportedMimeError",

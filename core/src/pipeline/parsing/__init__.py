@@ -15,6 +15,7 @@ from src.pipeline.parsing.extract import (
     MIME_TXT,
     EncryptedPdfError,
     ExtractedText,
+    InputTooLargeError,
     UnsupportedMimeError,
     extract_text,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "MIME_TXT",
     "EncryptedPdfError",
     "ExtractedText",
+    "InputTooLargeError",
     "UnsupportedMimeError",
     "chunk_resume",
     "extract_text",

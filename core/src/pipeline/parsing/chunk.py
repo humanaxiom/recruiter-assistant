@@ -17,6 +17,7 @@ ResumeChunk``).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from typing import Any
 
 from src.pipeline.parsing.extract import ExtractedText
 from src.schemas.resumes import ResumeChunk
+
+log = logging.getLogger(__name__)
 
 # Section heading detection. Patterns are matched against single lines
 # (case-insensitive) so "## Experience" and "WORK HISTORY" both hit.
@@ -49,6 +52,15 @@ _SECTION_PATTERNS: dict[str, re.Pattern[str]] = {
 _MAX_CHARS_PER_CHUNK = 1200
 _MIN_CHARS_PER_CHUNK = 40
 
+# Hard cap on the NUMBER of chunks, per id namespace. These mirror the
+# ``ResumeParsed`` list caps exactly (``chunks`` max_length=200,
+# ``cover_letter_chunks`` max_length=100) — and pydantic's ``max_length``
+# RAISES rather than truncates, so an over-long CV would otherwise blow up in
+# ``ResumeParsed.model_validate`` deep inside ``parse_resume``, after several
+# expensive LLM calls already ran. Truncate here, loudly, instead.
+_MAX_CHUNKS_BY_PREFIX = {"c": 200, "cl": 100}
+_DEFAULT_MAX_CHUNKS = 200
+
 
 @dataclass(frozen=True)
 class _Section:
@@ -65,14 +77,23 @@ def chunk_resume(extracted: ExtractedText, *, prefix: str = "c") -> list[ResumeC
     namespace: ``c_NNN`` for a résumé, ``cl_NNN`` for a cover letter —
     kept disjoint so the evidence verifier can scrub fabricated ids
     per-source.
+
+    The output is BOUNDED by the ``ResumeParsed`` list cap for that namespace
+    (200 for ``c``, 100 for ``cl``). Ids stay contiguous and one-based; a
+    truncated tail is logged, never dropped silently.
     """
+    max_chunks = _MAX_CHUNKS_BY_PREFIX.get(prefix, _DEFAULT_MAX_CHUNKS)
     sections = _split_by_section(extracted)
     chunks: list[ResumeChunk] = []
     counter = 1
+    dropped = 0
     for section in sections:
         for body in _split_paragraphs(section.text, max_chars=_MAX_CHARS_PER_CHUNK):
             stripped = body.strip()
             if len(stripped) < _MIN_CHARS_PER_CHUNK:
+                continue
+            if len(chunks) >= max_chunks:
+                dropped += 1
                 continue
             chunks.append(
                 ResumeChunk(
@@ -83,6 +104,13 @@ def chunk_resume(extracted: ExtractedText, *, prefix: str = "c") -> list[ResumeC
                 )
             )
             counter += 1
+    if dropped:
+        log.warning(
+            "chunk_resume.truncated prefix=%s kept=%d dropped=%d",
+            prefix,
+            len(chunks),
+            dropped,
+        )
     return chunks
 
 
