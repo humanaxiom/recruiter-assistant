@@ -1,33 +1,39 @@
-# 🧰 AI Agent Harness v2 — Offline-First
+# recruiter-assistant
 
-> Python core (FastAPI + Neo4j + Postgres + arq + Flask) driven by AI subagents through **Claude Code**. Inference runs on **Ollama on bare metal**; everything else runs in Docker.
+> Local-first, evidence-backed resume ranking. Upload a job and a stack of resumes; get a ranked shortlist where every claim is a quote verified against the candidate's own document. Inference runs on **Ollama on the host** — no candidate data ever leaves the machine.
 
----
-
-## Why this stack
-
-One Python core, one instruction layer. Claude Code reads `CLAUDE.md` and the subagents in `.claude/agents/` at the repo root, pointing at the same code, gates, and CI. Inference stays local on Ollama — no cloud API calls at runtime.
+Ported from the resume-ranking feature of an internal HRIS onto the offline-first agent harness. The review workflow, JD-Harmonizer, and cloud object storage were dropped; anonymization, the 4-stage ranking engine, shortlists, reverse-match, and exports were kept. See [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) for the full keep/cut boundary and the phased build.
 
 ---
 
-## System Architecture
+## What it does
+
+- **Blind by default** — candidate name / email / phone are redacted in the viewer and excluded from embeddings; reveal is opt-in and audited (decision 4).
+- **Evidence-backed** — the LLM produces per-requirement evidence, then an anti-fabrication pass fuzzy-matches every quote (≥ 0.85) against its cited resume chunk; unverifiable quotes are blanked.
+- **Hybrid ranking** — Neo4j vector recall + a structured skill/experience/education/seniority score + evidence completeness + motivation.
+- **Offline** — all model calls go through an OpenAI-compatible client pointed at Ollama on `host.docker.internal:11434`. No cloud endpoint exists anywhere in the code or compose.
+
+---
+
+## System architecture
 
 ```mermaid
 graph TB
-    subgraph Metal["🔩 Bare Metal (Host)"]
-        OL[Ollama<br/>:11434]
+    subgraph Metal["Bare Metal (Host)"]
+        OL[Ollama<br/>:11434 /v1<br/>gpt-oss:20b · nomic-embed-text]
     end
 
-    subgraph Docker["🐳 Docker Compose"]
+    subgraph Docker["Docker Compose"]
         subgraph AppTier["App Tier"]
             API[FastAPI<br/>:8000]
-            FE[Flask Frontend<br/>:5000]
-            WK[arq Worker<br/>async tasks]
+            WK[arq Worker<br/>parse · rank · reverse-match]
+            FE[Flask Viewer<br/>:5000 · read-only]
         end
         subgraph DataTier["Data Tier"]
-            PG[(PostgreSQL<br/>transactions)]
-            NEO[(Neo4j<br/>graph + vector)]
-            RD[(Redis<br/>arq queue)]
+            PG[(PostgreSQL 16<br/>asyncpg · pgcrypto PII)]
+            NEO[(Neo4j 5<br/>skill graph + 768-d vector)]
+            RD[(Redis 7<br/>arq broker + embed cache)]
+            BLOB[["./data<br/>filesystem BlobStore"]]
         end
     end
 
@@ -35,9 +41,11 @@ graph TB
     API --> PG
     API --> NEO
     API -->|enqueue| RD
+    API --> BLOB
     WK -->|dequeue| RD
     WK --> PG
     WK --> NEO
+    WK --> BLOB
     API & WK -->|host.docker.internal:11434| OL
 
     style Metal fill:#2D3436,color:#fff
@@ -45,194 +53,169 @@ graph TB
     style DataTier fill:#F59F00,color:#fff
 ```
 
-**Data responsibilities**
+**Store responsibilities**
 
 | Store | Role |
 |---|---|
-| **PostgreSQL** | Transactional data: task records, run ledger, audit log, users |
-| **Neo4j** | Agent memory graph + vector indexes (embeddings via Ollama `nomic-embed-text`) |
-| **Redis** | arq task queue + result backend |
+| **PostgreSQL** (raw asyncpg) | Transactional data: jobs, resumes, shortlist / reverse-match entries, outbox. Candidate PII is encrypted at rest with pgcrypto. |
+| **Neo4j** | Skill / experience graph + four 768-d cosine vector indexes for coarse recall and skill-graph scoring. |
+| **Redis** | arq task broker + embedding cache. No domain data. |
+| **`./data` BlobStore** | Original resume + cover-letter files on the local filesystem — MinIO was dropped (see ADR-004). |
+
+There is **no migration framework**: `init_schema` (Postgres) and `bootstrap_neo4j_schema` (Neo4j) run idempotently on every API/worker boot.
 
 ---
 
-## Agent Memory Graph (Neo4j)
+## Data model (Postgres)
 
 ```mermaid
-graph LR
-    T[Task] -->|DECOMPOSED_INTO| S[Subtask]
-    S -->|EXECUTED_BY| A[Agent]
-    S -->|PRODUCED| AR[Artifact]
-    AR -->|EMBEDDED_AS| V[Vector Index<br/>artifact_embeddings]
-    R[Run] -->|OF_TASK| T
-    R -->|GATE_RESULT| G[GateResult]
-    A -->|LEARNED| N[Note]
+erDiagram
+    jobs ||--o{ resumes : "has"
+    jobs ||--o{ shortlist_entries : "ranks"
+    jobs ||--o{ reverse_match_entries : "scored against"
+    resumes ||--o{ shortlist_entries : "appears in"
+    resumes ||--o{ reverse_match_entries : "matched to"
+
+    jobs {
+        uuid id PK
+        text title
+        text description_raw
+        jsonb description_parsed
+        job_status status
+        bool blind_review "DEFAULT TRUE"
+        text created_by "nullable actor label"
+    }
+    resumes {
+        uuid id PK
+        uuid job_id FK
+        text blob_key "filesystem BlobStore"
+        bytea candidate_name "pgcrypto"
+        bytea candidate_email "pgcrypto"
+        bytea candidate_phone "pgcrypto"
+        text candidate_email_hash "plaintext sha256"
+        bytea cover_letter_text "pgcrypto"
+        resume_status status
+        bool consent_acknowledged "no default"
+    }
+    shortlist_entries {
+        uuid id PK
+        int rank "CHECK > 0"
+        float8 score_final "CHECK 0..1"
+        jsonb evidence
+    }
+    reverse_match_entries {
+        uuid id PK
+        int rank "CHECK > 0"
+        float8 score_final "CHECK 0..1"
+        jsonb score_breakdown
+    }
+    outbox {
+        bigserial id PK
+        text aggregate
+        uuid aggregate_id "polymorphic, no FK"
+        jsonb payload
+    }
 ```
 
-Vector index `artifact_embeddings` (768-dim, cosine) enables semantic retrieval of prior agent outputs — agents query "have we solved something like this before?" before implementing.
+Five tables (`jobs`, `resumes`, `shortlist_entries`, `reverse_match_entries`, `outbox`). The four PII columns (`candidate_name` / `candidate_email` / `candidate_phone` / `cover_letter_text`) are `BYTEA` encrypted via `pgp_sym_encrypt` under the `app.pii_key` GUC; only `candidate_email_hash` is plaintext, and only so subject-access requests can find a candidate. Full column list and the three deliberate deviations from the source schema are in [ADR-004](docs/adr/004-phase-0-storage-schema-embedding-contract.md).
 
 ---
 
-## Subagent Roster
+## Neo4j schema
 
-The pipeline is **planner → tester → coder(loop) → reviewer + security → docs**, backed by the shared Python core:
+`bootstrap_neo4j_schema` creates 5 node uniqueness constraints (`Job`, `Resume`, `Skill`, `Company`, `Institution`) and four 768-d cosine vector indexes (`resume_summary_idx`, `job_summary_idx`, `skill_emb_idx`, `chunk_emb_idx`). The `768` is read from `settings.llm_embedding_dim` — one number, one place — so the indexes can never drift from the embedding model.
 
-| Subagent | Python class (`core/src/agents/`) | Claude Code (`.claude/agents/`) |
+`ResumeChunk` deliberately has **no** uniqueness constraint on `id`: chunk ids (`c_001`, `c_002`, …) are deterministic per-resume and intentionally collide across resumes. A stale `chunk_id_unique` constraint is actively dropped on bootstrap; re-adding it silently caps every shortlist at one candidate.
+
+---
+
+## Ranking algorithm
+
+Four stages (ported near-verbatim; live from Phase 4):
+
+1. **Coarse recall** — Neo4j `resume_summary_idx` vector query, scoped to the job, 3× oversample → k = 50.
+2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty.
+3. **Evidence** — LLM per-requirement evidence, then anti-fabrication verify (quotes fuzzy-matched ≥ 0.85 against the cited chunk or blanked).
+4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → `shortlist_entries` (Postgres) + `SHORTLISTED` edges (Neo4j).
+
+Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text`, cosine — matching the Neo4j indexes.
+
+---
+
+## Status & roadmap
+
+**Phase 0 (seed & infra) is complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, and the API serves `/health`. There are **no ranking or upload routes yet** — those land in later phases.
+
+| Phase | Deliverable | State |
 |---|---|---|
-| Planner | `PlannerAgent` — JSON plan, TDD-order validated | `planner.md` |
-| Tester | `TesterAgent` — failing tests only, tests/ allowlist | `tester.md` |
-| Coder | `CoderAgent` in `ReviewLoop` — iterate ≤5 then escalate | `coder.md` |
-| Reviewer | `ReviewerAgent` — severity findings, merge-blocking | `reviewer.md` |
-| Security | `SecurityAgent` — injection/secrets/traversal/egress audit | `security.md` |
-| Docs | `DocsAgent` — ADR + Mermaid, docs/ allowlist | `docs.md` |
+| **0 · Seed & infra** | Compose, settings (768-d contract), asyncpg startup DDL, Neo4j bootstrap | **done** |
+| 1 · Storage | Filesystem `BlobStore` | pending |
+| 2 · Schemas | `resumes`, `matching`, `jobs` pydantic schemas | pending |
+| 3 · Ingest + parse | extract/chunk, LLM client+cache, PII encryption on parse | pending |
+| 4 · Ranking engine | orchestrator + 4-stage hybrid, reverse-match | pending |
+| 5 · Persist + anonymize + export | shortlist service, redaction, csv/json export with `reveal` | pending |
+| 6 · API | job/resume/shortlist/reverse-match routes, minimal auth | pending |
+| 7 · Evals + viewer | precision@k / evidence-verification fixtures, Flask viewer | pending |
 
-The **Orchestrator** (`core/src/agents/orchestrator.py`) resolves subtask dependencies topologically, runs the coder inside the iterate-until-green loop, and hard-blocks the pipeline on reviewer rejection or security failure. Runs execute async via arq (`run_pipeline` job) and land lineage in Neo4j.
-
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant P as Planner
-    participant T as Tester
-    participant C as Coder+ReviewLoop
-    participant R as Reviewer
-    participant S as Security
-    participant D as Docs
-
-    O->>P: task spec
-    P-->>O: validated plan (tester<coder enforced)
-    O->>T: write failing tests
-    T-->>O: RED confirmed
-    O->>C: implement
-    loop until gates green (max 5)
-        C->>C: fix exact failures
-    end
-    C-->>O: GREEN
-    par merge-blocking checks
-        O->>R: review diff
-        O->>S: security audit
-    end
-    R-->>O: APPROVED
-    S-->>O: PASS
-    O->>D: ADR + diagrams + README
-    D-->>O: done → PR
-```
+Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
 ---
 
-## Review-Iterate Loop (non-negotiable gates)
+## Quick start
 
-```mermaid
-stateDiagram-v2
-    [*] --> Branch : git checkout -b agent/&lt;task-id&gt;-&lt;slug&gt;
-    Branch --> Tests : TestAgent writes failing tests
-    Tests --> Red : gates run — must be RED
-    Red --> Implement : CoderAgent
-    Implement --> Gates : run all gates
-    Gates --> Review : ALL GREEN
-    Gates --> Implement : any RED (max 5 iterations)
-    Implement --> Escalate : 5 failures → human
-    Review --> Docs : ReviewAgent approves
-    Review --> Implement : review findings
-    Docs --> PR : open PR to main
-    PR --> [*] : CI green + human merge
+```bash
+# 0. Prereq on host: Ollama running on metal with the two models pulled
+ollama serve &
+ollama pull gpt-oss:20b nomic-embed-text
+
+# 1. Configure — PII_KEY is REQUIRED (32 random bytes, base64)
+cp .env.example .env
+#   set PII_KEY, e.g.:  openssl rand -base64 32
+
+# 2. Bring up the stack
+docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
+# Postgres tables + Neo4j vector indexes are created on API startup —
+# no separate migration step.
+
+# 3. Check the API
+curl localhost:8000/health    # -> {"status":"ok"}
 ```
 
-**Gates (all must pass, enforced locally by `make gates` and in CI):**
+`PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
+
+---
+
+## Gates
+
+`make gates` is the **offline** default — no Docker required, green on a fresh clone:
 
 1. `ruff check` — lint
 2. `black --check` — format
 3. `mypy --strict` — types (no unjustified `# type: ignore`)
-4. `pytest tests/unit` — unit tests
-5. `pytest tests/integration` — integration (real Postgres + Neo4j + Redis via testcontainers)
-6. Coverage ≥ **80%**
-7. Branch name matches `agent/<task-id>-<slug>` or `feat|fix|chore/<slug>`
+4. `pytest tests/unit` — unit tests (drivers mocked; no live services)
+5. Coverage ≥ **80%**
+6. Branch name matches `agent/<task-id>-<slug>` or `feat|fix|chore/<slug>`
+
+`make gates-integration` runs the testcontainers suite (real Postgres + Neo4j) and needs a Docker socket. CI runs `make gates-all`.
 
 ---
 
-## Git Branch Workflow
-
-```mermaid
-gitGraph
-    commit id: "main"
-    branch agent/T42-rate-limiter
-    commit id: "red: failing tests"
-    commit id: "green: implementation"
-    commit id: "refactor + docs"
-    checkout main
-    merge agent/T42-rate-limiter tag: "CI green"
-```
-
-- Agents only ever commit to `agent/*` branches
-- `main` is protected: PR + green CI + human approval required
-- Pre-commit hooks run ruff/black/mypy/fast-tests before any commit lands
-
----
-
-## Repository Layout
+## Repository layout
 
 ```
-agent-harness-v2/
-├── core/                          # THE shared application
+recruiter-assistant/
+├── core/
 │   ├── src/
-│   │   ├── api/                   # FastAPI app + routes
-│   │   ├── agents/                # BaseAgent, Planner, Coder, Tester, Reviewer
-│   │   ├── memory/                # Neo4j graph memory + vector retrieval
-│   │   ├── models/                # SQLAlchemy (Postgres) + Pydantic schemas
-│   │   ├── worker/                # arq task queue workers
-│   │   └── gates/                 # Gate runner + review loop
-│   ├── frontend/                  # Flask app (dashboard for runs/gates)
+│   │   ├── api/         # FastAPI app (Phase 0: /health + lifespan)
+│   │   ├── models/      # asyncpg pool + idempotent startup DDL
+│   │   ├── worker/      # arq worker + Neo4j bootstrap
+│   │   └── settings.py  # single source of truth (pydantic-settings)
+│   ├── frontend/        # Flask viewer (Phase 0: stub)
 │   └── tests/{unit,integration}/
-├── CLAUDE.md                      # Claude Code instruction layer (auto-read)
-├── .claude/                       # agents/ + commands/ + settings.json
-├── docs/{adr,diagrams}/
-├── .github/workflows/ci.yml
-├── docker-compose.yml
-├── Makefile
-└── .pre-commit-config.yaml
+├── CLAUDE.md            # Claude Code instruction layer (auto-read)
+├── .claude/            # build subagents + commands
+├── docs/{adr,}          # ADRs + the extraction plan
+├── docker-compose.yml   # pg · neo4j · redis · api · worker · frontend
+├── Makefile             # gates + stack controls
+└── .env.example
 ```
-
----
-
-## Quick Start
-
-```bash
-# 0. Prereq on host: Ollama running on metal
-ollama serve &
-ollama pull qwen2.5-coder:14b nomic-embed-text
-
-# 1. Bring up the stack
-docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
-# Schema (Postgres tables + Neo4j vector index) is created automatically
-# on API startup — there is no separate migration step.
-
-# 2. Run the offline gate suite (no Docker needed for this one)
-make gates
-
-# 3. Open the dashboard
-open http://localhost:5000
-
-# 5. Drive development with Claude Code
-claude                        # reads CLAUDE.md + .claude/ automatically
-```
-
-Claude Code auto-loads `CLAUDE.md` and the six subagents in `.claude/agents/` from the repo root — no extra wiring. Confirm with `/agents`.
-
----
-
-## Ollama Connectivity from Docker
-
-Containers reach the host's Ollama via `host.docker.internal:11434` (mapped in compose with `extra_hosts` for Linux). All agent code takes `OLLAMA_BASE_URL` — no cloud API is required at runtime. The OpenAI-compatible endpoint (`/v1`) is used so agent code is portable if you later swap to vLLM.
-
----
-
-## Environment Variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434/v1` | Local inference |
-| `AGENT_MODEL` | `qwen2.5-coder:14b` | Coding model |
-| `EMBED_MODEL` | `nomic-embed-text` | Embeddings for Neo4j vectors |
-| `DATABASE_URL` | `postgresql+asyncpg://app:app@postgres:5432/harness` | Postgres |
-| `NEO4J_URI` | `bolt://neo4j:7687` | Neo4j |
-| `REDIS_URL` | `redis://redis:6379/0` | arq queue |
-| `MAX_REVIEW_ITERATIONS` | `5` | Review-loop cap before escalation |
-| `COVERAGE_THRESHOLD` | `80` | CI/gate coverage minimum |

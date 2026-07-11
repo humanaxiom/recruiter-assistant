@@ -76,7 +76,7 @@ jobs:
     services:
       postgres:
         image: postgres:16-alpine
-        env: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: harness }
+        env: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: recruiter }
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U app" --health-interval 5s
@@ -98,9 +98,9 @@ jobs:
       - name: Integration tests (testcontainers spins Neo4j; pg/redis via services)
         run: pytest tests/integration -v --timeout=300
         env:
-          DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/harness
+          POSTGRES_DSN: postgresql://app:app@localhost:5432/recruiter
           REDIS_URL: redis://localhost:6379/0
-          # NOTE: no OLLAMA_BASE_URL — embeddings are mocked in integration tests.
+          # NOTE: no LLM_BASE_URL — embeddings are mocked in integration tests.
           # CI never calls a model endpoint; inference is host-only by design.
 
   # ─── All gates green ────────────────────────────────────────────────────

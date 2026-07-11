@@ -1,107 +1,70 @@
-"""Unit tests for the FastAPI routes — logic exercised without live stores."""
+"""Unit tests for the FastAPI app — Phase 0 exposes ``/health`` and nothing else.
+
+The lifespan (asyncpg pool, arq, Neo4j) is stubbed out, so these run with no
+live services. Job/resume/shortlist routes arrive in Phases 1-6.
+"""
 
 from __future__ import annotations
 
-import uuid
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from src.api.main import (
-    TaskCreate,
-    app,
-    create_task,
-    get_task,
-    health,
-    lifespan,
-    run_gates,
-    similar,
-    task_lineage,
+from src.api.main import app, health
+
+# Template demo routes — Phase 0 deletes the agent-harness app.
+DEMO_ROUTES: tuple[str, ...] = (
+    "/tasks",
+    "/tasks/{task_id}",
+    "/tasks/{task_id}/lineage",
+    "/memory/similar",
+    "/gates/run",
 )
-from src.models.db import Task
+
+
+@asynccontextmanager
+async def _noop_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+
+
+@pytest.fixture
+def client() -> Iterator[TestClient]:
+    with patch.object(app.router, "lifespan_context", _noop_lifespan):
+        with TestClient(app) as test_client:
+            yield test_client
+
+
+def test_health_endpoint_returns_200_ok(client: TestClient) -> None:
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 @pytest.mark.asyncio
-async def test_health() -> None:
+async def test_health_handler_returns_ok() -> None:
     assert await health() == {"status": "ok"}
 
 
-@pytest.mark.asyncio
-async def test_create_task_enqueues_pipeline() -> None:
-    session = MagicMock()
-    session.add = MagicMock()
-    session.flush = AsyncMock()
-    session.commit = AsyncMock()
-    app.state.arq = AsyncMock()
-
-    payload = TaskCreate(title="Add rate limiter", spec="limit requests per ip")
-    task = await create_task(payload, session)
-
-    assert task.title == "Add rate limiter"
-    assert task.branch is not None and task.branch.startswith("agent/")
-    session.add.assert_called_once()
-    session.commit.assert_awaited_once()
-    app.state.arq.enqueue_job.assert_awaited_once()
+def test_app_is_rebranded() -> None:
+    title = app.title.lower()
+    assert "recruiter" in title
+    assert "harness" not in title
 
 
-@pytest.mark.asyncio
-async def test_get_task_found() -> None:
-    existing = Task(title="t", spec="spec spec")
-    session = MagicMock()
-    session.get = AsyncMock(return_value=existing)
-    assert await get_task(uuid.uuid4(), session) is existing
+@pytest.mark.parametrize("path", DEMO_ROUTES)
+def test_template_demo_routes_are_gone(path: str) -> None:
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert path not in paths
 
 
-@pytest.mark.asyncio
-async def test_get_task_missing_raises_404() -> None:
-    session = MagicMock()
-    session.get = AsyncMock(return_value=None)
-    with pytest.raises(HTTPException) as exc:
-        await get_task(uuid.uuid4(), session)
-    assert exc.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_task_lineage_delegates_to_memory() -> None:
-    app.state.memory = AsyncMock()
-    app.state.memory.task_lineage = AsyncMock(return_value=[{"subtask": "s"}])
-    out = await task_lineage(uuid.uuid4())
-    assert out == [{"subtask": "s"}]
-
-
-@pytest.mark.asyncio
-async def test_similar_delegates_to_memory() -> None:
-    app.state.memory = AsyncMock()
-    app.state.memory.similar_artifacts = AsyncMock(return_value=[{"id": "a"}])
-    out = await similar("query", k=3)
-    assert out == [{"id": "a"}]
-
-
-@pytest.mark.asyncio
-async def test_run_gates_returns_job_id() -> None:
-    app.state.arq = AsyncMock()
-    app.state.arq.enqueue_job = AsyncMock(return_value=SimpleNamespace(job_id="j1"))
-    assert await run_gates("agent/x-y") == {"job_id": "j1"}
-
-
-@pytest.mark.asyncio
-async def test_lifespan_bootstraps_and_tears_down() -> None:
-    memory = AsyncMock()
-    engine = MagicMock()
-    engine.dispose = AsyncMock()
-    with (
-        patch("src.api.main.create_async_engine", return_value=engine),
-        patch("src.api.main.async_sessionmaker"),
-        patch("src.api.main.create_pool", AsyncMock(return_value=AsyncMock())),
-        patch("src.api.main.GraphMemory", return_value=memory),
-        patch("src.api.main.init_schema", AsyncMock()) as init_mock,
-    ):
-        async with lifespan(app):
-            pass
-
-    init_mock.assert_awaited_once()
-    memory.ensure_schema.assert_awaited_once()
-    memory.close.assert_awaited_once()
-    engine.dispose.assert_awaited_once()
+def test_health_is_the_only_business_route() -> None:
+    paths = {
+        getattr(route, "path", "")
+        for route in app.routes
+        if not getattr(route, "path", "").startswith(("/openapi", "/docs", "/redoc"))
+    }
+    assert paths == {"/health"}
