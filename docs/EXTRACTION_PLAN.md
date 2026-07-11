@@ -76,7 +76,7 @@ Done:
 - Repo created: **`github.com/humanaxiom/recruiter-assistant`** (private). Local `origin` repointed here. Frozen template stays at `adamsalah13/agent-harness-template`.
 - This plan + the `data-pipeline` and `ranking-evals` subagents committed to `main`.
 - The 4 decisions above are locked.
-- **Phase 0 · Seed & infra — landed on `feat/phase-0-seed-infra`, pushed to origin.** Six commits (red → green → three review fixes → docs). What landed:
+- **Phase 0 · Seed & infra — merged to `main` via PR #1 (merge commit `8b2b47c`), CI green** (merged 2026-07-11). Seven commits + a merge commit (red → green → three review fixes → docs → ruff-pin fix `22abcb9`). CI (GitHub Actions) passed branch-name, `ruff·black·mypy`, `unit·coverage ≥ 80%`, and `integration (pg + neo4j + redis)`. The 7th commit — `22abcb9` "fix: pin ruff + declare src first-party so CI and local isort agree" — pinned `ruff==0.15.21` and added `known-first-party = ["src"]` to `core/pyproject.toml` after CI's ruff and the local container resolved different ruff versions (`requirements-dev.txt` only floor-pinned `ruff>=0.6.0`) and disagreed on first-party import grouping, failing the static gate with I001. What landed:
   - Template demo app removed; ranking-domain foundation in its place. Rebrand to `recruiter-assistant` across `pyproject.toml` / README / compose.
   - `docker-compose.yml`: pg/neo4j/redis/ollama, **no MinIO**, `./data` bind mount for the filesystem BlobStore.
   - `settings.py`: `llm_embedding_dim = 768` (single source of the contract), `storage_dir`, LLM base url, Neo4j creds.
