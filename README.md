@@ -137,6 +137,24 @@ Five tables (`jobs`, `resumes`, `shortlist_entries`, `reverse_match_entries`, `o
 
 ---
 
+## Schemas
+
+`core/src/schemas/` is the pydantic **v2** contract layer (Phase 2) — three modules plus an `__init__` re-export (`from src.schemas import JobCreate, ResumeParsed, MatchWeights, …`). Pure data models: no I/O, no services, no routes. They are the contract for four things at once — the API request/response DTOs, the strict LLM `chat_json` output schemas, the jsonb columns persisted verbatim, and the ranking weights. The routes/pipeline that consume them land in Phases 3–6.
+
+| Module | Contract for |
+|---|---|
+| `jobs.py` | `JobCreate`/`JobUpdate`/`JobTransition`/`JobOut`/`JobDeleteOut`/`JobListItem`, `JDExtractText`, `BulkJobResult` (job API DTOs); `Skill`/`Education`/`JDExtracted` (LLM extraction → `jobs.description_parsed` jsonb). |
+| `resumes.py` | `ResumeParsed`/`ResumeCore`/`ResumeSkill*`, `CandidateInfo`, `CoverLetterParsed` (LLM/jsonb parse shapes); `ResumeOut`/`ResumeListItem`/`ResumeUploadResult`/`ResumeDeleteOut` (resume API DTOs). Carries `_coerce_year` (two-digit-year pivot) and the lossy `_drop_invalid_rows`/`_coerce_*` pre-validators so one malformed row never fails a whole parse. |
+| `matching.py` | `MatchWeights` (+ `DEFAULT_WEIGHTS`) — the ranking-weight contract; `ScoreBreakdown`/`EvidenceObject`/`PipelineMeta` (jsonb shapes); `ShortlistEntry`/`JobMatchEntry`/`JobMatchResultOut` (shortlist / reverse-match DTOs). |
+
+**Review workflow cut.** The 2nd-review pipeline the source carried is not ported and is not importable: `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*` are gone, `ShortlistEntry` drops `current_decision`/`current_stage` (keeping only the blind-review `blinded`/`display_label`), and `JobListItem` drops the Taleo/JD-comment columns. A merge-blocking cut-guard test keeps them out.
+
+**`MatchWeights` = the ranking weights.** A frozen model whose defaults encode the algorithm — `0.6·structured + 0.3·evidence + 0.1·motivation` on top, `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` below, `evidence_verify_fuzz = 0.85` (the anti-fabrication quote threshold). A sums-to-1.0 validator rejects any weight vector that would silently rescale scores. This is the single source of the ranking constants; Phase 4's scorer reads them.
+
+The DTOs are aligned to the Phase 0 DDL at three points, and the redaction boundary is recorded: `ResumeOut`/`ResumeListItem` expose *decrypted* PII (`candidate.*`, `candidate_name`, `cover_letter_text`) with a `blinded` flag the schema does not act on — Phase 5 redaction must mask those fields before DTO construction. Full boundary + deviations: [ADR-006](docs/adr/006-schema-port-trim-ddl-alignment.md).
+
+---
+
 ## Ranking algorithm
 
 Four stages (ported near-verbatim; live from Phase 4):
@@ -152,13 +170,13 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 ## Status & roadmap
 
-**Phases 0–1 are complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive is implemented and wired (onto `app.state` / worker `ctx`) but has **no HTTP surface** — there are **no ranking or upload routes yet**, so nothing calls it in a request path. Routes land in later phases.
+**Phases 0–2 are complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive and the pydantic schema layer are implemented but have **no HTTP surface** — there are **no ranking or upload routes yet**. Routes and the pipeline that consume the schemas land in Phases 3–6.
 
 | Phase | Deliverable | State |
 |---|---|---|
 | **0 · Seed & infra** | Compose, settings (768-d contract), asyncpg startup DDL, Neo4j bootstrap | **done** |
 | **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | **done** |
-| 2 · Schemas | `resumes`, `matching`, `jobs` pydantic schemas | pending |
+| **2 · Schemas** | `jobs`, `resumes`, `matching` pydantic schemas (review workflow cut; `MatchWeights` ranking contract) | **done** |
 | 3 · Ingest + parse | extract/chunk, LLM client+cache, PII encryption on parse | pending |
 | 4 · Ranking engine | orchestrator + 4-stage hybrid, reverse-match | pending |
 | 5 · Persist + anonymize + export | shortlist service, redaction, csv/json export with `reveal` | pending |
@@ -216,6 +234,7 @@ recruiter-assistant/
 │   ├── src/
 │   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store)
 │   │   ├── models/      # asyncpg pool + idempotent startup DDL
+│   │   ├── schemas/     # pydantic contract layer: jobs/resumes/matching (Phase 2)
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
 │   │   ├── worker/      # arq worker + Neo4j bootstrap (wires blob_store)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
