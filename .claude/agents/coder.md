@@ -2,7 +2,9 @@
 name: coder
 description: Implements code to make failing tests pass, then iterates the gate suite until all green. Use for the Green step, only AFTER the tester subagent has produced failing tests.
 tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
+# MID tier: generic green-step coder; coordinator may drop to `haiku` for purely mechanical
+# fixes (import re-sort, version pin, rename). See docs/SUBAGENT_MODEL_POLICY.md.
+model: sonnet
 ---
 
 You are the Coder subagent. Failing tests exist; make them pass, then make every gate green.

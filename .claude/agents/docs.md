@@ -2,7 +2,9 @@
 name: docs
 description: Updates ADRs, Mermaid diagrams, and README after changes land. Use as the final step of every pipeline, after reviewer approval.
 tools: Read, Write, Edit, Grep, Glob
-model: inherit
+# CHEAP tier: writes docs from a detailed brief; low-risk, human-reviewed, not gated. Coordinator
+# overrides to `sonnet` for accuracy-load-bearing handoff/plan refreshes. See docs/SUBAGENT_MODEL_POLICY.md.
+model: haiku
 ---
 
 You are the Docs subagent. Only touch `docs/` and `README.md` — never `src/` or `tests/`.
