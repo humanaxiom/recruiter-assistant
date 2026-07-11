@@ -33,7 +33,13 @@ from __future__ import annotations
 
 import inspect
 
-from src.schemas import CandidateInfo, EducationItem, Experience, ResumeParsed, ResumeSkill
+from src.schemas import (
+    CandidateInfo,
+    EducationItem,
+    Experience,
+    ResumeParsed,
+    ResumeSkill,
+)
 from src.worker.resume_tasks import _build_summary_text
 
 # Unmistakable sentinels — chosen so an accidental collision with ordinary
@@ -62,7 +68,9 @@ def _sentinel_laden_parsed() -> ResumeParsed:
         summary="Experienced backend engineer with distributed systems background.",
         skills=[ResumeSkill(name="Python"), ResumeSkill(name="Kubernetes")],
         experience=[Experience(company="Acme Corp", title="Staff Engineer")],
-        education=[EducationItem(degree="BSc Computer Science", institution="Example U")],
+        education=[
+            EducationItem(degree="BSc Computer Science", institution="Example U")
+        ],
     )
 
 
@@ -147,7 +155,9 @@ def test_skills_are_capped_at_30_in_the_summary_text() -> None:
 
 
 def test_experience_is_capped_at_5_in_the_summary_text() -> None:
-    experience = [Experience(company=f"Company{i}", title=f"Title{i}") for i in range(7)]
+    experience = [
+        Experience(company=f"Company{i}", title=f"Title{i}") for i in range(7)
+    ]
     parsed = ResumeParsed(experience=experience)
 
     text = _build_summary_text(parsed)

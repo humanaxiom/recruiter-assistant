@@ -50,7 +50,7 @@ def test_match_skills_finds_aliased_term_case_insensitively() -> None:
 
 
 def test_match_skills_respects_word_boundaries_not_substring() -> None:
-    """"js" must not fire inside a longer token like "abcjs"."""
+    """ "js" must not fire inside a longer token like "abcjs"."""
     text = "I maintain a legacy internal tool called abcjs for reporting."
     assert "javascript" not in match_skills_in_text(text)
 

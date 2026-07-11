@@ -249,7 +249,9 @@ async def test_happy_path_outbox_payload_carries_job_parsed_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row() -> None:
+async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row() -> (
+    None
+):
     """``record_parsed`` returning False means the job was no longer 'draft'
     by the time the UPDATE ran (a concurrent transition). The parse must
     return "stale" and MUST NOT enqueue an outbox row for a write that never

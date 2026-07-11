@@ -92,7 +92,9 @@ CORE_RESULT = ResumeCore(
         )
     ],
     education=[
-        EducationItem(degree="BSc Computer Science", institution="Example University", year=2015)
+        EducationItem(
+            degree="BSc Computer Science", institution="Example University", year=2015
+        )
     ],
 )
 
@@ -116,7 +118,9 @@ def _make_llm() -> MagicMock:
             return SKILLS_RESULT
         if schema is CoverLetterParsed:
             return CoverLetterParsed()
-        raise AssertionError(f"integration LLM stub got an unexpected schema: {schema!r}")
+        raise AssertionError(
+            f"integration LLM stub got an unexpected schema: {schema!r}"
+        )
 
     return MagicMock(chat_json=AsyncMock(side_effect=_chat_json))
 
@@ -275,9 +279,9 @@ async def test_candidate_columns_are_ciphertext_bytes_without_pii_key(
             f"resumes.{column} must be stored as bytea ciphertext, got "
             f"{type(value)!r} (raw value: {value!r})"
         )
-        assert plaintext.encode() not in bytes(value), (
-            f"resumes.{column} ciphertext leaks the plaintext candidate value"
-        )
+        assert plaintext.encode() not in bytes(
+            value
+        ), f"resumes.{column} ciphertext leaks the plaintext candidate value"
 
 
 @pytest.mark.asyncio
@@ -293,9 +297,15 @@ async def test_candidate_columns_decrypt_correctly_with_pii_key(
         row = await conn.fetchrow(
             """
             SELECT
-                pgp_sym_decrypt(candidate_name, current_setting('app.pii_key')) AS name,
-                pgp_sym_decrypt(candidate_email, current_setting('app.pii_key')) AS email,
-                pgp_sym_decrypt(candidate_phone, current_setting('app.pii_key')) AS phone
+                pgp_sym_decrypt(
+                    candidate_name, current_setting('app.pii_key')
+                ) AS name,
+                pgp_sym_decrypt(
+                    candidate_email, current_setting('app.pii_key')
+                ) AS email,
+                pgp_sym_decrypt(
+                    candidate_phone, current_setting('app.pii_key')
+                ) AS phone
               FROM resumes WHERE id = $1
             """,
             parsed["resume_id"],
@@ -313,7 +323,8 @@ async def test_candidate_email_hash_is_plaintext_sha256(parsed: dict[str, Any]) 
     pool: asyncpg.Pool = parsed["pool"]
     async with pool.acquire() as conn:
         stored_hash = await conn.fetchval(
-            "SELECT candidate_email_hash FROM resumes WHERE id = $1", parsed["resume_id"]
+            "SELECT candidate_email_hash FROM resumes WHERE id = $1",
+            parsed["resume_id"],
         )
     expected = hashlib.sha256(CANDIDATE_EMAIL.strip().lower().encode()).hexdigest()
     assert stored_hash == expected
@@ -338,7 +349,10 @@ async def test_parsed_jsonb_round_trips_through_resume_parsed_model(
 
     assert model.summary == CORE_RESULT.summary
     assert model.total_years_experience == CORE_RESULT.total_years_experience
-    assert {s.name for s in model.skills} >= {"Python", "Kubernetes"}
+    # Canonical skill names are lower-case by design (see the aliases.yaml
+    # header) — that is what lets the LLM's "Python" and the deterministic
+    # scan's "python" collapse into one row instead of two HAS_SKILL edges.
+    assert {s.name for s in model.skills} >= {"python", "kubernetes"}
     assert model.chunks, "chunker output must be persisted alongside the extraction"
     # The PII invariant, once more, at the persisted-jsonb boundary: the
     # embedded candidate block on the *validated model* is fine to carry
@@ -377,7 +391,10 @@ async def test_outbox_payload_carries_the_resume_parse_fields(
     pool: asyncpg.Pool = parsed["pool"]
     async with pool.acquire() as conn:
         raw_payload = await conn.fetchval(
-            "SELECT payload FROM outbox WHERE aggregate_id = $1 AND event_type = 'resume.parsed'",
+            """
+            SELECT payload FROM outbox
+             WHERE aggregate_id = $1 AND event_type = 'resume.parsed'
+            """,
             parsed["resume_id"],
         )
     assert raw_payload is not None

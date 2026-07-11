@@ -233,9 +233,7 @@ async def test_resume_service_record_parsed_sets_the_pii_columns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_service_record_parsed_where_clause_restricts_to_uploaded_or_parsing() -> (
-    None
-):
+async def test_resume_record_parsed_where_restricts_to_uploaded_or_parsing() -> None:
     conn = _mock_conn("UPDATE 1")
     await resume_service.record_parsed(
         conn, uuid4(), ResumeParsed(), _pii_tuple(), None, _NOW
@@ -296,9 +294,7 @@ async def test_resume_service_record_parse_failure_sets_status_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_encrypt_pii_via_session_calls_set_pii_key_exactly_once_before_encrypt() -> (
-    None
-):
+async def test_encrypt_pii_session_calls_set_key_once_before_encrypt() -> None:
     """set_config must land before any current_setting() read in the same
     transaction — call pii.set_pii_key exactly once, and strictly before all
     three pii.encrypt calls (name, email, phone)."""
@@ -335,9 +331,7 @@ async def test_encrypt_pii_via_session_calls_set_pii_key_exactly_once_before_enc
 
 
 @pytest.mark.asyncio
-async def test_encrypt_pii_via_session_returns_none_tuple_slots_for_missing_fields() -> (
-    None
-):
+async def test_encrypt_pii_session_returns_none_slots_for_missing_fields() -> None:
     conn = _mock_conn()
     candidate = CandidateInfo()  # every field None
 

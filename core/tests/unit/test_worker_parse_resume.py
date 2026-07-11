@@ -216,7 +216,9 @@ async def test_zero_chunks_records_failure_before_any_llm_call() -> None:
     ctx = _make_ctx(conn, llm=llm, blob_store=blob_store)
 
     with (
-        patch("src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
         patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=[])),
         patch(
             "src.worker.resume_tasks.resume_service.record_parse_failure",
@@ -228,9 +230,9 @@ async def test_zero_chunks_records_failure_before_any_llm_call() -> None:
     assert result == "failed"
     record_failure.assert_awaited_once()
     flat = _flat_call_args(record_failure.await_args)
-    assert any(isinstance(a, str) and "chunk" in a.lower() for a in flat), (
-        "record_parse_failure reason should mention 'no chunks produced'"
-    )
+    assert any(
+        isinstance(a, str) and "chunk" in a.lower() for a in flat
+    ), "record_parse_failure reason should mention 'no chunks produced'"
     llm.chat_json.assert_not_called()
 
 
@@ -246,7 +248,9 @@ async def test_core_llm_failure_records_failure_and_returns_failed() -> None:
     ]
 
     with (
-        patch("src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
         patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
         patch(
             "src.worker.resume_tasks.resume_service.record_parse_failure",
@@ -272,7 +276,9 @@ async def test_core_llm_failure_records_failure_and_returns_failed() -> None:
 async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
     resume_id = uuid4()
     job_id = uuid4()
-    conn = _make_conn(_meta_row(job_id=job_id, status=status, blob_key="resumes/abc.pdf"))
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status=status, blob_key="resumes/abc.pdf")
+    )
     blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
     core = ResumeCore(
         candidate=CandidateInfo(name="Ada Lovelace"),
@@ -291,7 +297,9 @@ async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
     merged_skills = [ResumeSkill(name="Python", years=5, evidence_chunk_ids=["c_002"])]
 
     with (
-        patch("src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
         patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
@@ -342,7 +350,9 @@ async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row() -> None:
+async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row() -> (
+    None
+):
     """``record_parsed`` returning False means the row was no longer
     'uploaded'/'parsing' by the time the UPDATE ran. Must return "stale" and
     MUST NOT enqueue an outbox row for a write that never happened."""
@@ -352,12 +362,16 @@ async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row()
     blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
     core = ResumeCore(summary="Backend engineer.")
     llm = MagicMock(chat_json=AsyncMock(return_value=core))
-    chunks = [ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")]
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
     embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
     ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
 
     with (
-        patch("src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
         patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
@@ -512,7 +526,9 @@ async def test_extract_skills_merged_first_non_null_years_wins_on_collision() ->
     chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="SQL expert")]
 
     with (
-        patch("src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])),
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
         patch(
             "src.worker.resume_tasks.canonicalize_skill_names",
             MagicMock(side_effect=lambda names: list(names)),
@@ -585,7 +601,8 @@ async def test_parse_cover_letter_blob_branch_fetches_via_blob_store_get() -> No
             "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
         ) as extract_text,
         patch(
-            "src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks_sentinel)
+            "src.worker.resume_tasks.chunk_resume",
+            MagicMock(return_value=chunks_sentinel),
         ),
         patch(
             "src.worker.resume_tasks.load_prompt",
@@ -627,7 +644,9 @@ async def test_parse_cover_letter_text_branch_decrypts_after_set_pii_key() -> No
         patch(
             "src.worker.resume_tasks.chunk_resume",
             MagicMock(
-                return_value=[ResumeChunk(id="cl_001", section="other", page=0, text="x")]
+                return_value=[
+                    ResumeChunk(id="cl_001", section="other", page=0, text="x")
+                ]
             ),
         ),
         patch(
@@ -641,9 +660,9 @@ async def test_parse_cover_letter_text_branch_decrypts_after_set_pii_key() -> No
     set_pii_key.assert_awaited_once()
     decrypt.assert_awaited_once()
     call_names = [c[0] for c in manager.mock_calls]
-    assert call_names.index("set_pii_key") < call_names.index("decrypt"), (
-        "set_pii_key must be called BEFORE decrypt (transaction-scoped GUC)"
-    )
+    assert call_names.index("set_pii_key") < call_names.index(
+        "decrypt"
+    ), "set_pii_key must be called BEFORE decrypt (transaction-scoped GUC)"
 
 
 @pytest.mark.asyncio
@@ -663,7 +682,8 @@ async def test_parse_cover_letter_llm_failure_is_non_fatal() -> None:
             "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
         ),
         patch(
-            "src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks_sentinel)
+            "src.worker.resume_tasks.chunk_resume",
+            MagicMock(return_value=chunks_sentinel),
         ),
         patch(
             "src.worker.resume_tasks.load_prompt",

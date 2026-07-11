@@ -35,11 +35,11 @@ def _expected_key(model: str, text: str) -> str:
 
 
 class _FakePipeline:
-    def __init__(self, redis: "_FakeRedis") -> None:
+    def __init__(self, redis: _FakeRedis) -> None:
         self._redis = redis
         self._ops: list[tuple[str, bytes, int | None]] = []
 
-    def set(self, key: str, value: bytes, ex: int | None = None) -> "_FakePipeline":
+    def set(self, key: str, value: bytes, ex: int | None = None) -> _FakePipeline:
         self._ops.append((key, value, ex))
         return self
 

@@ -22,6 +22,8 @@ import pytest
 from src.settings import Settings
 from src.storage.blob_store import BlobStore
 from src.worker.main import WorkerSettings, startup
+from src.worker.resume_tasks import parse_resume
+from src.worker.tasks import parse_job
 
 
 def _fake_driver() -> Any:
@@ -81,6 +83,12 @@ async def test_startup_blob_store_is_rooted_at_storage_dir(tmp_path: Path) -> No
     assert (tmp_path / "worker.txt").read_bytes() == b"z"
 
 
-def test_worker_functions_list_is_still_empty() -> None:
-    """Phase 1 wires infra only — ranking jobs arrive in Phases 3-4."""
-    assert WorkerSettings.functions == []
+def test_worker_registers_the_phase_3_parse_tasks() -> None:
+    """Phase 3 registers the parse tasks — and only those.
+
+    The outbox drainer (``project_to_graph``) is deliberately absent: Phase 3
+    stops at parse -> Postgres -> outbox row, and Phase 4 adds the drainer that
+    projects those rows into Neo4j. Undelivered outbox rows at this stage are
+    the outbox pattern working, not a dropped requirement.
+    """
+    assert WorkerSettings.functions == [parse_job, parse_resume]

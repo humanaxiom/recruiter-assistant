@@ -142,7 +142,7 @@ async def test_job_service_record_parsed_description_parsed_round_trips(
 
 
 @pytest.mark.asyncio
-async def test_job_service_record_parsed_returns_false_and_leaves_row_unchanged_when_not_draft(
+async def test_job_record_parsed_false_and_row_unchanged_when_not_draft(
     conn: asyncpg.Connection,
 ) -> None:
     job_id = await _insert_job(conn, status="open")
@@ -160,7 +160,7 @@ async def test_job_service_record_parsed_returns_false_and_leaves_row_unchanged_
 
 
 @pytest.mark.asyncio
-async def test_job_service_record_parse_failure_sets_failure_reason_without_invalid_status(
+async def test_job_record_parse_failure_sets_reason_without_bad_status(
     conn: asyncpg.Connection,
 ) -> None:
     """job_status has NO 'failed' value — if record_parse_failure ever tried
@@ -243,7 +243,7 @@ async def test_resume_service_record_parsed_parsed_jsonb_round_trips(
 
 
 @pytest.mark.asyncio
-async def test_resume_service_record_parsed_returns_false_and_leaves_row_unchanged_when_status_terminal(
+async def test_resume_record_parsed_false_and_row_unchanged_when_terminal(
     conn: asyncpg.Connection,
 ) -> None:
     job_id = await _insert_job(conn)
@@ -317,7 +317,7 @@ async def test_resume_service_record_parsed_stores_pii_bytea_columns_and_email_h
 
 
 @pytest.mark.asyncio
-async def test_resume_service_record_parse_failure_sets_status_failed_and_failure_reason(
+async def test_resume_record_parse_failure_sets_status_failed_and_reason(
     conn: asyncpg.Connection,
 ) -> None:
     job_id = await _insert_job(conn)
