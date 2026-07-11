@@ -20,6 +20,7 @@ is strictly under the realpath'd root) *before* any write — raising
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -69,6 +70,11 @@ class BlobStore:
         """
         if not key:
             raise InvalidBlobKey("blob key must not be empty")
+        # An embedded null byte makes ``Path.resolve()`` raise a *bare*
+        # ``ValueError``; reject it here so callers catching the specific type
+        # still catch it.
+        if "\x00" in key:
+            raise InvalidBlobKey("blob key must not contain a null byte")
         # Normalise Windows separators so a backslash key is checked as segments
         # rather than landing as one literal filename on POSIX.
         normalised = key.replace("\\", "/")
@@ -93,8 +99,26 @@ class BlobStore:
         path = self._resolve(key)
 
         def _write() -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            # ``mkdir(parents=True, mode=...)`` applies the mode to the leaf
+            # only, so walk the missing chain and create each level 0o700 —
+            # raw resume bytes must not sit in a world-traversable dir. Only
+            # store-created levels are touched; the (pre-existing) root is not.
+            missing: list[Path] = []
+            probe = path.parent
+            while not probe.exists():
+                missing.append(probe)
+                probe = probe.parent
+            for created in reversed(missing):
+                created.mkdir(mode=0o700)
+                os.chmod(created, 0o700)  # deterministic regardless of umask
+            # Create/truncate the blob 0o600 (no world-readable window), then
+            # chmod so an overwrite of a looser pre-existing file is tightened.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.chmod(path, 0o600)
 
         await asyncio.to_thread(_write)
 
@@ -128,10 +152,13 @@ class BlobStore:
         def _walk() -> list[str]:
             if not base.exists():
                 return []
+            # ``rglob`` follows symlinks, so realpath-filter to entries
+            # genuinely under root — a link pointing outside must not leak into
+            # the listing (the read side is as strict as the write side).
             return sorted(
                 p.relative_to(self._root).as_posix()
                 for p in base.rglob("*")
-                if p.is_file()
+                if p.is_file() and p.resolve().is_relative_to(self._root)
             )
 
         return await asyncio.to_thread(_walk)
