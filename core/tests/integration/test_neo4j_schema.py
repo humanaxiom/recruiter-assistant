@@ -15,10 +15,10 @@ from typing import Any
 
 import pytest
 from neo4j import AsyncDriver, AsyncGraphDatabase
-from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 from testcontainers.neo4j import Neo4jContainer
 
 from src.settings import get_settings
+from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
 VECTOR_INDEXES: frozenset[str] = frozenset(
     {"resume_summary_idx", "job_summary_idx", "skill_emb_idx", "chunk_emb_idx"}
@@ -57,9 +57,27 @@ async def driver(neo4j_container: Neo4jContainer) -> AsyncIterator[AsyncDriver]:
 
 
 async def _show(driver: AsyncDriver, what: str) -> list[dict[str, Any]]:
+    """``SHOW <what> YIELD *``.
+
+    ``YIELD *`` is load-bearing: Neo4j 5's *default* SHOW INDEXES projection
+    omits the ``options`` column (and with it ``indexConfig``), so a bare
+    ``SHOW INDEXES`` cannot see the vector dimensions at all.
+    """
     async with driver.session() as session:
-        result = await session.run(f"SHOW {what}")
+        result = await session.run(f"SHOW {what} YIELD *")
         return [dict(record) async for record in result]
+
+
+def _index_config(index: dict[str, Any]) -> dict[str, Any]:
+    """The ``options.indexConfig`` map, with a loud error if the shape drifts."""
+    assert "options" in index, (
+        f"{index.get('name')}: no 'options' column — SHOW must use YIELD *; "
+        f"got columns {sorted(index)}"
+    )
+    config = index["options"].get("indexConfig")
+    assert config, f"{index.get('name')}: options.indexConfig missing or empty"
+    result: dict[str, Any] = dict(config)
+    return result
 
 
 # ── Vector indexes: the 768-d contract, live ───────────────────────────────
@@ -74,14 +92,20 @@ async def test_the_four_vector_indexes_exist(driver: AsyncDriver) -> None:
 
 @pytest.mark.asyncio
 async def test_vector_indexes_are_768d_cosine(driver: AsyncDriver) -> None:
+    """THE contract guard: what the live database actually stored must equal
+    ``settings.llm_embedding_dim``. Fails loudly if either side drifts."""
     expected_dim = get_settings().llm_embedding_dim
     indexes = [i for i in await _show(driver, "INDEXES") if i["type"] == "VECTOR"]
     assert len(indexes) == 4
 
-    for index in indexes:
-        config = index["options"]["indexConfig"]
-        assert int(config["vector.dimensions"]) == expected_dim, index["name"]
-        assert config["vector.similarity_function"].lower() == "cosine", index["name"]
+    actual = {
+        index["name"]: (
+            int(_index_config(index)["vector.dimensions"]),
+            str(_index_config(index)["vector.similarity_function"]).lower(),
+        )
+        for index in indexes
+    }
+    assert actual == {name: (expected_dim, "cosine") for name in VECTOR_INDEXES}
 
 
 @pytest.mark.asyncio
@@ -112,6 +136,9 @@ async def test_no_constraint_on_resumechunk(driver: AsyncDriver) -> None:
     """Chunk ids collide across resumes by design — a unique constraint here
     silently caps every shortlist at one candidate."""
     constraints = await _show(driver, "CONSTRAINTS")
+    assert constraints, "SHOW CONSTRAINTS returned nothing — wrong query shape?"
+    assert "labelsOrTypes" in constraints[0], sorted(constraints[0])
+
     assert "chunk_id_unique" not in {c["name"] for c in constraints}
     assert [
         c["name"] for c in constraints if "ResumeChunk" in (c["labelsOrTypes"] or [])
