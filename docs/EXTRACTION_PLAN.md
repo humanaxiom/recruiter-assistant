@@ -124,7 +124,7 @@ Exact paths in `C:\repos\hris` to port from (avoids re-exploring). Everything he
 
 **Pipeline — port near-verbatim** (`packages/pipeline/src/pipeline/`): `config.py`; `llm/{client.py, cache.py}`; `parsing/{extract.py, chunk.py}`; `matching/{orchestrator.py, stages.py, config.py}`. (Do NOT copy `pipeline/bank/`, `pipeline/quality/`, `pipeline/sources/` — those are JD-Harmonizer.)
 
-**Prompts** (`packages/prompts/.../templates/`): `resume_core_v1`, `resume_skills_v2`, `shortlist_evidence_v1` (+`_v2`), `cover_letter_v1` (+`_v2`) — each `.system.j2` + `.user.j2`.
+**Prompts** (`packages/prompts/src/prompts/templates/`): `resume_core_v1`, `resume_skills_v2`, `shortlist_evidence_v1` (+`_v2`), `cover_letter_v1` (+`_v2`) — each `.system.j2` + `.user.j2`.
 
 **Worker** (`apps/worker/src/worker/`): `resume_tasks.py` (`parse_resume`, `project_to_graph`, `_build_summary_text` — the PII-exclusion point), `tasks.py` (`parse_job`), `shortlist_task.py`, `reverse_match_task.py` (v1 includes reverse match), `skill_normalize.py`, `skill_category_task.py`, `neo4j_bootstrap.py` (4 vector indexes, 768-d cosine: `resume_summary_idx`, `job_summary_idx`, `skill_emb_idx`, `chunk_emb_idx`; nodes Job/Resume/ResumeChunk/Skill/Company/Institution; rels HAS_CHUNK/HAS_SKILL/REQUIRES/SHORTLISTED), `main.py` + `config.py` (prune to ranking jobs only).
 
