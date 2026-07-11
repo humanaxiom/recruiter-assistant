@@ -51,9 +51,9 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | Phase | Deliverable | Status |
 |---|---|---|
 | **0 · Seed & infra** | Repo from template; compose (pg/neo4j/redis/ollama, no minio) + `data/` volume; settings (768-d, storage dir); DDL + Neo4j bootstrap on startup | ✅ done |
-| **1 · Storage** | Filesystem `BlobStore` replacing every MinIO call site | next |
-| **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | not started |
-| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** | not started |
+| **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | ✅ done |
+| **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | next |
+| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criterion: strict `current_setting('app.pii_key')`, no `missing_ok`) | not started |
 | **4 · Ranking engine** | `orchestrator` + `stages` (4-stage hybrid), `MatchWeights`, `shortlist_job`, `reverse_match_job` | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal` | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth | not started |
@@ -70,7 +70,19 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — Phase 0 is complete and green. Phase 1 is next.**
+**As of this writing — Phases 0–1 are complete and green. Phase 2 is next.**
+
+**Phase 1 · Storage — complete and green on `feat/phase-1-storage`** (not yet merged). The filesystem `BlobStore` (`core/src/storage/blob_store.py`) is implemented and wired: async `put`/`get`/`delete`/`exists`/`list_keys` over `settings.storage_dir`, stdlib-only (`pathlib`/`asyncio`/`os`, IO via `asyncio.to_thread`), replacing MinIO. Security core is the `_resolve` path-traversal guard (rejects `..` segments, absolute/Windows-drive/backslash keys, empty/root/null-byte keys, and symlink escapes via realpath + `is_relative_to`), with blobs `0o600` and store-created dirs `0o700` for blobs-at-rest (PIPEDA/FIPPA). Wired onto `app.state.blob_store` (with a `get_blob_store` dependency) and worker `ctx["blob_store"]`; **no call site invokes it yet** — the upload/fetch/flush sites (`resume_service`, `resume_tasks`, admin/flush, routes) are ported in Phases 3–6. Four commits (red → green → red-harden → green-harden). Gates: offline green — ruff (no `--fix`), black, mypy --strict, **240 unit tests, 99.46% coverage**; all three merge-blocking gates passed (reviewer APPROVED, security PASS, ranking-evals PASS with a guard-mutation test proving the traversal guard is real). Full write-up: [docs/activity/phase-1-storage.md](activity/phase-1-storage.md); interface & path-safety rationale: [ADR-005](adr/005-filesystem-blobstore-interface-path-safety.md).
+
+**Scope correction — the two carried-forward Phase-0 security criteria split across two phases.** Only **#1 (path-traversal)** was a Phase 1 concern and is **done** (above). **#2 (strict `current_setting('app.pii_key')`, no `missing_ok`)** is **not** a `BlobStore` concern — it belongs to **Phase 3** (`pii.py`), where the PII read path lands. It is moved to Phase 3's acceptance criteria below so it is neither lost nor wrongly attributed to Phase 1.
+
+**Immediate next step — Phase 2 (Schemas):** port `resumes`, `matching` (minus review types — `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*`; drop `ShortlistEntry.current_decision/current_stage`), and `jobs` (`Skill`, `JDExtracted`) pydantic schemas per Appendix A.
+
+---
+
+### Historical: Phase 0 status (for reference)
+
+**Phase 0 was complete and green; Phase 1 was next at the time of this note.**
 
 Done:
 - Repo created: **`github.com/humanaxiom/recruiter-assistant`** (private). Local `origin` repointed here. Frozen template stays at `adamsalah13/agent-harness-template`.
@@ -87,11 +99,12 @@ Done:
 
 **Checklist reconciliation note (`core/src/gates/`):** the Phase 0 checklist said "keep `gates/`". The template demo's product-code gate-runner module (`core/src/gates/`, alongside `core/src/agents|memory` and `models/db.py`) **was deleted** — it was demo code the ranking domain replaces. "Keep gates" was (correctly) read as the **build** harness: `make gates`, CI, `.claude/`, and pre-commit are all intact. Don't mistake the deleted demo module for the still-live gate suite.
 
-**Immediate next step — Phase 1 (Storage):** filesystem `BlobStore` (put/get/delete over `./data/resumes/{id}`) replacing every MinIO call site — `resume_service.py` put/remove and `resume_tasks._fetch_blob` get (see Appendix A, "MinIO → filesystem").
+**(Phase 1 — Storage) — DONE** (see "Current status & next step" above): filesystem `BlobStore` (put/get/delete/exists/list_keys) replacing every MinIO call site — the `resume_service.py` put/remove and `resume_tasks._fetch_blob` get sites (Appendix A, "MinIO → filesystem") will call it when they land in Phases 3–6.
 
-Two requirements carried forward from Phase 0's security gate — **Phase 1 acceptance criteria, must land in `BlobStore`'s first commit:**
-1. **Path-traversal rejection.** `blob_key` / `cover_letter_blob_key` are unvalidated `TEXT` and `storage_dir` is a bind-mounted root, so `BlobStore` must reject `..`, absolute paths, and symlinks that escape `storage_dir` — from its first commit, not as a follow-up.
-2. **STRICT PII-key GUC read.** When wiring `settings.pii_key` into the `app.pii_key` GUC, use `current_setting('app.pii_key')` **without** `missing_ok=true`. A `missing_ok` read of an unset key yields NULL → NULL ciphertext → silent data loss; fail loud instead.
+Security criteria carried forward from Phase 0's gate — **split across two phases** (correction to the original wording, which grouped both under Phase 1):
+
+1. **Path-traversal rejection** — a **Phase 1** acceptance criterion, **DONE**. `blob_key` / `cover_letter_blob_key` are unvalidated `TEXT` and `storage_dir` is a bind-mounted root, so `BlobStore._resolve` rejects `..`, absolute paths, null-byte keys, and symlinks that escape `storage_dir` before any IO — landed in Phase 1's first commit (guard-mutation eval proves it).
+2. **STRICT PII-key GUC read** — **NOT a Phase 1 item; moved to Phase 3** (`pii.py`, where the PII read path lands). When wiring `settings.pii_key` into the `app.pii_key` GUC, use `current_setting('app.pii_key')` **without** `missing_ok=true`. A `missing_ok` read of an unset key yields NULL → NULL ciphertext → silent data loss; fail loud instead. **This is a Phase 3 acceptance criterion.**
 
 Then Phases 2–7 per the table above.
 

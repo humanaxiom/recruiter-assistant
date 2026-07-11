@@ -19,7 +19,9 @@ The working copy now holds the **ranking-domain foundation** (Phase 0) on the te
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phase 0 (seed & infra) complete and merged to `main` via PR #1** (merge commit `8b2b47c`, merged 2026-07-11), CI green. `main` now contains Phase 0.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phase 0 (seed & infra) complete and merged to `main` via PR #1** (merge commit `8b2b47c`, merged 2026-07-11), CI green. **Phase 1 (storage) complete and green on `feat/phase-1-storage`** (not yet merged). `main` contains Phase 0; Phase 1 awaits merge.
+
+**Phase 1 landed** (four commits — red → green → red-harden → green-harden): the filesystem `BlobStore` (`core/src/storage/blob_store.py`) exists — async `put`/`get`/`delete`/`exists`/`list_keys` over `settings.storage_dir`, stdlib-only (`pathlib`/`asyncio`/`os`, IO via `asyncio.to_thread`), replacing MinIO. `BlobNotFound` / `InvalidBlobKey` exceptions. Security core: the `_resolve` guard rejects `..` segments, absolute/Windows-drive/backslash keys, empty/root/null-byte keys, and symlink escapes (realpath + `is_relative_to`); blobs are `0o600` and store-created dirs `0o700` (PIPEDA/FIPPA — blobs-at-rest are permission-gated, distinct from the pgcrypto-encrypted PII *columns*); `list_keys` realpath-filters escaping symlinks out of listings. Wired onto `app.state.blob_store` (with a `get_blob_store` dependency) and worker `ctx["blob_store"]`; **no call site invokes it yet** — the upload/fetch/flush sites are ported in Phases 3–6. Gates: offline green — ruff (no `--fix`), black, mypy --strict, **240 unit tests, 99.46% coverage**; all three merge-blocking gates passed (reviewer APPROVED, security PASS, ranking-evals PASS with a guard-mutation test). Details: [docs/activity/phase-1-storage.md](docs/activity/phase-1-storage.md); rationale: [docs/adr/005-*.md](docs/adr/005-filesystem-blobstore-interface-path-safety.md).
 
 **Phase 0 landed** (seven commits + a merge commit, red → green → 3 review fixes → docs → ruff-pin fix):
 - Template demo app removed (`core/src/agents|memory|gates`, `models/db.py`) and replaced with the ranking-domain foundation. Rebrand to `recruiter-assistant`.
@@ -30,7 +32,7 @@ The working copy now holds the **ranking-domain foundation** (Phase 0) on the te
 
 **Note on `core/src/gates/`:** the deleted `gates/` was the template demo's *product-code* gate-runner, not the build harness. `make gates`, CI, `.claude/`, and pre-commit are all intact. The Phase 0 checklist's "keep gates" meant the build suite.
 
-**Not started:** Phase 1 onward — see below.
+**Not started:** Phase 2 onward — see below.
 
 **Decisions locked:** template-first port · filesystem storage (MinIO dropped — community edition archived 2026-04-25) · keep Neo4j (load-bearing) · v1 includes cover-letter/motivation, reverse-match, a minimal Flask viewer, and blind-review redaction ON by default.
 
@@ -62,15 +64,15 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); TDD (failing tests first); offline only (no cloud endpoints — local Ollama/OpenAI-compatible client); config via settings; a single red gate = not done. Privacy: PII never enters embeddings; anonymization non-destructive; PIPEDA/FIPPA.
 
-## Immediate next step — Phase 1 (Storage)
+## Immediate next step — Phase 2 (Schemas)
 
-Filesystem `BlobStore` (put/get/delete over `./data/resumes/{id}`) replacing every MinIO call site: `resume_service.py` put/remove and `resume_tasks._fetch_blob` get (Appendix A, "MinIO → filesystem"). The `resume-previews` bucket is unused — ignore it.
+Port the pydantic schemas: `resumes`, `matching` (**minus review types** — drop `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*`; drop `ShortlistEntry.current_decision/current_stage`), and `jobs` (`Skill`, `JDExtracted`). hris source paths are in **Appendix A** of the plan. Then Phases 3–7 per the plan table.
 
-**Two security requirements carried forward from Phase 0 — Phase 1 acceptance criteria, must land in `BlobStore`'s first commit:**
-1. **Path-traversal rejection.** `blob_key` / `cover_letter_blob_key` are unvalidated `TEXT` and `storage_dir` is a bind-mounted root — reject `..`, absolute paths, and symlinks that escape `storage_dir` from the first commit.
-2. **STRICT PII-key GUC read.** Wire `settings.pii_key` into `app.pii_key` with `current_setting('app.pii_key')` **without** `missing_ok=true` — a missing_ok read of an unset key yields NULL → NULL ciphertext → silent data loss. Fail loud.
+**Phase 1 is done** — the filesystem `BlobStore` exists and is wired (see Current state). One of the two Phase-0 carried-forward security criteria is closed by it:
+1. **Path-traversal rejection — DONE in Phase 1.** `BlobStore._resolve` rejects `..`, absolute paths, null-byte keys, and symlink escapes before any IO.
+2. **STRICT PII-key GUC read — now a Phase 3 acceptance criterion, NOT Phase 1.** It concerns `pii.py` (the PII read path), which lands in Phase 3. Wire `settings.pii_key` into `app.pii_key` with `current_setting('app.pii_key')` **without** `missing_ok=true` — a missing_ok read of an unset key yields NULL → NULL ciphertext → silent data loss. Fail loud. Do this in Phase 3.
 
-hris source paths for every phase are in **Appendix A** of the plan; Phase 0 architecture rationale is in **ADR-004**.
+hris source paths for every phase are in **Appendix A** of the plan; Phase 0 architecture rationale is in **ADR-004**, Phase 1's in **ADR-005**.
 
 ## Trigger prompt (paste into a new session)
 
@@ -79,21 +81,29 @@ Resume the recruiter-assistant build. Working dir C:\repos\recruiter-assistant
 (origin github.com/humanaxiom/recruiter-assistant). Read HANDOFF.md and
 docs/EXTRACTION_PLAN.md first — they are the source of truth for state,
 decisions, environment quirks, and the hris source-file map (Appendix A).
-Phase 0 architecture rationale is in docs/adr/004-*.md.
+Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
 cover-letter/reverse-match/minimal viewer/blind-default). Phase 0 (seed & infra)
-is complete and merged to main via PR #1 (merge commit 8b2b47c), CI green — main
-now contains Phase 0. Phase 1 is next.
+is complete and merged to main via PR #1 (merge commit 8b2b47c), CI green. Phase 1
+(storage) is complete and green on feat/phase-1-storage (240 unit tests, 99.46%
+coverage; reviewer/security/ranking-evals all green) — the filesystem BlobStore
+exists and is wired, but no call site invokes it yet. Phase 2 is next.
 
-Start Phase 1 (Storage): filesystem BlobStore (put/get/delete over
-./data/resumes/{id}) replacing every MinIO call site — via the TDD subagent loop,
-using the data-pipeline and ranking-evals subagents. Two carried-forward security
-acceptance criteria for BlobStore's first commit: (1) reject path traversal
-(.., absolute paths, symlinks escaping storage_dir); (2) read app.pii_key with
-STRICT current_setting (no missing_ok — NULL key → NULL ciphertext → data loss).
+Start Phase 2 (Schemas): port the pydantic schemas — resumes, matching (minus
+review types: PipelineStage, DispositionReason, ShortlistDecision*,
+StageTransition*; drop ShortlistEntry.current_decision/current_stage), and jobs
+(Skill, JDExtracted) — via the TDD subagent loop using the data-pipeline and
+ranking-evals subagents.
+
+Carried-forward security criteria status: (1) path-traversal rejection is DONE in
+Phase 1's BlobStore._resolve; (2) STRICT current_setting('app.pii_key') with NO
+missing_ok is a PHASE 3 acceptance criterion (it concerns pii.py, not the store) —
+carry it to Phase 3, don't apply it in Phase 2. NULL key → NULL ciphertext →
+silent data loss, so fail loud when pii.py lands.
+
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Do Phase 1 on a feat/ branch, land make gates green, then check in
-with me before Phase 2.
+HANDOFF.md. Do Phase 2 on a feat/ branch, land make gates green, then check in
+with me before Phase 3.
 ```
