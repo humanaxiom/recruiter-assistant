@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     max_review_iterations: int = 5
     coverage_threshold: int = 80
 
+    # Flask frontend
+    api_base_url: str = "http://api:8000"
+    flask_secret_key: str = "dev-only"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

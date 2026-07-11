@@ -23,6 +23,7 @@ FAKE_EMBEDDING = [0.1] * 768
 
 # ── Containers (session-scoped: one boot per test session) ─────────────────
 
+
 @pytest.fixture(scope="session")
 def pg_url() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as pg:
@@ -37,14 +38,15 @@ def neo4j_container() -> Iterator[Neo4jContainer]:
 
 # ── Postgres integration ───────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_task_lifecycle_in_postgres(pg_url: str) -> None:
     engine = create_async_engine(pg_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    async with Session() as session:
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
         task = Task(title="Integration test task", spec="Do the thing properly")
         session.add(task)
         await session.commit()
@@ -66,6 +68,7 @@ async def test_task_lifecycle_in_postgres(pg_url: str) -> None:
 
 
 # ── Neo4j integration ──────────────────────────────────────────────────────
+
 
 @pytest.fixture
 async def memory(neo4j_container: Neo4jContainer) -> AsyncIterator[GraphMemory]:

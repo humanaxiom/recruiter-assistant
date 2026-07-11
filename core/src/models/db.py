@@ -8,7 +8,7 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.ext.asyncio import AsyncAttrs
+from sqlalchemy.ext.asyncio import AsyncAttrs, AsyncEngine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -16,10 +16,22 @@ class Base(AsyncAttrs, DeclarativeBase):
     pass
 
 
-class TaskStatus(str, enum.Enum):
+async def init_schema(engine: AsyncEngine) -> None:
+    """Create all tables if absent — idempotent, run on app startup.
+
+    The stack has no migration framework by design: there is no legacy
+    schema to evolve, so tables are created directly from the models the
+    first time the app connects. Introduce Alembic only when a real
+    schema-change history begins to matter.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+class TaskStatus(enum.StrEnum):
     PENDING = "pending"
     PLANNING = "planning"
-    RED = "red"            # failing tests written
+    RED = "red"  # failing tests written
     ITERATING = "iterating"  # coder loop running
     REVIEW = "review"
     ESCALATED = "escalated"
@@ -27,7 +39,7 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class GateStatus(str, enum.Enum):
+class GateStatus(enum.StrEnum):
     GREEN = "green"
     RED = "red"
     SKIPPED = "skipped"

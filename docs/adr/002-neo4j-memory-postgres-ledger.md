@@ -11,7 +11,7 @@ Agents need two very different kinds of persistence: (a) an auditable, transacti
 
 Split by access pattern, not by "one database to rule them all":
 
-- **Postgres** — tasks, runs, gate results, audit rows. ACID, Alembic-migrated, queried by the API and Flask dashboard.
+- **Postgres** — tasks, runs, gate results, audit rows. ACID, queried by the API and Flask dashboard. Tables are created directly from the SQLAlchemy models on startup (`init_schema`); no migration framework yet — add Alembic when a real schema-change history begins to matter.
 - **Neo4j** — lineage graph `(:Task)-[:DECOMPOSED_INTO]->(:Subtask)-[:EXECUTED_BY]->(:Agent)`, artifacts with a 768-dim vector index (`nomic-embed-text` via Ollama). Agents query it before implementing.
 - **Redis** — arq broker/results only; no domain data.
 
@@ -27,7 +27,7 @@ graph LR
 
 - Clear ownership: a datum lives in exactly one store
 - Vector retrieval gives agents genuine reuse of prior work
-- Two migration systems (Alembic + Cypher files) — mitigated by `make migrate` running both
+- Schema for both stores is created idempotently on startup (`init_schema` for Postgres, `GraphMemory.ensure_schema` for Neo4j) — one bootstrap path, no migration tooling to keep in sync while the schema is still young
 
 ## Alternatives Considered
 

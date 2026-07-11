@@ -5,14 +5,15 @@ Talks to the FastAPI backend over HTTP; renders server-side templates.
 
 from __future__ import annotations
 
-import os
-
 import httpx
 from flask import Flask, flash, redirect, render_template, request, url_for
 
+from src.settings import get_settings
+
+_settings = get_settings()
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-only")
-API = os.environ.get("API_BASE_URL", "http://api:8000")
+app.secret_key = _settings.flask_secret_key
+API = _settings.api_base_url
 
 
 @app.get("/")

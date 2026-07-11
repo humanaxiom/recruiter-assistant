@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import re
-
 from src.agents.base import AgentInput, AgentOutput, BaseAgent
-
-FILE_BLOCK = re.compile(r"```[a-z]*\s+path=([^\s`]+)\n(.*?)```", re.DOTALL)
+from src.agents.parsing import extract_file_blocks
 
 
 class TesterAgent(BaseAgent):
@@ -20,7 +17,8 @@ RULES:
 - Cover: happy path, edge cases, error cases; parametrize where natural
 - Mock ALL external I/O (Ollama, Postgres, Neo4j, Redis) in unit tests
 - Full type annotations; tests must satisfy ruff/black/mypy --strict
-- Tests go in tests/unit/test_<module>.py (or tests/integration/ if the spec demands real stores)
+- Tests go in tests/unit/test_<module>.py (or tests/integration/ if the spec
+  demands real stores)
 - NEVER write implementation code — only tests
 - Aim for >= 5 tests per public class/function
 
@@ -35,8 +33,7 @@ Output every file as:
 
         try:
             text, tokens = await self._complete(
-                f"{memory_ctx}Spec:\n{input_.task}\n\n"
-                "Write the failing tests now."
+                f"{memory_ctx}Spec:\n{input_.task}\n\n" "Write the failing tests now."
             )
             artifacts = self._extract_test_files(text)
             if not artifacts:
@@ -57,8 +54,7 @@ Output every file as:
     def _extract_test_files(self, text: str) -> dict[str, str]:
         """Only accept files under tests/ — a tester never writes src/."""
         files: dict[str, str] = {}
-        for match in FILE_BLOCK.finditer(text):
-            path, content = match.group(1), match.group(2)
+        for path, content in extract_file_blocks(text).items():
             if path.startswith("tests/") and ".." not in path:
                 files[path] = content
             else:

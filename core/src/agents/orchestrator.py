@@ -11,9 +11,10 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
-from graphlib import TopologicalSorter
+from graphlib import CycleError, TopologicalSorter
 
 from src.agents.base import AgentInput, AgentOutput, BaseAgent
 from src.agents.coder import CoderAgent
@@ -43,9 +44,10 @@ class Orchestrator:
         self._branch = branch
         self._memory = memory
         self._planner = PlannerAgent(memory=memory)
+        self._coder = CoderAgent(memory=memory)
         self._agents: dict[str, BaseAgent] = {
             "tester": TesterAgent(memory=memory),
-            "coder": CoderAgent(memory=memory),  # type: ignore[dict-item]
+            "coder": self._coder,
             "reviewer": ReviewerAgent(memory=memory),
             "docs": DocsAgent(memory=memory),
             "security": SecurityAgent(memory=memory),
@@ -57,16 +59,36 @@ class Orchestrator:
             AgentInput(task_id=task_id, task=task_spec)
         )
         if not plan_output.success:
-            return PipelineResult(
-                task_id, False, None, blocked_by="planner"
-            )
+            return PipelineResult(task_id, False, None, blocked_by="planner")
         plan: Plan = plan_output.result
         logger.info("Plan %s: %d subtasks", plan.plan_id, len(plan.subtasks))
 
         # 2. Topological execution
         result = PipelineResult(task_id, True, plan)
-        for subtask in self._ordered(plan.subtasks):
-            output = await self._dispatch(task_id, task_spec, subtask, result)
+        try:
+            ordered = self._ordered(plan.subtasks)
+        except CycleError as exc:
+            logger.error("Plan has a dependency cycle: %s", exc)
+            result.success = False
+            result.blocked_by = "planner"
+            return result
+
+        for subtask in ordered:
+            try:
+                output = await self._dispatch(task_id, task_spec, subtask, result)
+            except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+                logger.exception("Subtask %s crashed", subtask.id)
+                result.outputs[subtask.id] = AgentOutput(
+                    task_id=task_id,
+                    agent_id=subtask.agent,
+                    success=False,
+                    result=None,
+                    reasoning="",
+                    error=f"unhandled error in {subtask.agent}: {exc}",
+                )
+                result.success = False
+                result.blocked_by = subtask.agent
+                return result
             result.outputs[subtask.id] = output
 
             if not output.success:
@@ -109,7 +131,7 @@ class Orchestrator:
         agent = self._agents[subtask.agent]
         logger.info("Dispatching %s → %s", subtask.id, subtask.agent)
 
-        context = self._build_context(subtask, result)
+        context = await self._build_context(subtask, result)
         input_ = AgentInput(
             task_id=task_id,
             task=subtask.task,
@@ -119,8 +141,8 @@ class Orchestrator:
 
         # Coder runs inside the iterate-until-green ReviewLoop
         if subtask.agent == "coder":
-            loop = ReviewLoop(coder=self._agents["coder"], branch=self._branch)  # type: ignore[arg-type]
-            outcome = await loop.run(subtask.task)
+            loop = ReviewLoop(coder=self._coder, branch=self._branch)
+            outcome = await loop.run(task_id, subtask.task)
             result.loop_outcome = outcome
             if outcome.success:
                 return AgentOutput(
@@ -144,24 +166,42 @@ class Orchestrator:
 
         return await agent.run(input_)
 
-    def _build_context(
+    async def _build_context(
         self, subtask: Subtask, result: PipelineResult
     ) -> dict[str, object]:
         """Feed each agent what it needs from upstream outputs."""
         context: dict[str, object] = {}
         if subtask.agent in ("reviewer", "security"):
-            # In a live run the harness injects `git diff` here; upstream
-            # artifacts serve as the audit target for library usage.
-            artifacts: dict[str, str] = {}
-            for dep_id in subtask.depends_on:
-                dep = result.outputs.get(dep_id)
-                if dep:
-                    artifacts.update(dep.artifacts)
-            context["diff"] = "\n\n".join(
-                f"--- {p} ---\n{c}" for p, c in artifacts.items()
-            )
+            # Prefer the real branch diff; fall back to stitched upstream
+            # artifacts when git is unavailable (e.g. unit-test harness).
+            diff = await self._git_diff()
+            if not diff:
+                artifacts: dict[str, str] = {}
+                for dep_id in subtask.depends_on:
+                    dep = result.outputs.get(dep_id)
+                    if dep:
+                        artifacts.update(dep.artifacts)
+                diff = "\n\n".join(f"--- {p} ---\n{c}" for p, c in artifacts.items())
+            context["diff"] = diff
         if subtask.agent == "docs":
             context["changes_summary"] = "\n".join(
                 f"{o.agent_id}: {o.reasoning}" for o in result.outputs.values()
             )
         return context
+
+    async def _git_diff(self) -> str:
+        """The branch's diff against main; empty string if git is unavailable."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "diff",
+                "main...HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+        except OSError:
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return stdout.decode(errors="replace")

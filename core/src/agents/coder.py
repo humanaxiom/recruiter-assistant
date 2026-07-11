@@ -2,17 +2,20 @@
 
 Before implementing, it queries Neo4j vector memory for similar prior
 artifacts and injects them as context ("have we solved this before?").
+It extends :class:`BaseAgent` so it shares the same client, memory, and
+lineage-recording contract as every other subagent — produced files are
+written to the working tree *and* recorded to graph memory.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 
-from openai import AsyncOpenAI
-
+from src.agents.base import AgentInput, AgentOutput, BaseAgent
+from src.agents.parsing import extract_file_blocks
 from src.memory.graph import GraphMemory
-from src.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,76 +26,96 @@ Rules:
 - Full type annotations; mypy --strict must pass.
 - ruff and black clean.
 - When given a GATE FAILURE report, fix ONLY what the report indicates.
-Output unified diffs or complete file contents as instructed by the harness runner.
-"""
+Output every changed file as a fenced block:
+```python path=src/foo.py
+<full file content>
+```"""
+
+WriterFn = Callable[[str, str], None]
 
 
-class CoderAgent:
-    def __init__(self, memory: GraphMemory | None = None) -> None:
-        s = get_settings()
-        self._client = AsyncOpenAI(base_url=s.ollama_base_url, api_key="ollama")
-        self._model = s.agent_model
-        self._memory = memory
+def _default_writer(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
 
-    async def iterate(self, task: str, failure_report: str, iteration: int) -> str:
-        """One review-loop iteration: read failures, apply fixes."""
-        context = await self._retrieve_context(task) if self._memory else ""
 
-        messages = [
-            {"role": "system", "content": CODER_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"Task: {task}\n\n"
-                    f"Iteration: {iteration}\n\n"
-                    f"{context}"
-                    f"Gate failure report:\n{failure_report}\n\n"
-                    "Fix the failures. Respond with the corrected files."
-                ),
-            },
-        ]
+class CoderAgent(BaseAgent):
+    agent_id = "coder"
+    temperature = 0.1
+    system_prompt = CODER_SYSTEM
 
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=0.1,
-        )
-        content = response.choices[0].message.content or ""
-        applied = self._apply_changes(content)
-        return f"Applied {applied} file change(s) for iteration {iteration}"
+    def __init__(
+        self, memory: GraphMemory | None = None, writer: WriterFn | None = None
+    ) -> None:
+        super().__init__(memory=memory)
+        self._writer = writer or _default_writer
 
-    async def _retrieve_context(self, task: str) -> str:
-        assert self._memory is not None
-        similar = await self._memory.similar_artifacts(task, k=3)
-        if not similar:
-            return ""
-        blocks = "\n---\n".join(
-            f"[{a['kind']}] (score {a['score']:.2f})\n{a['content']}" for a in similar
-        )
-        return f"Similar prior work from memory:\n{blocks}\n\n"
+    async def run(self, input_: AgentInput) -> AgentOutput:
+        """Standard one-shot interface (ABC contract).
 
-    def _apply_changes(self, model_output: str) -> int:
-        """Parse fenced file blocks (```path=src/x.py) and write them.
-
-        Format expected from the model:
-            ```python path=src/foo.py
-            <full file content>
-            ```
+        The orchestrator normally drives the coder through :meth:`iterate`
+        inside the ReviewLoop; this satisfies BaseAgent and is a useful
+        single-pass entry point.
         """
-        import re
-
-        pattern = re.compile(
-            r"```[a-z]*\s+path=([^\s`]+)\n(.*?)```", re.DOTALL
+        summary, artifacts, tokens = await self._implement(input_.task, "", 1)
+        output = self._ok(
+            input_,
+            result={"files": list(artifacts)},
+            reasoning=summary,
+            artifacts=artifacts,
+            tokens=tokens,
         )
-        count = 0
-        for match in pattern.finditer(model_output):
-            path, content = match.group(1), match.group(2)
-            if path.startswith(("tests/", "src/")) and ".." not in path:
-                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(content)
-                count += 1
-                logger.info("Wrote %s", path)
+        await self._record(input_, output)
+        return output
+
+    async def iterate(
+        self, task_id: str, task: str, failure_report: str, iteration: int
+    ) -> str:
+        """One review-loop iteration: read failures, apply fixes, record."""
+        summary, artifacts, tokens = await self._implement(
+            task, failure_report, iteration
+        )
+        if artifacts:
+            input_ = AgentInput(task_id=task_id, task=task)
+            output = self._ok(input_, None, summary, artifacts, tokens)
+            await self._record(input_, output)
+        return summary
+
+    async def _implement(
+        self, task: str, failure_report: str, iteration: int
+    ) -> tuple[str, dict[str, str], int]:
+        context = await self._memory_context(task)
+        prompt = f"Task: {task}\n\n" f"Iteration: {iteration}\n\n" f"{context}"
+        if failure_report:
+            prompt += (
+                f"Gate failure report:\n{failure_report}\n\n"
+                "Fix the failures. Respond with the corrected files."
+            )
+        else:
+            prompt += "Implement the task. Respond with the complete files."
+
+        text, tokens = await self._complete(prompt)
+        artifacts = self._extract_src_files(text)
+        applied = self._apply_changes(artifacts)
+        return (
+            f"Applied {applied} file change(s) for iteration {iteration}",
+            artifacts,
+            tokens,
+        )
+
+    def _extract_src_files(self, text: str) -> dict[str, str]:
+        """Accept only src/ and tests/ paths, never outside the project tree."""
+        files: dict[str, str] = {}
+        for path, content in extract_file_blocks(text).items():
+            if path.startswith(("src/", "tests/")) and ".." not in path:
+                files[path] = content
             else:
                 logger.warning("Refused to write outside src/tests: %s", path)
-        return count
+        return files
+
+    def _apply_changes(self, artifacts: dict[str, str]) -> int:
+        for path, content in artifacts.items():
+            self._writer(path, content)
+            logger.info("Wrote %s", path)
+        return len(artifacts)

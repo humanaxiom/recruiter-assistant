@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.memory.graph import GraphMemory
-from src.models.db import Task, TaskStatus
+from src.models.db import Task, TaskStatus, init_schema
 from src.settings import get_settings
 
 
@@ -21,9 +22,14 @@ from src.settings import get_settings
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     s = get_settings()
     app.state.engine = create_async_engine(s.database_url)
-    app.state.sessionmaker = async_sessionmaker(app.state.engine, expire_on_commit=False)
+    app.state.sessionmaker = async_sessionmaker(
+        app.state.engine, expire_on_commit=False
+    )
     app.state.arq = await create_pool(RedisSettings.from_dsn(s.redis_url))
     app.state.memory = GraphMemory()
+    # Schema comes up with the app — no separate migration step.
+    await init_schema(app.state.engine)
+    await app.state.memory.ensure_schema()
     yield
     await app.state.memory.close()
     await app.state.arq.close()
@@ -40,6 +46,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 # ── Schemas ────────────────────────────────────────────────────────────────
 
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=3, max_length=255)
     spec: str = Field(min_length=10)
@@ -55,6 +62,7 @@ class TaskOut(BaseModel):
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -95,13 +103,15 @@ async def get_task(
 @app.get("/tasks/{task_id}/lineage")
 async def task_lineage(task_id: uuid.UUID) -> list[dict[str, Any]]:
     """Neo4j lineage: subtasks, agents, artifacts for a task."""
-    return await app.state.memory.task_lineage(str(task_id))
+    lineage: list[dict[str, Any]] = await app.state.memory.task_lineage(str(task_id))
+    return lineage
 
 
 @app.get("/memory/similar")
 async def similar(q: str, k: int = 5) -> list[dict[str, Any]]:
     """Vector search over prior artifacts."""
-    return await app.state.memory.similar_artifacts(q, k=k)
+    hits: list[dict[str, Any]] = await app.state.memory.similar_artifacts(q, k=k)
+    return hits
 
 
 @app.post("/gates/run")

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -25,7 +25,7 @@ class AgentInput:
     task_id: str
     task: str
     context: dict[str, Any] = field(default_factory=dict)
-    prior_outputs: dict[str, "AgentOutput"] = field(default_factory=dict)
+    prior_outputs: dict[str, AgentOutput] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,9 +38,7 @@ class AgentOutput:
     artifacts: dict[str, str] = field(default_factory=dict)  # path -> content
     tokens_used: int = 0
     error: str | None = None
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class BaseAgent(ABC):
@@ -58,8 +56,7 @@ class BaseAgent(ABC):
         self._scratchpad: list[str] = []
 
     @abstractmethod
-    async def run(self, input_: AgentInput) -> AgentOutput:
-        ...
+    async def run(self, input_: AgentInput) -> AgentOutput: ...
 
     # ── Shared machinery ───────────────────────────────────────────────────
 
@@ -70,7 +67,7 @@ class BaseAgent(ABC):
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_content},
-            ],  # type: ignore[arg-type]
+            ],
             temperature=self.temperature,
         )
         text = response.choices[0].message.content or ""
@@ -85,8 +82,7 @@ class BaseAgent(ABC):
         if not similar:
             return ""
         blocks = "\n---\n".join(
-            f"[{a['kind']}] (score {a['score']:.2f})\n{a['content']}"
-            for a in similar
+            f"[{a['kind']}] (score {a['score']:.2f})\n{a['content']}" for a in similar
         )
         return f"## Similar prior work (graph memory)\n{blocks}\n\n"
 
@@ -110,10 +106,7 @@ class BaseAgent(ABC):
             )
 
     def _log(self, message: str) -> None:
-        entry = (
-            f"[{datetime.now(timezone.utc).isoformat()}] "
-            f"[{self.agent_id}] {message}"
-        )
+        entry = f"[{datetime.now(UTC).isoformat()}] " f"[{self.agent_id}] {message}"
         self._scratchpad.append(entry)
         logger.info(entry)
 

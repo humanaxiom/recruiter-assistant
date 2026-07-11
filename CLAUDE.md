@@ -7,7 +7,7 @@ Read automatically by Claude Code every session. This governs ALL work in this r
 ## Stack (do not deviate)
 
 - **Python 3.11+**, FastAPI (API), Flask (frontend), arq + Redis (async queue)
-- **Postgres** = transactional data (SQLAlchemy async + Alembic)
+- **Postgres** = transactional data (SQLAlchemy async; tables created on startup, no migration framework yet)
 - **Neo4j** = agent graph memory + vector indexes (768-dim, cosine, `nomic-embed-text`)
 - **Ollama on host metal** at `host.docker.internal:11434/v1` — NEVER add cloud API calls
 - Everything except Ollama runs in Docker (`docker compose up -d`)

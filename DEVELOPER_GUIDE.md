@@ -67,12 +67,9 @@ pre-commit install
 
 # Bring up the stack (Ollama must already be running on host)
 docker compose up -d
-
-# Migrations
-make migrate
 ```
 
-`docker compose up -d` starts: `postgres`, `neo4j`, `redis`, `api` (FastAPI :8000), `worker` (arq), `frontend` (Flask :5000). Containers reach Ollama on the host via `host.docker.internal:11434` — this is preconfigured in `docker-compose.yml` with `extra_hosts: host-gateway` so it works on Linux too, not just Docker Desktop.
+`docker compose up -d` starts: `postgres`, `neo4j`, `redis`, `api` (FastAPI :8000), `worker` (arq), `frontend` (Flask :5000). The API creates its Postgres tables and the Neo4j vector index on startup (idempotent), so there is no separate migration step. Containers reach Ollama on the host via `host.docker.internal:11434` — this is preconfigured in `docker-compose.yml` with `extra_hosts: host-gateway` so it works on Linux too, not just Docker Desktop.
 
 ---
 
@@ -89,7 +86,7 @@ docker compose ps
 curl -s http://localhost:8000/health
 # {"status":"ok"}
 
-# 3.3 Neo4j vector index exists
+# 3.3 Neo4j vector index exists (created automatically on API startup)
 docker compose exec neo4j cypher-shell -u neo4j -p harnesspass \
   "SHOW INDEXES YIELD name, type WHERE name='artifact_embeddings' RETURN name, type"
 # Should list artifact_embeddings | VECTOR
@@ -99,9 +96,13 @@ docker compose exec api curl -s http://host.docker.internal:11434/v1/models | jq
 # Must list qwen2.5-coder:14b and nomic-embed-text
 # If this fails, agents cannot run. See Troubleshooting §11.
 
-# 3.5 Gate suite (the non-negotiables) — run OUTSIDE containers, on host
+# 3.5 Offline gate suite (the non-negotiables) — run OUTSIDE containers, on host
 make gates
-# Expect: ALL GATES GREEN — ruff, black, mypy, unit, integration, coverage ≥ 80%, branch-name
+# Expect: OFFLINE GATES GREEN — branch-name, ruff, black, mypy, unit, coverage ≥ 80%
+
+# 3.5b Integration gate (needs a running Docker socket — testcontainers)
+make gates-integration
+# Or `make gates-all` to run both. CI runs gates-all on every push.
 
 # 3.6 Dashboard
 open http://localhost:5000
@@ -235,9 +236,13 @@ RETURN t, s, a, ar LIMIT 25
 ## 7. The gate suite — what actually blocks you
 
 ```bash
-make gates          # full: ruff · black · mypy --strict · unit · integration · coverage ≥ 80 · branch-name
-make gates-fast     # pre-commit subset: no integration tests
+make gates              # OFFLINE: branch-name · ruff · black · mypy --strict · unit · coverage ≥ 80
+make gates-integration  # integration tests (needs Docker — testcontainers)
+make gates-all          # gates + gates-integration (what CI runs end-to-end)
+make gates-fast         # pre-commit subset: no coverage, no integration
 ```
+
+`make gates` is the default local loop and needs no Docker, so it stays green on a fresh clone. Integration is split out because it spins real Postgres/Neo4j/Redis via testcontainers and requires a running Docker socket.
 
 Enforced in three places:
 
@@ -248,7 +253,7 @@ Enforced in three places:
 **When a gate is red, the rule is: iterate on that exact failure only.** Never:
 - Weaken or delete a failing test to force green
 - Add `# type: ignore` without a justification comment above it
-- Lower the coverage threshold in `pyproject.toml`
+- Lower the coverage threshold (`COVERAGE_THRESHOLD` in settings/env, `--cov-fail-under` in the Makefile and CI)
 - Skip a gate by commenting it out in the Makefile
 
 If after 5 ReviewLoop iterations gates are still red, the subagent escalates with the full failure report. Read it. Usually the spec is ambiguous or the tests over-specify. Fix the spec or the test — never the gate.
@@ -352,7 +357,7 @@ Fix: verify Ollama listens on all interfaces (`OLLAMA_HOST=0.0.0.0 ollama serve`
 
 **Neo4j vector index missing**
 Symptom: `similar_artifacts` errors with "no such index".
-Fix: `make migrate` again. Verify with `SHOW INDEXES` in Neo4j Browser.
+Fix: restart the API (`docker compose restart api`) — it recreates the index idempotently on startup via `GraphMemory.ensure_schema()`. Verify with `SHOW INDEXES` in Neo4j Browser.
 
 **Integration tests fail with "cannot connect to Docker"**
 Testcontainers needs a reachable Docker socket. Confirm `docker ps` works as your user. If you're using Docker Desktop, ensure it's running.
@@ -412,9 +417,9 @@ When you pull a new Ollama model, run the full test suite against it before maki
 | Task | Command |
 |---|---|
 | Start stack | `docker compose up -d` |
-| Full gates | `make gates` |
+| Offline gates | `make gates` |
+| Integration gates | `make gates-integration` |
 | Fast gates (pre-commit) | `make gates-fast` |
-| Migrations | `make migrate` |
 | Similar prior work | `curl "localhost:8000/memory/similar?q=..."` |
 | Task lineage | `curl "localhost:8000/tasks/<id>/lineage"` |
 | Worker logs | `docker compose logs -f worker` |

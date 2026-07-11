@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
 from src.agents.base import AgentInput, AgentOutput, BaseAgent
+from src.agents.parsing import extract_file_blocks
 
-FILE_BLOCK = re.compile(r"```[a-z]*\s+path=([^\s`]+)\n(.*?)```", re.DOTALL)
 ALLOWED_PREFIXES = ("docs/", "README")
 
 
@@ -18,7 +16,8 @@ Given a summary of implemented changes, produce documentation updates.
 
 RULES:
 - ADRs go in docs/adr/NNN-title.md with sections:
-  Status / Date / Context / Decision / Architecture Diagram (Mermaid) / Consequences / Alternatives Considered
+  Status / Date / Context / Decision / Architecture Diagram (Mermaid) /
+  Consequences / Alternatives Considered
 - Architecture diagrams are Mermaid, in docs/diagrams/ or embedded in ADRs
 - Update README sections only when behaviour or interfaces changed
 - Only touch files under docs/ or README.md — never src/ or tests/
@@ -34,14 +33,14 @@ Output every file as:
         self._log("Generating documentation updates")
 
         try:
+            memory_ctx = await self._memory_context(input_.task)
             text, tokens = await self._complete(
-                f"Changes implemented:\n{changes}\n\n"
+                f"{memory_ctx}Changes implemented:\n{changes}\n\n"
                 "Produce the documentation updates now."
             )
             artifacts = {
                 path: content
-                for match in FILE_BLOCK.finditer(text)
-                for path, content in [(match.group(1), match.group(2))]
+                for path, content in extract_file_blocks(text).items()
                 if path.startswith(ALLOWED_PREFIXES) and ".." not in path
             }
             output = self._ok(

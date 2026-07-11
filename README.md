@@ -180,9 +180,7 @@ agent-harness-v2/
 │   │   ├── worker/                # arq task queue workers
 │   │   └── gates/                 # Gate runner + review loop
 │   ├── frontend/                  # Flask app (dashboard for runs/gates)
-│   ├── db/migrations/             # Alembic (Postgres) + Cypher (Neo4j)
-│   ├── tests/{unit,integration,e2e}/
-│   └── scripts/
+│   └── tests/{unit,integration}/
 ├── CLAUDE.md                      # Claude Code instruction layer (auto-read)
 ├── .claude/                       # agents/ + commands/ + settings.json
 ├── docs/{adr,diagrams}/
@@ -203,14 +201,13 @@ ollama pull qwen2.5-coder:14b nomic-embed-text
 
 # 1. Bring up the stack
 docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
+# Schema (Postgres tables + Neo4j vector index) is created automatically
+# on API startup — there is no separate migration step.
 
-# 2. Run migrations
-make migrate                  # alembic upgrade head + cypher migrations
-
-# 3. Run the full gate suite (what agents run every iteration)
+# 2. Run the offline gate suite (no Docker needed for this one)
 make gates
 
-# 4. Open the dashboard
+# 3. Open the dashboard
 open http://localhost:5000
 
 # 5. Drive development with Claude Code

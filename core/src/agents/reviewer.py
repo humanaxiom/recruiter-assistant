@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from src.agents.base import AgentInput, AgentOutput, BaseAgent
+from src.agents.parsing import extract_json
 
 
-class Severity(str, Enum):
-    CRITICAL = "critical"   # blocks merge
-    MAJOR = "major"         # must fix before merge
-    MINOR = "minor"         # should fix
-    NIT = "nit"             # optional
+class Severity(StrEnum):
+    CRITICAL = "critical"  # blocks merge
+    MAJOR = "major"  # must fix before merge
+    MINOR = "minor"  # should fix
+    NIT = "nit"  # optional
 
 
 @dataclass
@@ -34,7 +35,8 @@ class Review:
     @property
     def blocking(self) -> list[Finding]:
         return [
-            f for f in self.findings
+            f
+            for f in self.findings
             if f.severity in (Severity.CRITICAL, Severity.MAJOR)
         ]
 
@@ -65,10 +67,11 @@ approved=true ONLY if there are zero critical and zero major findings."""
 
         self._log(f"Reviewing diff ({len(diff)} chars)")
         try:
+            memory_ctx = await self._memory_context(input_.task)
             text, tokens = await self._complete(
-                f"Task: {input_.task}\n\nDiff to review:\n{diff[:24_000]}"
+                f"{memory_ctx}Task: {input_.task}\n\nDiff to review:\n{diff[:24_000]}"
             )
-            data = json.loads(text.strip().removeprefix("```json").removesuffix("```"))
+            data = extract_json(text)
             review = Review(
                 approved=bool(data["approved"]),
                 summary=data.get("summary", ""),
@@ -88,7 +91,9 @@ approved=true ONLY if there are zero critical and zero major findings."""
                 review.approved = False
 
             output = self._ok(
-                input_, review, review.summary,
+                input_,
+                review,
+                review.summary,
                 artifacts={"review.json": json.dumps(data, indent=2)},
                 tokens=tokens,
             )

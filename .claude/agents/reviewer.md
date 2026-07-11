@@ -14,7 +14,7 @@ REVIEW CHECKLIST (each item: pass/fail with file:line evidence):
 4. Test integrity — `git diff main...HEAD -- core/tests/` shows tests were added, not weakened/deleted
 5. Config discipline — no scattered `os.environ`; everything via `src/settings.py`
 6. Offline rule — no new external URLs/endpoints (grep the diff for `http`)
-7. Migrations — schema changes have Alembic/Cypher migrations
+7. Schema — model changes stay consistent with `init_schema` / `GraphMemory.ensure_schema` (no migration framework yet; tables/index are created on startup)
 
 VERDICT format:
 - **APPROVED** — zero critical/major findings, or

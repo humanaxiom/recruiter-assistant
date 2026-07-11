@@ -1,5 +1,5 @@
 # Agent Harness v2 — developer interface
-.PHONY: up down gates gates-fast migrate logs
+.PHONY: up down gates gates-fast gates-integration gates-all branch-name logs
 
 up:               ## Start the full stack (Ollama must be running on host)
 	docker compose up -d
@@ -11,23 +11,31 @@ logs:
 	docker compose logs -f api worker
 
 # ── Gates: THE non-negotiable suite ────────────────────────────────────────
-gates:            ## Full gate suite (what agents and CI run)
+# `make gates` is the OFFLINE default — no Docker, green on a fresh clone.
+# Integration (real Postgres/Neo4j/Redis via testcontainers) is a separate
+# target because it needs a running Docker socket. CI runs `gates-all`.
+
+branch-name:      ## Enforce branch naming (agent|feat|fix|chore)/<slug>
+	@B=$$(git branch --show-current); \
+	  echo "$$B" | grep -Eq '^(agent|feat|fix|chore)/[a-zA-Z0-9._-]+$$' || \
+	  { echo "❌ branch '$$B' must match (agent|feat|fix|chore)/<slug>"; exit 1; }
+	@echo "✅ branch name OK"
+
+gates: branch-name  ## Offline gate suite (ruff·black·mypy·unit·coverage·branch)
 	cd core && ruff check src tests
 	cd core && black --check src tests
 	cd core && mypy src --strict
-	cd core && pytest tests/unit --cov=src --cov-fail-under=80 --timeout=120 -q
-	cd core && pytest tests/integration --timeout=300 -q
-	@echo "✅ ALL GATES GREEN"
+	cd core && pytest tests/unit \
+		--cov=src --cov-fail-under=$${COVERAGE_THRESHOLD:-80} --timeout=120 -q
+	@echo "✅ OFFLINE GATES GREEN"
 
-gates-fast:       ## Pre-commit subset (no integration)
+gates-fast:       ## Pre-commit subset (no coverage, no integration)
 	cd core && ruff check src tests && black --check src tests
 	cd core && mypy src --strict
 	cd core && pytest tests/unit -q --timeout=120
 
-# ── Migrations ─────────────────────────────────────────────────────────────
-migrate:          ## Postgres (alembic) + Neo4j (cypher)
-	docker compose exec api alembic upgrade head
-	docker compose exec neo4j cypher-shell -u neo4j -p harnesspass \
-		-f /migrations/001_init.cypher || \
-		cat core/db/migrations/001_init.cypher | \
-		docker compose exec -T neo4j cypher-shell -u neo4j -p harnesspass
+gates-integration:  ## Integration tests — requires a running Docker socket
+	cd core && pytest tests/integration --timeout=300 -q
+
+gates-all: gates gates-integration  ## Everything CI runs
+	@echo "✅ ALL GATES GREEN"

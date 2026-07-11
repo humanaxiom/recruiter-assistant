@@ -19,6 +19,22 @@ from openai import AsyncOpenAI
 
 from src.settings import get_settings
 
+# Constraints + 768-dim cosine vector index for nomic-embed-text embeddings.
+# Applied idempotently on startup (IF NOT EXISTS) — there is no separate
+# migration step; the graph schema comes up with the app.
+_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    "CREATE CONSTRAINT task_id IF NOT EXISTS " "FOR (t:Task) REQUIRE t.id IS UNIQUE",
+    "CREATE CONSTRAINT subtask_id IF NOT EXISTS "
+    "FOR (s:Subtask) REQUIRE s.id IS UNIQUE",
+    "CREATE CONSTRAINT agent_id IF NOT EXISTS " "FOR (a:Agent) REQUIRE a.id IS UNIQUE",
+    "CREATE CONSTRAINT artifact_id IF NOT EXISTS "
+    "FOR (ar:Artifact) REQUIRE ar.id IS UNIQUE",
+    "CREATE VECTOR INDEX artifact_embeddings IF NOT EXISTS "
+    "FOR (ar:Artifact) ON (ar.embedding) "
+    "OPTIONS {indexConfig: {"
+    "`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
+)
+
 
 class GraphMemory:
     def __init__(self, driver: AsyncDriver | None = None) -> None:
@@ -33,6 +49,12 @@ class GraphMemory:
 
     async def close(self) -> None:
         await self._driver.close()
+
+    async def ensure_schema(self) -> None:
+        """Create constraints + the vector index if absent (idempotent)."""
+        async with self._driver.session() as session:
+            for statement in _SCHEMA_STATEMENTS:
+                await session.run(statement)
 
     # ── Write path ─────────────────────────────────────────────────────────
 

@@ -45,11 +45,36 @@ async def test_valid_plan_accepted(planner: PlannerAgent) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tdd_violation_rejected(planner: PlannerAgent) -> None:
+async def test_tdd_violation_when_coder_lacks_tester_dep(planner: PlannerAgent) -> None:
+    # List order is irrelevant; the violation is coder NOT depending on tester.
     bad = json.loads(json.dumps(VALID_PLAN))
-    bad["subtasks"][0], bad["subtasks"][1] = bad["subtasks"][1], bad["subtasks"][0]
+    bad["subtasks"][1]["depends_on"] = []  # coder no longer depends on tester
     with patch.object(planner, "_complete", patched_complete(bad)):
         out = await planner.run(AgentInput(task_id="T2", task="x"))
+    assert out.success is False
+    assert "TDD violation" in (out.error or "")
+
+
+@pytest.mark.asyncio
+async def test_reordered_list_still_valid_via_dependencies(
+    planner: PlannerAgent,
+) -> None:
+    # Swapping positions but keeping coder→tester dependency is fine.
+    good = json.loads(json.dumps(VALID_PLAN))
+    good["subtasks"][0], good["subtasks"][1] = good["subtasks"][1], good["subtasks"][0]
+    with patch.object(planner, "_complete", patched_complete(good)):
+        out = await planner.run(AgentInput(task_id="T2b", task="x"))
+    assert out.success is True
+
+
+@pytest.mark.asyncio
+async def test_coder_without_any_tester_rejected(planner: PlannerAgent) -> None:
+    bad = json.loads(json.dumps(VALID_PLAN))
+    bad["subtasks"] = [
+        {"id": "c1", "agent": "coder", "task": "implement", "depends_on": []},
+    ]
+    with patch.object(planner, "_complete", patched_complete(bad)):
+        out = await planner.run(AgentInput(task_id="T2c", task="x"))
     assert out.success is False
     assert "TDD violation" in (out.error or "")
 

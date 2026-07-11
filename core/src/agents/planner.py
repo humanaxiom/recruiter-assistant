@@ -6,8 +6,22 @@ import json
 from dataclasses import dataclass, field
 
 from src.agents.base import AgentInput, AgentOutput, BaseAgent
+from src.agents.parsing import extract_json
 
 VALID_AGENTS = {"tester", "coder", "reviewer", "docs", "security"}
+
+
+def _transitive_deps(start: str, by_id: dict[str, Subtask]) -> set[str]:
+    """All subtask ids reachable from ``start`` via depends_on (cycle-safe)."""
+    seen: set[str] = set()
+    stack = list(by_id[start].depends_on)
+    while stack:
+        dep = stack.pop()
+        if dep in seen or dep not in by_id:
+            continue
+        seen.add(dep)
+        stack.extend(by_id[dep].depends_on)
+    return seen
 
 
 @dataclass
@@ -50,10 +64,12 @@ HARD RULES:
                 f"{memory_ctx}Task: {input_.task}\n\n"
                 f"Context: {json.dumps(input_.context)}"
             )
-            data = json.loads(text.strip().removeprefix("```json").removesuffix("```"))
+            data = extract_json(text)
             plan = self._validate(data)
             output = self._ok(
-                input_, plan, plan.reasoning,
+                input_,
+                plan,
+                plan.reasoning,
                 artifacts={"plan.json": json.dumps(data, indent=2)},
                 tokens=tokens,
             )
@@ -77,18 +93,27 @@ HARD RULES:
         if not subtasks:
             raise ValueError("plan has no subtasks")
 
-        ids = {s.id for s in subtasks}
+        by_id = {s.id: s for s in subtasks}
         for s in subtasks:
             if s.agent not in VALID_AGENTS:
                 raise ValueError(f"unknown agent '{s.agent}'")
             for dep in s.depends_on:
-                if dep not in ids:
+                if dep not in by_id:
                     raise ValueError(f"subtask {s.id} depends on unknown '{dep}'")
 
-        order = [s.agent for s in subtasks]
-        if "coder" in order and "tester" in order:
-            if order.index("tester") > order.index("coder"):
-                raise ValueError("TDD violation: tester must precede coder")
+        # TDD is enforced on the dependency graph — the same edges the
+        # orchestrator topologically sorts on — not on list position, which
+        # says nothing about execution order.
+        tester_ids = {s.id for s in subtasks if s.agent == "tester"}
+        coders = [s for s in subtasks if s.agent == "coder"]
+        if coders:
+            if not tester_ids:
+                raise ValueError("TDD violation: coder present without a tester")
+            for coder in coders:
+                if not (_transitive_deps(coder.id, by_id) & tester_ids):
+                    raise ValueError(
+                        "TDD violation: coder must depend on a tester subtask"
+                    )
 
         return Plan(
             plan_id=data["plan_id"],
