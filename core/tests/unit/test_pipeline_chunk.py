@@ -5,15 +5,11 @@ Ported from hris ``packages/pipeline/src/pipeline/parsing/chunk.py``
 (``phase3-source-dossier.md`` §2). Pure text -> ``list[ResumeChunk]``, no
 LLM, no I/O.
 
-**Contract deviation flagged for the coordinator**: ``phase3-contract.md``
-states the default-prefix id series is ``c_000, c_001, ...`` (zero-based).
-The hris source (``counter = 1`` before the loop) actually emits
-``c_001, c_002, ...`` (one-based) — the *first* id is ``c_001``, not
-``c_000``. Per the contract being binding, these tests assert the
-CONTRACT's stated behaviour (``c_000`` first). If the implementation
-instead ports hris verbatim (one-based), this file's first two tests will
-fail and that conflict should be resolved explicitly, not silently
-"fixed" one way or the other.
+Chunk ids are **one-based**: the counter starts at 1, so the first id is
+``c_001``, not ``c_000``. This is the hris behaviour and it is load-bearing
+downstream — Phase 4's evidence verifier matches LLM-cited chunk ids against
+the ids minted here, so an off-by-one in the series silently invalidates
+every citation.
 """
 
 from __future__ import annotations
@@ -37,7 +33,7 @@ def _extracted(*page_texts: str) -> ExtractedText:
 # ── Chunk id series ──────────────────────────────────────────────────────
 
 
-def test_default_prefix_ids_are_zero_padded_c_series() -> None:
+def test_default_prefix_ids_are_zero_padded_one_based_c_series() -> None:
     body_a = "A" * 50
     body_b = "B" * 50
     extracted = _extracted(f"Summary\n{body_a}\n\nExperience\n{body_b}")
@@ -45,8 +41,8 @@ def test_default_prefix_ids_are_zero_padded_c_series() -> None:
     chunks = chunk_resume(extracted)
 
     ids = [c.id for c in chunks]
-    assert ids == [f"c_{i:03d}" for i in range(len(chunks))]
-    assert ids[0] == "c_000"
+    assert ids == [f"c_{i:03d}" for i in range(1, len(chunks) + 1)]
+    assert ids[0] == "c_001"
 
 
 def test_custom_prefix_yields_its_own_zero_padded_series() -> None:
@@ -55,7 +51,7 @@ def test_custom_prefix_yields_its_own_zero_padded_series() -> None:
 
     chunks = chunk_resume(extracted, prefix="cl")
 
-    assert chunks[0].id == "cl_000"
+    assert chunks[0].id == "cl_001"
 
 
 def test_default_and_cover_letter_prefix_id_spaces_are_disjoint() -> None:
