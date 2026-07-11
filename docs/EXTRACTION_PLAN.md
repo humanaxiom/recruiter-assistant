@@ -48,16 +48,16 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 
 `make gates` must be green before the next phase starts.
 
-| Phase | Deliverable |
-|---|---|
-| **0 · Seed & infra** | Repo from template; compose (pg/neo4j/redis/ollama, no minio) + `data/` volume; settings (768-d, storage dir); DDL + Neo4j bootstrap on startup |
-| **1 · Storage** | Filesystem `BlobStore` replacing every MinIO call site |
-| **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` |
-| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** |
-| **4 · Ranking engine** | `orchestrator` + `stages` (4-stage hybrid), `MatchWeights`, `shortlist_job`, `reverse_match_job` |
-| **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal` |
-| **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer |
+| Phase | Deliverable | Status |
+|---|---|---|
+| **0 · Seed & infra** | Repo from template; compose (pg/neo4j/redis/ollama, no minio) + `data/` volume; settings (768-d, storage dir); DDL + Neo4j bootstrap on startup | ✅ done |
+| **1 · Storage** | Filesystem `BlobStore` replacing every MinIO call site | next |
+| **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | not started |
+| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** | not started |
+| **4 · Ranking engine** | `orchestrator` + `stages` (4-stage hybrid), `MatchWeights`, `shortlist_job`, `reverse_match_job` | not started |
+| **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal` | not started |
+| **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth | not started |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started |
 
 ## Subagent structure
 
@@ -70,25 +70,30 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — planning complete, no product code written yet.**
+**As of this writing — Phase 0 is complete and green. Phase 1 is next.**
 
 Done:
 - Repo created: **`github.com/humanaxiom/recruiter-assistant`** (private). Local `origin` repointed here. Frozen template stays at `adamsalah13/agent-harness-template`.
 - This plan + the `data-pipeline` and `ranking-evals` subagents committed to `main`.
 - The 4 decisions above are locked.
+- **Phase 0 · Seed & infra — landed on `feat/phase-0-seed-infra`, pushed to origin.** Six commits (red → green → three review fixes → docs). What landed:
+  - Template demo app removed; ranking-domain foundation in its place. Rebrand to `recruiter-assistant` across `pyproject.toml` / README / compose.
+  - `docker-compose.yml`: pg/neo4j/redis/ollama, **no MinIO**, `./data` bind mount for the filesystem BlobStore.
+  - `settings.py`: `llm_embedding_dim = 768` (single source of the contract), `storage_dir`, LLM base url, Neo4j creds.
+  - **asyncpg idempotent startup DDL** (`init_schema`) for 5 tables (`jobs`, `resumes` (+PII BYTEA cols), `shortlist_entries`, `reverse_match_entries`, `outbox`); SQLAlchemy dropped from requirements.
+  - **Neo4j bootstrap**: 4× 768-d cosine vector indexes (`resume_summary_idx`, `job_summary_idx`, `skill_emb_idx`, `chunk_emb_idx`) + skill-graph constraints, dimension derived from `settings.llm_embedding_dim`.
+  - Three deliberate schema deviations from hris recorded in **ADR-004** (blind_review DEFAULT TRUE; nullable-TEXT actor cols; `score_final` unified to `DOUBLE PRECISION` with a 0–1 CHECK).
+  - **Gates:** offline green — ruff / black / mypy --strict, 172 unit tests, coverage 88.79%. Integration green — 39 tests against real Postgres + Neo4j.
 
-Not started:
-- **Phase 0 and everything after.** The repo still contains the *template's demo app* (`core/src/agents/` = planner/coder/etc. as product code). That demo is what Phase 0+ replaces with the ranking domain. Do **not** confuse it with `.claude/agents/` (the build subagents).
+**Checklist reconciliation note (`core/src/gates/`):** the Phase 0 checklist said "keep `gates/`". The template demo's product-code gate-runner module (`core/src/gates/`, alongside `core/src/agents|memory` and `models/db.py`) **was deleted** — it was demo code the ranking domain replaces. "Keep gates" was (correctly) read as the **build** harness: `make gates`, CI, `.claude/`, and pre-commit are all intact. Don't mistake the deleted demo module for the still-live gate suite.
 
-**Immediate next step — Phase 0 (seed & infra):**
-1. Rebrand the scaffold: `core/pyproject.toml` name, README/title, compose container names → `recruiter-assistant`.
-2. `docker-compose.yml`: keep pg/neo4j/redis/ollama; **no MinIO**; add a `./data` volume for the filesystem BlobStore.
-3. Settings: storage dir, 768-d embedding contract, LLM base url, Neo4j creds (align with template's `settings.py`).
-4. Schema-on-startup: replace the template's SQLAlchemy `create_all` demo with **asyncpg idempotent DDL** for `jobs, resumes (+PII cols), shortlist_entries, outbox`, plus the Neo4j bootstrap (4× 768-d cosine vector indexes + skill-graph constraints).
-5. Remove the template demo (`core/src/agents/` planner/coder/etc., `core/src/memory` if unused by ranking) — but keep `gates/`, `settings`, the `.claude/` build harness, Makefile, CI.
-6. Land Phase 0 green through the TDD subagent loop.
+**Immediate next step — Phase 1 (Storage):** filesystem `BlobStore` (put/get/delete over `./data/resumes/{id}`) replacing every MinIO call site — `resume_service.py` put/remove and `resume_tasks._fetch_blob` get (see Appendix A, "MinIO → filesystem").
 
-Then Phases 1–7 per the table above.
+Two requirements carried forward from Phase 0's security gate — **Phase 1 acceptance criteria, must land in `BlobStore`'s first commit:**
+1. **Path-traversal rejection.** `blob_key` / `cover_letter_blob_key` are unvalidated `TEXT` and `storage_dir` is a bind-mounted root, so `BlobStore` must reject `..`, absolute paths, and symlinks that escape `storage_dir` — from its first commit, not as a follow-up.
+2. **STRICT PII-key GUC read.** When wiring `settings.pii_key` into the `app.pii_key` GUC, use `current_setting('app.pii_key')` **without** `missing_ok=true`. A `missing_ok` read of an unset key yields NULL → NULL ciphertext → silent data loss; fail loud instead.
+
+Then Phases 2–7 per the table above.
 
 ## Appendix A — hris source file map (minimal port set)
 
