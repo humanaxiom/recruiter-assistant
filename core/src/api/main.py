@@ -19,6 +19,7 @@ from neo4j import AsyncGraphDatabase
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
 from src.settings import get_settings
+from src.storage.blob_store import BlobStore
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
 
@@ -34,6 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await bootstrap_neo4j_schema(driver)
     app.state.neo4j = driver
+
+    # Filesystem blob primitive — Phase-6 routes reach it via get_blob_store.
+    app.state.blob_store = BlobStore(s.storage_dir)
 
     app.state.arq = await create_pool(RedisSettings.from_dsn(s.redis_url))
     try:

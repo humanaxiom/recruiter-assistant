@@ -17,6 +17,7 @@ from neo4j import AsyncGraphDatabase
 
 from src.models.ddl import init_schema
 from src.settings import get_settings
+from src.storage.blob_store import BlobStore
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,10 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     await bootstrap_neo4j_schema(driver)
     ctx["neo4j"] = driver
+
+    # The worker builds its own store (not shared with the API); parse/project
+    # tasks in Phases 3-4 read it off the ctx.
+    ctx["blob_store"] = BlobStore(s.storage_dir)
 
     logger.info("worker.startup.ok")
 
