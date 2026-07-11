@@ -12,7 +12,8 @@ nothing calls a MinIO-style ``get_object``.
 
 Covers:
 * ``parse_resume`` control flow: missing/stale/blob-failure/extract-failure/
-  zero-chunks/core-LLM-failure/happy-path/race-guard.
+  zero-chunks/core-LLM-failure/happy-path/race-guard/ResumeParsed-validation-
+  failure (finding 2b)/outbox-payload-excludes-candidate (finding 5).
 * ``_drop_smeared_years``: the >=6-shared-exact-value boundary (6 triggers,
   5 does not), unrelated skills untouched.
 * ``_extract_skills_merged``: deterministic-scan-floor MERGED with a
@@ -35,6 +36,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from src.pipeline.llm import LLMOutputInvalidError
 from src.pipeline.parsing import MIME_DOCX, EncryptedPdfError, UnsupportedMimeError
@@ -126,6 +128,20 @@ def _fake_prompt(version: str = "resume_core_v1") -> MagicMock:
     ]
     prompt.version = version
     return prompt
+
+
+def _make_validation_error() -> ValidationError:
+    """A real ``pydantic.ValidationError`` instance, the same exception type
+    ``ResumeParsed.model_validate`` raises on malformed input."""
+
+    class _Sentinel(BaseModel):
+        x: int
+
+    try:
+        _Sentinel.model_validate({"x": "not-an-int"})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected ValidationError")  # pragma: no cover
 
 
 # ── parse_resume: missing / stale ──────────────────────────────────────
@@ -268,6 +284,66 @@ async def test_core_llm_failure_records_failure_and_returns_failed() -> None:
     record_parsed.assert_not_awaited()
 
 
+# ── Finding 2b (HIGH): a ResumeParsed ValidationError must not escape ──────
+#
+# ResumeParsed.model_validate(...) in parse_resume today sits in NO
+# try/except. An ordinary long CV that chunks into >200 pieces (finding 2a)
+# — or any other cause of a malformed payload — trips ValidationError,
+# which propagates straight out of parse_resume: record_parse_failure never
+# runs, the row is stranded uploaded/parsing with a NULL failure_reason, and
+# arq re-runs the whole expensive LLM pipeline on every retry.
+
+
+@pytest.mark.asyncio
+async def test_resume_parsed_validation_error_is_caught_not_raised() -> None:
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4()))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock())
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.ResumeParsed.model_validate",
+            MagicMock(side_effect=_make_validation_error()),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        # Today this raises ValidationError straight out of parse_resume —
+        # that IS the bug. The assertion below is what the fix must satisfy.
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
 # ── parse_resume: happy path ────────────────────────────────────────────
 
 
@@ -397,6 +473,80 @@ async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row()
 
     assert result == "stale"
     enqueue.assert_not_awaited()
+
+
+# ── Finding 5 (decision): outbox payload must NOT carry the candidate ─────
+#
+# Phase 4 needs skills/experience/embeddings, NOT identity — `resumes` is
+# the system of record for PII. The outbox payload today ships the full
+# ``parsed.model_dump()``, including the cleartext ``candidate`` block
+# (name/email/phone), which Phase 4 would otherwise project into Neo4j.
+
+
+@pytest.mark.asyncio
+async def test_outbox_payload_parsed_dict_excludes_candidate_block() -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace", email="ada@example.com"),
+        summary="Backend engineer.",
+        experience=[Experience(company="Acme", title="Engineer")],
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    enqueue.assert_awaited_once()
+    payload = enqueue.await_args.kwargs["payload"]
+    parsed_dict = payload["parsed"]
+
+    assert "candidate" not in parsed_dict, (
+        "outbox payload leaks the cleartext candidate (name/email/phone) "
+        "block — Phase 4 must receive skills/experience/embeddings only"
+    )
+    assert parsed_dict["summary"] == "Backend engineer."
+    assert "skills" in parsed_dict
+    assert "chunks" in parsed_dict
+    assert payload["summary_emb"] == [0.1] * 8
+    assert "chunk_embs" in payload
+    assert payload["prompt_version"] == "resume_core_v1+resume_skills_v2"
+    assert str(payload["job_id"]) == str(job_id)
 
 
 # ── _drop_smeared_years ──────────────────────────────────────────────────

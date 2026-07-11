@@ -16,6 +16,7 @@ forever, burning an LLM pass every time.
 
 from __future__ import annotations
 
+import zipfile
 from collections.abc import Iterator
 from io import BytesIO
 from typing import Any
@@ -33,6 +34,22 @@ from src.pipeline.parsing.extract import (
     UnsupportedMimeError,
     extract_text,
 )
+
+# ── Finding 3 (HIGH): decompression bomb / unbounded parsing guard ─────────
+#
+# ``extract.py`` doesn't define this error yet — that's the whole point of
+# these RED tests. Import it if it exists; otherwise fall back to a local
+# placeholder so the rest of this module still collects and the ALREADY
+# GREEN tests below stay green while only the new finding-3 tests go red.
+# The coder is expected to name the real one ``InputTooLargeError`` (per the
+# task spec) and raise it from ``extract_text`` for all three cases below.
+try:
+    from src.pipeline.parsing.extract import InputTooLargeError
+except ImportError:  # pragma: no cover — RED until the coder adds it
+
+    class InputTooLargeError(Exception):  # type: ignore[no-redef]
+        """Placeholder so this module collects before the fix lands."""
+
 
 # ── Real-fixture builders (no committed binaries) ───────────────────────────
 
@@ -68,6 +85,33 @@ def _make_docx_bytes(paragraphs: list[str]) -> bytes:
         doc.add_paragraph(para)
     buf = BytesIO()
     doc.save(buf)
+    return buf.getvalue()
+
+
+def _make_pdf_with_pages(count: int) -> bytes:
+    doc = fitz.open()
+    for i in range(count):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"page {i}", fontsize=10)
+    buf = BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _make_bomb_docx_bytes(uncompressed_size: int) -> bytes:
+    """A real zip whose declared (uncompressed) ``word/document.xml`` size is
+    ``uncompressed_size`` bytes, but whose ON-DISK size is tiny — the content
+    is a single repeated character, so DEFLATE compresses it to almost
+    nothing while the zip's central directory still truthfully declares the
+    full decompressed size. That's exactly the shape of a zip-bomb-ish DOCX:
+    small to upload, huge to fully inflate.
+    """
+    payload = "A" * uncompressed_size
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", payload)
     return buf.getvalue()
 
 
@@ -241,3 +285,69 @@ def test_no_low_text_density_warning_for_long_txt() -> None:
     long_text = ("word " * 60).encode("utf-8")  # well over 200 chars
     result = extract_text(long_text, MIME_TXT)
     assert "low_text_density_consider_ocr" not in result.warnings
+
+
+# ── Finding 3a: byte-cap — must reject BEFORE touching fitz/docx at all ─────
+
+_BYTE_CAP = 10 * 1024 * 1024  # 10 MB — matches hris's store_uploaded_blob cap
+
+
+def test_extract_text_raises_before_any_parse_when_blob_exceeds_byte_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: object, **_kw: object) -> Any:
+        raise AssertionError("fitz/docx must not be touched before the byte cap check")
+
+    monkeypatch.setattr("src.pipeline.parsing.extract.fitz.open", _boom)
+    monkeypatch.setattr("src.pipeline.parsing.extract.Document", _boom)
+
+    oversized = b"x" * (_BYTE_CAP + 1)
+
+    with pytest.raises(InputTooLargeError):
+        extract_text(oversized, MIME_PDF)
+
+
+@pytest.mark.parametrize("mime", [MIME_PDF, MIME_DOCX, MIME_TXT, MIME_RTF])
+def test_extract_text_raises_on_oversized_blob_for_every_mime(mime: str) -> None:
+    oversized = b"x" * (_BYTE_CAP + 1)
+    with pytest.raises(InputTooLargeError):
+        extract_text(oversized, mime)
+
+
+def test_extract_text_accepts_blob_at_exactly_the_byte_cap() -> None:
+    """The cap is a MAX, not an off-by-one trap: exactly ``_BYTE_CAP`` bytes
+    of plain text must still parse."""
+    blob = b"a" * _BYTE_CAP
+    result = extract_text(blob, MIME_TXT)
+    assert isinstance(result.full_text, str)
+
+
+# ── Finding 3b: DOCX decompression-bomb — declared size cap ─────────────────
+
+
+def test_extract_text_raises_on_decompression_bomb_docx() -> None:
+    # 100 MB of a single repeated byte: DEFLATE crushes this to a few KB on
+    # disk (well under the 10 MB byte cap) but the zip's own central
+    # directory truthfully declares ~100 MB of decompressed content — a
+    # bounded-input check must catch that BEFORE lxml fully inflates it.
+    blob = _make_bomb_docx_bytes(100 * 1024 * 1024)
+    assert len(blob) < _BYTE_CAP  # sanity: bomb passes the byte cap, must be
+    # caught by a SEPARATE decompressed-size check
+
+    with pytest.raises(InputTooLargeError):
+        extract_text(blob, MIME_DOCX)
+
+
+# ── Finding 3c: PDF page-count cap (300) ─────────────────────────────────────
+
+
+def test_extract_text_raises_when_pdf_exceeds_page_cap() -> None:
+    blob = _make_pdf_with_pages(301)
+    with pytest.raises(InputTooLargeError):
+        extract_text(blob, MIME_PDF)
+
+
+def test_extract_text_accepts_pdf_at_exactly_the_page_cap() -> None:
+    blob = _make_pdf_with_pages(300)
+    result = extract_text(blob, MIME_PDF)
+    assert len(result.pages) == 300

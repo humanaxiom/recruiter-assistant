@@ -181,3 +181,47 @@ def test_scrub_invalid_chunk_refs_drops_all_ids_when_none_are_valid() -> None:
     scrub_invalid_chunk_refs(skills, valid_ids=set())
 
     assert skills[0]["evidence_chunk_ids"] == []
+
+
+# ── Finding 2a (HIGH): chunk_resume output must be bounded ─────────────────
+#
+# ResumeParsed.chunks caps at max_length=200 and cover_letter_chunks caps at
+# max_length=100, but chunk_resume() itself has no cap. Pydantic's
+# max_length RAISES on a too-long list rather than truncating, so an
+# ordinary long CV (chunking into >200 pieces — there is no upload byte-cap
+# until Phase 6) blows up ResumeParsed.model_validate() deep inside
+# parse_resume, after several expensive LLM calls already ran.
+
+
+def _giant_unbroken_text(total_chars: int) -> str:
+    """One giant word with no whitespace/punctuation, so _hard_split slices
+    it into exactly ceil(total_chars / _MAX_CHARS_PER_CHUNK) same-sized
+    chunks — the simplest way to deterministically mint N chunks."""
+    return "x" * total_chars
+
+
+def test_chunk_resume_output_is_capped_at_200_for_default_prefix() -> None:
+    # 300 chunks worth of unbroken text -> without a cap this raises
+    # ValidationError deep inside ResumeParsed.model_validate; chunk_resume
+    # itself must never hand back more than 200.
+    body = _giant_unbroken_text(_MAX_CHARS_PER_CHUNK * 300)
+    extracted = _extracted(f"Experience\n{body}")
+
+    chunks = chunk_resume(extracted)
+
+    assert len(chunks) <= 200
+    ids = [c.id for c in chunks]
+    assert ids == [
+        f"c_{i:03d}" for i in range(1, len(chunks) + 1)
+    ]  # contiguous, 1-based
+
+
+def test_chunk_resume_output_is_capped_at_100_for_cover_letter_prefix() -> None:
+    body = _giant_unbroken_text(_MAX_CHARS_PER_CHUNK * 150)
+    extracted = _extracted(f"Experience\n{body}")
+
+    chunks = chunk_resume(extracted, prefix="cl")
+
+    assert len(chunks) <= 100
+    ids = [c.id for c in chunks]
+    assert ids == [f"cl_{i:03d}" for i in range(1, len(chunks) + 1)]

@@ -34,6 +34,20 @@ class _Widget(BaseModel):
     count: int
 
 
+# ── Finding 1 / Finding 4 fixtures: a schema shaped like the real ResumeCore
+# candidate block, so a wrong-typed ``phone`` produces the exact pydantic v2
+# error string the finding cites (``candidate.phone ... input_value=[...]``).
+
+
+class _CandidatePii(BaseModel):
+    name: str
+    phone: str | None = None
+
+
+class _ResumeLike(BaseModel):
+    candidate: _CandidatePii
+
+
 # ── Fake clock (circuit breaker tests) ──────────────────────────────────────
 
 
@@ -345,6 +359,71 @@ async def test_chat_json_raises_after_retries_exhausted() -> None:
     await llm.aclose()
 
 
+# ── Finding 1 (HIGH): chat_json's raised error must not leak PII ────────
+#
+# pydantic v2 embeds the offending input value in ValidationError's str():
+# "candidate.phone / Input should be a valid string [type=string_type,
+# input_value=['555-867-5309'], input_type=list]". LLMClient.chat_json does
+# `last_error = str(exc)[:500]` and raises that verbatim as
+# LLMOutputInvalidError, which is then logged (llm.json_invalid) and — via
+# record_parse_failure — written UNENCRYPTED to resumes.failure_reason. A
+# wrong-typed field from a small local model is the routine failure path
+# (it's why the self-correction retry exists), so this leaks real candidate
+# PII to logs + cleartext DB on an everyday path.
+
+
+@pytest.mark.asyncio
+async def test_chat_json_invalid_error_omits_pii_but_keeps_field_path() -> None:
+    bad_json = json.dumps(
+        {"candidate": {"name": "Ada Lovelace", "phone": ["555-867-5309"]}}
+    )
+    outcomes: list[Exception | httpx.Response] = [
+        _ok_chat_response(bad_json),
+        _ok_chat_response(bad_json),
+    ]
+    transport, calls = _sequenced_transport(outcomes)
+    llm = _client(transport)
+
+    with pytest.raises(LLMOutputInvalidError) as exc_info:
+        await llm.chat_json(
+            [{"role": "user", "content": "parse this resume"}],
+            _ResumeLike,
+            max_retries=1,
+        )
+
+    message = str(exc_info.value)
+    assert "candidate.phone" in message
+    assert "string_type" in message  # the error TYPE is fine to surface
+    assert "Ada Lovelace" not in message
+    assert "555-867-5309" not in message
+    assert len(calls) == 2
+    await llm.aclose()
+
+
+# ── Finding 4 (MEDIUM): LLM-emitted NUL must not survive into the model ─
+#
+# Postgres text/jsonb reject U+0000 (UntranslatableCharacterError). Document
+# text is sanitised on the way IN (extract._sanitize), but LLM OUTPUT never
+# passes through an equivalent guard — json.loads happily accepts a U+0000
+# escape, and that NUL then rides straight into resumes.parsed jsonb / the
+# pgp_sym_encrypt bytea column, crashing the write inside the transaction.
+
+
+@pytest.mark.asyncio
+async def test_chat_json_strips_nul_bytes_from_llm_string_output() -> None:
+    raw = json.dumps({"name": "wid\x00get", "count": 3})
+    transport, calls = _sequenced_transport([_ok_chat_response(raw)])
+    llm = _client(transport)
+
+    result = await llm.chat_json(
+        [{"role": "user", "content": "give me json"}], _Widget, max_retries=0
+    )
+
+    assert "\x00" not in result.name
+    assert len(calls) == 1
+    await llm.aclose()
+
+
 # ── _extract_json (static) ────────────────────────────────────────────────
 
 
@@ -386,6 +465,38 @@ async def test_embed_returns_vectors_in_input_order() -> None:
     result = await llm.embed(["x", "y"])
 
     assert result == vectors
+    await llm.aclose()
+
+
+# ── Finding 6 (hardening): embed() must validate vector dimension ───────
+#
+# 768-d is a hard contract — it must match the Neo4j vector indexes.
+# LLMClient.embed never checks the returned vector length today, so pointing
+# llm_model_embedding at a non-768-d model silently produces vectors that
+# only blow up much later, at Neo4j write time in Phase 4. The coder adds an
+# `expected_dim` constructor param (sourced from settings.llm_embedding_dim).
+
+
+@pytest.mark.asyncio
+async def test_embed_raises_when_vector_dimension_mismatches_expected_dim() -> None:
+    transport, _calls = _sequenced_transport([_ok_embed_response([[0.1, 0.2, 0.3]])])
+    llm = _client(transport, expected_dim=768)
+
+    with pytest.raises(LLMOutputInvalidError):
+        await llm.embed(["a"])
+
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_embed_accepts_vector_matching_expected_dim() -> None:
+    vec = [0.1] * 768
+    transport, _calls = _sequenced_transport([_ok_embed_response([vec])])
+    llm = _client(transport, expected_dim=768)
+
+    result = await llm.embed(["a"])
+
+    assert result == [vec]
     await llm.aclose()
 
 

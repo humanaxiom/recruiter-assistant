@@ -21,6 +21,17 @@ Two kinds of test here:
    intentionally broader than the concrete list above: it also requires
    ``Bullet.chunk_id`` (not explicitly named in the task spec) to carry a
    cap, since it is a ``str | None`` field on a guarded model.
+
+Finding 7 (regression guard, from ranking-evals) adds a third kind: a direct,
+obviously-named standing guard for the Phase-2 schema data-loss bug where
+``ResumeParsed(skills=[ResumeSkill(...)])`` silently yielded ``skills == []``
+because the model-level ``_drop_invalid_rows`` pre-validator only recognised
+dict rows and dropped already-validated sub-model instances on the floor.
+That bug was previously guarded only indirectly, via unrelated summary-text
+cap tests — a confusing failure for a future editor who reintroduces it. The
+fix (an ``isinstance(row, sub)`` pass-through branch) is already in
+``src/schemas/resumes.py``, so the Finding-7 tests below PASS today; they are
+a STANDING GUARD, not a red test.
 """
 
 from __future__ import annotations
@@ -34,7 +45,16 @@ from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
 from src.schemas.jobs import Education
-from src.schemas.resumes import Bullet, CandidateInfo, EducationItem, Experience
+from src.schemas.resumes import (
+    Bullet,
+    CandidateInfo,
+    EducationItem,
+    Experience,
+    ResumeParsed,
+    ResumeSkill,
+    ResumeSkillDetail,
+    ResumeSkillDetails,
+)
 
 # ── Introspection helpers ────────────────────────────────────────────────────
 
@@ -171,3 +191,37 @@ def test_education_fields_list_accepts_up_to_20_entries() -> None:
 def test_education_fields_list_rejects_over_20_entries() -> None:
     with pytest.raises(ValidationError):
         Education(fields=[f"f{i}" for i in range(21)])
+
+
+# ── Finding 7: standing guard for the Phase-2 lossy-validator regression ────
+#
+# NOTE: this whole section is a STANDING GUARD, not a red test — the
+# already-validated-sub-model pass-through fix is already present in
+# ResumeParsed._drop_invalid_rows / ResumeSkillDetails._coerce_rows. These
+# tests are expected to PASS today; they exist so a future edit that
+# reintroduces the "rows are not dicts, so they get silently dropped" bug
+# fails loudly, by name, instead of via an unrelated summary-text cap test.
+
+
+def test_resume_parsed_skills_survive_already_validated_sub_models() -> None:
+    parsed = ResumeParsed(skills=[ResumeSkill(name="python")])
+    assert parsed.skills != []
+    assert parsed.skills[0].name == "python"
+
+
+def test_resume_parsed_experience_survives_already_validated_sub_models() -> None:
+    parsed = ResumeParsed(experience=[Experience(company="Acme", title="Engineer")])
+    assert parsed.experience != []
+    assert parsed.experience[0].company == "Acme"
+
+
+def test_resume_parsed_education_survives_already_validated_sub_models() -> None:
+    parsed = ResumeParsed(education=[EducationItem(degree="BSc", institution="UBC")])
+    assert parsed.education != []
+    assert parsed.education[0].degree == "BSc"
+
+
+def test_resume_skill_details_skills_survive_already_validated_sub_models() -> None:
+    details = ResumeSkillDetails(skills=[ResumeSkillDetail(name="python")])
+    assert details.skills != []
+    assert details.skills[0].name == "python"
