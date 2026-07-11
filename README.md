@@ -60,9 +60,17 @@ graph TB
 | **PostgreSQL** (raw asyncpg) | Transactional data: jobs, resumes, shortlist / reverse-match entries, outbox. Candidate PII is encrypted at rest with pgcrypto. |
 | **Neo4j** | Skill / experience graph + four 768-d cosine vector indexes for coarse recall and skill-graph scoring. |
 | **Redis** | arq task broker + embedding cache. No domain data. |
-| **`./data` BlobStore** | Original resume + cover-letter files on the local filesystem — MinIO was dropped (see ADR-004). |
+| **`./data` BlobStore** | Original resume + cover-letter files on the local filesystem — MinIO was dropped (see ADR-004). Implemented in Phase 1 as an async `BlobStore` (see below). |
 
-There is **no migration framework**: `init_schema` (Postgres) and `bootstrap_neo4j_schema` (Neo4j) run idempotently on every API/worker boot.
+There is **no migration framework**: `init_schema` (Postgres) and `bootstrap_neo4j_schema` (Neo4j) run idempotently on every API/worker boot. The `BlobStore` bootstraps its root directory on construction (bucket-bootstrap parity), also with no migration step.
+
+### Filesystem BlobStore
+
+`core/src/storage/blob_store.py` — an async `BlobStore(root)` rooted at `settings.storage_dir` (default `/data`, bind-mounted to `./data`), stdlib-only (`pathlib` / `asyncio` / `os`; no `aiofiles` or S3/MinIO dependency). Every op runs its blocking filesystem IO in `asyncio.to_thread`. Interface: `put(key, data, content_type=None)` · `get(key) -> bytes` (raises `BlobNotFound`) · `delete(key)` (missing key is a no-op success) · `exists(key) -> bool` · `list_keys(prefix="") -> list[str]` (sorted, root-relative, POSIX-separated; **directory-scoped** prefix, not MinIO substring-prefix). The store is a dumb byte sink — it never parses or extracts text, so nothing here feeds an embedding path.
+
+**Path-safety & at-rest perms.** Every key-taking method funnels through one `_resolve` guard (before any IO) that raises `InvalidBlobKey` on `..` segments, absolute / Windows-drive / backslash keys, empty or root-resolving keys, null-byte keys, and symlink escapes (realpath + `is_relative_to`); `list_keys` applies the same realpath filter so an escaping symlink cannot be enumerated. Store-created directories are `0o700` and blobs are `0o600` — the PIPEDA/FIPPA control for raw resume bytes at rest (blobs are permission-gated; Postgres PII columns are pgcrypto-encrypted — two different at-rest controls). Interface and rationale: [ADR-005](docs/adr/005-filesystem-blobstore-interface-path-safety.md).
+
+The store is wired onto `app.state.blob_store` (with a `get_blob_store` FastAPI dependency) in the API lifespan and onto `ctx["blob_store"]` in the worker startup. It has **no HTTP surface yet** — the upload/fetch/flush call sites that invoke it are ported in Phases 3–6.
 
 ---
 
@@ -144,12 +152,12 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 ## Status & roadmap
 
-**Phase 0 (seed & infra) is complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, and the API serves `/health`. There are **no ranking or upload routes yet** — those land in later phases.
+**Phases 0–1 are complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive is implemented and wired (onto `app.state` / worker `ctx`) but has **no HTTP surface** — there are **no ranking or upload routes yet**, so nothing calls it in a request path. Routes land in later phases.
 
 | Phase | Deliverable | State |
 |---|---|---|
 | **0 · Seed & infra** | Compose, settings (768-d contract), asyncpg startup DDL, Neo4j bootstrap | **done** |
-| 1 · Storage | Filesystem `BlobStore` | pending |
+| **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | **done** |
 | 2 · Schemas | `resumes`, `matching`, `jobs` pydantic schemas | pending |
 | 3 · Ingest + parse | extract/chunk, LLM client+cache, PII encryption on parse | pending |
 | 4 · Ranking engine | orchestrator + 4-stage hybrid, reverse-match | pending |
@@ -206,9 +214,10 @@ curl localhost:8000/health    # -> {"status":"ok"}
 recruiter-assistant/
 ├── core/
 │   ├── src/
-│   │   ├── api/         # FastAPI app (Phase 0: /health + lifespan)
+│   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store)
 │   │   ├── models/      # asyncpg pool + idempotent startup DDL
-│   │   ├── worker/      # arq worker + Neo4j bootstrap
+│   │   ├── storage/     # filesystem BlobStore (Phase 1)
+│   │   ├── worker/      # arq worker + Neo4j bootstrap (wires blob_store)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
 │   ├── frontend/        # Flask viewer (Phase 0: stub)
 │   └── tests/{unit,integration}/
