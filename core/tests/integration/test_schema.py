@@ -10,14 +10,16 @@ Runs in CI (`make gates-integration`), not in the offline gate suite.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
-from src.models.ddl import init_schema
 from testcontainers.postgres import PostgresContainer
+
+from src.models.ddl import init_schema
 
 # 32 random bytes, base64 — the shape PII_KEY must take in production.
 PII_KEY = "b3VyLTMyLWJ5dGUtcGlpLWtleS1mb3ItdGVzdHM="
@@ -319,3 +321,43 @@ async def test_shortlist_score_is_a_float_not_a_decimal(
     )
     assert isinstance(score, float)
     assert score == pytest.approx(0.875)
+
+
+@pytest.mark.asyncio
+async def test_reverse_match_entry_round_trips_jsonb_payload(
+    conn: asyncpg.Connection,
+) -> None:
+    """Exercise reverse_match_entries live so its JSONB payload columns are
+    behaviourally proven, not just declared. score_breakdown/evidence/
+    pipeline_meta must accept a JSON object and hand it back as a mapping."""
+    job_id = await _insert_job(conn)
+    resume_id = await _insert_resume(conn, job_id)
+    await conn.execute(
+        """
+        INSERT INTO reverse_match_entries (
+            resume_id, job_id, rank, score_final, score_structured,
+            score_evidence, score_breakdown, evidence, requirement_count,
+            must_have_count, pipeline_meta
+        ) VALUES (
+            $1, $2, 1, 0.5, 0.6, 0.4,
+            '{"must_have": 0.7}', '[{"req": "python", "quote": "5y python"}]',
+            3, 2, '{"stage": "reverse"}'
+        )
+        """,
+        resume_id,
+        job_id,
+    )
+    row = await conn.fetchrow(
+        """
+        SELECT score_breakdown, evidence, pipeline_meta
+          FROM reverse_match_entries WHERE resume_id = $1
+        """,
+        resume_id,
+    )
+    assert row is not None
+    # asyncpg returns JSONB as str; a lossy TEXT downgrade would still parse,
+    # but the schema-level unit guard forbids TEXT — here we prove the value
+    # survives a JSON round-trip intact.
+    assert json.loads(row["score_breakdown"]) == {"must_have": 0.7}
+    assert json.loads(row["evidence"]) == [{"req": "python", "quote": "5y python"}]
+    assert json.loads(row["pipeline_meta"]) == {"stage": "reverse"}

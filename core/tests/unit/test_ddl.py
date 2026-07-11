@@ -23,6 +23,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 from src.models.ddl import _STATEMENTS, init_schema
 
 EXPECTED_TABLES: frozenset[str] = frozenset(
@@ -61,6 +62,16 @@ ENCRYPTED_COLUMNS: tuple[str, ...] = (
     "candidate_email",
     "candidate_phone",
     "cover_letter_text",
+)
+
+# JSONB in ddl.py is already correct; this guard stops a silent downgrade to a
+# lossy TEXT column. `evidence` holds the per-requirement verified quotes whose
+# fabrication is a hard fail from Phase 3 — a TEXT column would accept '{}' and
+# ship green, so the guard must fail on TEXT.
+JSONB_PAYLOAD_COLUMNS: tuple[str, ...] = (
+    "score_breakdown",
+    "evidence",
+    "pipeline_meta",
 )
 
 EXPECTED_INDEXES: tuple[str, ...] = (
@@ -325,6 +336,19 @@ def test_rank_is_positive(table: str) -> None:
         _table_sql(table),
         re.IGNORECASE,
     )
+
+
+@pytest.mark.parametrize("table", ["shortlist_entries", "reverse_match_entries"])
+@pytest.mark.parametrize("column", JSONB_PAYLOAD_COLUMNS)
+def test_ranking_payload_columns_are_jsonb(table: str, column: str) -> None:
+    """The 4-stage ranking output columns must be JSONB, never TEXT.
+
+    Parsed per-table so a downgrade of one table cannot hide behind the other:
+    reverse_match_entries is checked independently of shortlist_entries.
+    """
+    sql = _table_sql(table)
+    assert re.search(rf"\b{column}\s+JSONB\b", sql, re.IGNORECASE), sql
+    assert not re.search(rf"\b{column}\s+TEXT\b", sql, re.IGNORECASE), sql
 
 
 def test_shortlist_entries_unique_per_job_resume() -> None:
