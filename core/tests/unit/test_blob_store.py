@@ -15,11 +15,23 @@ Two things carry contracts the rest of the port hangs off:
   dedicated ``InvalidBlobKey(ValueError)``. The traversal + symlink tests below
   assert *both* the exception *and* that nothing was written/read outside the
   root — a store that wrote the file first and raised second would still fail.
+
+Review/security hardenings (RED increment on top of the first green):
+
+* **Restrictive modes (PIPEDA/FIPPA).** Raw resume bytes must not be
+  world-readable: created blobs are ``0o600`` and store-created dirs ``0o700``.
+* **Null-byte key.** ``"a\\x00b.txt"`` makes ``Path.resolve()`` raise a *bare*
+  ``ValueError``; it must surface as ``InvalidBlobKey`` so callers catching the
+  specific type still catch it.
+* **``list_keys`` symlink asymmetry.** ``rglob`` follows symlinks, so a link
+  inside root pointing outside must be realpath-filtered out of the listing —
+  the read side must be as strict as the write side.
 """
 
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -38,7 +50,15 @@ TRAVERSAL_KEYS: tuple[str, ...] = (
 # (you cannot put/get/delete the root as a file), but note ``list_keys("")``
 # is the *valid* "list everything" default and is tested separately.
 ROOT_OR_EMPTY_KEYS: tuple[str, ...] = ("", ".")
-INVALID_KEYS: tuple[str, ...] = TRAVERSAL_KEYS + ROOT_OR_EMPTY_KEYS
+# A key with an embedded null byte makes ``Path.resolve()`` raise a *bare*
+# ``ValueError("embedded null byte")``; the guard must convert it to
+# ``InvalidBlobKey`` (a ValueError subclass) so callers catching the specific
+# type still catch it (security finding, low).
+NULL_BYTE_KEY: str = "a\x00b.txt"
+INVALID_KEYS: tuple[str, ...] = TRAVERSAL_KEYS + ROOT_OR_EMPTY_KEYS + (NULL_BYTE_KEY,)
+# ``list_keys`` accepts ``""`` (list everything), but any *non-empty* prefix is
+# a key and must be validated the same way — including the null-byte case.
+INVALID_PREFIXES: tuple[str, ...] = TRAVERSAL_KEYS + (NULL_BYTE_KEY,)
 
 
 # ── Fixtures / helpers ──────────────────────────────────────────────────────
@@ -113,6 +133,30 @@ async def test_double_dot_inside_a_filename_is_allowed(store: BlobStore) -> None
     """``..`` is only a traversal as a whole *segment* — not inside a name."""
     await store.put("a..b.txt", b"x")
     assert await store.get("a..b.txt") == b"x"
+
+
+# ── Restrictive file/dir permissions (PIPEDA/FIPPA — not world-readable) ─────
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+@pytest.mark.asyncio
+async def test_put_creates_blob_and_dirs_with_restrictive_modes(
+    store: BlobStore, tmp_path: Path
+) -> None:
+    """Raw resume bytes must not be world-readable.
+
+    A blob lands ``0o600``; every directory the store creates under root —
+    including the *intermediate* ones (so the impl can't lean on
+    ``mkdir(parents=True)``, which ignores ``mode`` for parents) — lands
+    ``0o700``. A nested key exercises the intermediate-dir case.
+    """
+    await store.put("sub/dir/blob.bin", b"secret resume bytes")
+
+    blob = tmp_path / "sub" / "dir" / "blob.bin"
+    assert blob.stat().st_mode & 0o777 == 0o600
+
+    for created_dir in (tmp_path / "sub", tmp_path / "sub" / "dir"):
+        assert created_dir.stat().st_mode & 0o777 == 0o700
 
 
 # ── get ─────────────────────────────────────────────────────────────────────
@@ -194,6 +238,39 @@ async def test_list_keys_lists_files_not_directories(store: BlobStore) -> None:
     assert await store.list_keys() == ["d/f.txt"]
 
 
+@pytest.mark.asyncio
+async def test_list_keys_excludes_symlinks_escaping_root(
+    rooted: tuple[Path, Path, BlobStore],
+) -> None:
+    """The read side must be as strict as the write side.
+
+    ``get``/``put``/``exists``/``delete`` reject a key that symlinks outside
+    root, but ``list_keys`` walks with ``rglob`` + ``is_file()`` which FOLLOWS
+    symlinks — so a link inside root pointing at an outside file would be
+    enumerated (a listing leak). The store must realpath-filter walked entries
+    to those genuinely under root. A genuine in-root file is planted too, so the
+    test proves the filter is *selective*, not a blanket "drop all symlinks".
+    """
+    base, root, store = rooted
+    outside_file = base / "outside_secret.txt"
+    outside_file.write_bytes(b"secret")
+    link = root / "leak.txt"
+    try:
+        link.symlink_to(outside_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform cannot create symlinks")
+    # Sanity: the link really is a doorway out of the root (test isn't vacuous).
+    assert link.resolve() == outside_file.resolve()
+    assert not link.resolve().is_relative_to(root.resolve())
+
+    await store.put("real.txt", b"ok")
+
+    keys = await store.list_keys("")
+
+    assert "real.txt" in keys  # selective: the genuine in-root file is listed
+    assert "leak.txt" not in keys  # the escaping symlink is filtered out
+
+
 # ── content_type parity ─────────────────────────────────────────────────────
 
 
@@ -268,6 +345,19 @@ async def test_exists_rejects_bad_keys(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", INVALID_KEYS)
+async def test_delete_rejects_bad_keys(
+    bad: str, rooted: tuple[Path, Path, BlobStore]
+) -> None:
+    """Every bad key — traversal, root/empty, and null-byte — is rejected and
+    nothing under the root's parent is touched."""
+    base, root, store = rooted
+    with pytest.raises(InvalidBlobKey):
+        await store.delete(bad)
+    assert _escaped_files(base, root) == []
+
+
+@pytest.mark.asyncio
 async def test_delete_rejects_traversal_and_keeps_outside_files(
     rooted: tuple[Path, Path, BlobStore],
 ) -> None:
@@ -281,11 +371,13 @@ async def test_delete_rejects_traversal_and_keeps_outside_files(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", TRAVERSAL_KEYS)
+@pytest.mark.parametrize("bad", INVALID_PREFIXES)
 async def test_list_keys_rejects_traversal_prefix(
     bad: str, rooted: tuple[Path, Path, BlobStore]
 ) -> None:
-    """A prefix must not walk outside the root (``list_keys('/etc')`` leaks)."""
+    """A non-empty prefix must be validated like a key: a traversal walks
+    outside the root (``list_keys('/etc')`` leaks) and a null-byte prefix must
+    raise ``InvalidBlobKey``, not a bare ``ValueError``."""
     _, _, store = rooted
     with pytest.raises(InvalidBlobKey):
         await store.list_keys(bad)
