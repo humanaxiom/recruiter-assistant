@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 import asyncpg
+from asyncpg import Record
+from asyncpg.pool import PoolConnectionProxy
 from fastapi import Depends, FastAPI, Request
 
 from src.settings import Settings, get_settings
@@ -23,7 +25,9 @@ from src.settings import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
-async def init_pool(app: FastAPI, settings: Settings | None = None) -> asyncpg.Pool:
+async def init_pool(
+    app: FastAPI, settings: Settings | None = None
+) -> asyncpg.Pool[Record]:
     """Create the asyncpg pool and attach it to ``app.state.pg_pool``."""
     s = settings or get_settings()
     pool = await asyncpg.create_pool(
@@ -39,20 +43,23 @@ async def init_pool(app: FastAPI, settings: Settings | None = None) -> asyncpg.P
 
 async def close_pool(app: FastAPI) -> None:
     """Close the pool if it was ever opened. A no-op otherwise."""
-    pool: asyncpg.Pool | None = getattr(app.state, "pg_pool", None)
+    pool: asyncpg.Pool[Record] | None = getattr(app.state, "pg_pool", None)
     if pool is not None:
         await pool.close()
         app.state.pg_pool = None
         logger.info("pg.pool.close")
 
 
-async def get_db(request: Request) -> AsyncIterator[asyncpg.Connection]:
+async def get_db(request: Request) -> AsyncIterator[PoolConnectionProxy[Record]]:
     """FastAPI dep — one connection per request, released back to the pool."""
-    pool: asyncpg.Pool | None = getattr(request.app.state, "pg_pool", None)
+    pool: asyncpg.Pool[Record] | None = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise RuntimeError("Postgres pool not initialised (lifespan not running)")
     async with pool.acquire() as conn:
         yield conn
 
 
-Db = Annotated[asyncpg.Connection, Depends(get_db)]
+# PoolConnectionProxy is generic only in the stubs; it is not subscriptable at
+# runtime. A string forward-ref keeps mypy resolving the real parametrised type
+# while the runtime value stays a plain string.
+Db = Annotated["PoolConnectionProxy[Record]", Depends(get_db)]
