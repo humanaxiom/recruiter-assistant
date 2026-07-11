@@ -43,6 +43,24 @@ from src.services import job_service, outbox_service, resume_service
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
 
+def _json_args(args: tuple[Any, ...]) -> list[Any]:
+    """Decode the query args that are JSON documents, skipping the ones that aren't.
+
+    The same arg list carries plain TEXT bindings (``aggregate``, ``event_type``,
+    the email hash) alongside the jsonb payload, so decoding every ``str`` arg
+    unconditionally blows up on the first one that isn't JSON.
+    """
+    decoded: list[Any] = []
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        try:
+            decoded.append(json.loads(arg))
+        except json.JSONDecodeError:
+            continue
+    return decoded
+
+
 def _squash(sql: str) -> str:
     return " ".join(sql.split())
 
@@ -126,8 +144,7 @@ async def test_job_service_record_parsed_serializes_description_parsed_as_jsonb(
     await job_service.record_parsed(conn, uuid4(), extracted, _NOW)
     query, *args = conn.execute.await_args.args
     assert "description_parsed" in query.lower()
-    payload_args = [a for a in args if isinstance(a, str)]
-    matched = [a for a in payload_args if json.loads(a) == extracted.model_dump()]
+    matched = [d for d in _json_args(args) if d == extracted.model_dump()]
     assert matched, f"no arg round-trips to extracted.model_dump(); got {args!r}"
 
 
@@ -236,8 +253,7 @@ async def test_resume_service_record_parsed_serializes_parsed_as_jsonb() -> None
     await resume_service.record_parsed(conn, uuid4(), parsed, _pii_tuple(), None, _NOW)
     query, *args = conn.execute.await_args.args
     assert "parsed" in query.lower()
-    payload_args = [a for a in args if isinstance(a, str)]
-    matched = [a for a in payload_args if json.loads(a) == parsed.model_dump()]
+    matched = [d for d in _json_args(args) if d == parsed.model_dump()]
     assert matched, f"no arg round-trips to parsed.model_dump(); got {args!r}"
 
 
@@ -250,8 +266,7 @@ async def test_resume_service_record_parsed_serializes_cover_letter_parsed() -> 
     )
     query, *args = conn.execute.await_args.args
     assert "cover_letter_parsed" in query.lower()
-    payload_args = [a for a in args if isinstance(a, str)]
-    matched = [a for a in payload_args if json.loads(a) == cl.model_dump()]
+    matched = [d for d in _json_args(args) if d == cl.model_dump()]
     assert matched, f"no arg round-trips to cover_letter_parsed; got {args!r}"
 
 
@@ -396,6 +411,5 @@ async def test_enqueue_outbox_serializes_payload_as_jsonb() -> None:
     )
     query, *args = conn.execute.await_args.args
     assert "payload" in query.lower()
-    payload_args = [a for a in args if isinstance(a, str)]
-    matched = [a for a in payload_args if json.loads(a) == payload]
+    matched = [d for d in _json_args(args) if d == payload]
     assert matched, f"no arg round-trips to the payload dict; got {args!r}"

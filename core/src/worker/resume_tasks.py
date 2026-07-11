@@ -1,0 +1,448 @@
+"""arq tasks for the résumé pipeline.
+
+``parse_resume(ctx, resume_id)``::
+
+    blob    <- BlobStore.get(blob_key)
+    text    <- extract_text(blob, mime)
+    chunks  <- chunk_resume(text)                     # c_NNN
+    core    <- LLM(resume_core_v1  -> ResumeCore)     # narrative half
+    skills  <- vocab scan MERGED with LLM(resume_skills_v2)
+    cover   <- LLM(cover_letter_v1 -> CoverLetterParsed)   # cl_NNN, non-fatal
+    embed   <- summary text (PII-FREE) + every chunk
+    UPDATE resumes ... status='parsed' + INSERT outbox('resume.parsed')  [one tx]
+
+Ported from hris ``apps/worker/src/worker/resume_tasks.py``
+(``phase3-source-dossier.md`` §7). Four deliberate deviations:
+
+* **MinIO is gone.** hris's ``_fetch_blob(minio, bucket, key)`` +
+  ``asyncio.to_thread`` wrapper is deleted outright: ``BlobStore.get(key)`` is
+  already a coroutine and takes a single relative key (no bucket). ``S3Error``
+  becomes ``(BlobNotFound, InvalidBlobKey)``.
+* **``ctx["pg_pool"]``, not ``ctx["pool"]``** — the key ``src/worker/main.py``
+  actually sets. A verbatim copy-paste of the hris body ``KeyError``s here.
+* **The cover-letter paste branch decrypts through ``pii.decrypt``** rather
+  than re-SELECTing ``cover_letter_text`` with an inline ``pgp_sym_decrypt``:
+  the ciphertext is already in the ``meta`` row we fetched, so the extra round
+  trip bought nothing. ``set_pii_key`` still runs first, in the same
+  transaction — the GUC is transaction-scoped.
+* **Graph projection is Phase 4.** ``project_resume`` /
+  ``_resume_projection_tx`` / ``project_to_graph`` are not ported; this task
+  stops at the outbox row.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+from collections import Counter
+from typing import Any
+from uuid import UUID
+
+from asyncpg import Record
+
+from src.pipeline.llm import CachedEmbedder, LLMClient, LLMOutputInvalidError
+from src.pipeline.parsing import (
+    MIME_DOCX,
+    MIME_PDF,
+    MIME_RTF,
+    MIME_TXT,
+    EncryptedPdfError,
+    UnsupportedMimeError,
+    chunk_resume,
+    extract_text,
+)
+from src.pipeline.skills import canonicalize_skill_names, match_skills_in_text
+from src.prompts import load_prompt
+from src.schemas import (
+    CoverLetterParsed,
+    ResumeChunk,
+    ResumeCore,
+    ResumeParsed,
+    ResumeSkill,
+    ResumeSkillDetail,
+    ResumeSkillDetails,
+)
+from src.services import DbConn, outbox_service, pii, resume_service
+from src.storage.blob_store import BlobNotFound, BlobStore, InvalidBlobKey
+
+log = logging.getLogger(__name__)
+
+# ResumeParsed.skills is capped at 80; cap the merge at the same number so the
+# model_validate below never has to silently truncate.
+_MAX_SKILLS = 80
+
+_RESUME_META_SQL = (
+    "SELECT blob_key, mime_type, status, job_id, "
+    "cover_letter_blob_key, cover_letter_text FROM resumes WHERE id = $1"
+)
+
+# A résumé is parseable only from these two states; anything else means another
+# worker (or a delete) got there first.
+_PARSEABLE_STATUSES = ("uploaded", "parsing")
+
+
+# ---------------- skills ----------------
+
+
+async def _extract_skills_merged(
+    llm: LLMClient, chunks: list[ResumeChunk], resume_id_str: str
+) -> list[ResumeSkill]:
+    """Résumé skills = a deterministic vocabulary scan (reliable, never fails)
+    MERGED with a best-effort skills LLM call that also yields optional
+    per-skill ``years`` / ``last_used_year``.
+
+    Never raises: the LLM half is non-fatal (the lenient ``ResumeSkillDetails``
+    drops malformed/looping output), so the deterministic scan is the floor and
+    a résumé still parses with names-only when the model fails. Returns
+    canonical, deduped rows capped at the ``ResumeParsed.skills`` limit;
+    years/last_used_year are carried only where the LLM stated them.
+    """
+    det = match_skills_in_text("\n".join(c.text for c in chunks))
+    llm_details: list[ResumeSkillDetail] = []
+    try:
+        prompt = load_prompt("resume_skills_v2", chunks=chunks)
+        out = await llm.chat_json(
+            prompt.messages, ResumeSkillDetails, max_tokens=1536, max_retries=1
+        )
+        llm_details = out.skills
+    except LLMOutputInvalidError as exc:
+        log.warning(
+            "parse_resume.skills_llm_failed resume_id=%s error=%s", resume_id_str, exc
+        )
+
+    # Years/last_used_year keyed by CANONICAL name (the first stated value wins,
+    # then fill any gap from a later duplicate) so they survive the dedupe below.
+    detail_by_canonical: dict[str, ResumeSkill] = {}
+    for d in llm_details:
+        canon = canonicalize_skill_names([d.name])
+        if not canon:
+            continue
+        c = canon[0]
+        prev = detail_by_canonical.get(c)
+        if prev is None:
+            detail_by_canonical[c] = ResumeSkill(
+                name=c, years=d.years, last_used_year=d.last_used_year
+            )
+        else:
+            detail_by_canonical[c] = ResumeSkill(
+                name=c,
+                years=prev.years if prev.years is not None else d.years,
+                last_used_year=(
+                    prev.last_used_year
+                    if prev.last_used_year is not None
+                    else d.last_used_year
+                ),
+            )
+
+    # ``dict.fromkeys`` de-dupes while preserving first-seen order. The real
+    # ``canonicalize_skill_names`` already de-dupes, so this is a no-op against
+    # it — but the dedupe is a postcondition THIS function promises (see the
+    # docstring), and it must not outsource it: a duplicate canonical name
+    # survives into ``ResumeParsed.skills`` and becomes two HAS_SKILL edges for
+    # the same skill when Phase 4 projects the résumé. Cap AFTER the dedupe, so
+    # the limit counts 80 DISTINCT skills rather than 80 rows.
+    canonical = canonicalize_skill_names([*det, *[d.name for d in llm_details]])
+    ordered = list(dict.fromkeys(canonical))[:_MAX_SKILLS]
+    skills = [detail_by_canonical.get(c, ResumeSkill(name=c)) for c in ordered]
+    return _drop_smeared_years(skills, resume_id_str)
+
+
+# A small local instruct model often ignores the "don't copy a career total onto
+# every skill" instruction and stamps the SAME year-count on many skills (e.g.
+# "25" on 40 skills, from "over 25 years of software development"). A résumé
+# almost never legitimately states the identical duration for this many DISTINCT
+# skills, so that pattern is a copied total, not per-skill data — a
+# deterministic backstop the prompt can't reliably enforce. When >= this many
+# skills share one exact years value, drop years on those (treat as unknown).
+_SMEARED_YEARS_MIN = 6
+
+
+def _drop_smeared_years(
+    skills: list[ResumeSkill], resume_id_str: str
+) -> list[ResumeSkill]:
+    counts = Counter(s.years for s in skills if s.years is not None)
+    smeared = {years for years, n in counts.items() if n >= _SMEARED_YEARS_MIN}
+    if not smeared:
+        return skills
+    log.info(
+        "parse_resume.skills_years_smeared_dropped resume_id=%s values=%s",
+        resume_id_str,
+        sorted(smeared),
+    )
+    return [
+        s.model_copy(update={"years": None}) if s.years in smeared else s
+        for s in skills
+    ]
+
+
+# ---------------- cover letter ----------------
+
+_COVER_MIME_BY_EXT = {
+    "pdf": MIME_PDF,
+    "docx": MIME_DOCX,
+    "rtf": MIME_RTF,
+    "txt": MIME_TXT,
+}
+
+
+async def _parse_cover_letter(
+    conn: DbConn,
+    llm: LLMClient,
+    blob_store: BlobStore,
+    meta: Record,
+    resume_id: UUID,
+) -> tuple[list[ResumeChunk], CoverLetterParsed | None]:
+    """Extract + chunk (``cl_NNN``) + LLM-parse a résumé's cover letter, if any.
+
+    NON-FATAL by design: a résumé's parse must never fail because its cover
+    letter's extraction or LLM call did. Any extraction failure returns
+    ``([], None)``; an LLM failure returns ``(cl_chunks, CoverLetterParsed())``
+    — the chunks are kept (Phase 4's evidence stage can still cite them), the
+    extraction is just empty.
+
+    The text comes from either the blob (file upload) or the pgp-encrypted
+    ``cover_letter_text`` column (paste), decrypted under the session PII key.
+    """
+    blob_key = meta["cover_letter_blob_key"]
+    has_enc_text = meta["cover_letter_text"] is not None
+    if not blob_key and not has_enc_text:
+        return [], None
+
+    try:
+        if blob_key:
+            cover_blob = await blob_store.get(blob_key)
+            ext = blob_key.rsplit(".", 1)[-1].lower()
+            extracted = await asyncio.to_thread(
+                extract_text, cover_blob, _COVER_MIME_BY_EXT.get(ext, MIME_PDF)
+            )
+        else:
+            # SET LOCAL app.pii_key is transaction-scoped, so the key must land
+            # before the decrypt reads current_setting() — same transaction,
+            # set_pii_key strictly first.
+            async with conn.transaction():
+                await pii.set_pii_key(conn)
+                plain = await pii.decrypt(conn, meta["cover_letter_text"])
+            extracted = await asyncio.to_thread(
+                extract_text, (plain or "").encode(), MIME_TXT
+            )
+        cl_chunks = await asyncio.to_thread(chunk_resume, extracted, prefix="cl")
+    except (
+        UnsupportedMimeError,
+        EncryptedPdfError,
+        BlobNotFound,
+        InvalidBlobKey,
+    ) as exc:
+        log.warning(
+            "parse_resume.cover_extract_failed resume_id=%s error=%s", resume_id, exc
+        )
+        return [], None
+
+    if not cl_chunks:
+        return [], None
+
+    try:
+        prompt = load_prompt("cover_letter_v1", chunks=cl_chunks)
+        cl_parsed = await llm.chat_json(
+            prompt.messages, CoverLetterParsed, max_tokens=1024, max_retries=1
+        )
+    except LLMOutputInvalidError as exc:
+        log.warning(
+            "parse_resume.cover_llm_failed resume_id=%s error=%s", resume_id, exc
+        )
+        return cl_chunks, CoverLetterParsed()
+
+    return cl_chunks, cl_parsed
+
+
+# ---------------- parse_resume ----------------
+
+
+async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct return
+    ctx: dict[str, Any], resume_id_str: str
+) -> str:
+    """Parse one résumé end to end and enqueue its projection event.
+
+    Returns one of: ``"parsed"``, ``"missing"``, ``"stale"``, ``"failed"``.
+    """
+    pool = ctx["pg_pool"]
+    llm: LLMClient = ctx["llm"]
+    embedder: CachedEmbedder = ctx["embedder"]
+    blob_store: BlobStore = ctx["blob_store"]
+
+    resume_id = UUID(resume_id_str)
+
+    async with pool.acquire() as conn:
+        meta = await conn.fetchrow(_RESUME_META_SQL, resume_id)
+        if meta is None:
+            log.warning("parse_resume.missing resume_id=%s", resume_id_str)
+            return "missing"
+        if meta["status"] not in _PARSEABLE_STATUSES:
+            log.info(
+                "parse_resume.skipped resume_id=%s status=%s",
+                resume_id_str,
+                meta["status"],
+            )
+            return "stale"
+
+        try:
+            blob = await blob_store.get(meta["blob_key"])
+        except (BlobNotFound, InvalidBlobKey) as exc:
+            await resume_service.record_parse_failure(
+                conn, resume_id=resume_id, reason=f"blob fetch failed: {exc}"
+            )
+            return "failed"
+
+        # Extract + chunk are CPU-bound — run them off the event loop.
+        try:
+            extracted = await asyncio.to_thread(extract_text, blob, meta["mime_type"])
+        except (UnsupportedMimeError, EncryptedPdfError) as exc:
+            await resume_service.record_parse_failure(
+                conn, resume_id=resume_id, reason=f"text extraction failed: {exc}"
+            )
+            return "failed"
+
+        chunks = await asyncio.to_thread(chunk_resume, extracted)
+        if not chunks:
+            # Fail BEFORE any LLM call — an empty chunk set is unusable input
+            # and a wasted inference pass is expensive on local hardware.
+            await resume_service.record_parse_failure(
+                conn,
+                resume_id=resume_id,
+                reason="no chunks produced from extracted text",
+            )
+            return "failed"
+
+        # LLM extraction is SPLIT (hris ADR 0011) and must stay split:
+        #   1. a bounded "core" call for the narrative (candidate, summary,
+        #      experience, education) — small local models produce this
+        #      reliably;
+        #   2. skills come from a deterministic vocabulary scan (always) MERGED
+        #      with a best-effort skills-only call.
+        # A single combined call made small models loop/over-generate on the
+        # open-ended skills list and truncate the whole résumé into invalid JSON.
+        core_prompt = load_prompt("resume_core_v1", chunks=chunks)
+        try:
+            core = await llm.chat_json(
+                core_prompt.messages, ResumeCore, max_tokens=3072, max_retries=1
+            )
+        except LLMOutputInvalidError as exc:
+            await resume_service.record_parse_failure(
+                conn, resume_id=resume_id, reason=f"llm output invalid: {exc}"
+            )
+            return "failed"
+
+        merged = await _extract_skills_merged(llm, chunks, resume_id_str)
+
+        # Non-fatal. Its chunks ride in the parsed jsonb (cl_NNN id space); the
+        # LLM extraction goes to the cover_letter_parsed column.
+        cl_chunks, cl_parsed = await _parse_cover_letter(
+            conn, llm, blob_store, meta, resume_id
+        )
+        # Hand-assembled: a résumé parse spans 2-3 load_prompt calls, so there
+        # is no single RenderedPrompt.version to reach for.
+        prompt_version = "resume_core_v1+resume_skills_v2" + (
+            "+cover_letter_v1" if cl_chunks else ""
+        )
+
+        # Build from dicts so ResumeParsed's lossy row-dropping validator runs.
+        cleaned_parsed = ResumeParsed.model_validate(
+            {
+                "candidate": core.candidate.model_dump(),
+                "summary": core.summary,
+                "total_years_experience": core.total_years_experience,
+                "skills": [s.model_dump() for s in merged],
+                "experience": [e.model_dump() for e in core.experience],
+                "education": [e.model_dump() for e in core.education],
+                "chunks": [c.model_dump() for c in chunks],
+                "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
+            }
+        )
+
+        # The embedding text NEVER carries name/email/phone/location — embeddings
+        # are PII-equivalent under PIPEDA/FIPPA. See _build_summary_text.
+        summary_text = _build_summary_text(cleaned_parsed)
+        [summary_emb] = await embedder.embed([summary_text])
+        chunk_texts = [c.text for c in chunks]
+        chunk_embs_list = await embedder.embed(chunk_texts)
+        chunk_embs = {chunks[i].id: chunk_embs_list[i] for i in range(len(chunks))}
+
+        # Encrypt PII + write back + enqueue the outbox row, all atomic.
+        async with conn.transaction():
+            encrypted_pii = await resume_service.encrypt_pii_via_session(
+                conn, cleaned_parsed.candidate
+            )
+            applied = await resume_service.record_parsed(
+                conn,
+                resume_id=resume_id,
+                parsed=cleaned_parsed,
+                pii=encrypted_pii,
+                cover_letter_parsed=cl_parsed,
+                parsed_at=dt.datetime.now(dt.UTC),
+            )
+            if not applied:
+                # The row moved out of uploaded/parsing under us. Drop the
+                # result on the floor: an outbox event for a write that never
+                # landed would project stale state into the graph in Phase 4.
+                log.info(
+                    "parse_resume.race resume_id=%s note=%s",
+                    resume_id_str,
+                    "row left uploaded/parsing mid-parse; dropping result",
+                )
+                return "stale"
+
+            await outbox_service.enqueue_outbox(
+                conn,
+                aggregate="resume",
+                aggregate_id=resume_id,
+                event_type="resume.parsed",
+                payload={
+                    "parsed": cleaned_parsed.model_dump(),
+                    "summary_emb": summary_emb,
+                    "chunk_embs": chunk_embs,
+                    "prompt_version": prompt_version,
+                    # job_id rides along so Phase 4's stage-1 vector search can
+                    # scope candidates to "resumes uploaded against THIS job"
+                    # rather than every résumé in the system — without it a
+                    # recruiter sees other jobs' candidates in their shortlist.
+                    "job_id": str(meta["job_id"]),
+                },
+            )
+
+    log.info(
+        "parse_resume.ok resume_id=%s chunks=%d skills=%d",
+        resume_id_str,
+        len(chunks),
+        len(cleaned_parsed.skills),
+    )
+    return "parsed"
+
+
+def _build_summary_text(parsed: ResumeParsed) -> str:
+    """The text that gets EMBEDDED. Excludes name/email/phone/location.
+
+    MERGE-BLOCKING INVARIANT: embeddings are treated as PII-equivalent
+    (PIPEDA/FIPPA) — this string is fed to ``nomic-embed-text`` and the vector
+    is stored in a Neo4j index that Phase 4 queries. This function must read
+    ONLY ``summary`` / ``skills`` / ``experience`` / ``education`` and must
+    NEVER touch the ``CandidateInfo`` block. Two tests guard it: a runtime
+    sentinel check and a static ``inspect.getsource`` check.
+    """
+    parts: list[str] = []
+    if parsed.summary:
+        parts.append(parsed.summary)
+    if parsed.skills:
+        parts.append("Skills: " + ", ".join(s.name for s in parsed.skills[:30]))
+    if parsed.experience:
+        roles = [f"{e.title} at {e.company}" for e in parsed.experience[:5]]
+        parts.append("Recent roles: " + "; ".join(roles))
+    if parsed.education:
+        edu = [
+            f"{e.degree}, {e.institution}" + (f" ({e.year})" if e.year else "")
+            for e in parsed.education[:3]
+        ]
+        parts.append("Education: " + "; ".join(edu))
+    # Never "" — an empty string is a degenerate embedding-cache key (the cache
+    # keys on sha256(f"{model}\n{text}"), so every contentless résumé would
+    # collide on one vector).
+    return ". ".join(parts) or "candidate"

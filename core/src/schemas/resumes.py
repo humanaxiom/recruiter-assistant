@@ -209,6 +209,13 @@ class ResumeParsed(BaseModel):
         validate each candidate row through its own sub-schema
         (which itself runs the `_coerce_year` / name-truncation fixes
         first), and only keep the survivors.
+
+        An ALREADY-VALIDATED sub-model instance passes straight through.
+        Without that branch this filter drops every row of
+        ``ResumeParsed(skills=[ResumeSkill(...)])`` on the floor — the
+        rows are not dicts, so the "is it a dict?" guard rejects them and
+        the caller silently gets an empty list. hris only ever fed this
+        validator raw dicts, so the hole never showed there.
         """
         if not isinstance(data, dict):
             return data
@@ -220,8 +227,11 @@ class ResumeParsed(BaseModel):
             rows = data.get(key)
             if not isinstance(rows, list):
                 continue
-            kept: list[dict[str, object]] = []
+            kept: list[object] = []
             for row in rows:
+                if isinstance(row, sub):
+                    kept.append(row)
+                    continue
                 if not isinstance(row, dict):
                     continue
                 try:
@@ -254,14 +264,19 @@ class ResumeCore(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_invalid_rows(cls, data: object) -> object:
+        # Same lossy filter as ResumeParsed, including the already-validated
+        # sub-model pass-through — see the docstring there.
         if not isinstance(data, dict):
             return data
         for key, sub in (("experience", Experience), ("education", EducationItem)):
             rows = data.get(key)
             if not isinstance(rows, list):
                 continue
-            kept: list[dict[str, object]] = []
+            kept: list[object] = []
             for row in rows:
+                if isinstance(row, sub):
+                    kept.append(row)
+                    continue
                 if not isinstance(row, dict):
                     continue
                 try:
@@ -351,9 +366,15 @@ class ResumeSkillDetails(BaseModel):
             return data
         rows = data.get("skills")
         if isinstance(rows, list):
-            cleaned: list[dict[str, object]] = []
+            cleaned: list[object] = []
             for s in rows:
-                if isinstance(s, str) and s.strip():
+                # An already-validated detail passes straight through: without
+                # this branch ``ResumeSkillDetails(skills=[ResumeSkillDetail(
+                # ...)])`` silently yields an empty list (the row is neither a
+                # str nor a dict, so both coercion arms skip it).
+                if isinstance(s, ResumeSkillDetail):
+                    cleaned.append(s)
+                elif isinstance(s, str) and s.strip():
                     cleaned.append({"name": s})
                 elif isinstance(s, dict) and isinstance(s.get("name"), str):
                     cleaned.append(
