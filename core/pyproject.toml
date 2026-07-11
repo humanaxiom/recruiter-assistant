@@ -1,6 +1,6 @@
 [project]
-name = "agent-harness-core"
-version = "2.0.0"
+name = "recruiter-assistant-core"
+version = "0.1.0"
 requires-python = ">=3.11"
 
 [tool.ruff]
@@ -24,7 +24,8 @@ python_version = "3.11"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*", "arq.*"]
+# No py.typed marker ships with these; the rest of src stays strict.
+module = ["testcontainers.*", "arq.*", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

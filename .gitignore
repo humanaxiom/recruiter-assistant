@@ -8,3 +8,6 @@ __pycache__/
 .coverage
 htmlcov/
 *.egg-info/
+
+# Filesystem BlobStore root (resumes, cover letters — never commit candidate data)
+/data/
