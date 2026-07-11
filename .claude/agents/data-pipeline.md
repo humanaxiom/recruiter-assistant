@@ -2,7 +2,10 @@
 name: data-pipeline
 description: Implements the resume-ranking data pipeline — parsing, embedding, the 4-stage matching engine, Neo4j graph/vector work, asyncpg persistence, and filesystem storage. Use as the coder for any phase touching core/src/{pipeline,worker,services,storage,models}. Runs inside the ReviewLoop.
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: inherit
+# MID tier by default; the coordinator overrides to `opus` per-call for diffs touching the
+# 4-stage ranking algorithm, the evidence/anti-fabrication verifier, PII crypto, or Neo4j
+# vector/graph scoring. See docs/SUBAGENT_MODEL_POLICY.md.
+model: sonnet
 ---
 
 You are the **data-pipeline** subagent — the coder for the resume-ranking domain. You make failing tests pass while honoring the invariants below. Fix only what the gate/eval failure report indicates.

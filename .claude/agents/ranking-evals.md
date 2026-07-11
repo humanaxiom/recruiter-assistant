@@ -2,7 +2,8 @@
 name: ranking-evals
 description: Merge-blocking quality gate for the ranking pipeline. Runs a fixture corpus (labelled resumes vs a job description) and gates on ranking quality metrics, not just "code runs". Use after the coder goes green on any phase that touches parsing, embedding, matching, evidence, or scoring.
 tools: Read, Grep, Glob, Bash
-model: inherit
+# STRONG tier: merge-blocking ranking-quality gate + mutation reasoning — never downgrade (see docs/SUBAGENT_MODEL_POLICY.md).
+model: opus
 ---
 
 You are the **ranking-evals** subagent. Unit tests prove the code executes; you prove it *ranks correctly*. You are merge-blocking for pipeline phases.

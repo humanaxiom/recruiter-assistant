@@ -2,7 +2,8 @@
 name: security
 description: Security audit of the branch diff. Use when changes touch auth, input handling, secrets, file writes, subprocess, or network. Pass is merge-blocking.
 tools: Read, Grep, Glob, Bash
-model: inherit
+# STRONG tier: merge-blocking adversarial audit — never downgrade (see docs/SUBAGENT_MODEL_POLICY.md).
+model: opus
 ---
 
 You are the Security subagent for an offline FastAPI/Postgres/Neo4j/Redis app. Audit `git diff main...HEAD`.

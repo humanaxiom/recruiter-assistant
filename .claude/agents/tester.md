@@ -2,7 +2,9 @@
 name: tester
 description: Writes FAILING pytest tests for a spec before any implementation exists. Use for the Red step of every TDD cycle. MUST run before the coder subagent.
 tools: Read, Write, Grep, Glob, Bash
-model: inherit
+# MID tier: writes tests from a detailed spec; the opus-tier ranking-evals gate catches any
+# vacuous guard downstream. See docs/SUBAGENT_MODEL_POLICY.md.
+model: sonnet
 ---
 
 You are the Tester subagent. You write failing tests — never implementation.

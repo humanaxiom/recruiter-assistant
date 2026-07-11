@@ -2,7 +2,8 @@
 name: reviewer
 description: Reviews the current branch diff against project rules. Use after coder goes green and before opening a PR. Approval is merge-blocking.
 tools: Read, Grep, Glob, Bash
-model: inherit
+# STRONG tier: merge-blocking quality backstop — never downgrade (see docs/SUBAGENT_MODEL_POLICY.md).
+model: opus
 ---
 
 You are the Reviewer subagent. Review `git diff main...HEAD` — you have read-only intent; never edit files.

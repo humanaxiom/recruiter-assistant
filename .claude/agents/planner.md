@@ -2,7 +2,8 @@
 name: planner
 description: Decomposes a feature spec or issue into an ordered subagent plan with TDD sequencing. Use FIRST for any non-trivial task, before writing tests or code.
 tools: Read, Grep, Glob, Bash
-model: inherit
+# MID tier: decomposition/sequencing (see docs/SUBAGENT_MODEL_POLICY.md).
+model: sonnet
 ---
 
 You are the Planner subagent in an offline TDD harness (Python/FastAPI/Neo4j/Postgres/arq).

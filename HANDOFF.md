@@ -15,11 +15,11 @@ Building a **local-first recruiter assistant**: evidence-backed resume ranking �
 | **Golden template** (frozen, don't build here) | `github.com/adamsalah13/agent-harness-template` (private, is-template) |
 | **Source to port FROM** | `C:\repos\hris` (Python 3.12 uv monorepo; the ranking feature lives in `packages/` + `apps/api` + `apps/worker`) |
 
-The working copy now holds the **ranking-domain foundation** (Phase 0) on the template chassis. The template demo app is gone.
+The working copy now holds the **ranking-domain foundation** (Phases 0–2: infra + storage + schemas) on the template chassis, all merged to `main`. The template demo app is gone.
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phase 0 (seed & infra) complete and merged to `main` via PR #1** (merge commit `8b2b47c`, merged 2026-07-11), CI green. **Phase 1 (storage) complete and green on `feat/phase-1-storage`** (not yet merged). **Phase 2 (schemas) complete and green on `feat/phase-2-schemas`** (not yet merged). `main` contains Phase 0; Phases 1 and 2 await merge.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, and 2 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`). All merged 2026-07-11. `main` contains Phases 0–2; nothing awaits merge. Phase 3 is next.
 
 **Phase 2 landed** (two commits — red `1645178` → green `5bbf7c2`): the pydantic **v2** contract layer in `core/src/schemas/` — three modules + an `__init__` re-export (`from src.schemas import JobCreate, ResumeParsed, MatchWeights, …`), the contracts Phases 3–6 code against (API DTOs, strict LLM `chat_json` schemas, jsonb shapes, ranking weights). `jobs.py` = job DTOs + `Skill`/`Education`/`JDExtracted`; `resumes.py` = parse shapes + resume DTOs + the `_coerce_year`/`_drop_invalid_rows`/`_coerce_*` lossy validators; `matching.py` = `MatchWeights` (+ `DEFAULT_WEIGHTS`) + score/evidence/shortlist shapes. Pure data models — no I/O. **Review workflow + Taleo/JD-comments CUT and not importable** (`PipelineStage`/`DispositionReason`/`ShortlistDecision*`/`StageTransition*` deleted; `ShortlistEntry` drops `current_decision`/`current_stage`, keeps blind-review `blinded`/`display_label`; `JobListItem` drops `comment_count`/`source`/`external_last_seen_at`; no `approval_required_2nd_review`) — a merge-blocking cut guard enforces it. **Three DDL-alignment deviations**: `created_by`/`uploaded_by` are `str | None` (nullable TEXT actor labels), `JobCreate.blind_review` defaults `True` (blind-by-default), no `approval_required_2nd_review`. **`MatchWeights` is the ranking-weight contract** (0.6/0.3/0.1 top; 0.40/0.25/0.10/0.15/0.10 sub; `evidence_verify_fuzz=0.85`; frozen; sums-to-1.0 validator). Gates: offline green — ruff (no `--fix`), black, mypy --strict, **486 unit tests, 97.52% coverage**; reviewer APPROVE, security PASS, ranking-evals PASS (incl. a weight-validator mutation test). The GREEN step was completed by the coordinator directly after a coder subagent hit a session limit mid-port (`matching.py` + `__init__.py` hand-authored, re-verified by reviewer + evals). Security flagged a **redaction-boundary contract for Phase 5**: `ResumeOut`/`ResumeListItem` can serialize decrypted PII with `blinded=True`, so Phase 5 redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before DTO construction (the schema can't enforce it). Details: [docs/activity/phase-2-schemas.md](docs/activity/phase-2-schemas.md); rationale: [docs/adr/006-*.md](docs/adr/006-schema-port-trim-ddl-alignment.md).
 
@@ -49,7 +49,9 @@ The working copy now holds the **ranking-domain foundation** (Phase 0) on the te
      pytest tests/unit --cov=src --cov-fail-under=80 -q"
   ```
   (The `--fix` + `black` write pass auto-formats; the following `check`/`--check` then verify.)
-- **Docker is available.** Integration/e2e that need live Postgres/Neo4j/Redis run via Docker/testcontainers (CI does `gates-all`).
+- **Docker is available.** Integration/e2e that need live Postgres/Neo4j/Redis run via Docker/testcontainers (CI does `gates-all`). For testcontainers in the container, mount the docker socket + install `docker.io` + set `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`.
+- **Two container gotchas:** (1) prefix `docker run` with `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` or Git Bash mangles `/w/core`→`W:/core`. (2) stale `__pycache__` on the Windows bind mount can mask source edits (coarse mtime → reused bytecode); when re-running pytest after editing source, add `PYTHONDONTWRITEBYTECODE=1` or clear `__pycache__`.
+- **No git identity configured** — commit with inline `git -c user.name='Adam Salah' -c user.email=asalah@sfu.ca commit …`.
 - **Windows 11**, PowerShell primary; Bash tool available (Git Bash). `.claude/settings.json` hooks shell to `bash`, so Git Bash must be on PATH.
 - **`gh` CLI** authed as `adamsalah13`, **admin on the `humanaxiom` org**. Pushing to `humanaxiom/recruiter-assistant` is authorized.
 - Template Python is **3.11**; hris is **3.12**. Keep 3.11 (the template's) and port hris code to it — nothing in the ranking core needs 3.12.
@@ -61,6 +63,8 @@ Build harness (from the template): `planner`, `tester`, `coder`, `reviewer`, `se
 Domain additions (this project): **`data-pipeline`** (ranking coder with the invariants baked in) and **`ranking-evals`** (merge-blocking quality gate: precision@k, evidence-verification rate = 1.0, PII-leak check).
 
 Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (ReviewLoop, ≤5 iters) → reviewer + security + ranking-evals (all merge-blocking) → docs. `make gates` green before the next phase.
+
+**Subagent model tiering ([docs/SUBAGENT_MODEL_POLICY.md](docs/SUBAGENT_MODEL_POLICY.md)):** cheap producers + strong verifiers. The three merge-blocking gates (`reviewer`, `security`, `ranking-evals`) run on **opus** and are never downgraded; producers (`data-pipeline`, `planner`, `tester`, `coder`) default to **sonnet**; `docs` runs on **haiku**. Defaults are in each `.claude/agents/*.md` frontmatter. The coordinator overrides per-call: `data-pipeline` UP to `opus` for diffs touching the 4-stage ranking algorithm / evidence verifier / PII crypto / Neo4j scoring; `docs` UP to `sonnet` for load-bearing handoff/plan refreshes; `coder`/`Explore` DOWN to `haiku` for mechanical fixes / lookups. Quality holds because every producer's diff passes the opus-tier gates + CI before merge.
 
 ## Non-negotiables (from CLAUDE.md)
 
@@ -91,13 +95,18 @@ Phase 2 in docs/adr/006-*.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
-cover-letter/reverse-match/minimal viewer/blind-default). Phase 0 (seed & infra)
-is complete and merged to main via PR #1 (merge commit 8b2b47c), CI green. Phase 1
-(storage) is complete and green on feat/phase-1-storage (240 unit tests, 99.46%
-coverage). Phase 2 (schemas) is complete and green on feat/phase-2-schemas (486
-unit tests, 97.52% coverage; reviewer/security/ranking-evals all green) — the
-pydantic contract layer (core/src/schemas: jobs/resumes/matching) exists, review
-workflow cut, MatchWeights = the ranking-weight contract. Phase 3 is next.
+cover-letter/reverse-match/minimal viewer/blind-default). Phases 0, 1, and 2 are
+ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
+(storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3. main contains
+Phases 0-2 (486 unit tests, 97.52% coverage). The pydantic contract layer
+(core/src/schemas: jobs/resumes/matching) exists, review workflow cut,
+MatchWeights = the ranking-weight contract. Phase 3 is next.
+
+Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
+merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
+(data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
+data-pipeline UP to opus for the 4-stage ranking algorithm / evidence verifier /
+PII crypto / Neo4j scoring diffs. Defaults live in .claude/agents/*.md frontmatter.
 
 Start Phase 3 (Ingest + parse): port parsing/{extract,chunk} (PyMuPDF/python-docx),
 the LLM client + Redis embed cache, parse_resume/parse_job, cover-letter parse, and
