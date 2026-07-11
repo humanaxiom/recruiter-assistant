@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
-from src.models.pool import close_pool, get_db, init_pool
 
+from src.models.pool import close_pool, get_db, init_pool
 from src.settings import Settings
 
 

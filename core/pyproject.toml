@@ -10,6 +10,9 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "ASYNC"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection idiom: Depends()/Security() in arg defaults.
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]

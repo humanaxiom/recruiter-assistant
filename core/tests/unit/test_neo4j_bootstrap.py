@@ -25,9 +25,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from src.worker.neo4j_bootstrap import _STATEMENTS, bootstrap_neo4j_schema
 
 from src.settings import get_settings
+from src.worker.neo4j_bootstrap import _STATEMENTS, bootstrap_neo4j_schema
 
 VECTOR_INDEXES: tuple[str, ...] = (
     "resume_summary_idx",
