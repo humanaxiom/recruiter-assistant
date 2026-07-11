@@ -80,17 +80,18 @@ class ResumeChunk(BaseModel):
 class Bullet(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    text: str
-    chunk_id: str | None = None
+    text: str = Field(max_length=1000)
+    # A chunk id is a ``c_NNN``/``cl_NNN`` token — same cap as ResumeChunk.id.
+    chunk_id: str | None = Field(default=None, max_length=20)
 
 
 class Experience(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    company: str
-    title: str
-    start: str | None = None  # "YYYY-MM" or "YYYY"
-    end: str | None = None
+    company: str = Field(max_length=300)
+    title: str = Field(max_length=300)
+    start: str | None = Field(default=None, max_length=50)  # "YYYY-MM" or "YYYY"
+    end: str | None = Field(default=None, max_length=50)
     is_current: bool = False
     bullets: list[Bullet] = Field(default_factory=list, max_length=20)
 
@@ -98,9 +99,9 @@ class Experience(BaseModel):
 class EducationItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    degree: str
-    institution: str
-    field: str | None = None
+    degree: str = Field(max_length=300)
+    institution: str = Field(max_length=300)
+    field: str | None = Field(default=None, max_length=300)
     year: int | None = Field(default=None, ge=1900, le=2100)
 
     @field_validator("year", mode="before")
@@ -110,14 +111,19 @@ class EducationItem(BaseModel):
 
 
 class CandidateInfo(BaseModel):
-    """The PII subset of the parsed resume. Never embedded; encrypted at rest."""
+    """The PII subset of the parsed resume. Never embedded; encrypted at rest.
+
+    Every field is capped: these strings flow straight from an untrusted local
+    LLM response into a ``pgp_sym_encrypt`` BYTEA column, so a looping small
+    model must not be able to push an unbounded blob through the encrypt path.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-    name: str | None = None
-    email: str | None = None
-    phone: str | None = None
-    location: str | None = None
+    name: str | None = Field(default=None, max_length=300)
+    email: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=300)
+    location: str | None = Field(default=None, max_length=300)
 
 
 class ResumeSkill(BaseModel):

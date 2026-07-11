@@ -200,7 +200,9 @@ class Education(BaseModel):
     min_level: (
         Literal["high_school", "associate", "bachelors", "masters", "phd"] | None
     ) = None
-    fields: list[str] = Field(default_factory=list)
+    # Capped like every other LLM-emitted list on this shape: an uncapped list
+    # is the same unbounded-JSONB hole as an uncapped string.
+    fields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class JDExtracted(BaseModel):
