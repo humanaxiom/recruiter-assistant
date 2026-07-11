@@ -21,8 +21,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-import asyncpg
-from asyncpg import Record
+from src.services import DbConn
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ VALUES ($1, $2, $3, $4::jsonb)
 
 
 async def enqueue_outbox(
-    conn: asyncpg.Connection[Record],
+    conn: DbConn,
     *,
     aggregate: str,
     aggregate_id: UUID,

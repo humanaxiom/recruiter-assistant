@@ -22,10 +22,8 @@ import json
 import logging
 from uuid import UUID
 
-import asyncpg
-from asyncpg import Record
-
 from src.schemas.resumes import CandidateInfo, CoverLetterParsed, ResumeParsed
+from src.services import DbConn
 from src.services import pii as pii_service
 
 logger = logging.getLogger(__name__)
@@ -58,7 +56,7 @@ WHERE id = $1 AND status IN ('uploaded', 'parsing')
 
 
 async def encrypt_pii_via_session(
-    conn: asyncpg.Connection[Record], candidate: CandidateInfo
+    conn: DbConn, candidate: CandidateInfo
 ) -> EncryptedPii:
     """Encrypt the candidate's PII and derive the lookup hash.
 
@@ -80,7 +78,7 @@ async def encrypt_pii_via_session(
 
 
 async def record_parsed(
-    conn: asyncpg.Connection[Record],
+    conn: DbConn,
     resume_id: UUID,
     parsed: ResumeParsed,
     pii: EncryptedPii,
@@ -114,9 +112,7 @@ async def record_parsed(
     return applied
 
 
-async def record_parse_failure(
-    conn: asyncpg.Connection[Record], resume_id: UUID, reason: str
-) -> None:
+async def record_parse_failure(conn: DbConn, resume_id: UUID, reason: str) -> None:
     """Mark the résumé failed and surface why. Terminal — no retry."""
     await conn.execute(_RECORD_FAILURE_SQL, resume_id, reason[:_MAX_REASON_CHARS])
     logger.warning(

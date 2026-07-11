@@ -39,9 +39,7 @@ from __future__ import annotations
 
 import hashlib
 
-import asyncpg
-from asyncpg import Record
-
+from src.services import DbConn
 from src.settings import get_settings
 
 _SET_KEY_SQL = "SELECT set_config('app.pii_key', $1, true)"
@@ -49,7 +47,7 @@ _ENCRYPT_SQL = "SELECT pgp_sym_encrypt($1::text, current_setting('app.pii_key'))
 _DECRYPT_SQL = "SELECT pgp_sym_decrypt($1::bytea, current_setting('app.pii_key'))"
 
 
-async def set_pii_key(conn: asyncpg.Connection[Record]) -> None:
+async def set_pii_key(conn: DbConn) -> None:
     """SET LOCAL ``app.pii_key`` on the current transaction.
 
     Must be called inside an open ``conn.transaction()`` block: SET LOCAL is
@@ -62,9 +60,7 @@ async def set_pii_key(conn: asyncpg.Connection[Record]) -> None:
     await conn.execute(_SET_KEY_SQL, get_settings().pii_key)
 
 
-async def encrypt(
-    conn: asyncpg.Connection[Record], plaintext: str | None
-) -> bytes | None:
+async def encrypt(conn: DbConn, plaintext: str | None) -> bytes | None:
     """Return ``pgp_sym_encrypt(plaintext, app.pii_key)::bytea``, or ``None``.
 
     A ``None`` plaintext short-circuits WITHOUT touching the connection — an
@@ -78,9 +74,7 @@ async def encrypt(
     return result
 
 
-async def decrypt(
-    conn: asyncpg.Connection[Record], ciphertext: bytes | None
-) -> str | None:
+async def decrypt(conn: DbConn, ciphertext: bytes | None) -> str | None:
     """Return ``pgp_sym_decrypt(ciphertext, app.pii_key)``, or ``None``.
 
     The caller's transaction must have called ``set_pii_key`` first; if it has

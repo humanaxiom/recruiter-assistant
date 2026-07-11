@@ -31,10 +31,8 @@ import json
 import logging
 from uuid import UUID
 
-import asyncpg
-from asyncpg import Record
-
 from src.schemas.jobs import JDExtracted
+from src.services import DbConn
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +56,7 @@ WHERE id = $1 AND status = 'draft'
 
 
 async def record_parsed(
-    conn: asyncpg.Connection[Record],
+    conn: DbConn,
     job_id: UUID,
     extracted: JDExtracted,
     parsed_at: dt.datetime,
@@ -81,9 +79,7 @@ async def record_parsed(
     return applied
 
 
-async def record_parse_failure(
-    conn: asyncpg.Connection[Record], job_id: UUID, reason: str
-) -> None:
+async def record_parse_failure(conn: DbConn, job_id: UUID, reason: str) -> None:
     """Surface a parse failure on the job row. Status stays 'draft'."""
     await conn.execute(_RECORD_FAILURE_SQL, job_id, reason[:_MAX_REASON_CHARS])
     logger.warning("job.parse_failed job_id=%s reason=%s", job_id, reason[:200])
