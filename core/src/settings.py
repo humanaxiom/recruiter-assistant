@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     llm_model_embedding: str = "nomic-embed-text"
     llm_embedding_dim: int = 768  # CONTRACT: == Neo4j `vector.dimensions`
     llm_timeout_s: float = 120.0
+    llm_max_retries: int = 2
+    llm_breaker_threshold: int = 10  # consecutive failures before the breaker opens
+    llm_breaker_cooldown_s: float = 30.0
+    # Ollama's OpenAI-compat layer only intermittently honours `think: false`, so a
+    # reasoning model (the default gpt-oss:20b is one) can burn its whole token budget
+    # on a discarded reasoning trace and return empty content. The native /api/chat
+    # route honours it reliably — flip this on if JSON-mode parses come back empty.
+    llm_ollama_native: bool = False
+    debug_llm: bool = False  # MUST stay False by default — prompts carry PII
+
+    # ── Embedding cache (Redis read-through) ─────────────────────────────────
+    embedding_cache_ttl_s: int = 60 * 60 * 24 * 90  # 90 days
 
     # ── Storage (filesystem BlobStore root — no MinIO/S3) ────────────────────
     storage_dir: str = "/data"
