@@ -1,0 +1,51 @@
+# Phase-4a ranking-evals thresholds.
+#
+# Consumed by the `ranking-evals` merge-blocking gate (.claude/agents/ranking-evals.md)
+# and (once 4c lands the orchestrator) by run_evals.py. `core/tests/unit/test_evals_corpus.py`
+# parses this file today to guard its shape/keys before any evals code exists.
+#
+# Keys are read literally by both consumers — do not rename a key without updating
+# both the gate doc and run_evals.py in the same change.
+
+[precision_at_k]
+# Top-k shortlist quality: >= min_precision of the top-k entries must be tagged
+# 'strong' or 'borderline' in fixtures/labels.json; none may be 'weak' or
+# 'adversarial'. With this corpus (3 strong + 2 borderline = 5 "good" resumes)
+# a correct ranking should fill k=5 entirely with good tags.
+k = 5
+min_precision = 0.8
+
+[evidence]
+# Fraction of surfaced evidence quotes that fuzzy-match (>= fuzz_threshold,
+# rapidfuzz-style ratio) their cited resume chunk. Must be 1.0 -- any
+# unverifiable/fabricated quote reaching output is a hard fail (anti-fabrication
+# invariant, docs/EXTRACTION_PLAN.md "Contract invariants").
+verification_rate_min = 1.0
+# SINGLE SOURCE OF TRUTH NOTE: this value must always equal
+# `src.schemas.matching.MatchWeights().evidence_verify_fuzz` (currently 0.85).
+# It is repeated here only because thresholds.toml must be readable without
+# importing src.* (see run_evals.py's pre-4c import-guard). Do NOT let this
+# drift from MatchWeights -- `test_evals_corpus.py` asserts equality between
+# the two on every gate run.
+fuzz_threshold = 0.85
+
+[pii]
+# The embedding text and any anonymized/exported shortlist output must never
+# contain a fixture's candidate name/email/phone (see fixtures/labels.json and
+# the *@example.test / 555-01xx synthetic markers in every resume fixture).
+leak_check = true
+# ADR-007's N1 residual: free-text experience/education fields (company names,
+# institutions, bullet text) are allowed to appear -- only the CandidateInfo
+# contact fields (name/email/phone) are the leak boundary.
+allow_structured_fields = true
+
+[determinism]
+# Same inputs -> same ranking order. Evals pin LLM temperature to 0 and expect
+# score_final to be byte-identical (delta 0.0) across repeated runs.
+temperature = 0.0
+max_score_delta = 0.0
+
+# [reverse_match]
+# Placeholder -- added in Phase 4d once match_resume_to_jobs / reverse_match_job
+# land. Will gate JobMatchEntry ranking quality the same way precision_at_k
+# gates ShortlistEntry ranking quality.

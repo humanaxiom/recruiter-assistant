@@ -1,0 +1,82 @@
+{
+  "candidate": {
+    "name": "Morgan Lee",
+    "email": "morgan.lee@example.test",
+    "phone": "555-0104",
+    "location": "Ottawa, ON"
+  },
+  "summary": "Backend developer with 4 years building Python services on PostgreSQL and Docker; scheduling has been cron-based rather than a dedicated workflow orchestrator.",
+  "total_years_experience": 4,
+  "skills": [
+    { "name": "Python", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 3, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Docker", "years": 2, "last_used_year": 2025, "evidence_chunk_ids": ["c_003"] },
+    { "name": "REST API design", "years": 2, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Cron scheduling", "years": 3, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] }
+  ],
+  "experience": [
+    {
+      "company": "Capital Ledger Systems",
+      "title": "Backend Developer",
+      "start": "2022-02",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Built internal Python REST API endpoints for the invoicing module.", "chunk_id": "c_001" },
+        { "text": "Wrote PostgreSQL queries and lightweight schema changes for the invoicing module.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Rideau Software Group",
+      "title": "Junior Developer",
+      "start": "2020-08",
+      "end": "2022-01",
+      "is_current": false,
+      "bullets": [
+        { "text": "Deployed a small set of internal tools as Docker containers on a shared host.", "chunk_id": "c_003" },
+        { "text": "Scheduled nightly report generation with cron jobs rather than a workflow orchestrator.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Rideau Valley College",
+      "field": "Computer Science",
+      "year": 2020
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Built internal Python REST API endpoints for the invoicing module at Capital Ledger Systems."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Wrote PostgreSQL queries and lightweight schema changes for the invoicing module at Capital Ledger Systems."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Deployed a small set of internal tools as Docker containers on a shared host at Rideau Software Group."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Scheduled nightly report generation with cron jobs rather than a workflow orchestrator at Rideau Software Group."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Rideau Valley College, graduated 2020."
+    }
+  ],
+  "cover_letter_chunks": []
+}

@@ -1,0 +1,56 @@
+{
+  "candidate": {
+    "name": "Riley Chen",
+    "email": "riley.chen@example.test",
+    "phone": "555-0108",
+    "location": "Edmonton, AB"
+  },
+  "summary": "Retail operations manager transitioning into tech; self-taught SQL for store reporting, no professional Python, Airflow, or Docker experience.",
+  "total_years_experience": 8,
+  "skills": [
+    { "name": "SQL", "years": 2, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Excel", "years": 8, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] }
+  ],
+  "experience": [
+    {
+      "company": "Northgate Retail Group",
+      "title": "Store Operations Manager",
+      "start": "2018-03",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Wrote basic SQL SELECT queries against the store's point-of-sale reporting database to pull weekly sales summaries.", "chunk_id": "c_001" },
+        { "text": "Built Excel dashboards tracking staffing, inventory shrink, and sales targets for a 40-person team.", "chunk_id": "c_002" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Diploma, Business Administration",
+      "institution": "Northern Alberta Business College",
+      "field": "Business Administration",
+      "year": 2016
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Wrote basic SQL SELECT queries against the store's point-of-sale reporting database to pull weekly sales summaries at Northgate Retail Group."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Built Excel dashboards tracking staffing, inventory shrink, and sales targets for a 40-person team at Northgate Retail Group."
+    },
+    {
+      "id": "c_003",
+      "section": "education",
+      "page": 1,
+      "text": "Diploma, Business Administration, Northern Alberta Business College, graduated 2016."
+    }
+  ],
+  "cover_letter_chunks": []
+}
