@@ -19,11 +19,11 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, and 2 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`). All merged 2026-07-11.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12.
 
-### Phase 3 is BUILT + GREEN + FULLY RE-AUDITED on branch `feat/phase-3-ingest-parse` — NOT merged, NOT yet PR'd
+### Phase 3 is MERGED to `main` (PR #6, merge `49196d7`) — DONE
 
-**Read the "Phase 3 resume — exact next step" section below FIRST.** The branch is **20 commits ahead of `main`** (final HEAD `c7b497e`), working tree clean, all gates green **offline + integration**, and **all three merge-blocking gates have now been re-run to green on final HEAD** (reviewer APPROVE, security PASS, ranking-evals PASS) across **four** rounds of findings-and-fix. The re-audit that the previous version of this handoff said was pending is **done**. The immediate next action is a **human check-in before the PR is opened** (see "Phase 3 resume" below) — not further gate work, and not Phase 4.
+Phase 3 (ingest + parse) landed on `main` on 2026-07-12 via PR #6 after **four rounds of gate findings-and-fix** on branch `feat/phase-3-ingest-parse` (now deleted). All three merge-blocking gates were green on final HEAD `c7b497e` (reviewer APPROVE, security PASS, ranking-evals PASS) and **CI (`gates-all`) went fully green before merge**. The gate history below is retained because its findings (especially the PII-at-rest / outbox-embedding boundary) are load-bearing context for Phase 4. **The next action is Phase 4 — see "Phase 4 resume" below.**
 
 **What landed on the branch (TDD, red→green throughout):** the full ingest/parse pipeline ported from `C:\repos\hris`:
 - `core/src/pipeline/parsing/{extract,chunk}.py` — PyMuPDF/python-docx/striprtf extraction + section-aware chunker (chunk ids **one-based**, `c_001`/`cl_001`; `_sanitize` NUL-strip preserved).
@@ -63,7 +63,7 @@ Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ing
 
 **Note on `core/src/gates/`:** the deleted `gates/` was the template demo's *product-code* gate-runner, not the build harness. `make gates`, CI, `.claude/`, and pre-commit are all intact. The Phase 0 checklist's "keep gates" meant the build suite.
 
-**Not started:** Phase 4 onward — see below. (Phase 3 is now built + green + re-audited, not yet merged; see "Current state" above.)
+**Not started:** Phase 4 onward — see below. (Phase 3 is merged to `main`; see "Current state" above.)
 
 **Decisions locked:** template-first port · filesystem storage (MinIO dropped — community edition archived 2026-04-25) · keep Neo4j (load-bearing) · v1 includes cover-letter/motivation, reverse-match, a minimal Flask viewer, and blind-review redaction ON by default.
 
@@ -99,23 +99,21 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); TDD (failing tests first); offline only (no cloud endpoints — local Ollama/OpenAI-compatible client); config via settings; a single red gate = not done. Privacy: PII never enters embeddings; anonymization non-destructive; PIPEDA/FIPPA.
 
-## Phase 3 resume — EXACT next step (do this first, before anything else)
+## Phase 4 resume — EXACT next step (do this first, before anything else)
 
-Phase 3 is **built, green, and fully re-audited — all three merge-blocking gates (reviewer, security,
-ranking-evals) are green on final HEAD `c7b497e`, across four rounds of findings-and-fix (see "Gate
-history" above: round 1 general findings, round 2 F1–F6, round 3 F1/F2/F3/F5, round 4 F1-R). The docs
-finalize pass is done: ADR-007 records the full PII-at-rest boundary and all round-3/4 findings,
-`docs/EXTRACTION_PLAN.md`'s Phase 3 row is ✅, and this handoff reflects the re-audited state.** The
-next actions, in order:
+Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). `main`
+now holds the full ingest/parse pipeline (729 unit tests, ~96.6% coverage). The next phase is **Phase 4
+— Ranking engine** per the plan table. The recommended order:
 
-1. **Check in with the human before opening the PR** — they asked to gate Phase 4 behind a check-in,
-   and that check-in has **not** happened yet. Do this before step 2, not after.
-2. **After the check-in**, push `feat/phase-3-ingest-parse`, open the PR to `main` via `gh` (authed as
-   `adamsalah13`, admin on `humanaxiom`), let CI (`gates-all`) go green, then merge.
-3. **Only then** start Phase 4 (Ranking engine) per the plan table.
-
-Do **not** claim the PR is opened or merged until it actually is — as of this writing neither has
-happened.
+1. **Create the evals corpus FIRST** — `core/tests/evals/` does not exist yet: the labelled
+   resumes-vs-JD fixture corpus + `thresholds.toml` (precision@k, evidence-verification-rate) must land
+   **before** the matching engine so its first green build is falsifiable. `ranking-evals` flagged this
+   as a hard Phase-4 prerequisite across three re-audit rounds. Do this before writing matching code.
+2. **Then** run the per-phase subagent loop for Phase 4: planner → tester (+ evals fixture) →
+   `data-pipeline` coder (override UP to **opus** — Phase 4 is the 4-stage ranking algorithm / evidence
+   verifier / Neo4j scoring, exactly the diffs the model policy escalates) → reviewer + security +
+   ranking-evals (all merge-blocking) → docs. `make gates` green before merge.
+3. Branch `feat/phase-4-...`, TDD red→green, then PR to `main` via `gh` and let CI go green.
 
 **Carried into Phase 4** (from Phase 3 gate findings — don't lose these):
 - The **outbox drainer** (`project_to_graph`) lands in Phase 4 — it consumes the `job.parsed`/`resume.parsed` rows Phase 3 enqueues. It **must not** project `parsed.candidate` into Neo4j and **must not** log the payload. hris's `_resume_projection_tx` only sets `total_years_experience` on the `Resume` node — keep it that way.
@@ -162,43 +160,41 @@ Phase 2 in docs/adr/006-*.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
-cover-letter/reverse-match/minimal viewer/blind-default). Phases 0, 1, and 2 are
+cover-letter/reverse-match/minimal viewer/blind-default). Phases 0, 1, 2, and 3 are
 ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
-(storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3. main contains
-Phases 0-2 (486 unit tests, 97.52% coverage). The pydantic contract layer
-(core/src/schemas: jobs/resumes/matching) exists, review workflow cut,
-MatchWeights = the ranking-weight contract.
+(storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3, Phase 3 (ingest +
+parse) PR #6 (merge 49196d7). main now holds the full ingest/parse pipeline (729 unit
+tests, ~96.6% coverage): parsing/{extract,chunk}, the httpx LLM client + Redis embed
+cache, parse_job/parse_resume, PII encryption on parse, and the PII-clean outbox
+boundary (ADR-007). The pydantic contract layer (core/src/schemas) exists,
+review workflow cut, MatchWeights = the ranking-weight contract.
 
-Phase 3 (ingest + parse) is BUILT, GREEN, and FULLY RE-AUDITED on branch
-feat/phase-3-ingest-parse (20 commits ahead of main, HEAD c7b497e; 729 unit tests,
-~96.6% coverage) — all three merge-blocking gates (reviewer/security/ranking-evals)
-are green after four rounds of findings-and-fix. It is NOT yet merged. See
-"Phase 3 resume — EXACT next step" in HANDOFF.md: the next action is a HUMAN
-CHECK-IN before the PR is opened (do this first — do not open the PR or start
-Phase 4 without it), then push + open the PR via gh + let CI go green + merge,
-then start Phase 4.
+The next phase is Phase 4 — Ranking engine. See "Phase 4 resume — EXACT next step"
+in HANDOFF.md. Do the evals corpus FIRST (core/tests/evals/ + thresholds.toml —
+precision@k / evidence-verification-rate; it does NOT exist yet and is a hard
+prerequisite so the matching engine's first green build is falsifiable), THEN run
+the per-phase subagent loop (planner → tester → data-pipeline coder → reviewer +
+security + ranking-evals → docs) on a feat/phase-4-... branch.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 (data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
 data-pipeline UP to opus for the 4-stage ranking algorithm / evidence verifier /
-PII crypto / Neo4j scoring diffs. Defaults live in .claude/agents/*.md frontmatter.
+PII crypto / Neo4j scoring diffs (Phase 4 is squarely this). Defaults live in
+.claude/agents/*.md frontmatter.
 
-Phase 4 (Ranking engine) carries forward from Phase 3's gate findings: the outbox
-drainer (project_to_graph) must not project parsed.candidate or log the payload;
-core/tests/evals/ (precision@k / evidence-verification-rate corpus) must exist
-before Phase 4's matching engine; a chunk-cap coupling nit; and the N1/N2 accepted
-residuals from ADR-007 §7 (structured fields ride the outbox unscrubbed — non-contact;
-the embed scrub errs toward over-redaction). Further out: Phase 5 redaction MUST mask
-candidate.*/candidate_name/cover_letter_text before building ResumeOut (schema can't
-enforce it, ADR-006 §4); Phase 6 must set JobOut.blind_review explicitly (the DTO
-defaults it False, fail-open).
+Phase 4 carries forward from Phase 3's gate findings: the outbox drainer
+(project_to_graph) must not project parsed.candidate or log the payload;
+core/tests/evals/ must exist before the matching engine; a chunk-cap coupling nit;
+and the N1/N2 accepted residuals from ADR-007 §7 (structured fields ride the outbox
+unscrubbed — non-contact; the embed scrub errs toward over-redaction). Further out:
+Phase 5 redaction MUST mask candidate.*/candidate_name/cover_letter_text before
+building ResumeOut (schema can't enforce it, ADR-006 §4); Phase 6 must set
+JobOut.blind_review explicitly (the DTO defaults it False, fail-open).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening the Phase 3 PR, and again before
-starting Phase 4.
+HANDOFF.md. Check in with me before opening the Phase 4 PR.
 
-See the "Phase 3 starting map (verified)" subsection above (historical — Phase 3
-is now built) for the dependency gap, LLM-client decision, and PII port-verbatim
-details that guided the port.
+See the "Phase 3 starting map (verified)" subsection above (historical) and
+docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.
 ```
