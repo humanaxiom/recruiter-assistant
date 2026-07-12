@@ -5,7 +5,7 @@
     "phone": "555-0115",
     "location": "Halifax, NS"
   },
-  "summary": "Backend/data engineer building Python REST platforms, PostgreSQL data infrastructure, Apache Airflow and Kafka pipelines, and Docker/Kubernetes/Terraform operations — comfortably above the role's 5-year minimum without being overqualified for it.",
+  "summary": "Backend/data engineer building Python REST platforms, PostgreSQL data infrastructure, Apache Airflow and Kafka pipelines, and Docker/Kubernetes/Terraform operations.",
   "total_years_experience": 6,
   "skills": [
     { "name": "Python", "years": 14, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },

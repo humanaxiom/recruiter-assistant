@@ -5,7 +5,7 @@
     "phone": "555-0111",
     "location": "Fredericton, NB"
   },
-  "summary": "Backend engineer with 6 years building Python REST services on PostgreSQL, Apache Airflow orchestration, and Docker/Kubernetes deployment; came into engineering via a Mechanical Engineering degree rather than a Computer Science one.",
+  "summary": "Backend engineer with 6 years building Python REST services on PostgreSQL, Apache Airflow orchestration, and Docker/Kubernetes deployment.",
   "total_years_experience": 6,
   "skills": [
     { "name": "Python", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },

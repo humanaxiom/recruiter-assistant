@@ -60,7 +60,7 @@ try:
         run_match,
     )
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised until 4c lands
-    run_match = None  # type: ignore[assignment]
+    run_match = None
     _ORCHESTRATOR_IMPORT_ERROR = exc
 else:  # pragma: no cover - not reachable until 4c lands
     _ORCHESTRATOR_IMPORT_ERROR = None

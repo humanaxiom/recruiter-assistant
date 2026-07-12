@@ -181,13 +181,13 @@
       "dimension": "education",
       "higher_id": "r14_devon_ashworth",
       "lower_id": "r11_skyler_brooks",
-      "rationale": "r14 and r11 are identical in skills, cited chunks, experience, and total_years_experience. r14 holds a CS/allowed-field (Computer Science) bachelor's degree; r11 holds an otherwise-equivalent bachelor's in a non-allowed field (Mechanical Engineering). MatchWeights.education_partial (0.5) should demote r11 relative to r14 -- education is otherwise a same-tier, within-tier signal that a dimension-blind ranker could ignore without failing any tier-level invariant."
+      "rationale": "r14 and r11 are identical in skills, cited chunks, experience, total_years_experience, AND summary (the summary is deliberately degree-neutral because _build_summary_text embeds it into summary_emb; if it narrated the degree it would be a second, uncontrolled differentiator on top of the education entry). They differ ONLY in the education field: r14 holds a CS/allowed-field (Computer Science) bachelor's degree; r11 holds an otherwise-equivalent bachelor's in a non-allowed field (Mechanical Engineering). MatchWeights.education_partial (0.5) should demote r11 relative to r14 -- education is otherwise a same-tier, within-tier signal that a dimension-blind ranker could ignore without failing any tier-level invariant."
     },
     {
       "dimension": "overqual",
       "higher_id": "r15_cameron_whitfield",
       "lower_id": "r13_quinn_delgado",
-      "rationale": "r15 and r13 are identical in skills, cited chunks, experience, and education. r15's total_years_experience=6 gives ratio 6/5=1.2 (< MatchWeights.overqual_ratio=2.0), so it is NOT overqualified; r13's total_years_experience=14 gives ratio 14/5=2.8 (>= overqual_ratio), triggering the overqual penalty (slope/floor). A dimension-blind ranker would score both identically since every other field matches."
+      "rationale": "r15 and r13 are identical in skills, cited chunks, experience, education, AND summary. The summary is deliberately years/seniority-neutral: total_years_experience is NOT embedded by _build_summary_text, so if the summary narrated the years or 'overqualified' it would become the SOLE embedded differentiator and leak the overqual signal into summary_emb (the vector sub-score) -- letting a no-op overqual penalty pass 4c's ordering assertion via the vector path. They differ ONLY in total_years_experience: r15=6 gives ratio 6/5=1.2 (< MatchWeights.overqual_ratio=2.0), so NOT overqualified; r13=14 gives ratio 14/5=2.8 (>= overqual_ratio), triggering the overqual penalty (slope/floor). Every embedded field now matches, so any score gap must come from the structured overqual penalty alone."
     },
     {
       "dimension": "motivation",

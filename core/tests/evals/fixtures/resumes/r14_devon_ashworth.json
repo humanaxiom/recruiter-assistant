@@ -5,7 +5,7 @@
     "phone": "555-0114",
     "location": "Moncton, NB"
   },
-  "summary": "Backend engineer with 6 years building Python REST services on PostgreSQL, Apache Airflow orchestration, and Docker/Kubernetes deployment; holds a Computer Science bachelor's degree.",
+  "summary": "Backend engineer with 6 years building Python REST services on PostgreSQL, Apache Airflow orchestration, and Docker/Kubernetes deployment.",
   "total_years_experience": 6,
   "skills": [
     { "name": "Python", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },

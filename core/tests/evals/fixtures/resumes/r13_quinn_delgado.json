@@ -5,7 +5,7 @@
     "phone": "555-0113",
     "location": "Victoria, BC"
   },
-  "summary": "Principal-level backend/data engineer with 14 years building Python REST platforms, PostgreSQL data infrastructure, Apache Airflow and Kafka pipelines, and Docker/Kubernetes/Terraform operations — well above the role's 5-year minimum.",
+  "summary": "Backend/data engineer building Python REST platforms, PostgreSQL data infrastructure, Apache Airflow and Kafka pipelines, and Docker/Kubernetes/Terraform operations.",
   "total_years_experience": 14,
   "skills": [
     { "name": "Python", "years": 14, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },

@@ -1074,6 +1074,12 @@ def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None
         r11["experience"] == r14["experience"]
     ), "twins must have identical experience (company/title/dates/bullets)"
     assert r11["total_years_experience"] == r14["total_years_experience"]
+    # summary is embedded by _build_summary_text -> summary_emb (the vector
+    # sub-score's input), so it MUST be byte-identical or it becomes an
+    # uncontrolled second differentiator on top of the education entry.
+    assert (
+        r11["summary"] == r14["summary"]
+    ), "twins must share a byte-identical, degree-neutral summary (it is embedded)"
 
     # Every chunk cited by a skill or experience bullet must be byte-identical
     # between the twins; only the (uncited) education chunk may narrate the
@@ -1127,6 +1133,13 @@ def test_r15_overqual_twin_is_identical_to_r13_except_total_years_experience() -
     ), "twins must have identical experience"
     assert r13["education"] == r15["education"], "twins must share identical education"
     assert r13["chunks"] == r15["chunks"], "twins must share byte-identical chunks"
+    # total_years_experience is NOT embedded, so summary is the ONLY place the
+    # overqual signal could leak into summary_emb (the vector sub-score). It
+    # must be byte-identical, or a no-op overqual penalty could still be
+    # "rewarded" via the vector path and pass 4c's ordering assertion.
+    assert (
+        r13["summary"] == r15["summary"]
+    ), "twins must share a byte-identical, seniority/years-neutral summary"
 
     assert r13["total_years_experience"] != r15["total_years_experience"], (
         "the twins must differ on total_years_experience -- that is the sole "
@@ -1164,6 +1177,9 @@ def test_r16_motivation_twin_is_identical_to_r04_except_cover_letter_chunks() ->
     assert r04["education"] == r16["education"], "twins must share identical education"
     assert r04["chunks"] == r16["chunks"], "twins must share byte-identical chunks"
     assert r04["total_years_experience"] == r16["total_years_experience"]
+    assert (
+        r04["summary"] == r16["summary"]
+    ), "twins must share a byte-identical summary (it is embedded)"
 
     assert r04[
         "cover_letter_chunks"
