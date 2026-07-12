@@ -92,8 +92,24 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
             )
             return "failed"
 
+        # The summary embed has the same failure split as the core LLM call:
+        # a PERMANENT LLMOutputInvalidError (dim/count mismatch) is recorded on
+        # the row and returns "failed" with NO outbox row — otherwise it escapes
+        # uncaught, stranding the 'draft' row and re-burning the JD extraction on
+        # every arq retry. A TRANSIENT LLMUnavailableError deliberately escapes
+        # so arq retries the genuine Ollama outage. (No PII scrub here: the JD
+        # summary carries no candidate identity.)
         summary_text = build_summary_text(extracted)
-        [embedding] = await embedder.embed([summary_text])
+        try:
+            [embedding] = await embedder.embed([summary_text])
+        except LLMOutputInvalidError as exc:
+            log.error("parse_job.embed_invalid job_id=%s error=%s", job_id_str, exc)
+            await job_service.record_parse_failure(
+                conn,
+                job_id=job_id,
+                reason=f"embedding failed: {exc}"[:_MAX_REASON_CHARS],
+            )
+            return "failed"
 
         # The write-back and its outbox row commit together or not at all.
         async with conn.transaction():

@@ -101,17 +101,39 @@ Candidate identity exists in three places with three different postures:
   *system of record* Phase 4's evidence-verification stage reads chunk text from; Phase 5 redaction
   handles display-time masking (ADR-006 §4). `resumes.parsed` deliberately KEEPS full chunk text.
 - **Cleartext in transit — the `outbox` payload — carries NO candidate identity.** The `resume.parsed`
-  event is projected into Neo4j by Phase 4 and needs skills/experience/education/summary +
+  event is projected into Neo4j by Phase 4 and needs skills/experience/education +
   embeddings only, NOT identity. The `outbox` is an unencrypted jsonb table, so the payload
-  deliberately excludes **both** the structured `candidate` block **and** raw chunk TEXT
-  (`parsed.chunks[].text` / `parsed.cover_letter_chunks[].text`) — dropping the structured block
-  alone was "theatre" while header-chunk text still shipped name/email/phone. Chunk `id`/`section`/
-  `page` stay (embeddings are keyed by chunk id; Phase 4 reads any text preview from `resumes.parsed`).
-  Embedding text itself never carries name/email/phone/location (`_build_summary_text`) — embeddings
-  are PII-equivalent under PIPEDA/FIPPA and land in a Neo4j index.
+  deliberately excludes the structured `candidate` block, raw chunk TEXT
+  (`parsed.chunks[].text` / `parsed.cover_letter_chunks[].text`), **and** the cleartext `summary`
+  field — dropping the structured block alone was "theatre" while header-chunk text (and a
+  name-opening `summary`) still shipped name/email/phone. Chunk `id`/`section`/`page` stay
+  (embeddings are keyed by chunk id; Phase 4 reads any text preview and the summary from
+  `resumes.parsed`, the system of record).
+- **Embeddings are PII-equivalent and are made outbox-safe at the embedding boundary.** `chunk_embs`
+  and `summary_emb` are separate top-level payload keys that ride the same unencrypted outbox and are
+  projected into a Neo4j vector index in Phase 4, so a `nomic-embed-text` vector of a header chunk (or
+  of a summary a small model opened with the candidate's own name) would be PII-equivalent under
+  PIPEDA/FIPPA. Every string handed to the embedder is therefore scrubbed by a deterministic
+  `_redact_candidate_pii(text, candidate)` pass — each non-empty structured identifier
+  (name/email/phone/location) is removed as a whole, case-insensitive literal substring — applied to
+  BOTH each chunk's text and the composed summary text before `embed(...)`. This is on TOP of
+  `_build_summary_text` (which still never reads the `CandidateInfo` block). Only the embedder's INPUT
+  is scrubbed: the chunk text and `summary` STORED in `resumes.parsed` stay full/cleartext at rest
+  (system of record). The `resume_core_v1` prompt also instructs the model to keep name/contact out
+  of `summary` (defense in depth).
 
 The split, stated plainly: **identity may live at rest behind the DB boundary (encrypted, and
-cleartext in `resumes.parsed`); identity must NOT ride the outbox into the graph.**
+cleartext in `resumes.parsed`); identity must NOT ride the outbox into the graph — not as the
+structured block, not as chunk/summary text, and not encoded inside an embedding vector.**
+
+### 7a. Redis backs the embedding cache (accepted deviation from CLAUDE.md's "Redis only as arq broker")
+
+`CachedEmbedder` reads through a Redis `emb:v1:*` keyspace (keyed on `sha256(model\ntext)`, TTL from
+`settings.embedding_cache_ttl_s`) on the SAME Redis instance that backs the arq broker, in a distinct
+key space. CLAUDE.md says "Redis only as arq broker"; this is a recorded, ratified decision, not
+drift — local re-embedding is the pipeline's slowest step, the cache serves partial batch hits, and
+the vectors are non-authoritative (Neo4j is the vector system of record). No PII lands in Redis: the
+cache keys and values are computed from the already-`_redact_candidate_pii`-scrubbed embedder input.
 
 ### 8. Permanent-vs-transient error split in `parse_resume`
 
@@ -149,7 +171,7 @@ graph TB
     subgraph PII["PII-at-rest boundary"]
         ENC["candidate_* BYTEA<br/>ENCRYPTED"]
         PARSED["resumes.parsed jsonb<br/>CLEARTEXT identity + chunk text (ACCEPTED v1)"]
-        OUT["outbox payload<br/>NO candidate block · NO chunk text<br/>skills/exp/edu/summary + embeddings only"]
+        OUT["outbox payload<br/>NO candidate block · NO chunk text · NO summary<br/>skills/exp/edu + PII-scrubbed embeddings only"]
     end
 
     Trust --> Parse

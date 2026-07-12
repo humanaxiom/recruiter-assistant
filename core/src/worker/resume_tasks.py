@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 from collections import Counter
 from typing import Any
 from uuid import UUID
@@ -62,6 +63,7 @@ from src.pipeline.parsing import (
 from src.pipeline.skills import canonicalize_skill_names, match_skills_in_text
 from src.prompts import load_prompt
 from src.schemas import (
+    CandidateInfo,
     CoverLetterParsed,
     ResumeChunk,
     ResumeCore,
@@ -271,6 +273,42 @@ async def _parse_cover_letter(
 # ---------------- embeddings ----------------
 
 
+def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
+    """Strip the candidate's own name/email/phone/location out of a piece of
+    text BEFORE it is embedded — embeddings are PII-equivalent (PIPEDA/FIPPA)
+    and both ``chunk_embs`` and ``summary_emb`` ride the unencrypted outbox
+    into Neo4j in Phase 4. A header chunk is the candidate's verbatim contact
+    block; a small model sometimes opens ``summary`` with the candidate's own
+    name — either way the resulting vector encodes identity unless the input
+    string is scrubbed first.
+
+    Deterministic and surgical: each NON-EMPTY structured identifier is removed
+    as a whole, case-insensitive LITERAL substring (``re.escape`` — never a
+    per-token or regex match), so an unrelated reference's surname ("John Doe"
+    next to the candidate's "Jane Doe") is untouched. Whitespace left by a
+    removal is collapsed. When the candidate carries no identifiers the text is
+    returned verbatim. This function only scrubs the EMBEDDER'S input — the
+    ``resumes.parsed`` chunk text/summary stay full/cleartext at rest
+    (ADR-007 §6, system of record).
+    """
+    identifiers = [
+        value
+        for value in (
+            candidate.name,
+            candidate.email,
+            candidate.phone,
+            candidate.location,
+        )
+        if value
+    ]
+    if not identifiers:
+        return text
+    redacted = text
+    for identifier in identifiers:
+        redacted = re.sub(re.escape(identifier), " ", redacted, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", redacted).strip()
+
+
 async def _embed_batched(
     embedder: CachedEmbedder, texts: list[str]
 ) -> list[list[float]]:
@@ -420,9 +458,17 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
         # LLMUnavailableError (Ollama down) is deliberately NOT caught here: it
         # propagates so arq retries the genuine outage.
         try:
-            summary_text = _build_summary_text(cleaned_parsed)
+            # Scrub the candidate's structured identifiers out of every string
+            # handed to the embedder — the STORED chunk text / summary stay full
+            # (see _redact_candidate_pii / _build_summary_text docstrings).
+            candidate = cleaned_parsed.candidate
+            summary_text = _redact_candidate_pii(
+                _build_summary_text(cleaned_parsed), candidate
+            )
             [summary_emb] = await embedder.embed([summary_text])
-            chunk_embs_list = await _embed_batched(embedder, [c.text for c in chunks])
+            chunk_embs_list = await _embed_batched(
+                embedder, [_redact_candidate_pii(c.text, candidate) for c in chunks]
+            )
         except LLMOutputInvalidError as exc:
             await resume_service.record_parse_failure(
                 conn, resume_id=resume_id, reason=f"embedding failed: {exc}"
@@ -474,6 +520,11 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                     "parsed": cleaned_parsed.model_dump(
                         exclude={
                             "candidate": True,
+                            # `summary` is cleartext and a small model sometimes
+                            # opens it with the candidate's own name — drop it
+                            # from the (unencrypted) outbox. Phase 4 reads the
+                            # summary from `resumes.parsed` (system of record).
+                            "summary": True,
                             "chunks": {"__all__": {"text"}},
                             "cover_letter_chunks": {"__all__": {"text"}},
                         }

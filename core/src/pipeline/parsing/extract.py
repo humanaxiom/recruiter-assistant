@@ -174,7 +174,18 @@ def _extract_pdf(blob: bytes) -> ExtractedText:
     except Exception as exc:
         raise UnsupportedMimeError(f"pdf parse failed: {exc}") from exc
 
-    if doc.needs_pass:
+    # ``doc.needs_pass`` runs MuPDF C code that reads the encryption dictionary;
+    # on a CORRUPT (not merely password-protected) doc that READ itself can
+    # raise an untyped exception. Wrap it so a genuine password prompt still
+    # surfaces as EncryptedPdfError, but a failed check surfaces as the typed
+    # UnsupportedMimeError — never escaping extract_text uncaught — and the
+    # handle is closed either way.
+    try:
+        needs_pass = doc.needs_pass
+    except Exception as exc:
+        doc.close()
+        raise UnsupportedMimeError(f"pdf encryption check failed: {exc}") from exc
+    if needs_pass:
         doc.close()
         raise EncryptedPdfError("pdf is password-protected")
 

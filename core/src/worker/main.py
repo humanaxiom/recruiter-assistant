@@ -43,6 +43,16 @@ logger = logging.getLogger(__name__)
 
 async def startup(ctx: dict[str, Any]) -> None:
     s = get_settings()
+    # Fail loud on a misconfigured deploy BEFORE opening any pool/driver/store:
+    # pii.set_pii_key binds settings.pii_key (default "") into the app.pii_key
+    # GUC unconditionally, so an unset PII_KEY would silently pgp_sym_encrypt
+    # every resume's PII with an EMPTY passphrase (weak-key ciphertext) instead
+    # of refusing to start.
+    if not s.pii_key:
+        raise RuntimeError(
+            "PII_KEY is empty — refusing to start the worker; pgcrypto would "
+            "encrypt candidate PII with an empty passphrase. Set PII_KEY."
+        )
     pool = await asyncpg.create_pool(
         dsn=s.postgres_dsn,
         min_size=s.postgres_pool_min,

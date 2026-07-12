@@ -46,7 +46,8 @@ def test_startup_is_a_coroutine() -> None:
 @pytest.mark.asyncio
 async def test_startup_parks_a_blob_store_on_ctx(tmp_path: Path) -> None:
     ctx: dict[str, Any] = {}
-    settings = Settings(storage_dir=str(tmp_path))
+    # Round 3 F3: startup now fails loud on an empty pii_key, so supply one.
+    settings = Settings(storage_dir=str(tmp_path), pii_key="a-real-secret-key")
     with (
         patch("src.worker.main.get_settings", return_value=settings),
         patch(
@@ -69,7 +70,8 @@ async def test_startup_parks_a_blob_store_on_ctx(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_startup_blob_store_is_rooted_at_storage_dir(tmp_path: Path) -> None:
     ctx: dict[str, Any] = {}
-    settings = Settings(storage_dir=str(tmp_path))
+    # Round 3 F3: startup now fails loud on an empty pii_key, so supply one.
+    settings = Settings(storage_dir=str(tmp_path), pii_key="a-real-secret-key")
     with (
         patch("src.worker.main.get_settings", return_value=settings),
         patch(

@@ -686,7 +686,9 @@ async def test_outbox_payload_parsed_dict_excludes_candidate_block() -> None:
         "outbox payload leaks the cleartext candidate (name/email/phone) "
         "block — Phase 4 must receive skills/experience/embeddings only"
     )
-    assert parsed_dict["summary"] == "Backend engineer."
+    # Round 3 F2: `summary` is dropped from the outbox payload (a small model may
+    # write the candidate's name into it); Phase 4 reads it from resumes.parsed.
+    assert "summary" not in parsed_dict
     assert "skills" in parsed_dict
     assert "chunks" in parsed_dict
     assert payload["summary_emb"] == [0.1] * 8
@@ -791,7 +793,8 @@ async def test_outbox_payload_never_carries_raw_chunk_text_pii() -> None:
     assert "skills" in parsed_dict
     assert "experience" in parsed_dict
     assert "education" in parsed_dict
-    assert "summary" in parsed_dict
+    # Round 3 F2: `summary` is excluded from the outbox payload.
+    assert "summary" not in parsed_dict
 
 
 # ── _drop_smeared_years ──────────────────────────────────────────────────

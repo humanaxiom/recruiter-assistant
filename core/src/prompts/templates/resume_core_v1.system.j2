@@ -42,4 +42,8 @@ Rules:
 3. `total_years_experience` is the cumulative work history, not the
    most recent role's tenure.
 4. At most 30 experience entries and 10 education entries.
-5. Output JSON only — no fences, no prefatory text.
+5. Do NOT put the candidate's name or contact details (email, phone,
+   location) in `summary` — those belong ONLY in the `candidate` object.
+   Write `summary` as a role/skills headline (e.g. "Senior backend
+   engineer with 10 years in distributed systems.").
+6. Output JSON only — no fences, no prefatory text.
