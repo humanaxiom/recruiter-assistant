@@ -55,7 +55,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
-| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ gates green (reviewer/security/ranking-evals on `e8e83be`); PR/merge pending. [activity](activity/phase-4a-ranking-evals-corpus.md) |
+| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. [activity](activity/phase-4a-ranking-evals-corpus.md) |
 | &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`) | not started |
 | &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate | not started |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
@@ -78,9 +78,9 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 **As of this writing — Phases 0–3 are merged to `main`, CI green. Phase 4 (Ranking engine) is 🔄 IN
 PROGRESS, split into 4 gated sub-phases** (planner pass 2026-07-12). Sub-phase **4a (evals corpus) is
-COMPLETE and gate-green** on branch `feat/phase-4a-ranking-evals-corpus` (HEAD `e8e83be`; all three
-merge-blocking gates green; corpus = 16 labelled fixtures + matched-pair dimension controls +
-`thresholds.toml` + a RED-pending-4c harness stub — see
+COMPLETE and MERGED to `main`** via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking
+gates green; corpus = 16 labelled fixtures + matched-pair dimension controls + `thresholds.toml` + a
+RED-pending-4c harness stub — see
 [activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). **4b is next**;
 4b→4c→4d follow, each on its own branch/PR with the full reviewer/security/ranking-evals gate before the
 next starts. The split mirrors Phases 0–3's
