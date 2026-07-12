@@ -72,13 +72,12 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — Phases 0–2 are merged to `main`. Phase 3 is built, green, and fully
-re-audited on branch `feat/phase-3-ingest-parse`; it is awaiting a human check-in before the PR to
-`main` is opened.**
+**As of this writing — Phases 0–3 are merged to `main`, CI green. The next phase is Phase 4 (Ranking
+engine); start with the `core/tests/evals/` corpus (see the Phase-4 note below and HANDOFF.md).**
 
-**Phase 3 · Ingest + parse — built + green + fully re-audited on `feat/phase-3-ingest-parse` (20
-commits ahead of `main`, HEAD `c7b497e`), not yet merged.** All three merge-blocking gates are green
-on final HEAD (reviewer APPROVE, security PASS, ranking-evals PASS) after **four rounds** of
+**Phase 3 · Ingest + parse — complete and merged to `main` via PR #6 (merge `49196d7`), CI green**
+(merged 2026-07-12). All three merge-blocking gates were green on final HEAD `c7b497e`
+(reviewer APPROVE, security PASS, ranking-evals PASS) after **four rounds** of
 findings-and-fix: round 1 and round 2 closed general security/reviewer findings and the DOCX/PDF
 decompression-bomb + `RecursionError` + outbox-PII guards (F1–F6); **round 3** found **F1 (HIGH) —
 candidate PII embeddable via the outbox's `chunk_embs`/`summary_emb` vectors** plus F2 (outbox
