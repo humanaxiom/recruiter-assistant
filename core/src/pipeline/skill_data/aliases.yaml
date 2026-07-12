@@ -1,0 +1,159 @@
+# Hand-curated skill aliases. Each canonical name maps to a list of
+# variants the LLM is likely to produce. _basic_normalise looks here
+# BEFORE the vector-search fallback.
+#
+# Conventions:
+#   - canonical name is lower-case; we recase for display elsewhere
+#   - keep aliases lower-cased and trimmed
+#   - include the canonical name itself in `aliases` for round-trip safety
+#
+# Add freely. The Phase-6 matching quality compounds from this list.
+
+- canonical: javascript
+  aliases: [javascript, js, ecmascript, java script]
+- canonical: typescript
+  aliases: [typescript, ts]
+- canonical: python
+  aliases: [python, python3, py]
+- canonical: java
+  aliases: [java]
+- canonical: react
+  aliases: [react, reactjs, react.js, react js]
+- canonical: vue
+  aliases: [vue, vue.js, vuejs]
+- canonical: angular
+  aliases: [angular, angular.js, angularjs]
+- canonical: node.js
+  aliases: [node.js, node, nodejs]
+- canonical: postgresql
+  aliases: [postgresql, postgres, pgsql]
+- canonical: mysql
+  aliases: [mysql, my sql]
+- canonical: kubernetes
+  aliases: [kubernetes, k8s, kube]
+- canonical: docker
+  aliases: [docker]
+- canonical: terraform
+  aliases: [terraform, tf]
+- canonical: aws
+  aliases: [aws, amazon web services]
+- canonical: gcp
+  aliases: [gcp, google cloud, google cloud platform]
+- canonical: azure
+  aliases: [azure, microsoft azure]
+- canonical: redis
+  aliases: [redis]
+- canonical: neo4j
+  aliases: [neo4j, cypher]
+- canonical: fastapi
+  aliases: [fastapi, fast api]
+- canonical: django
+  aliases: [django]
+- canonical: flask
+  aliases: [flask]
+- canonical: spring boot
+  aliases: [spring boot, springboot, spring]
+- canonical: kafka
+  aliases: [kafka, apache kafka]
+- canonical: elasticsearch
+  aliases: [elasticsearch, elastic search, elastic]
+
+# --- Languages ---
+- canonical: c#
+  aliases: ["c#", csharp, "c sharp"]
+- canonical: c++
+  aliases: ["c++", cpp]
+- canonical: go
+  aliases: [golang, "go lang"]   # not bare "go" — too noisy
+- canonical: ruby
+  aliases: [ruby]
+- canonical: php
+  aliases: [php]
+- canonical: scala
+  aliases: [scala]
+- canonical: rust
+  aliases: [rust]
+- canonical: kotlin
+  aliases: [kotlin]
+- canonical: swift
+  aliases: [swift]
+- canonical: sql
+  aliases: [sql]
+- canonical: bash
+  aliases: [bash, shell scripting, shell]
+- canonical: powershell
+  aliases: [powershell, power shell]
+- canonical: vba
+  aliases: [vba, "visual basic for applications"]
+
+# --- Microsoft / .NET / enterprise stack ---
+- canonical: .net
+  aliases: [".net", dotnet, "dot net", ".net framework", ".net core"]
+- canonical: asp.net
+  aliases: ["asp.net", aspnet, "asp.net mvc", "asp.net core"]
+- canonical: sql server
+  aliases: ["sql server", mssql, "microsoft sql server", "ms sql"]
+- canonical: t-sql
+  aliases: [t-sql, tsql, "transact-sql"]
+- canonical: sharepoint
+  aliases: [sharepoint, "share point", "sharepoint online"]
+- canonical: ssis
+  aliases: [ssis, "sql server integration services"]
+- canonical: ssrs
+  aliases: [ssrs, "sql server reporting services"]
+- canonical: ssas
+  aliases: [ssas, "sql server analysis services"]
+- canonical: power bi
+  aliases: ["power bi", powerbi]
+- canonical: excel
+  aliases: [excel, "microsoft excel", "ms excel"]
+- canonical: dynamics 365
+  aliases: ["dynamics 365", "dynamics crm", "ms dynamics"]
+
+# --- Web / frontend ---
+- canonical: html
+  aliases: [html, html5]
+- canonical: css
+  aliases: [css, css3]
+- canonical: graphql
+  aliases: [graphql, "graph ql"]
+- canonical: jquery
+  aliases: [jquery]
+
+# --- Data / infra ---
+- canonical: mongodb
+  aliases: [mongodb, mongo]
+- canonical: oracle
+  aliases: [oracle, "oracle db", "oracle database"]
+- canonical: sqlite
+  aliases: [sqlite]
+- canonical: snowflake
+  aliases: [snowflake]
+- canonical: spark
+  aliases: [spark, "apache spark", pyspark]
+- canonical: hadoop
+  aliases: [hadoop]
+- canonical: airflow
+  aliases: [airflow, "apache airflow"]
+- canonical: pandas
+  aliases: [pandas]
+- canonical: linux
+  aliases: [linux, unix]
+- canonical: git
+  aliases: [git]
+- canonical: jenkins
+  aliases: [jenkins]
+- canonical: ci/cd
+  aliases: ["ci/cd", cicd, "ci cd", "continuous integration"]
+- canonical: ansible
+  aliases: [ansible]
+- canonical: nginx
+  aliases: [nginx]
+
+# --- Ways of working ---
+- canonical: agile
+  aliases: [agile]
+- canonical: scrum
+  aliases: [scrum]
+- canonical: jira
+  aliases: [jira]

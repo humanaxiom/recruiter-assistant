@@ -80,17 +80,18 @@ class ResumeChunk(BaseModel):
 class Bullet(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    text: str
-    chunk_id: str | None = None
+    text: str = Field(max_length=1000)
+    # A chunk id is a ``c_NNN``/``cl_NNN`` token — same cap as ResumeChunk.id.
+    chunk_id: str | None = Field(default=None, max_length=20)
 
 
 class Experience(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    company: str
-    title: str
-    start: str | None = None  # "YYYY-MM" or "YYYY"
-    end: str | None = None
+    company: str = Field(max_length=300)
+    title: str = Field(max_length=300)
+    start: str | None = Field(default=None, max_length=50)  # "YYYY-MM" or "YYYY"
+    end: str | None = Field(default=None, max_length=50)
     is_current: bool = False
     bullets: list[Bullet] = Field(default_factory=list, max_length=20)
 
@@ -98,9 +99,9 @@ class Experience(BaseModel):
 class EducationItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    degree: str
-    institution: str
-    field: str | None = None
+    degree: str = Field(max_length=300)
+    institution: str = Field(max_length=300)
+    field: str | None = Field(default=None, max_length=300)
     year: int | None = Field(default=None, ge=1900, le=2100)
 
     @field_validator("year", mode="before")
@@ -110,14 +111,19 @@ class EducationItem(BaseModel):
 
 
 class CandidateInfo(BaseModel):
-    """The PII subset of the parsed resume. Never embedded; encrypted at rest."""
+    """The PII subset of the parsed resume. Never embedded; encrypted at rest.
+
+    Every field is capped: these strings flow straight from an untrusted local
+    LLM response into a ``pgp_sym_encrypt`` BYTEA column, so a looping small
+    model must not be able to push an unbounded blob through the encrypt path.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-    name: str | None = None
-    email: str | None = None
-    phone: str | None = None
-    location: str | None = None
+    name: str | None = Field(default=None, max_length=300)
+    email: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=300)
+    location: str | None = Field(default=None, max_length=300)
 
 
 class ResumeSkill(BaseModel):
@@ -203,6 +209,13 @@ class ResumeParsed(BaseModel):
         validate each candidate row through its own sub-schema
         (which itself runs the `_coerce_year` / name-truncation fixes
         first), and only keep the survivors.
+
+        An ALREADY-VALIDATED sub-model instance passes straight through.
+        Without that branch this filter drops every row of
+        ``ResumeParsed(skills=[ResumeSkill(...)])`` on the floor — the
+        rows are not dicts, so the "is it a dict?" guard rejects them and
+        the caller silently gets an empty list. hris only ever fed this
+        validator raw dicts, so the hole never showed there.
         """
         if not isinstance(data, dict):
             return data
@@ -214,8 +227,11 @@ class ResumeParsed(BaseModel):
             rows = data.get(key)
             if not isinstance(rows, list):
                 continue
-            kept: list[dict[str, object]] = []
+            kept: list[object] = []
             for row in rows:
+                if isinstance(row, sub):
+                    kept.append(row)
+                    continue
                 if not isinstance(row, dict):
                     continue
                 try:
@@ -248,14 +264,19 @@ class ResumeCore(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_invalid_rows(cls, data: object) -> object:
+        # Same lossy filter as ResumeParsed, including the already-validated
+        # sub-model pass-through — see the docstring there.
         if not isinstance(data, dict):
             return data
         for key, sub in (("experience", Experience), ("education", EducationItem)):
             rows = data.get(key)
             if not isinstance(rows, list):
                 continue
-            kept: list[dict[str, object]] = []
+            kept: list[object] = []
             for row in rows:
+                if isinstance(row, sub):
+                    kept.append(row)
+                    continue
                 if not isinstance(row, dict):
                     continue
                 try:
@@ -345,9 +366,15 @@ class ResumeSkillDetails(BaseModel):
             return data
         rows = data.get("skills")
         if isinstance(rows, list):
-            cleaned: list[dict[str, object]] = []
+            cleaned: list[object] = []
             for s in rows:
-                if isinstance(s, str) and s.strip():
+                # An already-validated detail passes straight through: without
+                # this branch ``ResumeSkillDetails(skills=[ResumeSkillDetail(
+                # ...)])`` silently yields an empty list (the row is neither a
+                # str nor a dict, so both coercion arms skip it).
+                if isinstance(s, ResumeSkillDetail):
+                    cleaned.append(s)
+                elif isinstance(s, str) and s.strip():
                     cleaned.append({"name": s})
                 elif isinstance(s, dict) and isinstance(s.get("name"), str):
                     cleaned.append(
