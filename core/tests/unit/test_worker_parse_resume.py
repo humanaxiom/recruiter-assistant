@@ -2,8 +2,8 @@
 
 Same real-ctx-keys discipline as ``test_worker_parse_job.py``: ``ctx`` is
 built from ``pg_pool`` / ``llm`` / ``embedder`` / ``blob_store`` (the keys
-``src/worker/main.py::startup`` actually sets), never hris's
-``ctx["minio"]``/``ctx["minio_bucket_resumes_raw"]``.
+``src/worker/main.py::startup`` actually sets), never hris's ``ctx["minio"]``/
+``ctx["minio_bucket_resumes_raw"]``.
 
 ``blob_store`` is the Phase-1 ``BlobStore`` — ``.get(key)`` is already async
 and takes a single relative key, no bucket. Every test that reaches the blob
@@ -38,6 +38,20 @@ this whole file is expected to fail at collection (ImportError).
   chunks contain the candidate's name/email/phone verbatim, so shipping
   chunk text in the unencrypted ``outbox`` jsonb still leaks identity even
   though round 1 dropped the structured ``candidate`` block.
+
+── Round 3 (merge-blocking re-audit) additions ─────────────────────────────
+* F1 (HIGH): the TEXT handed to the embedder (chunk batch + summary) must
+  never carry the candidate's name/email/phone/location verbatim — a header
+  chunk's embedding (``chunk_embs``) and a name-opening LLM summary's
+  embedding (``summary_emb``) both ride the (unencrypted) outbox and get
+  projected into Neo4j in Phase 4, so they are PII-equivalent even though
+  round 2 already dropped raw chunk TEXT from the outbox payload. Covers the
+  pure ``_redact_candidate_pii`` helper AND end-to-end embed-call-capture
+  assertions, and pins that ``resumes.parsed`` (the system of record) keeps
+  the FULL, unredacted chunk text/summary — only the embedder's input is
+  scrubbed.
+* F2 (MEDIUM): the outbox ``parsed`` dict must not carry the cleartext
+  ``summary`` field either (belt-and-braces alongside F1's embedding scrub).
 """
 
 from __future__ import annotations
@@ -1076,3 +1090,339 @@ async def test_parse_cover_letter_llm_failure_is_non_fatal() -> None:
     assert chunks == chunks_sentinel
     assert parsed is not None
     assert parsed == CoverLetterParsed()
+
+
+# ── F1 (HIGH, round 3) — PII-equivalent EMBEDDINGS ride the outbox ─────────
+#
+# `chunk_embs`/`summary_emb` are nomic-embed-text vectors of the TEXT handed
+# to the embedder. A header chunk's text (and sometimes the LLM-authored
+# summary) carries the candidate's name/email/phone/location VERBATIM, so
+# those vectors are PII-equivalent even though round 2 already dropped raw
+# chunk TEXT from the outbox `parsed` dict (finding 6) — the embedding is a
+# separate top-level payload key that still encodes identity. The fix is a
+# pure `_redact_candidate_pii(text, candidate) -> str` helper applied to every
+# chunk's text and the composed summary text BEFORE either is embedded.
+# `resumes.parsed` (system of record, ADR-007 §6) keeps the FULL, unredacted
+# chunk text and summary at rest — only the embedder's INPUT is scrubbed.
+#
+# `_redact_candidate_pii` does not exist yet. Each pure-function test below
+# imports it LOCALLY (inside the helper, called from each test body) so a
+# missing implementation errors only these new tests — not the ~30
+# already-green tests earlier in this file that import real,
+# already-implemented symbols from `src.worker.resume_tasks` at module scope.
+
+
+def _redact(text: str, candidate: CandidateInfo) -> str:
+    from src.worker.resume_tasks import _redact_candidate_pii
+
+    result: str = _redact_candidate_pii(text, candidate)
+    return result
+
+
+def test_redact_candidate_pii_removes_name_email_phone_location_verbatim() -> None:
+    candidate = CandidateInfo(
+        name="Ada Lovelace",
+        email="ada@example.com",
+        phone="555-0100",
+        location="Toronto, ON",
+    )
+    text = "Ada Lovelace | ada@example.com | 555-0100 | Toronto, ON | Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert "ada lovelace" not in result.lower()
+    assert "ada@example.com" not in result.lower()
+    assert "555-0100" not in result.lower()
+    assert "toronto, on" not in result.lower()
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_is_case_insensitive() -> None:
+    """A small model may title-case the summary differently than the résumé
+    body (e.g. ALL CAPS in a header vs. Title Case from the LLM)."""
+    candidate = CandidateInfo(name="Ada Lovelace", email="ADA@EXAMPLE.COM")
+    text = "ADA LOVELACE is a senior backend engineer. Contact: ada@example.com"
+
+    result = _redact(text, candidate)
+
+    assert "ada lovelace" not in result.lower()
+    assert "ada@example.com" not in result.lower()
+    assert "senior backend engineer" in result.lower()
+
+
+def test_redact_candidate_pii_none_fields_are_noop_for_that_field() -> None:
+    """Only email is set — phone/location/name are None and must not crash or
+    get matched against anything (there's nothing to match)."""
+    candidate = CandidateInfo(email="ada@example.com")
+    text = "Ada Lovelace, Python developer, ada@example.com, 555-0100"
+
+    result = _redact(text, candidate)
+
+    assert "ada@example.com" not in result.lower()
+    assert "ada lovelace" in result.lower()  # name is None: untouched
+    assert "555-0100" in result  # phone is None: untouched
+
+
+def test_redact_candidate_pii_all_fields_none_returns_text_verbatim() -> None:
+    candidate = CandidateInfo()
+    text = "Python developer with 5 years of backend experience."
+
+    result = _redact(text, candidate)
+
+    assert result == text
+
+
+def test_redact_candidate_pii_matches_full_identifier_not_per_token() -> None:
+    """`candidate.name="Jane Doe"` must redact the literal "Jane Doe" SUBSTRING
+    only — not decompose into per-token global removal, which would also eat
+    an unrelated "Doe" elsewhere in the résumé (e.g. a reference's surname)."""
+    candidate = CandidateInfo(name="Jane Doe")
+    text = "Jane Doe. References: John Doe, former manager at Acme Corp."
+
+    result = _redact(text, candidate)
+
+    assert "jane doe" not in result.lower()
+    assert "john doe" in result.lower(), (
+        "per-token redaction of 'Doe' corrupted unrelated content that is "
+        "not the candidate's own name"
+    )
+
+
+def test_redact_candidate_pii_collapses_resulting_whitespace() -> None:
+    candidate = CandidateInfo(name="Ada Lovelace")
+    text = "Ada Lovelace   Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert "  " not in result  # no doubled/tripled space left by the removal
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_does_not_mutate_the_candidate_argument() -> None:
+    candidate = CandidateInfo(name="Ada Lovelace")
+    before = candidate.model_dump()
+    _redact("Ada Lovelace, backend engineer.", candidate)
+
+    assert candidate.model_dump() == before
+
+
+# ── F1 (HIGH, round 3) — end-to-end: embed-call TEXT is scrubbed, the ─────
+# STORED ResumeParsed stays full/unredacted ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_header_chunk_pii_redacted_in_embeds_full_text_stored() -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    candidate = CandidateInfo(
+        name="Ada Lovelace",
+        email="ada.lovelace@example.com",
+        phone="555-0100",
+        location="Toronto, ON",
+    )
+    core = ResumeCore(
+        candidate=candidate, summary="Backend engineer with 10 years experience."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    header_text = "Ada Lovelace | ada.lovelace@example.com | 555-0100 | Toronto, ON"
+    chunks = [
+        ResumeChunk(id="c_001", section="header", page=0, text=header_text),
+        ResumeChunk(
+            id="c_002", section="skills", page=0, text="Python, SQL, Kubernetes"
+        ),
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8, [0.3] * 8]])
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    assert embedder.embed.await_count == 2
+    summary_call_texts = _flat_call_args(embedder.embed.await_args_list[0])[0]
+    chunk_call_texts = _flat_call_args(embedder.embed.await_args_list[1])[0]
+
+    pii_substrings = [
+        "Ada Lovelace",
+        "ada.lovelace@example.com",
+        "555-0100",
+        "Toronto, ON",
+    ]
+    for embedded_text in [*summary_call_texts, *chunk_call_texts]:
+        for pii in pii_substrings:
+            assert pii.lower() not in embedded_text.lower(), (
+                f"embedded text still carries candidate PII substring "
+                f"{pii!r}: {embedded_text!r}"
+            )
+
+    # Non-header chunks still get embedded — redaction is not "embed nothing".
+    assert len(chunk_call_texts) == 2
+    assert "python" in chunk_call_texts[1].lower()
+    assert "kubernetes" in chunk_call_texts[1].lower()
+
+    # The STORED ResumeParsed (system of record, ADR-007 §6) keeps the FULL,
+    # unredacted chunk text — only the embedder's input was scrubbed.
+    record_parsed.assert_awaited_once()
+    flat = _flat_call_args(record_parsed.await_args)
+    stored_parsed = next(a for a in flat if isinstance(a, ResumeParsed))
+    assert stored_parsed.chunks[0].text == header_text
+
+
+@pytest.mark.asyncio
+async def test_summary_with_candidate_name_redacted_in_embed_only() -> None:
+    """Small models sometimes open the `summary` field with the candidate's
+    own name ("Jane Doe is a senior engineer..."). The embedded summary text
+    must not carry it; the STORED `ResumeParsed.summary` must stay full."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    candidate = CandidateInfo(name="Jane Doe", email="jane.doe@example.com")
+    summary_text = "Jane Doe is a senior backend engineer with deep Python experience."
+    core = ResumeCore(candidate=candidate, summary=summary_text)
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    summary_call_texts = _flat_call_args(embedder.embed.await_args_list[0])[0]
+    assert len(summary_call_texts) == 1
+    embedded_summary = summary_call_texts[0]
+    assert "jane doe" not in embedded_summary.lower()
+    assert "jane.doe@example.com" not in embedded_summary.lower()
+    assert "senior backend engineer" in embedded_summary.lower()
+
+    record_parsed.assert_awaited_once()
+    flat = _flat_call_args(record_parsed.await_args)
+    stored_parsed = next(a for a in flat if isinstance(a, ResumeParsed))
+    assert stored_parsed.summary == summary_text
+
+
+# ── F2 (MEDIUM, round 3) — outbox payload must not carry cleartext `summary`
+#
+# Even with the embedding scrubbed (F1), `outbox.parsed.summary` is still
+# cleartext and can carry the candidate's name. Phase 4 reads `summary` from
+# `resumes.parsed` (the system of record) — the outbox does not need it.
+
+
+@pytest.mark.asyncio
+async def test_outbox_payload_parsed_dict_excludes_summary_key() -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Jane Doe"),
+        summary="Jane Doe is a senior backend engineer.",
+        experience=[Experience(company="Acme", title="Engineer")],
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    enqueue.assert_awaited_once()
+    parsed_dict = enqueue.await_args.kwargs["payload"]["parsed"]
+
+    assert "summary" not in parsed_dict, (
+        "outbox payload leaks the cleartext `summary` — Phase 4 reads it "
+        "from resumes.parsed (system of record), not the outbox"
+    )
+    assert "skills" in parsed_dict
+    assert "experience" in parsed_dict

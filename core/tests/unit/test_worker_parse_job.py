@@ -23,6 +23,14 @@ Also pinned:
 
 ``src.worker.tasks`` does not exist yet — RED half of the TDD cycle; this
 whole file is expected to fail at collection (ImportError).
+
+── Round 3 (merge-blocking re-audit) additions ─────────────────────────────
+* Reviewer minor #2: the JD summary-embed call (``[embedding] = await
+  embedder.embed([summary_text])``) is UNGUARDED today. A permanent
+  ``LLMOutputInvalidError`` must funnel through ``record_parse_failure`` ->
+  "failed" with no outbox row, mirroring round-2 finding 3's fix for
+  ``parse_resume``'s embedding calls. A transient ``LLMUnavailableError``
+  must still ESCAPE uncaught so arq retries the genuine Ollama outage.
 """
 
 from __future__ import annotations
@@ -34,7 +42,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.pipeline.llm import LLMOutputInvalidError
+from src.pipeline.llm import LLMOutputInvalidError, LLMUnavailableError
 from src.schemas import JDExtracted, Skill
 from src.worker.tasks import parse_job
 
@@ -279,4 +287,76 @@ async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row()
         result = await parse_job(ctx, str(job_id))
 
     assert result == "stale"
+    enqueue.assert_not_awaited()
+
+
+# ── Reviewer minor #2 (round 3) — JD summary-embed guard parity ────────────
+#
+# `[embedding] = await embedder.embed([summary_text])` is UNGUARDED today. A
+# permanent `LLMOutputInvalidError` (dim/count mismatch) must funnel through
+# `record_parse_failure` -> "failed", exactly like round-2 finding 3 fixed
+# for `parse_resume`'s embedding calls — not escape uncaught (a stranded
+# 'draft' row + arq retry storm that re-burns the JD LLM extraction on every
+# attempt). A transient `LLMUnavailableError` must still ESCAPE uncaught so
+# arq retries the genuine Ollama outage.
+
+
+@pytest.mark.asyncio
+async def test_summary_embed_permanent_failure_records_failure_and_returns_failed() -> (
+    None
+):
+    job_id = uuid4()
+    conn = _make_conn({"description_raw": "Build things.", "status": "draft"})
+    extracted = JDExtracted(title="Senior Backend Engineer")
+    llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=LLMOutputInvalidError("768-d contract violated"))
+    )
+    ctx = _make_ctx(conn, llm, embedder)
+
+    with (
+        patch("src.worker.tasks.load_prompt", return_value=_fake_prompt()),
+        patch(
+            "src.worker.tasks.job_service.record_parse_failure", new_callable=AsyncMock
+        ) as record_failure,
+        patch(
+            "src.worker.tasks.job_service.record_parsed", new_callable=AsyncMock
+        ) as record_parsed,
+        patch(
+            "src.worker.tasks.outbox_service.enqueue_outbox", new_callable=AsyncMock
+        ) as enqueue,
+    ):
+        result = await parse_job(ctx, str(job_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    assert job_id in _flat_call_args(record_failure.await_args)
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_summary_embed_transient_failure_escapes_uncaught_for_arq_retry() -> None:
+    job_id = uuid4()
+    conn = _make_conn({"description_raw": "Build things.", "status": "draft"})
+    extracted = JDExtracted(title="Senior Backend Engineer")
+    llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=LLMUnavailableError("ollama down"))
+    )
+    ctx = _make_ctx(conn, llm, embedder)
+
+    with (
+        patch("src.worker.tasks.load_prompt", return_value=_fake_prompt()),
+        patch(
+            "src.worker.tasks.job_service.record_parse_failure", new_callable=AsyncMock
+        ) as record_failure,
+        patch(
+            "src.worker.tasks.outbox_service.enqueue_outbox", new_callable=AsyncMock
+        ) as enqueue,
+        pytest.raises(LLMUnavailableError),
+    ):
+        await parse_job(ctx, str(job_id))
+
+    record_failure.assert_not_awaited()
     enqueue.assert_not_awaited()

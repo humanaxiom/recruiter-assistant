@@ -23,6 +23,13 @@ forever, burning an LLM pass every time.
 * Finding 5 (LOW): the 300/301-page cap boundary test already exists below
   (unchanged) — Finding 2's fix (wrapping the MuPDF page-tree access)
   subsumes the ``getattr(doc, "page_count", 0)`` fail-open.
+
+── Round 3 (merge-blocking re-audit) additions ─────────────────────────────
+* F5 (LOW): ``doc.needs_pass`` is read OUTSIDE any try block, between the
+  ``fitz.open()`` try and the page-tree try. If that READ itself raises (a
+  corrupt doc, not merely an encrypted one), the exception must surface as
+  the typed ``UnsupportedMimeError`` — not escape ``extract_text`` uncaught
+  — and the handle must still be closed.
 """
 
 from __future__ import annotations
@@ -521,3 +528,51 @@ def test_extract_text_raises_typed_error_not_bare_runtimeerror_on_malformed_pdf(
 ) -> None:
     with pytest.raises(UnsupportedMimeError):
         extract_text(bad_pdf, MIME_PDF)
+
+
+# ── F5 (LOW, round 3) — `doc.needs_pass` read failure must not escape ──────
+# uncaught / leak the handle ────────────────────────────────────────────────
+#
+# `_extract_pdf` reads `doc.needs_pass` OUTSIDE any try block, between the
+# `fitz.open()` try and the page-tree try. If that read itself raises on a
+# corrupt doc (not merely an ENCRYPTED one — a genuinely malformed encryption
+# dictionary), the exception must surface as the typed `UnsupportedMimeError`
+# (never a bare/untyped exception escaping `extract_text` uncaught) and the
+# handle must still be closed. The existing `EncryptedPdfError` path (above)
+# must stay green — this only hardens the case where the CHECK ITSELF throws.
+
+
+class _FakeDocNeedsPassRaises:
+    """A doc whose `needs_pass` READ itself raises — simulating a corrupt PDF
+    where even MuPDF's encryption-dictionary check throws, distinct from a
+    genuinely password-protected doc (`EncryptedPdfError`, tested above)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    @property
+    def needs_pass(self) -> bool:
+        raise RuntimeError("mupdf: corrupt encryption dictionary")
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(())
+
+
+def test_needs_pass_read_failure_raises_unsupported_mime_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_doc = _FakeDocNeedsPassRaises()
+    monkeypatch.setattr(
+        "src.pipeline.parsing.extract.fitz.open", lambda **_kw: fake_doc
+    )
+
+    with pytest.raises(UnsupportedMimeError):
+        extract_text(b"fake-pdf-bytes", MIME_PDF)
+
+    assert fake_doc.closed is True, (
+        "the fitz handle must be closed even when the needs_pass READ itself "
+        "raises, not just when the page-tree loop raises"
+    )
