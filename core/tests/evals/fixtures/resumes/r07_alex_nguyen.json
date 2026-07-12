@@ -1,0 +1,56 @@
+{
+  "candidate": {
+    "name": "Alex Nguyen",
+    "email": "alex.nguyen@example.test",
+    "phone": "555-0107",
+    "location": "Winnipeg, MB"
+  },
+  "summary": "Recent coding-bootcamp graduate with 1 year of experience; built a single Python project in class and has no professional PostgreSQL, Airflow, or Docker exposure.",
+  "total_years_experience": 1,
+  "skills": [
+    { "name": "Python", "years": 1, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "HTML/CSS", "years": 1, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] }
+  ],
+  "experience": [
+    {
+      "company": "Prairie Code School (capstone)",
+      "title": "Bootcamp Student",
+      "start": "2025-09",
+      "end": "2026-01",
+      "is_current": false,
+      "bullets": [
+        { "text": "Built a to-do list web app in Python and Flask as a capstone project.", "chunk_id": "c_001" },
+        { "text": "Styled the capstone project's pages with hand-written HTML and CSS.", "chunk_id": "c_002" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Certificate, Full-Stack Web Development",
+      "institution": "Prairie Code School",
+      "field": "Web Development",
+      "year": 2026
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Built a to-do list web app in Python and Flask as a capstone project at Prairie Code School."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Styled the capstone project's pages with hand-written HTML and CSS."
+    },
+    {
+      "id": "c_003",
+      "section": "education",
+      "page": 1,
+      "text": "Certificate, Full-Stack Web Development, Prairie Code School, 2026."
+    }
+  ],
+  "cover_letter_chunks": []
+}

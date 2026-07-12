@@ -1,0 +1,72 @@
+{
+  "candidate": {
+    "name": "Reese Dawson",
+    "email": "reese.dawson@example.test",
+    "phone": "555-0112",
+    "location": "Saint John, NB"
+  },
+  "summary": "Marketing coordinator with 7 years of campaign management experience; no professional Python, PostgreSQL, Apache Airflow, or Docker background.",
+  "total_years_experience": 7,
+  "skills": [
+    { "name": "Content Marketing", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Google Analytics", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] }
+  ],
+  "experience": [
+    {
+      "company": "Lakeshore Consumer Brands",
+      "title": "Marketing Coordinator",
+      "start": "2021-04",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Ran quarterly campaign analytics reporting using Google Analytics dashboards at Lakeshore Consumer Brands.", "chunk_id": "c_002" },
+        { "text": "Reese Dawson was recognized as Employee of the Quarter for the Lakeshore Consumer Brands rebrand launch.", "chunk_id": "c_003" }
+      ]
+    },
+    {
+      "company": "Harborview Retail Co",
+      "title": "Marketing Assistant",
+      "start": "2019-01",
+      "end": "2021-03",
+      "is_current": false,
+      "bullets": [
+        { "text": "Coordinated content calendars and social copy for seasonal promotions at Harborview Retail Co.", "chunk_id": "c_001" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BA Communications",
+      "institution": "Saint John Coastal University",
+      "field": "Communications",
+      "year": 2019
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Coordinated content calendars and social copy for seasonal promotions at Harborview Retail Co."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Ran quarterly campaign analytics reporting using Google Analytics dashboards at Lakeshore Consumer Brands."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Reese Dawson was recognized as Employee of the Quarter for the Lakeshore Consumer Brands rebrand launch."
+    },
+    {
+      "id": "c_004",
+      "section": "education",
+      "page": 1,
+      "text": "BA Communications, Saint John Coastal University, graduated 2019."
+    }
+  ],
+  "cover_letter_chunks": []
+}

@@ -101,24 +101,40 @@ Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); 
 
 ## Phase 4 resume — EXACT next step (do this first, before anything else)
 
-Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). `main`
-now holds the full ingest/parse pipeline (729 unit tests, ~96.6% coverage). The next phase is **Phase 4
-— Ranking engine** per the plan table. The recommended order:
+Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). Phase 4
+(Ranking engine) is split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
+table). **Sub-phase 4a (evals corpus) is COMPLETE and gate-green** on branch
+`feat/phase-4a-ranking-evals-corpus`.
 
-1. **Create the evals corpus FIRST** — `core/tests/evals/` does not exist yet: the labelled
-   resumes-vs-JD fixture corpus + `thresholds.toml` (precision@k, evidence-verification-rate) must land
-   **before** the matching engine so its first green build is falsifiable. `ranking-evals` flagged this
-   as a hard Phase-4 prerequisite across three re-audit rounds. Do this before writing matching code.
-2. **Then** run the per-phase subagent loop for Phase 4: planner → tester (+ evals fixture) →
-   `data-pipeline` coder (override UP to **opus** — Phase 4 is the 4-stage ranking algorithm / evidence
-   verifier / Neo4j scoring, exactly the diffs the model policy escalates) → reviewer + security +
-   ranking-evals (all merge-blocking) → docs. `make gates` green before merge.
-3. Branch `feat/phase-4-...`, TDD red→green, then PR to `main` via `gh` and let CI go green.
+### 4a status (done this session, 2026-07-12) — branch `feat/phase-4a-ranking-evals-corpus`
+`core/tests/evals/` now holds the labelled corpus: JD fixture + **16 synthetic résumés**
+(7 strong / 4 borderline / 4 weak / 1 adversarial), `labels.json` (tags + tier-derived rank bands +
+gold_evidence + matched-pair `ordering_controls`), `thresholds.toml`, a RED-pending-4c harness stub
+`run_evals.py`, and 226 self-verifying tests in `test_evals_corpus.py`. **All three merge-blocking gates
+green on HEAD `e8e83be`** (reviewer APPROVE, security PASS, ranking-evals PASS). Zero product code, so
+src coverage is unmoved (955 unit @ 96.63%). Full write-up:
+[docs/activity/phase-4a-ranking-evals-corpus.md](docs/activity/phase-4a-ranking-evals-corpus.md).
+Key gate fix: the education/overqual twin controls had a **confound** — they narrated their target
+dimension in `summary`, which `_build_summary_text` embeds into `summary_emb` (the vector sub-score) —
+now neutralized to byte-identical summaries with a guarding assertion. (A reviewer "CRITICAL" was a
+false alarm from running a mutation-testing gate concurrently with the reviewer on the shared tree; re-gate
+sequentially.) **Remaining for 4a: push branch + open PR to `main`; after CI green, merge.** If this
+handoff is being read cold, check `git log --oneline main..HEAD` and `gh pr list` — 4a may already be
+pushed/PR'd/merged; do not redo it.
+
+### THEN — 4b (Graph projection) is the next sub-phase
+Run the per-phase subagent loop on a fresh `feat/phase-4b-...` branch: planner → tester (+ evals fixture)
+→ `data-pipeline` coder (override UP to **opus** — 4b/4c are the Neo4j scoring / 4-stage algorithm /
+evidence verifier diffs the model policy escalates) → reviewer + security + ranking-evals (all
+merge-blocking) → docs. `make gates` green, then PR to `main` and let CI go green. 4b builds the outbox
+drainer `project_to_graph` + the Neo4j skill-graph half of `skill_normalize` (see the plan's 4b row and
+the Phase-4 decisions block, esp. the **required chunk-text-preview deviation**: read chunk text from
+`resumes.parsed`, NOT the ADR-007-stripped outbox).
 
 **Carried into Phase 4** (from Phase 3 gate findings — don't lose these):
 - The **outbox drainer** (`project_to_graph`) lands in Phase 4 — it consumes the `job.parsed`/`resume.parsed` rows Phase 3 enqueues. It **must not** project `parsed.candidate` into Neo4j and **must not** log the payload. hris's `_resume_projection_tx` only sets `total_years_experience` on the `Resume` node — keep it that way.
 - `ResumeSkill.evidence_chunk_ids` is always `[]` after a Phase 3 parse (matches hris) — Phase 4's evidence verifier sources citations from the `shortlist_evidence_v1` prompt against `parsed.chunks`, and `scrub_invalid_chunk_refs` (ported-but-uncalled) wires in at that citation boundary.
-- `core/tests/evals/` does not exist yet — the precision@k / evidence-verification-rate corpus + `thresholds.toml` must be created before Phase 4's matching engine so its first green build is falsifiable.
+- ~~`core/tests/evals/` does not exist yet~~ **DONE in 4a** — the corpus + `thresholds.toml` + harness stub exist and are gate-green; 4c wires the live orchestrator into `run_evals.py::_run_corpus` to turn the harness green and activate the pairwise twin-ordering assertions.
 - Chunk-cap coupling nit: `chunk.py`'s `{"c":200,"cl":100}` and `ResumeParsed.chunks`/`cover_letter_chunks` `max_length` are two magic numbers coupled only by a comment — consider a single source.
 - **N1 (round-4 accepted residual, ADR-007 §7):** structured `experience[].bullets[].text`/skills/education fields ride the outbox unscrubbed for Phase 4's graph projection — non-contact, but a candidate could self-dox in achievement text. Accepted, symmetric with the §6/§7 at-rest cleartext decision; no code change, just context for Phase 4's projection code and Phase 5's redaction scope.
 - **N2 (round-4 accepted residual, ADR-007 §7):** the embed-boundary PII scrub errs toward over-redaction (e.g. a common-word `location` substring inside a larger word). Not chased — favors privacy over retrieval precision. Relevant context if Phase 4 retrieval quality ever looks degraded near a location term.

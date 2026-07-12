@@ -54,7 +54,11 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | ✅ done |
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
-| **4 · Ranking engine** | `orchestrator` + `stages` (4-stage hybrid), `MatchWeights`, `shortlist_job`, `reverse_match_job` | not started |
+| **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
+| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ gates green (reviewer/security/ranking-evals on `e8e83be`); PR/merge pending. [activity](activity/phase-4a-ranking-evals-corpus.md) |
+| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`) | not started |
+| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate | not started |
+| &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started |
 | **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started |
@@ -72,8 +76,37 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — Phases 0–3 are merged to `main`, CI green. The next phase is Phase 4 (Ranking
-engine); start with the `core/tests/evals/` corpus (see the Phase-4 note below and HANDOFF.md).**
+**As of this writing — Phases 0–3 are merged to `main`, CI green. Phase 4 (Ranking engine) is 🔄 IN
+PROGRESS, split into 4 gated sub-phases** (planner pass 2026-07-12). Sub-phase **4a (evals corpus) is
+COMPLETE and gate-green** on branch `feat/phase-4a-ranking-evals-corpus` (HEAD `e8e83be`; all three
+merge-blocking gates green; corpus = 16 labelled fixtures + matched-pair dimension controls +
+`thresholds.toml` + a RED-pending-4c harness stub — see
+[activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). **4b is next**;
+4b→4c→4d follow, each on its own branch/PR with the full reviewer/security/ranking-evals gate before the
+next starts. The split mirrors Phases 0–3's
+one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
+tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
+isolating them keeps each diff auditable.
+
+**Phase-4 decisions adopted from the planner pass** (recommended defaults; reversible):
+- **Chunk-text preview source (required deviation, Risk #1):** hris's `_resume_projection_tx` reads
+  `chunk.text` off the outbox payload, but ADR-007 stripped `chunks[].text` from the outbox in Phase 3.
+  4b MUST instead read chunk text from `resumes.parsed` (Postgres) inside the projection — a verbatim
+  port would `KeyError`/write empty `ResumeChunk.text_preview`. Evidence citations (stage 3) likewise
+  source chunks from `resumes.parsed`, never the outbox.
+- **Reverse-match evidence depth** `match_reverse_evidence_k > 0` — recruiter-assistant runs reverse
+  match only on the async `reverse_match_job` path (no synchronous endpoint to protect), so port hris's
+  worker-path default, not its sync-timeout `k=0`.
+- **`skill_category_task` (LLM category backfill cron) deferred** out of Phase 4 — `_ensure_categories`'
+  curated seed already covers stage-2 family partial-credit; revisit later if the corpus shows gaps.
+- **NICE_TO_HAVE skills** contribute to stage-3 evidence text but NOT the stage-2 structured skill
+  sub-score — hris's shipped behavior, ported verbatim and recorded (not "fixed") in the 4c ADR.
+- **4d ships the write path only** (`persist_shortlist`/`persist_reverse_match`); `list_for_job`/
+  `get_one`/`export_rows` + display redaction stay Phase 5 per the plan-of-record.
+
+Per-phase TDD subagent loop as usual; `data-pipeline` runs on **opus** for 4b/4c (the 4-stage algorithm,
+evidence verifier, Neo4j scoring) and **sonnet** for mechanical settings/plumbing. Full decomposition +
+hris→target file map + risk table live in the planner output captured for this session.
 
 **Phase 3 · Ingest + parse — complete and merged to `main` via PR #6 (merge `49196d7`), CI green**
 (merged 2026-07-12). All three merge-blocking gates were green on final HEAD `c7b497e`

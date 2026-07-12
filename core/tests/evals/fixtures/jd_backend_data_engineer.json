@@ -1,0 +1,29 @@
+{
+  "title": "Backend Data Engineer",
+  "required_skills": [
+    { "name": "Python", "min_years": 4 },
+    { "name": "PostgreSQL", "min_years": 3 },
+    { "name": "Apache Airflow", "min_years": 2 },
+    { "name": "Docker", "min_years": 2 },
+    { "name": "REST API design", "min_years": 3 }
+  ],
+  "nice_to_have_skills": [
+    { "name": "Kubernetes" },
+    { "name": "Kafka" },
+    { "name": "Terraform" }
+  ],
+  "min_years_experience": 5,
+  "education": {
+    "min_level": "bachelors",
+    "fields": ["Computer Science", "Software Engineering", "Data Engineering"]
+  },
+  "location": "Remote (Canada)",
+  "remote_policy": "remote",
+  "responsibilities": [
+    "Design and maintain ETL/ELT pipelines moving data between operational systems and the analytics warehouse",
+    "Build and operate Python microservices exposing REST APIs consumed by internal tooling",
+    "Own PostgreSQL schema design, query performance, and data-quality checks for core pipelines",
+    "Orchestrate scheduled and event-driven workflows with Apache Airflow",
+    "Containerize services with Docker and participate in on-call rotation for pipeline incidents"
+  ]
+}

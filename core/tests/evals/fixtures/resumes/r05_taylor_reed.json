@@ -1,0 +1,74 @@
+{
+  "candidate": {
+    "name": "Taylor Reed",
+    "email": "taylor.reed@example.test",
+    "phone": "555-0105",
+    "location": "Halifax, NS"
+  },
+  "summary": "Junior-to-mid backend engineer with 3 years of Python and PostgreSQL experience, one year of Apache Airflow exposure, and no production Docker experience yet.",
+  "total_years_experience": 3,
+  "skills": [
+    { "name": "Python", "years": 3, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 2, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 1, "last_used_year": 2025, "evidence_chunk_ids": ["c_003"] },
+    { "name": "REST API design", "years": 2, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] }
+  ],
+  "experience": [
+    {
+      "company": "Harbourfront Software",
+      "title": "Backend Engineer",
+      "start": "2023-06",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Implemented Python REST API endpoints for the customer-notifications service.", "chunk_id": "c_001" },
+        { "text": "Wrote PostgreSQL queries backing the notifications service's delivery log.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Maritime Data Co",
+      "title": "Junior Data Analyst",
+      "start": "2021-09",
+      "end": "2023-05",
+      "is_current": false,
+      "bullets": [
+        { "text": "Shadowed the platform team maintaining a single Apache Airflow DAG for weekly reporting.", "chunk_id": "c_003" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Chebucto University",
+      "field": "Computer Science",
+      "year": 2021
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Implemented Python REST API endpoints for the customer-notifications service at Harbourfront Software."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Wrote PostgreSQL queries backing the notifications service's delivery log at Harbourfront Software."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Shadowed the platform team maintaining a single Apache Airflow DAG for weekly reporting at Maritime Data Co."
+    },
+    {
+      "id": "c_004",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Chebucto University, graduated 2021."
+    }
+  ],
+  "cover_letter_chunks": []
+}

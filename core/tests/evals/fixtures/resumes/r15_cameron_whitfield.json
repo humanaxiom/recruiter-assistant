@@ -1,0 +1,85 @@
+{
+  "candidate": {
+    "name": "Cameron Whitfield",
+    "email": "cameron.whitfield@example.test",
+    "phone": "555-0115",
+    "location": "Halifax, NS"
+  },
+  "summary": "Backend/data engineer building Python REST platforms, PostgreSQL data infrastructure, Apache Airflow and Kafka pipelines, and Docker/Kubernetes/Terraform operations.",
+  "total_years_experience": 6,
+  "skills": [
+    { "name": "Python", "years": 14, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 12, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 10, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 8, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 12, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Kubernetes", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "Kafka", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Terraform", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] }
+  ],
+  "experience": [
+    {
+      "company": "Summit Ledger Systems",
+      "title": "Principal Backend Engineer",
+      "start": "2019-01",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Lead the Python REST API platform serving all core banking services at Summit Ledger Systems.", "chunk_id": "c_001" },
+        { "text": "Directed PostgreSQL and Terraform-provisioned infrastructure strategy for the data platform at Summit Ledger Systems.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Delta Harbor Technologies",
+      "title": "Staff Data Engineer",
+      "start": "2012-01",
+      "end": "2018-12",
+      "is_current": false,
+      "bullets": [
+        { "text": "Owned Apache Airflow and Kafka streaming pipelines processing 500M+ events daily at Delta Harbor Technologies.", "chunk_id": "c_003" },
+        { "text": "Containerized the entire data platform with Docker and Kubernetes at Delta Harbor Technologies.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Victoria Coastal University",
+      "field": "Computer Science",
+      "year": 2011
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Lead the Python REST API platform serving all core banking services at Summit Ledger Systems."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Directed PostgreSQL and Terraform-provisioned infrastructure strategy for the data platform at Summit Ledger Systems."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Owned Apache Airflow and Kafka streaming pipelines processing 500M+ events daily at Delta Harbor Technologies."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Containerized the entire data platform with Docker and Kubernetes at Delta Harbor Technologies."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Victoria Coastal University, graduated 2011."
+    }
+  ],
+  "cover_letter_chunks": []
+}

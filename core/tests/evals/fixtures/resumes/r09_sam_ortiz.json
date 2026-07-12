@@ -1,0 +1,80 @@
+{
+  "candidate": {
+    "name": "Sam Ortiz",
+    "email": "sam.ortiz@example.test",
+    "phone": "555-0109",
+    "location": "Regina, SK"
+  },
+  "summary": "Results-driven software professional with expertise in Python, PostgreSQL, Apache Airflow, Docker, REST API design, Kubernetes, Kafka, and Terraform, consistently exceeding expectations in fast-paced, cross-functional environments.",
+  "total_years_experience": 8,
+  "skills": [
+    { "name": "Python", "years": 8, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_005"] },
+    { "name": "Kubernetes", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Kafka", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Terraform", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] }
+  ],
+  "experience": [
+    {
+      "company": "Global Solutions Group",
+      "title": "Software Professional",
+      "start": "2018-01",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Collaborated cross-functionally to deliver results ahead of schedule.", "chunk_id": "c_001" },
+        { "text": "Consistently exceeded expectations in a fast-paced, dynamic environment.", "chunk_id": "c_002" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Diploma, General Studies",
+      "institution": "Wascana Community College",
+      "field": "General Studies",
+      "year": 2017
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Collaborated cross-functionally to deliver results ahead of schedule, demonstrating strong communication and a proactive, can-do attitude."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Consistently exceeded expectations in a fast-paced, dynamic environment, earning recognition as a dependable team player."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Detail-oriented self-starter with a passion for continuous learning and driving business value across the organization."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Thrives under pressure and is known for going above and beyond to exceed stakeholder expectations on every initiative."
+    },
+    {
+      "id": "c_005",
+      "section": "experience",
+      "page": 1,
+      "text": "Excellent communicator and fast learner who builds strong relationships with colleagues at every level of the organization."
+    },
+    {
+      "id": "c_006",
+      "section": "education",
+      "page": 1,
+      "text": "Diploma, General Studies, Wascana Community College, graduated 2017."
+    }
+  ],
+  "cover_letter_chunks": []
+}

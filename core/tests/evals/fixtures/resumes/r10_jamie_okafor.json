@@ -1,0 +1,89 @@
+{
+  "candidate": {
+    "name": "Jamie Okafor",
+    "email": "jamie.okafor@example.test",
+    "phone": "555-0110",
+    "location": "Saskatoon, SK"
+  },
+  "summary": "Engineering leader whose hands-on Python/PostgreSQL/Apache Airflow/Docker backend work concluded in 2018, before moving into non-technical engineering management; the skills below reflect that final individual-contributor stretch, not recent day-to-day work.",
+  "total_years_experience": 12,
+  "skills": [
+    { "name": "Python", "years": 4, "last_used_year": 2018, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 4, "last_used_year": 2018, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 3, "last_used_year": 2017, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 3, "last_used_year": 2018, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 4, "last_used_year": 2018, "evidence_chunk_ids": ["c_001"] }
+  ],
+  "experience": [
+    {
+      "company": "Prairie Grain Analytics",
+      "title": "Engineering Manager",
+      "start": "2018-06",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Led a team of 8 engineers delivering quarterly commodities-forecasting roadmaps at Prairie Grain Analytics.", "chunk_id": "c_005" }
+      ]
+    },
+    {
+      "company": "Northern Pipeline Systems",
+      "title": "Senior Backend Engineer",
+      "start": "2014-01",
+      "end": "2018-05",
+      "is_current": false,
+      "bullets": [
+        { "text": "Built Python REST API services and PostgreSQL schemas powering internal analytics tooling at Northern Pipeline Systems.", "chunk_id": "c_001" },
+        { "text": "Owned PostgreSQL schema design and migrations for the core analytics warehouse at Northern Pipeline Systems.", "chunk_id": "c_002" },
+        { "text": "Orchestrated nightly ETL with Apache Airflow DAGs across 8 data sources at Northern Pipeline Systems.", "chunk_id": "c_003" },
+        { "text": "Containerized every backend service with Docker as part of the 2018 platform migration at Northern Pipeline Systems.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Northern Plains University",
+      "field": "Computer Science",
+      "year": 2013
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Built Python REST API services and PostgreSQL schemas powering internal analytics tooling at Northern Pipeline Systems."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Owned PostgreSQL schema design and migrations for the core analytics warehouse at Northern Pipeline Systems."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Orchestrated nightly ETL with Apache Airflow DAGs across 8 data sources at Northern Pipeline Systems."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Containerized every backend service with Docker as part of the 2018 platform migration at Northern Pipeline Systems."
+    },
+    {
+      "id": "c_005",
+      "section": "experience",
+      "page": 1,
+      "text": "Led a team of 8 engineers delivering quarterly commodities-forecasting roadmaps at Prairie Grain Analytics."
+    },
+    {
+      "id": "c_006",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Northern Plains University, graduated 2013."
+    }
+  ],
+  "cover_letter_chunks": []
+}

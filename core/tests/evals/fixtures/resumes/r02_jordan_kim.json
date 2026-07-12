@@ -1,0 +1,83 @@
+{
+  "candidate": {
+    "name": "Jordan Kim",
+    "email": "jordan.kim@example.test",
+    "phone": "555-0102",
+    "location": "Toronto, ON"
+  },
+  "summary": "Staff data engineer with 7 years designing PostgreSQL-backed ETL platforms, Apache Airflow orchestration, and Python REST services; recent work adding Kafka streaming and Docker packaging.",
+  "total_years_experience": 7,
+  "skills": [
+    { "name": "Python", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 3, "last_used_year": 2025, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Kafka", "years": 3, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] }
+  ],
+  "experience": [
+    {
+      "company": "Lighthouse Data Systems",
+      "title": "Staff Data Engineer",
+      "start": "2020-03",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Own the Python REST API layer that exposes curated PostgreSQL datasets to 6 downstream product teams.", "chunk_id": "c_001" },
+        { "text": "Rebuilt the core warehouse schema in PostgreSQL, adding partitioning that cut nightly load time in half.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Anchor Software",
+      "title": "Data Engineer",
+      "start": "2017-01",
+      "end": "2020-02",
+      "is_current": false,
+      "bullets": [
+        { "text": "Authored and maintained 30+ Apache Airflow DAGs covering ingestion, transformation, and reporting jobs.", "chunk_id": "c_003" },
+        { "text": "Introduced Kafka topics for near-real-time event ingestion and packaged consumers with Docker.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Software Engineering",
+      "institution": "Northshore Polytechnic",
+      "field": "Software Engineering",
+      "year": 2016
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Own the Python REST API layer that exposes curated PostgreSQL datasets to 6 downstream product teams at Lighthouse Data Systems."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Rebuilt the core warehouse schema in PostgreSQL, adding partitioning that cut nightly load time in half at Lighthouse Data Systems."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Authored and maintained 30+ Apache Airflow DAGs covering ingestion, transformation, and reporting jobs at Anchor Software."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Introduced Kafka topics for near-real-time event ingestion and packaged consumers with Docker at Anchor Software."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Software Engineering, Northshore Polytechnic, graduated 2016."
+    }
+  ],
+  "cover_letter_chunks": []
+}

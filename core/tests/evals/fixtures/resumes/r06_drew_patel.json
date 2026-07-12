@@ -1,0 +1,66 @@
+{
+  "candidate": {
+    "name": "Drew Patel",
+    "email": "drew.patel@example.test",
+    "phone": "555-0106",
+    "location": "Montreal, QC"
+  },
+  "summary": "Frontend and mobile developer with 5 years of React, TypeScript, and Swift experience; no backend, data-pipeline, or PostgreSQL work.",
+  "total_years_experience": 5,
+  "skills": [
+    { "name": "React", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "TypeScript", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Swift", "years": 3, "last_used_year": 2025, "evidence_chunk_ids": ["c_002"] }
+  ],
+  "experience": [
+    {
+      "company": "Mile End Studio",
+      "title": "Frontend Engineer",
+      "start": "2021-01",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Built the customer-facing dashboard in React and TypeScript.", "chunk_id": "c_001" }
+      ]
+    },
+    {
+      "company": "Plateau Mobile Labs",
+      "title": "iOS Developer",
+      "start": "2018-05",
+      "end": "2020-12",
+      "is_current": false,
+      "bullets": [
+        { "text": "Shipped two consumer iOS apps in Swift, both published to the App Store.", "chunk_id": "c_002" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BA Design and Computation",
+      "institution": "Sainte-Catherine College",
+      "field": "Design and Computation",
+      "year": 2018
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Built the customer-facing dashboard in React and TypeScript at Mile End Studio, including state management and component libraries."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Shipped two consumer iOS apps in Swift at Plateau Mobile Labs, both published to the App Store."
+    },
+    {
+      "id": "c_003",
+      "section": "education",
+      "page": 1,
+      "text": "BA Design and Computation, Sainte-Catherine College, graduated 2018."
+    }
+  ],
+  "cover_letter_chunks": []
+}

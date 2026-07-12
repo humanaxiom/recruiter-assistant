@@ -1,0 +1,83 @@
+{
+  "candidate": {
+    "name": "Avery Thompson",
+    "email": "avery.thompson@example.test",
+    "phone": "555-0103",
+    "location": "Calgary, AB"
+  },
+  "summary": "Backend engineer with 5 years shipping containerized Python services on PostgreSQL, with Apache Airflow pipeline ownership and hands-on Docker/Kubernetes/Terraform operations experience.",
+  "total_years_experience": 5,
+  "skills": [
+    { "name": "Python", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 3, "last_used_year": 2025, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Terraform", "years": 2, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] }
+  ],
+  "experience": [
+    {
+      "company": "Foothills Cloud Labs",
+      "title": "Backend Engineer",
+      "start": "2021-04",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Built the Python REST API gateway fronting the pricing service, backed by PostgreSQL.", "chunk_id": "c_001" },
+        { "text": "Wrote and tuned PostgreSQL migrations and indexes for the pricing service under production load.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Prairie Fintech",
+      "title": "Software Engineer",
+      "start": "2019-01",
+      "end": "2021-03",
+      "is_current": false,
+      "bullets": [
+        { "text": "Maintained Apache Airflow DAGs for the daily settlement reconciliation pipeline.", "chunk_id": "c_003" },
+        { "text": "Provisioned infrastructure with Terraform and shipped every service as a Docker image.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Bow Valley University",
+      "field": "Computer Science",
+      "year": 2019
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Built the Python REST API gateway fronting the pricing service, backed by PostgreSQL, at Foothills Cloud Labs."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Wrote and tuned PostgreSQL migrations and indexes for the pricing service under production load at Foothills Cloud Labs."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Maintained Apache Airflow DAGs for the daily settlement reconciliation pipeline at Prairie Fintech."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Provisioned infrastructure with Terraform and shipped every service as a Docker image at Prairie Fintech."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Bow Valley University, graduated 2019."
+    }
+  ],
+  "cover_letter_chunks": []
+}
