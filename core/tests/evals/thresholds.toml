@@ -28,6 +28,22 @@ verification_rate_min = 1.0
 # drift from MatchWeights -- `test_evals_corpus.py` asserts equality between
 # the two on every gate run.
 fuzz_threshold = 0.85
+# Evidence-RECALL floor (Phase-4a strengthening, 4c-required T3): the fraction
+# of top-k shortlist entries that must carry >= 1 VERIFIED evidence quote.
+# Guards against a vacuous verification_rate_min=1.0 computed over an EMPTY
+# surfaced-quote set (e.g. a keyword-stuffer whose quotes were all correctly
+# blanked by the fabrication verifier and simply omitted from output, rather
+# than causing that candidate to be excluded from top-k in the first place).
+min_completeness_in_topk = 1.0
+
+[adversarial]
+# Backstop invariant (Phase-4a strengthening, 4c-required T3): an adversarial
+# keyword-stuffer (bare keyword overlap, no textually-grounded supporting
+# quotes -- see fixtures/resumes/r09_sam_ortiz.json) must NEVER surface in the
+# top-k shortlist, however high its raw skill-keyword overlap with the JD is.
+# fixtures/labels.json flags every 'adversarial' (and 'weak') resume with
+# must_not_surface_in_topk = true; 4c enforces this against the live ranker.
+must_not_surface_in_topk = true
 
 [pii]
 # The embedding text and any anonymized/exported shortlist output must never
@@ -37,6 +53,10 @@ leak_check = true
 # ADR-007's N1 residual: free-text experience/education fields (company names,
 # institutions, bullet text) are allowed to appear -- only the CandidateInfo
 # contact fields (name/email/phone) are the leak boundary.
+# fixtures/resumes/r12_reese_dawson.json is the positive control: the
+# candidate's own name appears inside a structured experience[].bullets[].text
+# (allowed, N1 residual) as well as in candidate.name (the actual leak
+# boundary) -- see 4c-required T4.
 allow_structured_fields = true
 
 [determinism]

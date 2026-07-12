@@ -20,7 +20,25 @@
     "core/src/schemas/jobs.py): every entry in the JD's required_skills is an",
     "implicit must-have for stage-2 structured skill scoring; entries in",
     "nice_to_have_skills feed stage-3 evidence text only, per the",
-    "'NICE_TO_HAVE skills' decision recorded in docs/EXTRACTION_PLAN.md."
+    "'NICE_TO_HAVE skills' decision recorded in docs/EXTRACTION_PLAN.md.",
+    "",
+    "--- Phase-4a strengthening additions (adequacy-review round) ---",
+    "must_not_surface_in_topk: true on every 'weak'/'adversarial' entry -- the",
+    "  backstop the ranking-evals gate enforces against thresholds.toml's",
+    "  [adversarial].must_not_surface_in_topk / [evidence].min_completeness_in_topk",
+    "  once Phase 4c lands (see docs/adr for the invariant). NOT computed here.",
+    "expected_rank_band: {min, max} the tag implies for a CORRECT ranker's",
+    "  output order (max=null means unbounded / 'anywhere below the top tier').",
+    "  Bands are per-TAG canonical ranges (every 'strong' entry shares the same",
+    "  band) and are strictly ordered/disjoint across tiers:",
+    "  strong [1,3] < borderline [4,6] < weak/adversarial [7,null].",
+    "  This is a class-level aspiration for 4c's ordering test, not a promise",
+    "  of a unique numeric rank per candidate.",
+    "gold_evidence: for a couple of 'strong' fixtures, skill.name -> the EXACT",
+    "  substring of that skill's cited chunk text a correct evidence verifier",
+    "  should quote. 4c's fuzz-boundary test perturbs these toward ~0.83",
+    "  (must fail >= evidence_verify_fuzz) and ~0.87 (must pass). Fixture-only;",
+    "  no scoring logic here."
   ],
   "job": {
     "id": "job_backend_data_engineer",
@@ -28,18 +46,88 @@
     "target_seniority": "mid_to_senior"
   },
   "resumes": {
-    "r01_casey_rivera": { "tag": "strong", "fixture": "resumes/r01_casey_rivera.json" },
-    "r02_jordan_kim": { "tag": "strong", "fixture": "resumes/r02_jordan_kim.json" },
-    "r03_avery_thompson": { "tag": "strong", "fixture": "resumes/r03_avery_thompson.json" },
-    "r04_morgan_lee": { "tag": "borderline", "fixture": "resumes/r04_morgan_lee.json" },
-    "r05_taylor_reed": { "tag": "borderline", "fixture": "resumes/r05_taylor_reed.json" },
-    "r06_drew_patel": { "tag": "weak", "fixture": "resumes/r06_drew_patel.json" },
-    "r07_alex_nguyen": { "tag": "weak", "fixture": "resumes/r07_alex_nguyen.json" },
-    "r08_riley_chen": { "tag": "weak", "fixture": "resumes/r08_riley_chen.json" },
+    "r01_casey_rivera": {
+      "tag": "strong",
+      "fixture": "resumes/r01_casey_rivera.json",
+      "expected_rank_band": { "min": 1, "max": 3 },
+      "gold_evidence": {
+        "Python": "Designed and shipped Python REST APIs consumed by 40+ internal services",
+        "PostgreSQL": "Optimized PostgreSQL schemas and queries, cutting p95 latency 35% across core tables"
+      }
+    },
+    "r02_jordan_kim": {
+      "tag": "strong",
+      "fixture": "resumes/r02_jordan_kim.json",
+      "expected_rank_band": { "min": 1, "max": 3 },
+      "gold_evidence": {
+        "Apache Airflow": "Authored and maintained 30+ Apache Airflow DAGs covering ingestion, transformation, and reporting jobs",
+        "Docker": "Introduced Kafka topics for near-real-time event ingestion and packaged consumers with Docker"
+      }
+    },
+    "r03_avery_thompson": {
+      "tag": "strong",
+      "fixture": "resumes/r03_avery_thompson.json",
+      "expected_rank_band": { "min": 1, "max": 3 }
+    },
+    "r04_morgan_lee": {
+      "tag": "borderline",
+      "fixture": "resumes/r04_morgan_lee.json",
+      "expected_rank_band": { "min": 4, "max": 6 }
+    },
+    "r05_taylor_reed": {
+      "tag": "borderline",
+      "fixture": "resumes/r05_taylor_reed.json",
+      "expected_rank_band": { "min": 4, "max": 6 }
+    },
+    "r06_drew_patel": {
+      "tag": "weak",
+      "fixture": "resumes/r06_drew_patel.json",
+      "expected_rank_band": { "min": 7, "max": null },
+      "must_not_surface_in_topk": true
+    },
+    "r07_alex_nguyen": {
+      "tag": "weak",
+      "fixture": "resumes/r07_alex_nguyen.json",
+      "expected_rank_band": { "min": 7, "max": null },
+      "must_not_surface_in_topk": true
+    },
+    "r08_riley_chen": {
+      "tag": "weak",
+      "fixture": "resumes/r08_riley_chen.json",
+      "expected_rank_band": { "min": 7, "max": null },
+      "must_not_surface_in_topk": true
+    },
     "r09_sam_ortiz": {
       "tag": "adversarial",
       "fixture": "resumes/r09_sam_ortiz.json",
-      "adversarial_type": "keyword_stuffer_no_evidence"
+      "adversarial_type": "keyword_stuffer_no_evidence",
+      "expected_rank_band": { "min": 7, "max": null },
+      "must_not_surface_in_topk": true
+    },
+    "r10_jamie_okafor": {
+      "tag": "borderline",
+      "fixture": "resumes/r10_jamie_okafor.json",
+      "decision_point": "recency_decay_stale_skills",
+      "expected_rank_band": { "min": 4, "max": 6 }
+    },
+    "r11_skyler_brooks": {
+      "tag": "strong",
+      "fixture": "resumes/r11_skyler_brooks.json",
+      "decision_point": "education_partial_credit_non_cs_bachelor",
+      "expected_rank_band": { "min": 1, "max": 3 }
+    },
+    "r12_reese_dawson": {
+      "tag": "weak",
+      "fixture": "resumes/r12_reese_dawson.json",
+      "decision_point": "pii_leak_self_dox_positive_control",
+      "expected_rank_band": { "min": 7, "max": null },
+      "must_not_surface_in_topk": true
+    },
+    "r13_quinn_delgado": {
+      "tag": "strong",
+      "fixture": "resumes/r13_quinn_delgado.json",
+      "decision_point": "overqual_ratio_trigger",
+      "expected_rank_band": { "min": 1, "max": 3 }
     }
   }
 }

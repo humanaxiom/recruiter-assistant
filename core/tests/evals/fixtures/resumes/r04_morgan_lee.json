@@ -78,5 +78,18 @@
       "text": "BSc Computer Science, Rideau Valley College, graduated 2020."
     }
   ],
-  "cover_letter_chunks": []
+  "cover_letter_chunks": [
+    {
+      "id": "cl_001",
+      "section": "cover_letter",
+      "page": 1,
+      "text": "I'm reaching out because your backend data engineering role lines up exactly with the invoicing-pipeline work I've been doing at Capital Ledger Systems, and I'm eager to bring that same focus to a team solving these problems at a larger scale."
+    },
+    {
+      "id": "cl_002",
+      "section": "cover_letter",
+      "page": 1,
+      "text": "What draws me most to this position is the chance to grow from cron-based scheduling into full Apache Airflow orchestration, learning from engineers who have already solved that problem well."
+    }
+  ]
 }
