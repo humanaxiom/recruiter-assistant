@@ -1238,9 +1238,9 @@ def test_redact_candidate_pii_scrubs_newline_split_name() -> None:
 
     result = _redact(text, candidate)
 
-    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
-        f"candidate name survived a newline-split format divergence: {result!r}"
-    )
+    assert not re.search(
+        r"jane\s*doe", result, re.IGNORECASE
+    ), f"candidate name survived a newline-split format divergence: {result!r}"
     assert "senior engineer" in result.lower()
 
 
@@ -1252,9 +1252,9 @@ def test_redact_candidate_pii_scrubs_double_space_split_name() -> None:
 
     result = _redact(text, candidate)
 
-    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
-        f"candidate name survived a double-space format divergence: {result!r}"
-    )
+    assert not re.search(
+        r"jane\s*doe", result, re.IGNORECASE
+    ), f"candidate name survived a double-space format divergence: {result!r}"
     assert "senior engineer" in result.lower()
 
 
@@ -1266,9 +1266,9 @@ def test_redact_candidate_pii_scrubs_tab_split_name() -> None:
 
     result = _redact(text, candidate)
 
-    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
-        f"candidate name survived a tab-split format divergence: {result!r}"
-    )
+    assert not re.search(
+        r"jane\s*doe", result, re.IGNORECASE
+    ), f"candidate name survived a tab-split format divergence: {result!r}"
     assert "senior engineer" in result.lower()
 
 

@@ -273,6 +273,25 @@ async def _parse_cover_letter(
 # ---------------- embeddings ----------------
 
 
+def _whitespace_flexible_pattern(identifier: str) -> str | None:
+    """Build a case-insensitive regex that matches ``identifier`` allowing ANY
+    run of whitespace (space/tab/newline, any count) wherever the normalized
+    identifier has whitespace. Split on ``\\s+`` into tokens, ``re.escape`` each
+    (candidate values are untrusted LLM output — no ReDoS/injection), and join
+    with ``r"\\s+"``. A single-token identifier degrades to a plain
+    ``re.escape`` literal — no regression. Returns ``None`` for an all-whitespace
+    identifier (nothing to match).
+
+    Tokens stay ORDER- and BOUNDARY-bound: only whitespace between the
+    candidate's OWN tokens is tolerated, so an unrelated name sharing one token
+    ("Jane Smith" vs the candidate's "Jane Doe") is never connected.
+    """
+    tokens = [re.escape(tok) for tok in identifier.split()]
+    if not tokens:
+        return None
+    return r"\s+".join(tokens)
+
+
 def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
     """Strip the candidate's own name/email/phone/location out of a piece of
     text BEFORE it is embedded — embeddings are PII-equivalent (PIPEDA/FIPPA)
@@ -283,29 +302,49 @@ def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
     string is scrubbed first.
 
     Deterministic and surgical: each NON-EMPTY structured identifier is removed
-    as a whole, case-insensitive LITERAL substring (``re.escape`` — never a
-    per-token or regex match), so an unrelated reference's surname ("John Doe"
-    next to the candidate's "Jane Doe") is untouched. Whitespace left by a
-    removal is collapsed. When the candidate carries no identifiers the text is
-    returned verbatim. This function only scrubs the EMBEDDER'S input — the
+    as a case-insensitive, WHITESPACE-FLEXIBLE pattern (tokens ``re.escape``'d
+    and joined with ``r"\\s+"`` — see ``_whitespace_flexible_pattern``), so a
+    name split across a PDF line break, a phone reflowed with extra whitespace,
+    or a tab-separated two-column header still matches the LLM's normalized
+    value. An unrelated reference sharing only ONE token ("Jane Smith" next to
+    the candidate's "Jane Doe") is untouched — tokens stay order- and
+    boundary-bound. The email LOCAL-PART is additionally scrubbed as its own
+    pattern (a bare ``jane.doe`` in a column-wrapped header); the domain is not
+    PII and is left. Whitespace left by a removal is collapsed.
+
+    The scrub deliberately errs toward OVER-redaction of the embedded text
+    (a common-word ``location`` substring may be removed from a larger word —
+    ADR-007 §7 N2); this is not a leak and favors privacy over retrieval
+    precision. When the candidate carries no identifiers the text is returned
+    verbatim. This function only scrubs the EMBEDDER'S input — the
     ``resumes.parsed`` chunk text/summary stay full/cleartext at rest
     (ADR-007 §6, system of record).
     """
-    identifiers = [
-        value
-        for value in (
-            candidate.name,
-            candidate.email,
-            candidate.phone,
-            candidate.location,
-        )
-        if value
-    ]
-    if not identifiers:
+    values = [candidate.name, candidate.email, candidate.phone, candidate.location]
+    # Also scrub an email's local-part alone — a truncated/column-wrapped header
+    # can show `jane.doe` without the `@domain`. The domain is not PII, so only
+    # the substring before `@` is added; it is left intact. Gate this on a
+    # DISTINCTIVE local-part (one carrying a non-letter separator/digit, e.g.
+    # `jane.doe` / `jdoe1`); a bare single-word local-part (`ada`) is left to the
+    # full-email pattern only, so scrubbing it does not eat an unrelated
+    # first-name/word elsewhere in the body (ADR-007 §7 N2 — favor precision here
+    # since the whole email is already removed).
+    if candidate.email and "@" in candidate.email:
+        local = candidate.email.split("@", 1)[0]
+        if re.search(r"[^A-Za-z]", local):
+            values.append(local)
+    patterns: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        pattern = _whitespace_flexible_pattern(value)
+        if pattern is not None:
+            patterns.append(pattern)
+    if not patterns:
         return text
     redacted = text
-    for identifier in identifiers:
-        redacted = re.sub(re.escape(identifier), " ", redacted, flags=re.IGNORECASE)
+    for pattern in patterns:
+        redacted = re.sub(pattern, " ", redacted, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", redacted).strip()
 
 

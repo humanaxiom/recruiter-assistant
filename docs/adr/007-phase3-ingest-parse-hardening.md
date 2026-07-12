@@ -115,12 +115,42 @@ Candidate identity exists in three places with three different postures:
   of a summary a small model opened with the candidate's own name) would be PII-equivalent under
   PIPEDA/FIPPA. Every string handed to the embedder is therefore scrubbed by a deterministic
   `_redact_candidate_pii(text, candidate)` pass — each non-empty structured identifier
-  (name/email/phone/location) is removed as a whole, case-insensitive literal substring — applied to
-  BOTH each chunk's text and the composed summary text before `embed(...)`. This is on TOP of
-  `_build_summary_text` (which still never reads the `CandidateInfo` block). Only the embedder's INPUT
-  is scrubbed: the chunk text and `summary` STORED in `resumes.parsed` stay full/cleartext at rest
-  (system of record). The `resume_core_v1` prompt also instructs the model to keep name/contact out
-  of `summary` (defense in depth).
+  (name/email/phone/location) is removed as a case-insensitive, **whitespace-flexible** pattern
+  (`_whitespace_flexible_pattern`: split on `\s+`, `re.escape` each token, join with `r"\s+"`) —
+  applied to BOTH each chunk's text and the composed summary text before `embed(...)`. This is on TOP
+  of `_build_summary_text` (which still never reads the `CandidateInfo` block). Only the embedder's
+  INPUT is scrubbed: the chunk text and `summary` STORED in `resumes.parsed` stay full/cleartext at
+  rest (system of record). The `resume_core_v1` prompt also instructs the model to keep name/contact
+  out of `summary` (defense in depth).
+
+  **F1-R close (round 4, formerly a MEDIUM under-redaction residual).** The identifiers are the LLM's
+  *normalized* values matched against the *un-normalized* résumé body, so any whitespace/format
+  divergence used to leave identity in the embedded text (security PoC: a `Jane\nDoe` line-break /
+  double-space / tab split, a `+1  604 555\n1212` reflowed phone, a bare `jane.doe` local-part). The
+  whitespace-flexible pattern closes newline/multi-space/tab-split names and space-divergent phones
+  (two-column-PDF / stacked-name cases); a single-token identifier degrades to the prior literal
+  `re.escape` match (no regression). ADDITIONALLY, when `candidate.email` contains `@`, the
+  **local-part** (substring before `@`) is scrubbed as its own whitespace-flexible pattern (a
+  column-wrapped header can show `jane.doe` alone); the domain is not PII and is left. Tokens stay
+  order- and boundary-bound, so an unrelated reference sharing ONE token ("Jane Smith" / "John Doe"
+  next to the candidate's "Jane Doe") is preserved — the fix tolerates whitespace runs without
+  connecting unrelated tokens. `re.escape` on every token keeps the scrub injection/ReDoS-safe against
+  untrusted LLM output.
+
+  **Deliberate, accepted residuals (documentation only — no code change):**
+  - **(N2) The scrub errs toward OVER-redaction of embedded text.** A common-word `location`
+    substring (e.g. `location="York"` inside "New York") may be removed from a larger word. Substring
+    redaction favors privacy over retrieval precision; this is not a leak. Also NOT chased: bare
+    single-token name fragments are not globally redacted (removing a surname or a common first name
+    everywhere would over-redact legitimate résumé content and degrade Phase-4 retrieval). The
+    remaining risk — a candidate's surname alone, in isolation, format-divergent from the structured
+    value — is accepted and bounded.
+  - **(N1) Structured experience/education/skills fields ride the outbox unscrubbed.** LLM achievement
+    text (`parsed.experience[].bullets[].text`) and the structured skills/education fields are needed
+    by Phase 4's graph projection and are non-contact (not name/email/phone). Candidate identifiers are
+    separately scrubbed from all EMBEDDINGS. The residual self-dox risk — a candidate typing their own
+    email into an achievement bullet — is accepted, symmetric with the §6/§7 at-rest cleartext
+    decision. No code change.
 
 The split, stated plainly: **identity may live at rest behind the DB boundary (encrypted, and
 cleartext in `resumes.parsed`); identity must NOT ride the outbox into the graph — not as the
