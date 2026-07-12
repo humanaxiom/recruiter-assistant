@@ -86,7 +86,14 @@ def validation_error_digest(exc: ValidationError) -> str:
     return "; ".join(parts)[:500]
 
 
-def _strip_nuls(value: Any) -> Any:
+# Depth ceiling for the NUL-strip walk. Bounds recursion so deeply-nested LLM
+# JSON (prompt-injectable via ``[[[...]]]``) can't blow the Python stack. A
+# real résumé's parsed structure is only a few levels deep, so 200 is far past
+# anything legitimate while still well under CPython's ~1000 recursion limit.
+_MAX_JSON_DEPTH = 200
+
+
+def _strip_nuls(value: Any, _depth: int = 0) -> Any:
     """Recursively strip U+0000 from LLM-parsed JSON.
 
     ``extract._sanitize`` strips NULs from DOCUMENT text, but LLM output never
@@ -97,16 +104,24 @@ def _strip_nuls(value: Any) -> Any:
     loop that re-runs the whole LLM pipeline. The résumé is attacker-supplied
     and goes verbatim into the prompt, so prompt injection (or a looping model)
     can trigger it on demand.
+
+    Bounded: past ``_MAX_JSON_DEPTH`` levels this raises ``RecursionError``,
+    which ``chat_json`` catches and funnels into ``LLMOutputInvalidError`` — the
+    same path deeply-nested input takes when ``json.loads`` itself overflows.
     """
+    if _depth > _MAX_JSON_DEPTH:
+        raise RecursionError(f"LLM JSON nested past {_MAX_JSON_DEPTH} levels")
     if isinstance(value, str):
         return value.replace("\x00", "")
     if isinstance(value, dict):
         return {
-            (k.replace("\x00", "") if isinstance(k, str) else k): _strip_nuls(v)
+            (k.replace("\x00", "") if isinstance(k, str) else k): _strip_nuls(
+                v, _depth + 1
+            )
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [_strip_nuls(v) for v in value]
+        return [_strip_nuls(v, _depth + 1) for v in value]
     return value
 
 
@@ -294,6 +309,15 @@ class LLMClient:
                 # JSONDecodeError's str() is "msg: line L column C (char N)" —
                 # position only, never the document body. Safe as-is.
                 prompt_error = safe_error = str(exc)[:500]
+            except RecursionError:
+                # Deeply-nested LLM JSON (prompt-injectable ``[[[...]]]``) can
+                # overflow the stack in ``json.loads`` itself OR in the
+                # ``_strip_nuls`` walk — RecursionError is neither JSONDecode nor
+                # Validation, so without this it would escape ``chat_json`` (and
+                # ``parse_resume``) uncaught. Treat it as invalid LLM output and
+                # funnel it into the same LLMOutputInvalidError path. The reason
+                # is PII-free (structural only — no document body).
+                prompt_error = safe_error = "llm output nested too deeply to parse"
             except ValidationError as exc:
                 prompt_error = str(exc)[:500]
                 safe_error = validation_error_digest(exc)

@@ -410,9 +410,24 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
 
         # The embedding text NEVER carries name/email/phone/location — embeddings
         # are PII-equivalent under PIPEDA/FIPPA. See _build_summary_text.
-        summary_text = _build_summary_text(cleaned_parsed)
-        [summary_emb] = await embedder.embed([summary_text])
-        chunk_embs_list = await _embed_batched(embedder, [c.text for c in chunks])
+        #
+        # LLMClient.embed raises LLMOutputInvalidError on a count mismatch AND on
+        # the 768-d expected_dim check — a PERMANENT per-document error (the model
+        # is mis-pointed or misbehaving; re-running the same bytes won't fix it),
+        # exactly like a core chat_json failure. Funnel it through
+        # record_parse_failure -> "failed" so it doesn't escape parse_resume
+        # uncaught (stranded row + arq retry storm). A TRANSIENT
+        # LLMUnavailableError (Ollama down) is deliberately NOT caught here: it
+        # propagates so arq retries the genuine outage.
+        try:
+            summary_text = _build_summary_text(cleaned_parsed)
+            [summary_emb] = await embedder.embed([summary_text])
+            chunk_embs_list = await _embed_batched(embedder, [c.text for c in chunks])
+        except LLMOutputInvalidError as exc:
+            await resume_service.record_parse_failure(
+                conn, resume_id=resume_id, reason=f"embedding failed: {exc}"
+            )
+            return "failed"
         chunk_embs = {chunks[i].id: chunk_embs_list[i] for i in range(len(chunks))}
 
         # Encrypt PII + write back + enqueue the outbox row, all atomic.
@@ -445,13 +460,24 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 aggregate_id=resume_id,
                 event_type="resume.parsed",
                 payload={
-                    # NO `candidate` block. Phase 4 projects this payload into
-                    # Neo4j and needs skills/experience/embeddings, NOT identity
-                    # — `resumes` (pgcrypto-encrypted) is the system of record
-                    # for PII, and the outbox is an unencrypted jsonb table.
-                    # `resumes.parsed` KEEPS its candidate block; only the event
-                    # payload drops it.
-                    "parsed": cleaned_parsed.model_dump(exclude={"candidate"}),
+                    # NO `candidate` block AND no raw chunk TEXT. Phase 4 projects
+                    # this payload into Neo4j and needs skills/experience/
+                    # embeddings, NOT identity — `resumes` (pgcrypto-encrypted) is
+                    # the system of record for PII, and the outbox is an
+                    # unencrypted jsonb table. Beyond the structured `candidate`
+                    # block, header chunks carry the candidate's name/email/phone
+                    # VERBATIM in `chunks[].text` / `cover_letter_chunks[].text`,
+                    # so those are dropped too (ids/section/page stay — Phase 4
+                    # keys embeddings by chunk id and reads any chunk-text preview
+                    # from `resumes.parsed`, the system of record, which KEEPS the
+                    # full text).
+                    "parsed": cleaned_parsed.model_dump(
+                        exclude={
+                            "candidate": True,
+                            "chunks": {"__all__": {"text"}},
+                            "cover_letter_chunks": {"__all__": {"text"}},
+                        }
+                    ),
                     "summary_emb": summary_emb,
                     "chunk_embs": chunk_embs,
                     "prompt_version": prompt_version,
