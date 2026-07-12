@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -1207,6 +1208,134 @@ def test_redact_candidate_pii_does_not_mutate_the_candidate_argument() -> None:
     _redact("Ada Lovelace, backend engineer.", candidate)
 
     assert candidate.model_dump() == before
+
+
+# ── F1-R (MEDIUM, round 4) — whitespace-flexible identifier scrub closes ──
+# format-divergent leaks ─────────────────────────────────────────────────
+#
+# `_redact_candidate_pii` today matches each `candidate.*` value as a single,
+# LITERAL `re.escape`'d substring against the un-normalized résumé body. The
+# candidate values are the LLM's NORMALIZED output — a name split across a
+# PDF line break, a phone number reflowed with extra whitespace, or an email
+# whose local-part appears alone in the body all diverge from the literal
+# structured value and leak into the text handed to the embedder (security
+# round-4 finding F1-R). The fix: for each identifier, split on `\s+` into
+# tokens, `re.escape` each token, and join with `r"\s+"` so any run of
+# whitespace (space/tab/newline, any count) between tokens still matches.
+# Single-token identifiers (and the email as a whole) degrade to the current
+# literal match — no regression. The email LOCAL-PART is additionally
+# scrubbed as its own whitespace-flexible pattern (the domain is not PII).
+
+
+def test_redact_candidate_pii_scrubs_newline_split_name() -> None:
+    """A two-column PDF, or a name stacked above a title on the next line,
+    can insert a NEWLINE where the LLM's normalized `candidate.name` has a
+    plain space. The literal `re.escape` match in the current code requires
+    an EXACT single space and misses this — "Jane" and "Doe" both survive,
+    adjacent, in the text handed to the embedder."""
+    candidate = CandidateInfo(name="Jane Doe")
+    text = "Jane\nDoe Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
+        f"candidate name survived a newline-split format divergence: {result!r}"
+    )
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_scrubs_double_space_split_name() -> None:
+    """Same format-divergence leak as the newline case, but a doubled space
+    (a common PDF-extraction artifact from column gaps)."""
+    candidate = CandidateInfo(name="Jane Doe")
+    text = "Jane  Doe Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
+        f"candidate name survived a double-space format divergence: {result!r}"
+    )
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_scrubs_tab_split_name() -> None:
+    """Same format-divergence leak, this time a tab (some PDF extractors
+    render column gaps as literal tab characters)."""
+    candidate = CandidateInfo(name="Jane Doe")
+    text = "Jane\tDoe Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert not re.search(r"jane\s*doe", result, re.IGNORECASE), (
+        f"candidate name survived a tab-split format divergence: {result!r}"
+    )
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_scrubs_space_divergent_phone_digits() -> None:
+    """PDF text extraction can reflow a phone number's whitespace (an extra
+    space, or a line break inserted mid-number by a two-column layout) while
+    the LLM normalizes the SAME digit groups with single spaces. The
+    whitespace-flexible fix closes this; the current literal `re.escape`
+    match requires an EXACT single space between "604", "555" and "1212"
+    and leaves the digits in the embedded text.
+
+    NOTE (round4-fix-spec.md): the fix is deliberately bounded to WHITESPACE
+    divergence only — it does not strip or normalize punctuation (parens/
+    dashes) that differs between the body and the LLM-normalized value. This
+    body diverges from `candidate.phone` ONLY in whitespace (an extra space
+    plus a line break), never in punctuation, which is exactly the
+    "space-divergent phone (two-column-PDF)" case the spec fix commits to
+    closing — see round4-fix-spec.md for the accepted punctuation-divergence
+    residual.
+    """
+    candidate = CandidateInfo(phone="+1 604 555 1212")
+    text = "Contact:\n+1  604 555\n1212\nSenior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert "604" not in result
+    assert "555" not in result
+    assert "1212" not in result
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_scrubs_email_local_part_alone() -> None:
+    """A résumé header sometimes shows just the local-part of an email (a
+    truncated or column-wrapped rendering) while `candidate.email` carries
+    the LLM-normalized full address. The current code only matches the FULL
+    `name@domain` literal, so a bare local-part in the body is never
+    touched. The domain is not PII and is not required to be scrubbed."""
+    candidate = CandidateInfo(email="jane.doe@example.com")
+    text = "jane.doe Senior Engineer"
+
+    result = _redact(text, candidate)
+
+    assert "jane.doe" not in result.lower()
+    assert "senior engineer" in result.lower()
+
+
+def test_redact_candidate_pii_whitespace_flexible_name_keeps_precision() -> None:
+    """Over-redaction guard: the whitespace-flexible pattern must still
+    require the candidate's OWN tokens, in the candidate's OWN order,
+    separated by nothing but whitespace. An unrelated person who shares only
+    ONE token with the candidate's name — a different first name paired
+    with the candidate's surname, or vice versa — must be preserved
+    verbatim; the fix must not start connecting unrelated tokens across
+    word boundaries just because it tolerates whitespace runs."""
+    candidate = CandidateInfo(name="Jane Doe")
+    text = "Jane Smith is the referring recruiter. Contact John Doe for references."
+
+    result = _redact(text, candidate)
+
+    assert "jane smith" in result.lower(), (
+        "an unrelated person's name sharing the candidate's first name was "
+        f"corrupted by the whitespace-flexible scrub: {result!r}"
+    )
+    assert "john doe" in result.lower(), (
+        "an unrelated person's name sharing the candidate's surname was "
+        f"corrupted by the whitespace-flexible scrub: {result!r}"
+    )
 
 
 # ── F1 (HIGH, round 3) — end-to-end: embed-call TEXT is scrubbed, the ─────
