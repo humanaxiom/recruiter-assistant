@@ -19,7 +19,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases; sub-phase 4a (evals corpus) is MERGED to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. 4b (graph projection) is next.**
 
 ### Phase 3 is MERGED to `main` (PR #6, merge `49196d7`) — DONE
 
@@ -111,16 +111,16 @@ table). **Sub-phase 4a (evals corpus) is COMPLETE and gate-green** on branch
 (7 strong / 4 borderline / 4 weak / 1 adversarial), `labels.json` (tags + tier-derived rank bands +
 gold_evidence + matched-pair `ordering_controls`), `thresholds.toml`, a RED-pending-4c harness stub
 `run_evals.py`, and 226 self-verifying tests in `test_evals_corpus.py`. **All three merge-blocking gates
-green on HEAD `e8e83be`** (reviewer APPROVE, security PASS, ranking-evals PASS). Zero product code, so
-src coverage is unmoved (955 unit @ 96.63%). Full write-up:
-[docs/activity/phase-4a-ranking-evals-corpus.md](docs/activity/phase-4a-ranking-evals-corpus.md).
+green** (reviewer APPROVE, security PASS, ranking-evals PASS), and **MERGED to `main` via PR #8
+(merge `875eac2`), CI green (branch-name · ruff/black/mypy · unit/coverage · integration pg+neo4j+redis),
+2026-07-12** — branch deleted. Zero product code, so src coverage is unmoved (955 unit @ 96.63%). Full
+write-up: [docs/activity/phase-4a-ranking-evals-corpus.md](docs/activity/phase-4a-ranking-evals-corpus.md).
 Key gate fix: the education/overqual twin controls had a **confound** — they narrated their target
 dimension in `summary`, which `_build_summary_text` embeds into `summary_emb` (the vector sub-score) —
 now neutralized to byte-identical summaries with a guarding assertion. (A reviewer "CRITICAL" was a
-false alarm from running a mutation-testing gate concurrently with the reviewer on the shared tree; re-gate
-sequentially.) **Remaining for 4a: push branch + open PR to `main`; after CI green, merge.** If this
-handoff is being read cold, check `git log --oneline main..HEAD` and `gh pr list` — 4a may already be
-pushed/PR'd/merged; do not redo it.
+false alarm from running a mutation-testing gate concurrently with the reviewer on the shared tree —
+**re-gate sequentially, never concurrently, when a gate mutates the working tree.**) 4a is done; **the
+next action is 4b.**
 
 ### THEN — 4b (Graph projection) is the next sub-phase
 Run the per-phase subagent loop on a fresh `feat/phase-4b-...` branch: planner → tester (+ evals fixture)
