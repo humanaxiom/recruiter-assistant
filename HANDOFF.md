@@ -21,9 +21,9 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 **Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, and 2 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`). All merged 2026-07-11.
 
-### ⚠️ Phase 3 is IN FLIGHT on branch `feat/phase-3-ingest-parse` — NOT merged, NOT yet PR'd
+### Phase 3 is BUILT + GREEN + FULLY RE-AUDITED on branch `feat/phase-3-ingest-parse` — NOT merged, NOT yet PR'd
 
-**Read the "Phase 3 resume — exact next step" section below FIRST.** The branch is 15 commits ahead of `main`, working tree clean, all gates green **offline + integration**, but **the round-3 reviewer/security re-audit has not run yet** — that is the immediate next action, not a new phase.
+**Read the "Phase 3 resume — exact next step" section below FIRST.** The branch is **20 commits ahead of `main`** (final HEAD `c7b497e`), working tree clean, all gates green **offline + integration**, and **all three merge-blocking gates have now been re-run to green on final HEAD** (reviewer APPROVE, security PASS, ranking-evals PASS) across **four** rounds of findings-and-fix. The re-audit that the previous version of this handoff said was pending is **done**. The immediate next action is a **human check-in before the PR is opened** (see "Phase 3 resume" below) — not further gate work, and not Phase 4.
 
 **What landed on the branch (TDD, red→green throughout):** the full ingest/parse pipeline ported from `C:\repos\hris`:
 - `core/src/pipeline/parsing/{extract,chunk}.py` — PyMuPDF/python-docx/striprtf extraction + section-aware chunker (chunk ids **one-based**, `c_001`/`cl_001`; `_sanitize` NUL-strip preserved).
@@ -36,13 +36,19 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 - `core/src/settings.py` (+6 LLM/cache knobs), `core/requirements.txt` (added PyMuPDF/python-docx/striprtf/jinja2/pyyaml; removed openai; `redis>=5.0.1`).
 - `docs/adr/007-phase3-ingest-parse-hardening.md` — records all Phase 3 decisions + the PII-at-rest boundary.
 
-**Gate history on this branch (this is the important part):** first full pass was reviewer=CHANGES-REQUIRED, security=FAIL, ranking-evals=PASS. Both blocking gates **mutation-tested every guard** and found real defects. Two fix rounds followed:
+Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ingest-parse.md); rationale: [docs/adr/007-*.md](docs/adr/007-phase3-ingest-parse-hardening.md).
+
+**Gate history on this branch (this is the important part):** first full pass was reviewer=CHANGES-REQUIRED, security=FAIL, ranking-evals=PASS. All blocking gates **mutation-tested every guard** and found real defects across four rounds:
 - **Round 1** (`e24f9dc` red → `c8485b9` green): PII-in-`ValidationError` redaction (pydantic embeds `input_value` → leaked into `failure_reason`/logs), unbounded-chunks → uncaught `ValidationError`, decompression-bomb caps, LLM-emitted NUL, `embed()` dim validation, dropped `candidate` from outbox payload.
-- **Round 2** (`86f66d1` red → `c57a1c1` green): the re-audit **defeated round 1 by mutation** — DOCX bomb guard trusted the zip's self-declared central-directory sizes (forged CD → 198 MB inflation), a corrupt PDF raised a bare `RuntimeError` that still escaped uncaught, `_strip_nuls` could hit `RecursionError`, embedding-call failures escaped `parse_resume`, and dropping only the `candidate` field while still shipping raw chunk text (résumé header PII) into the outbox was "theatre." All six fixed: DOCX guard now streams members with a real 50 MB decompression ceiling; `_extract_pdf` page-count + loop wrapped → `UnsupportedMimeError`; `chat_json` catches `RecursionError` (+ depth-bounded `_strip_nuls`); permanent embedding `LLMOutputInvalidError` → `record_parse_failure` (transient `LLMUnavailableError` deliberately still escapes so arq retries an outage); outbox payload now excludes chunk `text` too (Phase 4 reads text from `resumes.parsed`, the system of record).
+- **Round 2** (`86f66d1` red → `c57a1c1` green, findings F1–F6): the re-audit **defeated round 1 by mutation** — DOCX bomb guard trusted the zip's self-declared central-directory sizes (forged CD → 198 MB inflation), a corrupt PDF raised a bare `RuntimeError` that still escaped uncaught, `_strip_nuls` could hit `RecursionError`, embedding-call failures escaped `parse_resume`, and dropping only the `candidate` field while still shipping raw chunk text (résumé header PII) into the outbox was "theatre." All six fixed: DOCX guard now streams members with a real 50 MB decompression ceiling; `_extract_pdf` page-count + loop wrapped → `UnsupportedMimeError`; `chat_json` catches `RecursionError` (+ depth-bounded `_strip_nuls`); permanent embedding `LLMOutputInvalidError` → `record_parse_failure` (transient `LLMUnavailableError` deliberately still escapes so arq retries an outage); outbox payload now excludes chunk `text` too (Phase 4 reads text from `resumes.parsed`, the system of record). ADR-007 was written at this point.
+- **Round 3** (`d7afe53` red → `13c74d8` green, findings F1/F2/F3/F5): the re-audit found the round-2 outbox fix still incomplete — **F1 (HIGH): `chunk_embs`/`summary_emb` in the outbox payload encode candidate identity inside the embedding vectors themselves** (a `nomic-embed-text` vector of a header chunk, or of a summary a small model opened with the candidate's name, is PII-equivalent under PIPEDA/FIPPA); **F2: the outbox `summary` field** was still cleartext and could open with the candidate's name; **F3: an empty `PII_KEY`** did not fail loud, so a misconfigured deploy would silently `pgp_sym_encrypt` PII with an empty passphrase; **F5: `_extract_pdf`'s `doc.needs_pass` read** was unwrapped and could raise an untyped exception on a corrupt (not merely password-protected) PDF, escaping `extract_text` uncaught. All four fixed: a deterministic `_redact_candidate_pii` scrub (whitespace-flexible identifier match) applied to every string handed to the embedder; `summary` dropped from the outbox payload; `worker/main.py` startup now raises `RuntimeError` on an empty `PII_KEY` before opening any pool/driver/store; `needs_pass` wrapped the same way as the page-count/page-loop reads. ADR-007 §7/§7a were extended.
+- **Round 4** (`6e1d35e` red → `c7b497e` green, finding F1-R): the re-audit found a **MEDIUM residual under-redaction** in the round-3 embed scrub — identifiers are matched as the LLM's *normalized* values against the *un-normalized* résumé body, so whitespace/format divergence (a line-broken name, a reflowed phone number, a bare email local-part) could still leave identity in the embedded text. Fixed with a whitespace-flexible redaction pattern (tokens joined by `\s+`) plus a separate email-local-part scrub. Two deliberate, accepted, documentation-only residuals were recorded alongside the fix: **N1** (structured experience/education/skills fields ride the outbox unscrubbed — non-contact, symmetric with the §6/§7 at-rest cleartext decision) and **N2** (the scrub errs toward over-redaction of embedded text, e.g. a common-word `location` substring). Same commit also **pinned `black==26.5.1`** in `requirements-dev.txt` for gate reproducibility (CI and local containers had been resolving different `black` versions).
+
+**All three merge-blocking gates are green on final HEAD `c7b497e`** — reviewer APPROVE, security PASS, ranking-evals PASS. No further gate rounds are outstanding.
 
 **Human decision made this session (record, don't re-ask):** for PII-at-rest, we **drop `candidate` (and now chunk text) from the outbox payload only**; `resumes.parsed` jsonb retains cleartext candidate — accepted for v1, documented in ADR-007 §6, revisit before any multi-tenant deploy. Phase 5 redaction is display-only and must not be mistaken for at-rest protection.
 
-**Current gate status:** offline (ruff/black/mypy --strict/**708 unit @ 96.62%**) and integration (**65** vs real Postgres+Neo4j) all GREEN as of `c57a1c1`, host write-back verified. `.claude/settings.json` was reverted to `main` (`f12faf6`) after parallel agents polluted it — do not let it back into the diff.
+**Current gate status:** offline (ruff/black/mypy --strict/**729 unit @ ~96.6% coverage**) and integration (vs real Postgres+Neo4j) all GREEN as of final HEAD `c7b497e`, host write-back verified. `.claude/settings.json` was reverted to `main` (`f12faf6`) after parallel agents polluted it — do not let it back into the diff.
 
 **Phase 2 landed** (two commits — red `1645178` → green `5bbf7c2`): the pydantic **v2** contract layer in `core/src/schemas/` — three modules + an `__init__` re-export (`from src.schemas import JobCreate, ResumeParsed, MatchWeights, …`), the contracts Phases 3–6 code against (API DTOs, strict LLM `chat_json` schemas, jsonb shapes, ranking weights). `jobs.py` = job DTOs + `Skill`/`Education`/`JDExtracted`; `resumes.py` = parse shapes + resume DTOs + the `_coerce_year`/`_drop_invalid_rows`/`_coerce_*` lossy validators; `matching.py` = `MatchWeights` (+ `DEFAULT_WEIGHTS`) + score/evidence/shortlist shapes. Pure data models — no I/O. **Review workflow + Taleo/JD-comments CUT and not importable** (`PipelineStage`/`DispositionReason`/`ShortlistDecision*`/`StageTransition*` deleted; `ShortlistEntry` drops `current_decision`/`current_stage`, keeps blind-review `blinded`/`display_label`; `JobListItem` drops `comment_count`/`source`/`external_last_seen_at`; no `approval_required_2nd_review`) — a merge-blocking cut guard enforces it. **Three DDL-alignment deviations**: `created_by`/`uploaded_by` are `str | None` (nullable TEXT actor labels), `JobCreate.blind_review` defaults `True` (blind-by-default), no `approval_required_2nd_review`. **`MatchWeights` is the ranking-weight contract** (0.6/0.3/0.1 top; 0.40/0.25/0.10/0.15/0.10 sub; `evidence_verify_fuzz=0.85`; frozen; sums-to-1.0 validator). Gates: offline green — ruff (no `--fix`), black, mypy --strict, **486 unit tests, 97.52% coverage**; reviewer APPROVE, security PASS, ranking-evals PASS (incl. a weight-validator mutation test). The GREEN step was completed by the coordinator directly after a coder subagent hit a session limit mid-port (`matching.py` + `__init__.py` hand-authored, re-verified by reviewer + evals). Security flagged a **redaction-boundary contract for Phase 5**: `ResumeOut`/`ResumeListItem` can serialize decrypted PII with `blinded=True`, so Phase 5 redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before DTO construction (the schema can't enforce it). Details: [docs/activity/phase-2-schemas.md](docs/activity/phase-2-schemas.md); rationale: [docs/adr/006-*.md](docs/adr/006-schema-port-trim-ddl-alignment.md).
 
@@ -57,7 +63,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 **Note on `core/src/gates/`:** the deleted `gates/` was the template demo's *product-code* gate-runner, not the build harness. `make gates`, CI, `.claude/`, and pre-commit are all intact. The Phase 0 checklist's "keep gates" meant the build suite.
 
-**Not started:** Phase 3 onward — see below.
+**Not started:** Phase 4 onward — see below. (Phase 3 is now built + green + re-audited, not yet merged; see "Current state" above.)
 
 **Decisions locked:** template-first port · filesystem storage (MinIO dropped — community edition archived 2026-04-25) · keep Neo4j (load-bearing) · v1 includes cover-letter/motivation, reverse-match, a minimal Flask viewer, and blind-review redaction ON by default.
 
@@ -95,18 +101,29 @@ Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); 
 
 ## Phase 3 resume — EXACT next step (do this first, before anything else)
 
-Phase 3 is **built and green but not yet re-audited or merged**. The next actions, in order:
+Phase 3 is **built, green, and fully re-audited — all three merge-blocking gates (reviewer, security,
+ranking-evals) are green on final HEAD `c7b497e`, across four rounds of findings-and-fix (see "Gate
+history" above: round 1 general findings, round 2 F1–F6, round 3 F1/F2/F3/F5, round 4 F1-R). The docs
+finalize pass is done: ADR-007 records the full PII-at-rest boundary and all round-3/4 findings,
+`docs/EXTRACTION_PLAN.md`'s Phase 3 row is ✅, and this handoff reflects the re-audited state.** The
+next actions, in order:
 
-1. **Re-run the two merge-blocking gates that last returned FAIL/CHANGES-REQUIRED** — `reviewer` and `security`, both on **opus** — over `git diff main...HEAD` on `feat/phase-3-ingest-parse`. They FAILED twice and were fixed twice (rounds 1 & 2 above); round-2 fixes (`c57a1c1`) have **not** been re-audited. Tell each gate exactly what round 2 changed (see the round-2 list in Current state) and have them **mutation-test the new guards** — especially: DOCX streaming decompression cap (forge a lying central directory again → must still reject), `_extract_pdf`'s broad `except → UnsupportedMimeError` (the corrupt-PDF `code=7` / cyclic-page-tree fixtures), `_strip_nuls` recursion catch, the permanent-vs-transient embedding-error split in `parse_resume`, and that no chunk-text PII rides in the outbox payload. `ranking-evals` already PASSed round 0 but re-run it too since source changed. If any gate finds a NEW real defect, do another red→green fix round (max sensible; each gate has been right so far — do not overrule a mutation-proven finding).
-   - Verify gates in the `python:3.11-slim` container per "Environment quirks" — no local Python. The `--fix`/`black` **write** pass MUST be scoped to `src` only; running it over `tests/` clobbers other work and is how `.claude/settings.json` got polluted.
-2. **When all three gates are green**, `docs` (haiku, or sonnet if load-bearing) does a final pass: confirm ADR-007 is complete, update `docs/EXTRACTION_PLAN.md` Phase 3 row to ✅, and **check in with the human before opening the PR** (they asked to gate Phase 4 behind a check-in). Push `feat/phase-3-ingest-parse`, open the PR to `main` via `gh` (authed as `adamsalah13`, admin on `humanaxiom`), let CI (`gates-all`) go green, then merge.
+1. **Check in with the human before opening the PR** — they asked to gate Phase 4 behind a check-in,
+   and that check-in has **not** happened yet. Do this before step 2, not after.
+2. **After the check-in**, push `feat/phase-3-ingest-parse`, open the PR to `main` via `gh` (authed as
+   `adamsalah13`, admin on `humanaxiom`), let CI (`gates-all`) go green, then merge.
 3. **Only then** start Phase 4 (Ranking engine) per the plan table.
+
+Do **not** claim the PR is opened or merged until it actually is — as of this writing neither has
+happened.
 
 **Carried into Phase 4** (from Phase 3 gate findings — don't lose these):
 - The **outbox drainer** (`project_to_graph`) lands in Phase 4 — it consumes the `job.parsed`/`resume.parsed` rows Phase 3 enqueues. It **must not** project `parsed.candidate` into Neo4j and **must not** log the payload. hris's `_resume_projection_tx` only sets `total_years_experience` on the `Resume` node — keep it that way.
 - `ResumeSkill.evidence_chunk_ids` is always `[]` after a Phase 3 parse (matches hris) — Phase 4's evidence verifier sources citations from the `shortlist_evidence_v1` prompt against `parsed.chunks`, and `scrub_invalid_chunk_refs` (ported-but-uncalled) wires in at that citation boundary.
 - `core/tests/evals/` does not exist yet — the precision@k / evidence-verification-rate corpus + `thresholds.toml` must be created before Phase 4's matching engine so its first green build is falsifiable.
 - Chunk-cap coupling nit: `chunk.py`'s `{"c":200,"cl":100}` and `ResumeParsed.chunks`/`cover_letter_chunks` `max_length` are two magic numbers coupled only by a comment — consider a single source.
+- **N1 (round-4 accepted residual, ADR-007 §7):** structured `experience[].bullets[].text`/skills/education fields ride the outbox unscrubbed for Phase 4's graph projection — non-contact, but a candidate could self-dox in achievement text. Accepted, symmetric with the §6/§7 at-rest cleartext decision; no code change, just context for Phase 4's projection code and Phase 5's redaction scope.
+- **N2 (round-4 accepted residual, ADR-007 §7):** the embed-boundary PII scrub errs toward over-redaction (e.g. a common-word `location` substring inside a larger word). Not chased — favors privacy over retrieval precision. Relevant context if Phase 4 retrieval quality ever looks degraded near a location term.
 
 ## Historical: original Phase 3 plan (for reference)
 
@@ -150,7 +167,16 @@ ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
 (storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3. main contains
 Phases 0-2 (486 unit tests, 97.52% coverage). The pydantic contract layer
 (core/src/schemas: jobs/resumes/matching) exists, review workflow cut,
-MatchWeights = the ranking-weight contract. Phase 3 is next.
+MatchWeights = the ranking-weight contract.
+
+Phase 3 (ingest + parse) is BUILT, GREEN, and FULLY RE-AUDITED on branch
+feat/phase-3-ingest-parse (20 commits ahead of main, HEAD c7b497e; 729 unit tests,
+~96.6% coverage) — all three merge-blocking gates (reviewer/security/ranking-evals)
+are green after four rounds of findings-and-fix. It is NOT yet merged. See
+"Phase 3 resume — EXACT next step" in HANDOFF.md: the next action is a HUMAN
+CHECK-IN before the PR is opened (do this first — do not open the PR or start
+Phase 4 without it), then push + open the PR via gh + let CI go green + merge,
+then start Phase 4.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
@@ -158,23 +184,21 @@ merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 data-pipeline UP to opus for the 4-stage ranking algorithm / evidence verifier /
 PII crypto / Neo4j scoring diffs. Defaults live in .claude/agents/*.md frontmatter.
 
-Start Phase 3 (Ingest + parse): port parsing/{extract,chunk} (PyMuPDF/python-docx),
-the LLM client + Redis embed cache, parse_resume/parse_job, cover-letter parse, and
-PII encryption on parse (pii.py, pgcrypto) — via the TDD subagent loop using the
-data-pipeline and ranking-evals subagents. Parse targets are the Phase 2 schemas:
-JDExtracted, ResumeParsed/ResumeCore/ResumeSkill*, CoverLetterParsed.
-
-Phase 3 acceptance criteria carried forward: (1) STRICT current_setting('app.pii_key')
-with NO missing_ok — NULL key → NULL ciphertext → silent data loss, fail loud;
-(2) per-field max_length on the LLM string fields at the ingest boundary. Further
-out: Phase 5 redaction MUST mask candidate.*/candidate_name/cover_letter_text before
-building ResumeOut (schema can't enforce it, ADR-006 §4); Phase 6 must set
-JobOut.blind_review explicitly (the DTO defaults it False, fail-open).
+Phase 4 (Ranking engine) carries forward from Phase 3's gate findings: the outbox
+drainer (project_to_graph) must not project parsed.candidate or log the payload;
+core/tests/evals/ (precision@k / evidence-verification-rate corpus) must exist
+before Phase 4's matching engine; a chunk-cap coupling nit; and the N1/N2 accepted
+residuals from ADR-007 §7 (structured fields ride the outbox unscrubbed — non-contact;
+the embed scrub errs toward over-redaction). Further out: Phase 5 redaction MUST mask
+candidate.*/candidate_name/cover_letter_text before building ResumeOut (schema can't
+enforce it, ADR-006 §4); Phase 6 must set JobOut.blind_review explicitly (the DTO
+defaults it False, fail-open).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Do Phase 3 on a feat/ branch, land make gates green, then check in
-with me before Phase 4.
+HANDOFF.md. Check in with me before opening the Phase 3 PR, and again before
+starting Phase 4.
 
-See the "Phase 3 starting map (verified)" subsection above for the verified
-dependency gap, LLM-client decision, and PII port-verbatim details before starting.
+See the "Phase 3 starting map (verified)" subsection above (historical — Phase 3
+is now built) for the dependency gap, LLM-client decision, and PII port-verbatim
+details that guided the port.
 ```

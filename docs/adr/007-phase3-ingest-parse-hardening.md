@@ -12,9 +12,15 @@ parsed résumé in Postgres and enqueues a projection event. `extract_text` is t
 touch attacker-supplied bytes; `LLMClient` is the only egress; `parse_resume` is where PII is
 encrypted at rest and where the outbox event is shaped for Phase 4.
 
-Two merge-blocking security/reviewer audits ran against the port. This ADR records the Phase 3
-decisions and — most importantly — the **PII-at-rest boundary**, because it is a deliberate,
-non-obvious posture that later phases depend on.
+Four rounds of merge-blocking security/reviewer audits ran against the port: round 1 (general
+security/reviewer findings on the first port, incl. dropping the structured `candidate` block from the
+outbox payload), round 2 (F1–F6: DOCX/PDF decompression-bomb guards, `RecursionError` handling,
+permanent-vs-transient embedding errors, and dropping raw chunk TEXT from the outbox too — round 1's
+candidate-block-only drop was "theatre" because header-chunk text still carried the same PII), round 3
+(F1 embed-boundary PII scrub, F2 dropping the outbox `summary` field, F3 fail-loud on an empty PII key,
+F5 the `needs_pass` untyped-exception boundary), and round 4 (F1-R, a residual under-redaction found in
+the round-3 embed scrub). This ADR records the Phase 3 decisions and — most importantly — the
+**PII-at-rest boundary**, because it is a deliberate, non-obvious posture that later phases depend on.
 
 ## Decision
 
@@ -33,6 +39,12 @@ test asserts the settings-built client only ever points at `host.docker.internal
 pgcrypto encrypt/decrypt of candidate PII uses a session GUC (`SET LOCAL app.pii_key`) set from
 `settings`, in the same transaction as the decrypt (the GUC is transaction-scoped, so `set_pii_key`
 runs strictly before `pii.decrypt`). There is no separate secrets-file loader in v1.
+
+**F3 (round 3) — fail loud on an empty key.** `worker/main.py`'s `startup` now checks
+`settings.pii_key` before opening any pool, driver, or store and raises `RuntimeError` if it is empty.
+Without this, `set_pii_key` binds `settings.pii_key` (default `""`) into the `app.pii_key` GUC
+unconditionally, so a misconfigured deploy would silently `pgp_sym_encrypt` every résumé's PII with an
+empty passphrase (weak-key ciphertext) instead of refusing to start.
 
 ### 3. Graph projection is deferred to Phase 4 (`parse → Postgres → outbox`)
 
@@ -71,6 +83,12 @@ caps live at this boundary, each a MAXIMUM (the exact value is accepted):
   *inside* the broad wrap, so it is not a fail-open — `getattr` only suppresses a MISSING attribute
   (real fitz always exposes `page_count`; only the unit-test fake omits it), while a page-count
   property that RAISES propagates through `getattr` and is caught by the broad handler.
+- **F5 (round 3) — the `needs_pass` read is wrapped the same way.** `doc.needs_pass` also runs MuPDF C
+  code (it reads the encryption dictionary) that can raise an untyped exception on a CORRUPT — not
+  merely password-protected — document, before the page-count/page-loop code above ever runs. The read
+  is now wrapped so a failed check surfaces as the typed `UnsupportedMimeError` instead of escaping
+  `extract_text` uncaught, while a genuine password prompt still raises `EncryptedPdfError`; the
+  document handle is closed on both paths.
 - **50 MB DOCX decompression ceiling via STREAMING actual bytes.** The guard does NOT trust the
   zip's self-declared central-directory `file_size` — that field is attacker-controlled and can lie
   (security forged a 50-byte declaration over a 60 MB member; a CD-summing guard passed it, then the
@@ -100,7 +118,7 @@ Candidate identity exists in three places with three different postures:
   `resumes.parsed` sits behind the same DB-access boundary as the encrypted columns and is the
   *system of record* Phase 4's evidence-verification stage reads chunk text from; Phase 5 redaction
   handles display-time masking (ADR-006 §4). `resumes.parsed` deliberately KEEPS full chunk text.
-- **Cleartext in transit — the `outbox` payload — carries NO candidate identity.** The `resume.parsed`
+- **Cleartext in transit — the `outbox` payload — carries NO candidate identity (F2, round 3).** The `resume.parsed`
   event is projected into Neo4j by Phase 4 and needs skills/experience/education +
   embeddings only, NOT identity. The `outbox` is an unencrypted jsonb table, so the payload
   deliberately excludes the structured `candidate` block, raw chunk TEXT
@@ -109,7 +127,7 @@ Candidate identity exists in three places with three different postures:
   name-opening `summary`) still shipped name/email/phone. Chunk `id`/`section`/`page` stay
   (embeddings are keyed by chunk id; Phase 4 reads any text preview and the summary from
   `resumes.parsed`, the system of record).
-- **Embeddings are PII-equivalent and are made outbox-safe at the embedding boundary.** `chunk_embs`
+- **Embeddings are PII-equivalent and are made outbox-safe at the embedding boundary (F1, round 3).** `chunk_embs`
   and `summary_emb` are separate top-level payload keys that ride the same unencrypted outbox and are
   projected into a Neo4j vector index in Phase 4, so a `nomic-embed-text` vector of a header chunk (or
   of a summary a small model opened with the candidate's own name) would be PII-equivalent under

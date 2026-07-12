@@ -53,7 +53,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **0 · Seed & infra** | Repo from template; compose (pg/neo4j/redis/ollama, no minio) + `data/` volume; settings (768-d, storage dir); DDL + Neo4j bootstrap on startup | ✅ done |
 | **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | ✅ done |
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
-| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | next |
+| **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | `orchestrator` + `stages` (4-stage hybrid), `MatchWeights`, `shortlist_job`, `reverse_match_job` | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started |
@@ -72,7 +72,25 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — Phases 0–2 are complete and green. Phase 3 is next.**
+**As of this writing — Phases 0–2 are merged to `main`. Phase 3 is built, green, and fully
+re-audited on branch `feat/phase-3-ingest-parse`; it is awaiting a human check-in before the PR to
+`main` is opened.**
+
+**Phase 3 · Ingest + parse — built + green + fully re-audited on `feat/phase-3-ingest-parse` (20
+commits ahead of `main`, HEAD `c7b497e`), not yet merged.** All three merge-blocking gates are green
+on final HEAD (reviewer APPROVE, security PASS, ranking-evals PASS) after **four rounds** of
+findings-and-fix: round 1 and round 2 closed general security/reviewer findings and the DOCX/PDF
+decompression-bomb + `RecursionError` + outbox-PII guards (F1–F6); **round 3** found **F1 (HIGH) —
+candidate PII embeddable via the outbox's `chunk_embs`/`summary_emb` vectors** plus F2 (outbox
+`summary` field), F3 (empty `PII_KEY` didn't fail loud), and F5 (`_extract_pdf`'s `needs_pass` read
+could raise untyped and escape), all fixed with a `_redact_candidate_pii` embed-boundary scrub, an
+outbox-summary drop, a worker-startup fail-loud check, and a wrapped `needs_pass` read; **round 4**
+found **F1-R (MEDIUM) — a residual under-redaction** in the round-3 embed scrub (whitespace/format
+divergence — line-broken names, reflowed phone numbers, bare email local-parts — could still leak into
+embedded text), closed with a whitespace-flexible redaction pattern + email-local-part scrubbing.
+Final offline gates: 729 unit tests, ~96.6% coverage; `black` pinned to `==26.5.1` for gate
+reproducibility. Full rationale: [ADR-007](adr/007-phase3-ingest-parse-hardening.md); activity report:
+[docs/activity/phase-3-ingest-parse.md](activity/phase-3-ingest-parse.md).
 
 **Phase 2 · Schemas — complete and merged to `main` via PR #3 (merge `cefd545`), CI green** (merged 2026-07-11). Three pydantic **v2** modules plus an `__init__` re-export in `core/src/schemas/` — the contract layer Phases 3–6 code against (API DTOs, strict LLM `chat_json` schemas, jsonb shapes, ranking weights). `jobs.py` = job DTOs + `Skill`/`Education`/`JDExtracted`; `resumes.py` = parse shapes + resume DTOs + `_coerce_year`/`_drop_invalid_rows`/`_coerce_*` lossy validators; `matching.py` = `MatchWeights` (+ `DEFAULT_WEIGHTS`) + score/evidence/shortlist shapes. Pure data models — no I/O. Two boundaries held: (a) the **2nd-review workflow + Taleo/JD-comments are CUT** and not importable (`PipelineStage`/`DispositionReason`/`ShortlistDecision*`/`StageTransition*` deleted; `ShortlistEntry` drops `current_decision`/`current_stage`; `JobListItem` drops `comment_count`/`source`/`external_last_seen_at`; no `approval_required_2nd_review`) — a merge-blocking cut guard enforces it; (b) three **DDL-alignment deviations** — `created_by`/`uploaded_by` are `str | None` (nullable TEXT actor labels, no users table in v1), `JobCreate.blind_review` defaults `True` (blind-by-default, decision 4), no `approval_required_2nd_review`. `MatchWeights` is the ranking-weight contract (0.6/0.3/0.1 top; 0.40/0.25/0.10/0.15/0.10 sub; `evidence_verify_fuzz=0.85`; frozen; sums-to-1.0 validator). Two commits (red `1645178` → green `5bbf7c2`). Gates: offline green — ruff (no `--fix`), black, mypy --strict, **486 unit tests, 97.52% coverage**; all three merge-blocking gates passed (reviewer APPROVE, security PASS, ranking-evals PASS incl. a weight-validator mutation test proving `_sums_close_to_one` is real). The GREEN step was completed by the coordinator directly after a coder subagent hit a session limit mid-port (`matching.py` + `__init__.py` hand-authored from the extraction, re-verified by reviewer + evals). Full write-up: [docs/activity/phase-2-schemas.md](activity/phase-2-schemas.md); trim/DDL-alignment/redaction-boundary rationale: [ADR-006](adr/006-schema-port-trim-ddl-alignment.md).
 

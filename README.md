@@ -155,6 +155,12 @@ The DTOs are aligned to the Phase 0 DDL at three points, and the redaction bound
 
 ---
 
+## Ingest & parse pipeline
+
+`core/src/pipeline/{parsing,llm,skills}/`, `core/src/services/`, `core/src/worker/{tasks,resume_tasks}.py` (Phase 3) — ports the résumé/JD ingest pipeline from hris. `extract_text` (PyMuPDF / python-docx / striprtf) enforces three input-safety caps at the trust boundary, independent of any Phase 6 upload-side cap: a 10 MB raw-blob cap, a 300-page PDF cap (malformed-page-tree exceptions wrapped to a typed error), and a 50 MB DOCX decompression ceiling enforced by streaming *real* decompressed bytes rather than trusting the zip's forgeable central-directory size. `LLMClient` is the pipeline's only egress — hand-rolled on `httpx` against `settings.llm_base_url` (no `openai` dependency), with retry/circuit-breaker and a Redis-backed `CachedEmbedder` (`emb:v1:*` keyspace, on the same Redis instance as the arq broker — a recorded deviation from "Redis only as arq broker"). The `parse_job`/`parse_resume` arq tasks encrypt candidate PII at rest via pgcrypto (`services/pii.py`, strict `current_setting('app.pii_key')`; the worker now fails loud at startup if `PII_KEY` is unset) and write a `resume.parsed`/`job.parsed` outbox row for Phase 4's graph projection. The outbox payload deliberately excludes the candidate block, raw chunk/summary text, and carries only embeddings that have been scrubbed of candidate identifiers at the embed boundary — no candidate identity rides into Neo4j. Graph projection itself (`project_to_graph`) is deferred to Phase 4. Full PII-at-rest boundary and the merge-blocking audit rounds that shaped it: [ADR-007](docs/adr/007-phase3-ingest-parse-hardening.md).
+
+---
+
 ## Ranking algorithm
 
 Four stages (ported near-verbatim; live from Phase 4):
@@ -170,14 +176,14 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 ## Status & roadmap
 
-**Phases 0–2 are complete.** What is live today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive and the pydantic schema layer are implemented but have **no HTTP surface** — there are **no ranking or upload routes yet**. Routes and the pipeline that consume the schemas land in Phases 3–6.
+**Phases 0–2 are merged to `main`. Phase 3 is built, green, and fully re-audited on branch `feat/phase-3-ingest-parse`** (not yet merged — gated behind a human check-in before the PR is opened; see [HANDOFF.md](HANDOFF.md)). What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive and the pydantic schema layer are implemented but have **no HTTP surface** — there are **no ranking or upload routes yet**. Routes land in Phase 6.
 
 | Phase | Deliverable | State |
 |---|---|---|
 | **0 · Seed & infra** | Compose, settings (768-d contract), asyncpg startup DDL, Neo4j bootstrap | **done** |
 | **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | **done** |
 | **2 · Schemas** | `jobs`, `resumes`, `matching` pydantic schemas (review workflow cut; `MatchWeights` ranking contract) | **done** |
-| 3 · Ingest + parse | extract/chunk, LLM client+cache, PII encryption on parse | pending |
+| **3 · Ingest + parse** | extract/chunk, LLM client+cache, PII encryption on parse, `parse_job`/`parse_resume` | **done on branch, not yet merged** |
 | 4 · Ranking engine | orchestrator + 4-stage hybrid, reverse-match | pending |
 | 5 · Persist + anonymize + export | shortlist service, redaction, csv/json export with `reveal` | pending |
 | 6 · API | job/resume/shortlist/reverse-match routes, minimal auth | pending |
@@ -234,9 +240,12 @@ recruiter-assistant/
 │   ├── src/
 │   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store)
 │   │   ├── models/      # asyncpg pool + idempotent startup DDL
+│   │   ├── pipeline/    # extract/chunk, LLM client+cache, skills scan (Phase 3)
+│   │   ├── prompts/     # Jinja prompt templates: jd_extract/resume_core/resume_skills/cover_letter (Phase 3)
 │   │   ├── schemas/     # pydantic contract layer: jobs/resumes/matching (Phase 2)
+│   │   ├── services/    # pii, job/resume/outbox services (Phase 3)
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
-│   │   ├── worker/      # arq worker + Neo4j bootstrap (wires blob_store)
+│   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume tasks (Phase 3)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
 │   ├── frontend/        # Flask viewer (Phase 0: stub)
 │   └── tests/{unit,integration}/
