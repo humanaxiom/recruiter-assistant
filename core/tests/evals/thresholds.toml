@@ -10,8 +10,10 @@
 [precision_at_k]
 # Top-k shortlist quality: >= min_precision of the top-k entries must be tagged
 # 'strong' or 'borderline' in fixtures/labels.json; none may be 'weak' or
-# 'adversarial'. With this corpus (3 strong + 2 borderline = 5 "good" resumes)
-# a correct ranking should fill k=5 entirely with good tags.
+# 'adversarial'. With this corpus (7 strong + 4 borderline = 11 "good" resumes,
+# out of 16 total fixtures -- see fixtures/labels.json's expected_rank_band
+# comment for how the tier counts and bands are kept in sync) a correct
+# ranking should fill k=5 entirely with good tags.
 k = 5
 min_precision = 0.8
 

@@ -1,0 +1,83 @@
+{
+  "candidate": {
+    "name": "Devon Ashworth",
+    "email": "devon.ashworth@example.test",
+    "phone": "555-0114",
+    "location": "Moncton, NB"
+  },
+  "summary": "Backend engineer with 6 years building Python REST services on PostgreSQL, Apache Airflow orchestration, and Docker/Kubernetes deployment; holds a Computer Science bachelor's degree.",
+  "total_years_experience": 6,
+  "skills": [
+    { "name": "Python", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST API design", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Kubernetes", "years": 3, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] }
+  ],
+  "experience": [
+    {
+      "company": "Cascade Data Works",
+      "title": "Backend Engineer",
+      "start": "2022-03",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Designed Python REST API services powering the customer billing platform at Cascade Data Works.", "chunk_id": "c_001" },
+        { "text": "Tuned PostgreSQL indexes and query plans for the billing platform's core tables at Cascade Data Works.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Northbridge Analytics",
+      "title": "Software Engineer",
+      "start": "2019-06",
+      "end": "2022-02",
+      "is_current": false,
+      "bullets": [
+        { "text": "Built Apache Airflow DAGs orchestrating the nightly billing-reconciliation pipeline at Northbridge Analytics.", "chunk_id": "c_003" },
+        { "text": "Deployed every pipeline service with Docker and wrote the Kubernetes manifests used in staging at Northbridge Analytics.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Fredericton Institute of Technology",
+      "field": "Computer Science",
+      "year": 2019
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Designed Python REST API services powering the customer billing platform at Cascade Data Works."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Tuned PostgreSQL indexes and query plans for the billing platform's core tables at Cascade Data Works."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Built Apache Airflow DAGs orchestrating the nightly billing-reconciliation pipeline at Northbridge Analytics."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Deployed every pipeline service with Docker and wrote the Kubernetes manifests used in staging at Northbridge Analytics."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Fredericton Institute of Technology, graduated 2019."
+    }
+  ],
+  "cover_letter_chunks": []
+}

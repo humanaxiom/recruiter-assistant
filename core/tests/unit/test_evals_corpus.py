@@ -26,7 +26,7 @@ and stays well-formed as it's edited:
   fixed, obviously-fake allowlist; no fixture text contains a real-looking
   email domain or a phone-number pattern outside the reserved fake range.
 
---- Phase-4a strengthening (adequacy-review round) additions ---
+--- Phase-4a strengthening (adequacy-review round 1) additions ---
 
 * ``[adversarial].must_not_surface_in_topk`` / ``[evidence].min_completeness_
   in_topk`` parse in thresholds.toml, and every 'weak'/'adversarial' fixture
@@ -48,6 +48,45 @@ and stays well-formed as it's edited:
   ``MatchWeights.overqual_ratio`` x the JD's ``min_years_experience``),
 * ``gold_evidence`` anchors (skill -> exact cited-chunk substring) for two
   strong fixtures, feeding 4c's future fuzz-boundary test.
+
+--- Phase-4a strengthening (round 2: GAP 1 + GAP 2) additions ---
+
+GAP 1 -- ``expected_rank_band`` feasibility. Round 1 shipped a bug: the
+'strong' band was the STATIC range ``[1, 3]`` while the corpus had 5 'strong'
+fixtures -- no correct ranker could ever satisfy that (5 candidates cannot
+fit in a 3-wide window). ``TAG_RANK_BANDS`` below is now computed FROM the
+corpus's actual tier population counts, so it is feasible by construction:
+strong -> ``[1, Nstrong]``, borderline -> ``[Nstrong+1, Nstrong+Nborderline]``,
+weak/adversarial (share one band) -> ``[Nstrong+Nborderline+1, null]``.
+``test_expected_rank_bands_fit_tier_populations`` independently re-derives
+the required window widths from ``labels.json``'s tag counts on every run
+(it does NOT just trust ``TAG_RANK_BANDS``) and performs a Hall-style
+cumulative feasibility check -- it fails if any tier's band is narrower than
+its population, or if the bands don't tile ranks 1..N with no gap/overlap.
+This is the guard that would have caught the round-1 bug.
+
+GAP 2 -- matched-pair ``ordering_controls``. r11 (education), r13 (overqual),
+and r04 (motivation) each only moved score WITHIN a tier (~0.03), so a
+ranker that ignored those dimensions still passed every tier-level
+invariant. r14/r15/r16 are TWIN fixtures of r11/r13/r04 respectively --
+each identical to its partner in every scoring-relevant field EXCEPT the one
+target dimension, so that dimension is the SOLE differentiator:
+
+* r14 (education twin of r11): identical skills/chunks/experience/years,
+  CS/allowed-field bachelor instead of Mechanical Engineering.
+* r15 (overqual twin of r13): identical skills/chunks/experience/education,
+  ``total_years_experience`` = 6 (ratio 1.2, not overqualified) instead of
+  14 (ratio 2.8, overqualified).
+* r16 (motivation twin of r04): identical skills/chunks/experience/education/
+  years, NO ``cover_letter_chunks`` instead of a populated one.
+
+``labels.json["ordering_controls"]`` records, per pair, which member a
+correct ranker must place strictly higher and why. The per-pair
+``test_r1{4,5,6}_*_twin_is_identical_to_*_except_*`` tests below are the
+Phase-4a-side guard: they assert the twins are genuinely "identical except
+X", which is what makes the eventual Phase-4c ``rank(higher) < rank(lower)``
+assertion trustworthy rather than confounded. The ordering assertion itself
+needs the live ranker and is NOT implemented here.
 
 This test suite is expected to PASS today -- it needs only the Phase 2
 schemas, which are already merged.
@@ -94,6 +133,9 @@ FAKE_NAMES = {
     "Skyler Brooks",
     "Reese Dawson",
     "Quinn Delgado",
+    "Devon Ashworth",
+    "Cameron Whitfield",
+    "Rowan Castillo",
 }
 
 _EMAIL_RE = re.compile(r"^[a-z]+\.[a-z]+@example\.test$")
@@ -129,16 +171,6 @@ SKILL_EVIDENCE_MARKERS: dict[str, str] = {
 # r10's stale skills deliberately sit years behind this.
 CURRENT_YEAR = 2026
 
-# Canonical per-tag expected_rank_band (Phase-4a strengthening item 5).
-# Strictly ordered/disjoint across tiers: strong < borderline < weak/adversarial.
-# max=None means "unbounded below" (the tier has no upper rank ceiling).
-TAG_RANK_BANDS: dict[str, dict[str, int | None]] = {
-    "strong": {"min": 1, "max": 3},
-    "borderline": {"min": 4, "max": 6},
-    "weak": {"min": 7, "max": None},
-    "adversarial": {"min": 7, "max": None},
-}
-
 
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
@@ -148,6 +180,16 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_labels() -> dict[str, Any]:
     return _load_json(LABELS_PATH)
+
+
+def _load_resume_raw(resume_id: str) -> dict[str, Any]:
+    """Raw (un-validated) JSON dict for a resume fixture, keyed by manifest
+    id. Used by the round-2 "identical except X" twin-pair integrity tests,
+    which need to compare fixture JSON field-for-field rather than through
+    ResumeParsed (which drops/normalises some data)."""
+    labels = _load_labels()
+    fixture = labels["resumes"][resume_id]["fixture"]
+    return _load_json(FIXTURES_DIR / fixture)
 
 
 def _resume_ids_from_labels() -> list[str]:
@@ -165,6 +207,25 @@ def _resume_ids_with_gold_evidence() -> list[str]:
         for resume_id, entry in labels["resumes"].items()
         if entry.get("gold_evidence")
     )
+
+
+def _ordering_controls() -> list[dict[str, str]]:
+    labels = _load_labels()
+    controls: list[dict[str, str]] = labels.get("ordering_controls", [])
+    return controls
+
+
+def _tag_populations() -> dict[str, int]:
+    """Count fixtures per tag, fresh from labels.json every call. Used both
+    to compute the canonical TAG_RANK_BANDS below AND, independently, by
+    test_expected_rank_bands_fit_tier_populations to verify those bands are
+    actually feasible -- the two must never be conflated into "the test just
+    checks itself"."""
+    labels = _load_labels()
+    counts: dict[str, int] = {tag: 0 for tag in ALLOWED_TAGS}
+    for entry in labels["resumes"].values():
+        counts[entry["tag"]] += 1
+    return counts
 
 
 # ── Directory / manifest sanity ──────────────────────────────────────────
@@ -680,7 +741,9 @@ def test_r04_cover_letter_chunk_ids_are_valid_cl_nnn_tokens() -> None:
 @pytest.mark.parametrize("resume_id", _resume_ids_from_fixture_files())
 def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
     """Negative control: every other fixture's cover_letter_chunks stays
-    empty, so r04 is unambiguously the one live motivation-weight case."""
+    empty (including r16, the round-2 motivation-twin -- its whole point is
+    that it does NOT have a cover letter), so r04 is unambiguously the one
+    live motivation-weight case in the corpus."""
     parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{resume_id}.json"))
     if resume_id == "r04_morgan_lee":
         assert parsed.cover_letter_chunks
@@ -688,7 +751,34 @@ def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
         assert parsed.cover_letter_chunks == []
 
 
-# ── Phase-4a strengthening item 5: expected_rank_band ─────────────────────
+# ── Phase-4a strengthening item 5 / round-2 GAP 1: expected_rank_band ────
+
+# Canonical per-tag expected_rank_band, COMPUTED from the corpus's tier
+# population counts (round-2 GAP 1 fix) so the bands are feasible BY
+# CONSTRUCTION -- a correct ranker can always satisfy them. Walked in
+# ascending-rank order: strong -> borderline -> weak/adversarial (weak and
+# adversarial share one band -- both mean "outside the top-k shortlist").
+# Whenever a fixture's tag changes, THIS constant must be recomputed to
+# match; test_expected_rank_bands_fit_tier_populations (below) independently
+# re-derives the required window widths from labels.json on every run and
+# will fail if this constant falls out of sync.
+_TAG_POPULATIONS_AT_AUTHORING_TIME = {
+    "strong": 7,
+    "borderline": 4,
+    "weak": 4,
+    "adversarial": 1,
+}
+_STRONG_MAX = _TAG_POPULATIONS_AT_AUTHORING_TIME["strong"]
+_BORDERLINE_MIN = _STRONG_MAX + 1
+_BORDERLINE_MAX = _STRONG_MAX + _TAG_POPULATIONS_AT_AUTHORING_TIME["borderline"]
+_BAD_MIN = _BORDERLINE_MAX + 1
+
+TAG_RANK_BANDS: dict[str, dict[str, int | None]] = {
+    "strong": {"min": 1, "max": _STRONG_MAX},
+    "borderline": {"min": _BORDERLINE_MIN, "max": _BORDERLINE_MAX},
+    "weak": {"min": _BAD_MIN, "max": None},
+    "adversarial": {"min": _BAD_MIN, "max": None},
+}
 
 
 def test_every_label_entry_has_an_expected_rank_band_matching_its_tag() -> None:
@@ -742,6 +832,69 @@ def test_weak_and_adversarial_bands_sit_strictly_outside_top_k() -> None:
     adversarial_min = TAG_RANK_BANDS["adversarial"]["min"]
     assert weak_min is not None and weak_min > k
     assert adversarial_min is not None and adversarial_min > k
+
+
+def test_expected_rank_bands_fit_tier_populations() -> None:
+    """Round-2 GAP-1 integrity guard: a per-tag expected_rank_band is only
+    useful if a CORRECT ranker can actually satisfy it.
+
+    This performs a Hall-style cumulative feasibility check against the
+    corpus's ACTUAL tier populations, recomputed FRESH from labels.json on
+    every run -- independent of (does not trust) the TAG_RANK_BANDS
+    constant above. Walking tiers in ascending-rank order (strong ->
+    borderline -> weak/adversarial, which share one band since both mean
+    "outside the top-k shortlist"), each tier's [min, max] window must:
+
+    (a) start exactly where the previous tier's window ended (no gap, no
+        overlap when tiling ranks 1..N), and
+    (b) be wide enough to hold every fixture actually tagged into that tier.
+
+    This is exactly the bug that shipped in round 1: expected_rank_band was
+    [1, 3] for 'strong' while the corpus had 5 'strong' fixtures -- no
+    correct ranker could ever place all 5 inside a 3-wide window. Run
+    against that state, this test fails with exactly that message; against
+    today's corpus (computed bands, see TAG_RANK_BANDS) it passes.
+    """
+    populations = _tag_populations()
+    n_total = sum(populations.values())
+    assert n_total == len(_load_labels()["resumes"])
+
+    combined_populations = {
+        "strong": populations["strong"],
+        "borderline": populations["borderline"],
+        "weak_adversarial": populations["weak"] + populations["adversarial"],
+    }
+
+    expected_next_min = 1
+    for tier_key in ("strong", "borderline", "weak_adversarial"):
+        pop = combined_populations[tier_key]
+        if pop == 0:
+            continue
+        tag_key = "weak" if tier_key == "weak_adversarial" else tier_key
+        band = TAG_RANK_BANDS[tag_key]
+        band_min = band["min"]
+        assert band_min is not None
+        assert band_min == expected_next_min, (
+            f"{tier_key} band starts at {band_min}, but the previous tier's "
+            f"window ended at {expected_next_min - 1} -- bands must tile "
+            f"ranks 1..N with no gap/overlap"
+        )
+        band_max = band["max"] if band["max"] is not None else n_total
+        window_width = band_max - band_min + 1
+        assert window_width >= pop, (
+            f"{tier_key}: expected_rank_band window [{band_min}, {band['max']}] "
+            f"is only {window_width} rank(s) wide but the corpus has {pop} "
+            f"fixture(s) tagged in this tier -- a correct ranker CANNOT place "
+            f"all {pop} candidates inside this band. (This is exactly the "
+            f"round-1 bug: expected_rank_band=[1,3] for 'strong' while the "
+            f"corpus had 5 'strong' fixtures.)"
+        )
+        expected_next_min = band_max + 1
+
+    assert expected_next_min - 1 == n_total, (
+        "the tiered bands must together cover every rank from 1..N with no "
+        "gap left uncovered at the end of the corpus"
+    )
 
 
 # ── Phase-4a strengthening item 6: self-dox positive control ─────────────
@@ -836,3 +989,185 @@ def test_gold_evidence_anchor_is_an_exact_substring_of_its_cited_chunk(
             f"{resume_id}: gold_evidence[{skill_name!r}] = {quote!r} is not an "
             f"exact substring of its cited chunk text {cited!r}"
         )
+
+
+# ── Round-2 GAP 2: matched-pair ordering_controls ─────────────────────────
+
+_EXPECTED_ORDERING_CONTROL_DIMENSIONS = {"education", "overqual", "motivation"}
+
+
+def test_labels_manifest_has_ordering_controls_for_each_gated_dimension() -> None:
+    controls = _ordering_controls()
+    assert controls, "labels.json must carry a non-empty ordering_controls list"
+    dims = {c["dimension"] for c in controls}
+    assert dims == _EXPECTED_ORDERING_CONTROL_DIMENSIONS, (
+        f"ordering_controls dimensions {dims} != expected "
+        f"{_EXPECTED_ORDERING_CONTROL_DIMENSIONS} -- education/overqual/"
+        f"motivation must each have exactly one matched-pair control"
+    )
+
+
+@pytest.mark.parametrize("control", _ordering_controls(), ids=lambda c: c["dimension"])
+def test_ordering_control_entry_is_well_formed(control: dict[str, str]) -> None:
+    resume_ids = set(_resume_ids_from_labels())
+    assert control["dimension"] in _EXPECTED_ORDERING_CONTROL_DIMENSIONS
+    assert control["higher_id"] in resume_ids, (
+        f"ordering_controls[{control['dimension']}].higher_id "
+        f"{control['higher_id']!r} has no matching labels.json entry"
+    )
+    assert control["lower_id"] in resume_ids, (
+        f"ordering_controls[{control['dimension']}].lower_id "
+        f"{control['lower_id']!r} has no matching labels.json entry"
+    )
+    assert (
+        control["higher_id"] != control["lower_id"]
+    ), "a matched pair must be two distinct fixtures"
+    assert control["rationale"].strip(), (
+        f"ordering_controls[{control['dimension']}] must document WHY the "
+        f"higher_id should outrank the lower_id"
+    )
+
+
+def test_ordering_control_pair_members_share_the_same_tag() -> None:
+    """Each matched pair should sit in the same tier -- the target dimension
+    is a within-tier tie-breaker (education/overqual/motivation each move
+    score by a small amount), not something that should also be doing the
+    work of a tier-level tag flip (that's what r10's recency fixture is
+    for)."""
+    labels = _load_labels()
+    for control in _ordering_controls():
+        higher_tag = labels["resumes"][control["higher_id"]]["tag"]
+        lower_tag = labels["resumes"][control["lower_id"]]["tag"]
+        assert higher_tag == lower_tag, (
+            f"{control['dimension']}: higher_id {control['higher_id']!r} tag "
+            f"{higher_tag!r} != lower_id {control['lower_id']!r} tag "
+            f"{lower_tag!r} -- a matched pair should isolate ONE dimension, "
+            f"not also cross a tier boundary"
+        )
+
+
+# ── Round-2 GAP 2: per-pair "identical except X" twin integrity ──────────
+
+# Scoring-relevant fields every twin pair must match exactly EXCEPT the pair's
+# one target dimension. "skills"/"experience"/"chunks" are compared as
+# raw-JSON list equality (order-sensitive, since evidence_chunk_ids/bullet
+# ordering is itself part of the fixture contract already checked above).
+
+
+def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None:
+    """r14 (education twin) must differ from r11 ONLY in the education
+    field: identical skills, cited chunks, and experience, both hold a
+    genuine bachelor's-LEVEL degree, but r14's field is JD-allowed
+    (Computer Science) and r11's is not (Mechanical Engineering). If the
+    twins accidentally differed anywhere else, a future 4c ordering
+    assertion built on this pair would be confounded."""
+    labels = _load_labels()
+    jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
+    assert jd.education is not None
+    allowed_fields = {f.lower() for f in jd.education.fields}
+
+    r11 = _load_resume_raw("r11_skyler_brooks")
+    r14 = _load_resume_raw("r14_devon_ashworth")
+
+    assert r11["skills"] == r14["skills"], "twins must claim identical skills"
+    assert (
+        r11["experience"] == r14["experience"]
+    ), "twins must have identical experience (company/title/dates/bullets)"
+    assert r11["total_years_experience"] == r14["total_years_experience"]
+
+    # Every chunk cited by a skill or experience bullet must be byte-identical
+    # between the twins; only the (uncited) education chunk may narrate the
+    # differing degree.
+    r11_chunks = {c["id"]: c["text"] for c in r11["chunks"]}
+    r14_chunks = {c["id"]: c["text"] for c in r14["chunks"]}
+    cited_ids = {cid for s in r11["skills"] for cid in s["evidence_chunk_ids"]}
+    cited_ids |= {
+        b["chunk_id"]
+        for exp in r11["experience"]
+        for b in exp["bullets"]
+        if b.get("chunk_id")
+    }
+    assert cited_ids, "sanity: r11 must actually cite chunks"
+    for cid in cited_ids:
+        assert (
+            r11_chunks[cid] == r14_chunks[cid]
+        ), f"cited chunk {cid!r} must be byte-identical between the twins"
+
+    r11_edu = r11["education"][0]
+    r14_edu = r14["education"][0]
+    assert (
+        r11_edu["degree"].lower().startswith("bsc")
+    ), "r11 must hold a bachelor's-level degree"
+    assert (
+        r14_edu["degree"].lower().startswith("bsc")
+    ), "r14 must hold the SAME degree level -- only field differs"
+    assert (
+        r11_edu["field"].lower() not in allowed_fields
+    ), "r11's field must stay outside the JD's allowed set (the control baseline)"
+    assert (
+        r14_edu["field"].lower() in allowed_fields
+    ), "r14's field must be inside the JD's allowed set -- the target dimension"
+    assert r11_edu["field"] != r14_edu["field"]
+
+
+def test_r15_overqual_twin_is_identical_to_r13_except_total_years_experience() -> None:
+    """r15 (overqual twin) must differ from r13 ONLY in
+    total_years_experience: identical skills, experience, education, and
+    chunks. r13's ratio triggers MatchWeights.overqual_ratio; r15's does
+    not."""
+    labels = _load_labels()
+    jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
+
+    r13 = _load_resume_raw("r13_quinn_delgado")
+    r15 = _load_resume_raw("r15_cameron_whitfield")
+
+    assert r13["skills"] == r15["skills"], "twins must claim identical skills"
+    assert (
+        r13["experience"] == r15["experience"]
+    ), "twins must have identical experience"
+    assert r13["education"] == r15["education"], "twins must share identical education"
+    assert r13["chunks"] == r15["chunks"], "twins must share byte-identical chunks"
+
+    assert r13["total_years_experience"] != r15["total_years_experience"], (
+        "the twins must differ on total_years_experience -- that is the sole "
+        "target dimension for this pair"
+    )
+
+    ratio_r13 = r13["total_years_experience"] / jd.min_years_experience
+    ratio_r15 = r15["total_years_experience"] / jd.min_years_experience
+    assert ratio_r13 >= DEFAULT_WEIGHTS.overqual_ratio, (
+        f"r13 (control baseline) must still trigger overqual: ratio "
+        f"{ratio_r13:.2f} must be >= {DEFAULT_WEIGHTS.overqual_ratio}"
+    )
+    assert ratio_r15 < DEFAULT_WEIGHTS.overqual_ratio, (
+        f"r15 (target) must NOT trigger overqual: ratio {ratio_r15:.2f} must "
+        f"be < {DEFAULT_WEIGHTS.overqual_ratio}"
+    )
+    assert r15["total_years_experience"] >= jd.min_years_experience, (
+        "r15 must still clear the JD's minimum years -- it's a non-overqual "
+        "control, not an under-qualified one"
+    )
+
+
+def test_r16_motivation_twin_is_identical_to_r04_except_cover_letter_chunks() -> None:
+    """r16 (motivation twin) must differ from r04 ONLY in
+    cover_letter_chunks: identical skills, experience, education,
+    total_years_experience, and resume chunks. r04 carries a populated cover
+    letter; r16 has none."""
+    r04 = _load_resume_raw("r04_morgan_lee")
+    r16 = _load_resume_raw("r16_rowan_castillo")
+
+    assert r04["skills"] == r16["skills"], "twins must claim identical skills"
+    assert (
+        r04["experience"] == r16["experience"]
+    ), "twins must have identical experience"
+    assert r04["education"] == r16["education"], "twins must share identical education"
+    assert r04["chunks"] == r16["chunks"], "twins must share byte-identical chunks"
+    assert r04["total_years_experience"] == r16["total_years_experience"]
+
+    assert r04[
+        "cover_letter_chunks"
+    ], "r04 (control baseline) must keep its cover letter"
+    assert (
+        r16["cover_letter_chunks"] == []
+    ), "r16 (target) must have NO cover letter -- the sole target dimension"
