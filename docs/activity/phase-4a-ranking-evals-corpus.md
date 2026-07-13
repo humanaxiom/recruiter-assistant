@@ -155,3 +155,45 @@ tests, up from 226). Coverage unmoved — still zero product code.
 **Recorded, deliberately NOT done here:** no **outbox-shaped fixture** exists — nothing encodes what
 the outbox payload is *allowed* to contain (no `candidate`, no `chunks[].text`, no `summary`). 4b
 projects to Neo4j and must add it (recorded as a 4b requirement in `docs/EXTRACTION_PLAN.md`).
+
+### Round 3 of findings-and-fix (`red(4a-hard-3)` → `green(4a-hard-3)`) — the first round that read the ENGINE
+
+Rounds 1–2 hardened the corpus against an *idealized* algorithm. Round 3 ported the one 4c actually
+extracts (hris `matching/{stages,orchestrator}.py`) and found **two of `MatchWeights`' five structured
+sub-scores do not compute what their names imply**. Both holes existed only against the real code.
+
+| # | Finding | Fix |
+|---|---|---|
+| F1 | **`seniority` (0.15) is not a years check** — it is `cosine(jd.title, most-recent role title)`, rescaled. The toml and the potency test justified **both** `experience` and `seniority` with one years claim, so the corpus asserted `experience` twice and `seniority` **never**, while r09 carried the most JD-distant title in the corpus. Measured (faithful + **no-op verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. Round 2 had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it | r09's most-recent title is the **JD title verbatim** → `cosine(x,x) = 1.0` → seniority **exactly 1.0 by arithmetic, under any embedder**. That matters: `Senior Backend Engineer` measured **0.755** on one `nomic-embed-text` build and **0.581** on another, straddling the **0.638** break-even at which the trap arms |
+| F2 | **`education` (0.10) reads the degree LEVEL only**, never `jd.education.fields` — so the r14/r11 twins (differing in *field*) asserted a mechanism that **does not exist** (both `BSc` → education = 1.00), and the pair still passed an education-blind ranker through the **embedded-degree vector leak** | Twins now differ in **level**; both fields JD-allowed. Education moves `score_final` by 0.0400 and **dominates** the ~3e-04 vector residual, which now points at the **lower** twin — so ordering the pair *requires* implementing the sub-score |
+| F3 | hris's shipped `_fuzz_substring` is a **character-set overlap ratio**: it **verifies all four** of the corpus's fabricated anchors (0.928/0.943/0.988/0.935) | Recorded as a hard 4c requirement: **replace it, do not port it** (rapidfuzz `partial_ratio` scores the same negatives 0.36–0.46) |
+
+### Round 4 of findings-and-fix (`red(4a-hard-4)` → `green(4a-hard-4)`)
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| F5 | **Two of the three ordering pairs did not gate their dimension.** `rank(higher) < rank(lower)` is satisfiable by a **tie-break**. `_build_summary_text` reads neither `total_years_experience` nor `cover_letter_chunks`, so the overqual and motivation twins' **embedding input is byte-identical** → a dimension-blind engine ties them **exactly** (+0.000e+00) and the stable sort decides the pair arbitrarily. A **motivation-blind engine PASSED** the motivation pair in the fixtures' natural order; the overqual pair failed only by luck (it PASSES on the reversed order) | `weights.motivation = 0` (motivation pair passes); `overqual_ratio = 99` (overqual pair passes on reversed input order) | **`[ordering_controls].min_score_gap = 1e-6`** (three-way-contract change). The assertion is now `rank(hi) < rank(lo)` **AND** `score_final(hi) − score_final(lo) ≥ min_score_gap` — no tie can pass on any input order. Correct-engine gaps +0.0397/+0.0120/+0.0900, all **arithmetic**. The twins' byte-identical embedding input is now itself asserted, so the tie cannot be "fixed" by narrating the dimension into a `summary` (that is F2 again) |
+
+Rejected alternative: copying F2's inverted-residual trick into the other two twins — it would re-introduce
+an **embedder-dependent magnitude**, and F1 is exactly the lesson that a measured quantity can straddle a
+threshold between two builds of the same model. **Pin by arithmetic, not by measurement.**
+
+Also reconciled: r09's **exact rank is no longer written anywhere** (it was "rank 9" in three files, and
+"~11" in two more). It is near-tied with r04 — 0.596994 vs 0.596711, a spread whose **sign flips between
+`nomic-embed-text` builds — and is gated by nothing. What is build-independent, and what the corpus does
+gate: r09 sits **below every strong fixture**, outside the k=5 window, with **~0.19** of margin.
+
+**Baseline battery, re-measured against the full contract** (both input orders; see
+`docs/EXTRACTION_PLAN.md` for the table): keyword-overlap **FAIL** · lexical tf-idf **FAIL** · embedding
+pure-vector (p@5 0.80, r09 rank 4) **FAIL** · faithful + no-op verifier **FAIL** · faithful + hris
+`_fuzz_substring` **FAIL** · faithful + correct verifier **PASS**. The round-3 report's "tf-idf
+pure-vector" row conflated the lexical and embedding baselines and is corrected there.
+
+**Accepted 4a residuals, recorded not fixed** (`docs/EXTRACTION_PLAN.md`, "the class of wrong engine this
+corpus still lets through"): the corpus is **blind to the skill sub-score's internals** — `weights.skill =
+0.0`, a disabled recency decay (even though r10's `decision_point` is `recency_decay_stale_skills`, it has
+no twin), a doubled `must_have_miss_penalty` and an ontology junk-bucket all still PASS — and it gates the
+evidence **verifier** but never the evidence **extractor**. Both are 4c requirements now.
+
+**Gates:** ruff · black · `mypy src --strict` clean; **1034 unit tests @ 96.63% coverage** (305 corpus
+tests); `run_evals.py` still exits 1. Zero `core/src/` changes.

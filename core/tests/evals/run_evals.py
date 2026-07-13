@@ -62,23 +62,44 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    must_not_surface_in_topk in labels.json. r09
                                    is structurally top-tier on ALL FIVE
                                    structured sub-scores -- skill, experience,
-                                   seniority, education (a JD-allowed BSc) and
+                                   seniority (its most-recent title is the JD
+                                   title VERBATIM, so the cosine is 1.0 by
+                                   arithmetic), education (a JD-allowed BSc) and
                                    vector (every JD skill in the embedded
                                    summary) -- so ONLY the evidence verifier can
-                                   reject it. It ranks ~11, ADJACENT to the
-                                   borderline tier and not below every weak
-                                   fixture: 0.6*structured + 0.3*0 + 0.1*0 is
-                                   arithmetic. Do not "fix" that by re-tagging
-                                   r09 or moving a threshold.
+                                   reject it. Scoring 0.6*structured + 0.3*0 +
+                                   0.1*0 ~= 0.597, it lands just BELOW THE STRONG
+                                   TIER (near-tied with r04, so its exact rank
+                                   moves between builds and is NOT gated) and
+                                   ~0.19 clear of the k=5 cutoff -- not below
+                                   every weak fixture. That is arithmetic: do not
+                                   "fix" it by re-tagging r09 or moving a
+                                   threshold, and do not re-pin an exact rank.
   [ordering_controls]
     enforce = true              -- for every pair below, the live ranker must
-    pairs = [...]                  place higher_id STRICTLY above lower_id:
-                                   rank(higher) < rank(lower). Each pair is
-                                   identical in every scoring-relevant field
+    pairs = [...]                  satisfy BOTH halves: rank(higher) <
+    min_score_gap = 1e-6           rank(lower), AND score_final(higher) -
+                                   score_final(lower) >= min_score_gap. Each pair
+                                   is identical in every scoring-relevant field
                                    except one dimension (education / overqual /
                                    motivation), so a ranker blind to that
-                                   dimension fails. These are the corpus's most
-                                   discriminating assertions.
+                                   dimension fails -- but ONLY IF THE GAP IS
+                                   CHECKED TOO (round-6 finding F5): the overqual
+                                   and motivation twins have BYTE-IDENTICAL
+                                   embedding input (_build_summary_text reads
+                                   neither total_years_experience nor
+                                   cover_letter_chunks), so a blind engine ties
+                                   them EXACTLY and the stable sort decides the
+                                   pair arbitrarily -- a motivation-blind engine
+                                   PASSED the rank-only assertion. min_score_gap
+                                   is an anti-tie epsilon: > 0 (else the tie
+                                   passes) and far below the smallest correct-
+                                   engine gap (0.0120). 4c MUST also run the
+                                   three blind-engine mutations (education = 0,
+                                   overqual_ratio = 99, motivation = 0) and
+                                   confirm each FAILS on BOTH input orders.
+                                   These are the corpus's most discriminating
+                                   assertions.
   [pii]
     leak_check = true           -- no fixture's candidate name/email/phone may
                                    appear in embedding input or exported output.

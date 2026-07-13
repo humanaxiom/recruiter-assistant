@@ -173,6 +173,65 @@ code, which is why three prior audits missed them:
   *lower* twin, so the only way to order the pair is to implement the sub-score. **4c must verify the
   `weights.education = 0.0` mutation FLIPS the pair.**
 
+**4a hardening, round 4 (same branch) — finding F5: two of the three ordering pairs did not gate their
+dimension.** The pairwise contract was `rank(higher) < rank(lower)` and nothing more — and a rank
+comparison is satisfiable by a **tie-break**. Measured against an engine made *blind* to each pair's own
+dimension (real `nomic-embed-text` 768-d + real rapidfuzz + an engine replica of the ported hris
+`stages`/`orchestrator`):
+
+| pair | blind engine | twin separation | labels order | reversed order |
+|---|---|---|---|---|
+| education | `weights.education = 0` | −3.266e-04 | FAIL | FAIL |
+| overqual | `overqual_ratio = 99` | **+0.000e+00 (exact tie)** | FAIL | **PASS** |
+| motivation | `weights.motivation = 0` | **+0.000e+00 (exact tie)** | **PASS** | FAIL |
+
+So a **motivation-blind engine passed the motivation pair** in the fixtures' natural order, and the
+overqual pair failed only by tie-break luck. Root cause is the **mirror image of F2**:
+`_build_summary_text` (`core/src/worker/resume_tasks.py`) embeds `summary`/`skills`/`experience`/
+`education` and nothing else — *not* `total_years_experience`, *not* `cover_letter_chunks`, which are
+exactly the fields the overqual and motivation twins differ in. Those twins' embedding input is therefore
+**byte-identical**, their vector sub-scores equal to the last bit, no residual exists to break the tie,
+and `stage4_combine`'s stable sort just inherits stage-1's `ORDER BY vec_score DESC` — arbitrary for
+identical vectors. (The education pair is decisive on ranks alone *because* F2 kept a residual and aimed
+it at the **lower** twin.)
+
+Fixed in the **contract**, not the fixtures: `[ordering_controls].min_score_gap = 1e-6` is new, and the
+assertion is now **`rank(hi) < rank(lo)` AND `score_final(hi) − score_final(lo) ≥ min_score_gap`**, so an
+exact tie can never pass under any tie-break, on any input order. The correct engine's gaps
+(**+0.0397 / +0.0120 / +0.0900**) clear it by four orders of magnitude and are all **arithmetic**
+(`0.6·0.10·(1 − 0.5·2/3)` less the vector residual; `0.6·0.25·0.08`; `0.1·0.9`). The alternative —
+copying F2's inverted-residual trick into the other two twins — was **rejected**: it would re-introduce an
+embedder-dependent magnitude, which is precisely the F1 lesson (*pin by arithmetic, not by measurement*).
+The twins' byte-identical embedding input is now itself asserted, so the tie cannot later be "fixed" by
+narrating years/motivation into a twin's `summary` (that would put the signal back into `summary_emb` and
+re-create the F2 confound). **4c must run all three blind-engine mutations and confirm each FAILS on both
+input orders.**
+
+**Baseline battery (measured, corrected — round 4).** Every arm scored against the *full* contract
+(precision@5 · adversarial · all three ordering pairs with rank **and** gap), on both input orders. Only
+the faithful engine with a correct verifier passes:
+
+| arm | p@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | all 3 ✗ (ties the twins) | FAIL |
+| lexical tf-idf | 1.00 | 8 | all 3 ✗ | FAIL |
+| **embedding** pure-vector (the engine's actual vector path) | **0.80** | **4** | all 3 ✗ | FAIL |
+| faithful + **no-op** verifier | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + hris `_fuzz_substring` | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + **correct** verifier | 1.00 | 8 | all 3 ✓ | **PASS** |
+
+(The round-3 report's "tf-idf pure-vector" row conflated two different engines and was not reproducible as
+stated. A *lexical* tf-idf and the *embedding* pure-vector ranker are different baselines with different
+failure modes — both fail, but the mechanism differs, and the embedding one is the one that matters
+because it is the engine's own stage-1 signal. The rank of r09 under a lexical tf-idf is also
+implementation-dependent (sublinear tf / idf weighting), which is a further reason not to gate on it.)
+
+**Stale figure reconciled (round 4).** r09's *exact* rank under the correct verifier is **not gated and
+not build-stable** — it is near-tied with r04 (0.596994 vs 0.596711, a 2.8e-04 spread whose **sign flips
+between `nomic-embed-text` builds**), so "rank 9" (and the older "rank 11") is no longer written anywhere.
+What is build-independent, and what the corpus actually gates: r09 ranks **below every strong fixture**,
+i.e. outside the k=5 window, with **~0.19** of margin below the 5th-place cutoff.
+
 **4c OPEN DECISION for a human — `jd.education.fields` is decorative.** The JD fixture declares
 `education.fields: ["Computer Science", "Software Engineering", "Data Engineering"]`, and the ported
 `stages.score_education()` **ignores them entirely** (it compares the degree *level* to `min_level`). So
@@ -210,6 +269,37 @@ rapidfuzz: every gold anchor ≥ 0.85 and every negative < 0.85 under **both**, 
 *stricter* than rapidfuzz on the similarity axis (Ratcliff–Obershelp ≤ LCS/indel) and *more lenient* on
 the window axis; if an anchor is ever tightened until its margin is thin, re-check it against real
 rapidfuzz rather than trusting the stand-in at the boundary.
+
+### ACCEPTED 4a RESIDUALS — the class of wrong engine this corpus still lets through
+
+Recorded at the end of 4a's hardening (round 4), **deliberately not fixed here**, so 4c/4d inherit them
+with eyes open rather than discovering them after a green `ranking-evals` run. Each was demonstrated by a
+mutation of the engine replica that the corpus **passed**.
+
+**R1 — the corpus is blind to the *internals* of the skill sub-score.** It gates the 0.40-weighted skill
+score only through *coverage* (does the candidate claim the skill at all). Every one of these mutations
+still **PASSES** the full contract:
+- `must_have_miss_penalty: 0.5 → 1.0` (the missing-must-have penalty deleted);
+- **recency decay disabled entirely** — even though `r10`'s `decision_point` is literally
+  `recency_decay_stale_skills`. r10 has **no twin**, so nothing isolates recency and the label is
+  *decorative*;
+- the whole **implied-experience relief** path (`implied_experience_relief` / `implied_min_coverage` /
+  `implied_seniority_factor`) — no fixture is positioned to fire or not-fire it;
+- an ontology **"junk-bucket"** that grants 0.5 family credit to *every* missing skill;
+- starkest: **`weights.skill = 0.0` — an engine that ignores skills entirely passes.**
+
+The corpus's separation is carried by **evidence and vector**, not skill, because the weak fixtures are
+weak on *everything* at once. **4c requirement:** add matched-pair twins for the skill sub-score's
+internals (a recency twin for r10 at minimum, and a must-have-miss twin), the same way r14/r15/r16 isolate
+education/overqual/motivation — a `weights.skill = 0` mutation must FAIL.
+
+**R2 — the corpus gates the evidence *verifier*, never the evidence *extractor*.** Stage 3 is
+LLM-extract-then-verify; every eval assertion is on the verify half (`negative_evidence_must_fail`,
+`verification_rate_min`). A stage-3 LLM that simply **fails to find** real evidence is caught only in the
+limit — `min_completeness_in_topk` catches "no quote at all" — while a *mediocre* extractor that finds
+some quotes and misses others shuffles freely inside the deliberately-wide tier bands. **4c requirement:**
+an evidence-**recall** assertion against the `gold_evidence` anchors (each gold anchor's requirement must
+come back `met` with a verified quote), not just an evidence-**precision** one.
 
 **Phase-4 decisions adopted from the planner pass** (recommended defaults; reversible):
 - **Chunk-text preview source (required deviation, Risk #1):** hris's `_resume_projection_tx` reads

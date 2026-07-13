@@ -135,11 +135,17 @@ negative_evidence_must_fail = true
 # embedder + real rapidfuzz):
 #   no-op evidence verifier    -> r09 rank 1, precision@5 = 0.80 -> FAILS (armed)
 #   hris's own _fuzz_substring -> r09 rank 1, precision@5 = 0.80 -> FAILS
-#   correct verifier           -> r09 rank 9, precision@5 = 1.00 -> PASSES,
-#                                 with 0.1881 of margin below the 5th-place
-#                                 cutoff (0.5972 vs 0.7852).
-# See fixtures/labels.json (r09 `expected_rank_band_note`) for why the repaired
-# bait's expected rank is ~9 and NOT "below every weak candidate".
+#   correct verifier           -> r09 OUT of the top-5, precision@5 = 1.00 -> PASSES
+#
+# WHAT IS GATED, and what is not (round-6 reconciliation). r09's exact rank under
+# the correct verifier is NOT gated and is NOT stable across builds -- it lands
+# just below the strong tier, in a near-tie with r04 (measured 0.596994 vs
+# 0.596711, a 2.8e-04 spread, so the two swap between builds; both stay in band,
+# because `adversarial` admits [8, null] and `borderline` admits [8, 12]). Do not
+# re-pin a rank here. What IS gated, and by ~0.19 of margin either way: the bait
+# is BELOW EVERY STRONG FIXTURE and therefore outside the k=5 window (score
+# ~0.597 vs the 5th-place cutoff ~0.785). See fixtures/labels.json's r09
+# `expected_rank_band_note`.
 must_not_surface_in_topk = true
 
 [ordering_controls]
@@ -150,9 +156,46 @@ must_not_surface_in_topk = true
 #
 # Each pair is identical in every scoring-relevant field EXCEPT the one named
 # dimension (see labels.json's `ordering_controls` for the per-pair rationale
-# and the twin-integrity tests that prove "identical except X"). For each
-# pair, a correct ranker MUST place higher_id strictly above lower_id:
-# rank(higher_id) < rank(lower_id). A ranker blind to the dimension fails.
+# and the twin-integrity tests that prove "identical except X"). For each pair,
+# a correct ranker MUST satisfy BOTH halves of the assertion:
+#
+#     rank(higher_id) < rank(lower_id)
+#   AND
+#     score_final(higher_id) - score_final(lower_id) >= min_score_gap
+#
+# A ranker blind to the dimension then fails on EITHER input order.
+#
+# ROUND-6 FINDING F5 -- THE RANK HALF ALONE GATED NOTHING ON TWO OF THE THREE
+# PAIRS. `rank(hi) < rank(lo)` is satisfiable by a TIE-BREAK, and that is exactly
+# how the overqual and motivation pairs were being decided. Measured against an
+# engine BLIND to each pair's own dimension (real nomic-embed-text 768d + real
+# rapidfuzz + an engine replica of the ported hris stages/orchestrator):
+#
+#   pair        blind engine             twin separation   labels order  reversed
+#   education   weights.education = 0    -3.266e-04        FAIL          FAIL
+#   overqual    overqual_ratio = 99      +0.000e+00 TIE    FAIL          PASS
+#   motivation  weights.motivation = 0   +0.000e+00 TIE    PASS          FAIL
+#
+# i.e. a MOTIVATION-BLIND ENGINE PASSED the motivation pair in the fixtures'
+# natural order, and the overqual pair failed only by tie-break luck.
+#
+# Root cause, and it is the mirror image of F2: `_build_summary_text`
+# (core/src/worker/resume_tasks.py) embeds `summary` / `skills` / `experience` /
+# `education` and NOTHING ELSE -- not `total_years_experience`, not
+# `cover_letter_chunks`, which are precisely the fields those two twin pairs
+# differ in. Their embedding input is BYTE-IDENTICAL (asserted:
+# test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists),
+# so their vector sub-scores are equal to the last bit, there is no residual to
+# break the tie, and `stage4_combine`'s stable sort just inherits stage-1's
+# `ORDER BY vec_score DESC` -- arbitrary for identical vectors. That byte
+# identity is DESIRABLE (it keeps the dimension out of `summary_emb`); the fix is
+# the gap, not a narrated summary. The education pair is decisive on ranks alone
+# only BECAUSE it keeps a residual and F2 aimed it at the LOWER twin.
+#
+# Correct-engine gaps: +0.0397 (education) / +0.0120 (overqual) / +0.0900
+# (motivation) -- four orders of magnitude clear of min_score_gap, and all three
+# are ARITHMETIC (0.6*0.10*(1-0.5*2/3) - residual; 0.6*0.25*0.08; 0.1*0.9). Each
+# blind engine now FAILS on BOTH input orders. 4c MUST run those three mutations.
 #
 # ROUND-5 FINDING F2 -- the `education` pair did not test education.
 # labels.json claimed r14/r11 were "identical EXCEPT the education[] entry" and
@@ -180,6 +223,18 @@ pairs = [
   { dimension = "overqual", higher_id = "r15_cameron_whitfield", lower_id = "r13_quinn_delgado" },
   { dimension = "motivation", higher_id = "r04_morgan_lee", lower_id = "r16_rowan_castillo" },
 ]
+# The anti-tie epsilon (round-6 finding F5). PINNED EXACTLY by
+# test_evals_corpus.py, like every other numeric threshold here, and bounded on
+# BOTH sides -- both bounds are load-bearing:
+#   * strictly > 0 -- a zero gap re-admits the exact tie above, and the whole
+#     point of the key is that an exact tie can NEVER pass, under any tie-break,
+#     on any input order;
+#   * far below 0.0120, the SMALLEST gap a correct engine can produce (the
+#     overqual pair: 0.6 * 0.25 * (1.00 - 0.92), pure arithmetic off MatchWeights
+#     and the twins' years) -- otherwise the guard could fail a CORRECT engine.
+# It is a float-noise epsilon, not a separation the fixtures have to earn: do not
+# raise it to "make the pairs more decisive", and do not lower it to 0.
+min_score_gap = 1e-6
 
 [pii]
 # The embedding text and any anonymized/exported shortlist output must never

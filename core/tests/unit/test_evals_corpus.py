@@ -1596,14 +1596,17 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
     * hris's own shipped ``_fuzz_substring`` -> r09 rank **1** -> FAIL. The
       verifier 4c is told to port VERIFIES all four fabricated anchors
       (0.928-0.988). It must be REPLACED, not ported (docs/EXTRACTION_PLAN.md).
-    * correct verifier (rapidfuzz ``partial_ratio``) -> r09 rank **9**,
-      precision@5 = 1.00 -> PASS, with 0.1881 of margin below the 5th-place
-      cutoff (0.5972 vs 0.7852).
+    * correct verifier (rapidfuzz ``partial_ratio``) -> r09 falls OUT of the
+      top-5 (score ~0.597 vs the ~0.785 5th-place cutoff, ~0.19 of margin),
+      precision@5 = 1.00 -> PASS.
 
-    (The round-4 docstring claimed rank 2 here while thresholds.toml and
-    labels.json said 3 -- finding F4. Neither is live any more; the numbers
-    above are re-derived on the repaired corpus and now agree across all three
-    files.)
+    The bait's EXACT RANK under the correct verifier is deliberately NOT stated
+    (round-6 reconciliation) and is not gated by anything: r09 and r04 sit within
+    ~3e-04 of each other, so which one takes rank 8 flips between
+    nomic-embed-text builds, and both stay in band either way. Earlier rounds
+    pinned "rank 2" / "rank 3" / "rank 9" in three files and had to keep
+    reconciling them; the invariant that actually matters -- below every strong
+    fixture, outside the k=5 window, by ~0.19 -- is build-independent.
 
     So: r09 must be structurally TOP-TIER on every non-evidence signal -- all
     FIVE of them, as the ENGINE computes them, not as their names suggest. Only
@@ -2031,13 +2034,16 @@ def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
 #                    ~= 0.547
 #
 # A candidate that is top-tier on EVERY non-evidence signal and scores ZERO on
-# evidence lands, by construction, adjacent to the borderline tier -- measured:
-# rank 11 of 17, one slot above the weakest borderline fixture (r05, 0.507).
-# It is nowhere near the top-5 cutoff (0.844), so every gate still bites; it
-# simply is not "below every borderline candidate", and a band that claimed
-# otherwise would be the round-1 infeasible-band bug all over again, just
-# pointed at a different tier. THIS IS ARITHMETIC, NOT A MISLABEL: do not
-# "fix" it by weakening a threshold or by re-tagging r09.
+# evidence lands, by construction, JUST BELOW THE STRONG TIER -- it is not
+# "below every borderline candidate", and a band that claimed otherwise would be
+# the round-1 infeasible-band bug all over again, just pointed at a different
+# tier. (Round 5 repaired the bait's seniority sub-score too, so the figure is
+# now ~0.597 rather than the ~0.547 above; the exact rank is near-tied with r04,
+# moves between embedder builds, and is gated by NOTHING -- see r09's
+# expected_rank_band_note. What is build-independent, and what the band gates, is
+# that it sits below every strong fixture and ~0.19 clear of the top-5 cutoff.)
+# THIS IS ARITHMETIC, NOT A MISLABEL: do not "fix" it by weakening a threshold or
+# by re-tagging r09.
 #
 # So the adversarial bait gets its OWN band -- "somewhere below every strong
 # fixture, and therefore outside the top-k" -- and the borderline band gains
