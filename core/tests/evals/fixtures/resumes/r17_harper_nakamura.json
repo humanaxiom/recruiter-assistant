@@ -74,6 +74,12 @@
       "section": "education",
       "page": 1,
       "text": "BA Visual Communication Design, Island Coastal College, graduated 2018."
+    },
+    {
+      "id": "c_008",
+      "section": "experience",
+      "page": 2,
+      "text": "Vendor portal login for packaging proof approvals is registered to harper.nakamura@example\n.test (page-break reflow)."
     }
   ],
   "cover_letter_chunks": []

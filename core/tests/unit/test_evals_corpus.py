@@ -330,9 +330,33 @@ assertion each:
   degree text is the residual's only contributor, and both the education dicts and
   the embedded ``Education: `` segment are pinned to differ ONLY in degree/field.
 
-ROUND NUMBERING (round 7 / N-3). Rounds are numbered CUMULATIVELY over the
+--- Phase-4a FALSIFIABILITY hardening (round 8: S1) ---
+
+* **S1** a line break INSIDE a token evaded both PII scanners. Round 4 (B6/N5)
+  made both scanners whitespace-tolerant only at TOKEN JOINTS -- ``\\s*@\\s*``
+  for the email local-part/domain joint, ``_PHONE_SEP`` between phone-group
+  joints -- so a break landing INSIDE a token (e.g. a domain reflowed mid-word
+  by a PDF extractor, ``shopify\\n.com``) was invisible on both scan passes:
+  the decoded-string pass, because ``_EMAIL_SHAPED_RE``'s domain alternative
+  (``[A-Za-z0-9.-]+\\.[A-Za-z]{2,}``) has no internal ``\\s``, so the regex
+  simply fails to match across the break at all (not a false negative on a
+  match -- no match is attempted); and the raw-source pass, because the JSON
+  ``\\n`` escape breaks the same contiguous character class. This is the
+  ACCIDENTAL-reflow threat model the corpus exists to regression-test (not a
+  deliberate-evasion residual, see below), and it is the ADR-007 F1-R leak
+  class r17 is the positive control for -- r17 previously modelled only
+  JOINT breaks (a line-broken name at a space, a reflowed phone at a group
+  boundary), not this one. Fixed with an EXTRA pass, not by widening the
+  shaped regexes (which would risk false positives across JSON field/line
+  boundaries): ``_scan_texts`` now also scans each decoded string value with
+  every ``\\n`` (and its surrounding whitespace) collapsed out. Four probes
+  (two email, two phone) pin the mid-token class; r17 gained a chunk carrying
+  a synthetic (``@example.test``) mid-token-broken address, so the fixture
+  now models the full break taxonomy the scanner covers.
+
+ROUND NUMBERING (round 8 / S1). Rounds are numbered CUMULATIVELY over the
 corpus's hardening history -- rounds 1-2 on ``feat/phase-4a-ranking-evals-corpus``,
-rounds 3-7 on ``fix/phase-4a-corpus-falsifiability`` -- and that is the scheme
+rounds 3-8 on ``fix/phase-4a-corpus-falsifiability`` -- and that is the scheme
 this file, ``thresholds.toml``, ``labels.json``, ``docs/activity/`` and
 ``docs/EXTRACTION_PLAN.md`` all use. The branch's COMMIT names count gate
 iterations on the branch, which is an offset of 2:
@@ -342,9 +366,10 @@ iterations on the branch, which is an offset of 2:
   cumulative round 5 (F1/F2)       = ``red|green(4a-hard-3)``
   cumulative round 6 (F5)          = ``red|green(4a-hard-4)``
   cumulative round 7 (R7-1/R7-2)   = ``red|green(4a-hard-5)``
+  cumulative round 8 (S1)          = ``red|green(4a-hard-6)``
 
-PII scanner scope (accepted residuals, round 4 / finding N6) -- what these
-scanners do NOT claim:
+PII scanner scope (accepted residuals, round 4 / finding N6; updated round 8 /
+S1) -- what these scanners do NOT claim:
 
 * ``FAKE_NAMES`` constrains ``candidate.name`` only. A real THIRD PARTY's
   name in free text ("Worked with <real person> at <real company>") passes
@@ -358,6 +383,11 @@ scanners do NOT claim:
 * ``_ALLOWED_EMAIL_DOMAIN`` is checked with ``endswith("@example.test")``, so
   a legitimate SUBDOMAIN (``casey@mail.example.test``) is flagged. Over-strict
   and fails safe; relax deliberately if a fixture ever needs a subdomain.
+* (round 8 / S1) a line break INSIDE a token -- a domain or phone group split
+  mid-word by a PDF reflow -- is now covered by a de-wrapped scan pass over
+  decoded string values, in addition to the round-4 token-JOINT tolerance.
+  International phone formats, homoglyph/obfuscated addresses, base64 and a
+  real third party's name remain accepted residuals, unchanged by this round.
 
 This test suite is expected to PASS today -- it needs only the Phase 2
 schemas, which are already merged.
@@ -652,16 +682,33 @@ def _string_values(node: object) -> list[str]:
 
 def _scan_texts(path: Path) -> list[str]:
     """Every text surface of a fixture the PII scanners must cover: the raw
-    file source AND every decoded string value.
+    file source, every decoded string value, and every decoded string value
+    DE-WRAPPED.
 
-    Both are needed. The raw source catches anything outside a JSON string
-    (and is what a `grep` of the repo would see); the decoded values are the
-    only place a JSON-escaped newline (`\\n` in source) is a REAL newline, so
-    a format-divergent leak like a line-broken phone number is invisible to a
-    raw-source scan alone (see r17, the ADR-007 F1-R control)."""
+    The raw source catches anything outside a JSON string (and is what a
+    `grep` of the repo would see); the decoded values are the only place a
+    JSON-escaped newline (`\\n` in source) is a REAL newline, so a
+    format-divergent leak like a line-broken phone number is invisible to a
+    raw-source scan alone (see r17, the ADR-007 F1-R control).
+
+    Round-8 (finding S1): the round-4 whitespace tolerance in both shaped
+    regexes sits only at TOKEN JOINTS (`\\s*@\\s*` for email, `_PHONE_SEP`
+    between phone groups) -- neither regex tolerates a break INSIDE a token
+    (e.g. a domain reflowed mid-word, `shopify\\n.com`), so a match is never
+    even attempted across it on either pass above. The de-wrapped pass below
+    collapses every `\\n` (and any whitespace around it) out of each decoded
+    value BEFORE scanning, so an intra-token break can no longer hide a
+    leak. This is an EXTRA pass over the same decoded values, not a widening
+    of the shaped regexes themselves -- widening risks false positives across
+    a value's own internal line/field boundaries (e.g. joining an address's
+    street line to its city line into something phone- or email-shaped that
+    was never one token to begin with); an extra pass fails safe; the regexes
+    are unchanged."""
     raw = path.read_text(encoding="utf-8")
     texts = [raw]
-    texts.extend(_string_values(json.loads(raw)))
+    decoded = _string_values(json.loads(raw))
+    texts.extend(decoded)
+    texts.extend(re.sub(r"\s*\n\s*", "", t) for t in decoded)
     return texts
 
 
@@ -1684,8 +1731,16 @@ _CLEAN_PHONE_PROBES = [
 
 @pytest.mark.parametrize("probe", _LEAKY_EMAIL_PROBES)
 def test_email_scanner_flags_format_divergent_addresses(probe: str) -> None:
-    """Finding B6. Whitespace around the `@` must NOT defeat the scanner."""
-    assert _offending_emails(probe) == [probe], (
+    """Finding B6 (token-JOINT breaks -- space/newline around the `@`) and
+    finding S1, round 8 (INTRA-token breaks -- a newline landing inside the
+    domain itself). A joint-break probe is caught by `_offending_emails`
+    directly (the shaped regex's own `\\s*` tolerance); an intra-token probe
+    is caught only after the same de-wrapped pass `_scan_texts` runs over a
+    fixture's decoded values -- so this checks BOTH exactly as a fixture
+    scan would, rather than assuming the direct call covers every probe."""
+    direct = _offending_emails(probe)
+    dewrapped = _offending_emails(re.sub(r"\s*\n\s*", "", probe))
+    assert direct or dewrapped, (
         f"the email scanner did not flag {probe!r} -- a leak reflowed by a PDF "
         f"extractor is the exact class ADR-007 F1-R is about, and it is the "
         f"class this corpus's r17 fixture exists to model"
@@ -1701,9 +1756,16 @@ def test_email_scanner_does_not_flag_the_synthetic_domain(probe: str) -> None:
 
 @pytest.mark.parametrize("probe", _LEAKY_PHONE_PROBES)
 def test_phone_scanner_flags_every_separator_style(probe: str) -> None:
-    """Finding N5. A number pasted out of a real PDF plausibly carries a
-    unicode hyphen/dash or a slash instead of an ASCII hyphen."""
-    assert _offending_phones(probe), (
+    """Finding N5 (a unicode dash/slash at a group JOINT) and finding S1,
+    round 8 (a newline landing INSIDE a digit group, which no separator
+    class can tolerate -- it has to be removed first). A joint-separator
+    probe is caught by `_offending_phones` directly; an intra-token probe is
+    caught only after the same de-wrapped pass `_scan_texts` runs over a
+    fixture's decoded values -- so this checks BOTH exactly as a fixture
+    scan would."""
+    direct = _offending_phones(probe)
+    dewrapped = _offending_phones(re.sub(r"\s*\n\s*", "", probe))
+    assert direct or dewrapped, (
         f"the phone scanner did not flag {probe!r} -- it is a real-range NANP "
         f"number outside the reserved-for-fiction 555-01xx block"
     )
