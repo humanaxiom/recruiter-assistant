@@ -1801,18 +1801,37 @@ def test_phone_scanner_does_not_flag_the_reserved_fake_range(probe: str) -> None
 # B4, the probe uses the RFC-2606 ``.invalid`` / reserved-555-01xx
 # conventions already used elsewhere in this file, never a real-looking
 # corporate/institutional string, even though it only ever touches a tmp file.
+#
+# Finding F-3 (round 9, continued). ``texts.extend(decoded)`` -- the line
+# BEFORE the de-wrap line above, i.e. the plain (non-de-wrapped) decoded-value
+# pass that predates round 8 -- was itself completely ungated: deleting it
+# left the corpus at 1040 passed (every test, including the F-1 probe above,
+# survives on the de-wrap pass alone). It is NOT redundant with the de-wrap
+# pass: a phone number broken at a GROUP JOINT by nothing but a literal
+# newline (no other separator character either side of it) is matched by
+# ``_PHONE_SHAPED_RE`` on the plain decoded value -- a real ``\n`` satisfies
+# ``_PHONE_SEP`` (which includes ``\s``) as the separator itself -- but
+# de-wrapping COLLAPSES that same newline, leaving 7 contiguous digits with NO
+# separator at all, which matches neither ``_PHONE_SHAPED_RE`` branch (both
+# require an actual separator character between the digit groups in the local
+# 7-digit form). ``555\n1212`` is that probe: caught ONLY by the plain
+# decoded pass, never by the de-wrapped one.
 def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
     tmp_path: Path,
 ) -> None:
-    """Mutation-proves ``_scan_texts``'s own de-wrap pass, not the helpers it
-    calls. With the ``texts.extend(re.sub(...))`` line present in
-    ``_scan_texts`` (today), this test is GREEN. Delete that line and it goes
-    RED -- the ``_offending_emails`` / ``_offending_phones`` calls below only
-    ever see ``raw`` and the still-wrapped decoded value, neither of which
-    can match a mid-token break, so no offender is found and the asserts
-    below fail. That is exactly the gap the round-8 (S1) fix closed and that
-    nothing before this test regression-gated end-to-end through
-    ``_scan_texts`` itself.
+    """Mutation-proves ``_scan_texts``'s own de-wrap pass, AND its sibling
+    plain-decoded pass, not the helpers they call. With both
+    ``texts.extend(decoded)`` and ``texts.extend(re.sub(...))`` present in
+    ``_scan_texts`` (today), this test is GREEN. Delete the de-wrap line and
+    it goes RED on the email/phone asserts below (neither ``raw`` nor the
+    still-wrapped decoded value can match a mid-token break). Delete the
+    PLAIN decoded-value line instead (``texts.extend(decoded)``) and the
+    email/phone asserts below still pass (the de-wrap pass alone covers those
+    two probes) -- but the joint-break-only phone assert now goes RED,
+    because de-wrapping ``555\\n1212`` collapses it to 7 contiguous digits
+    that match neither phone-shaped branch, and only the plain decoded pass
+    (a literal ``\\n`` satisfying ``_PHONE_SEP`` as the joint separator
+    itself) ever saw it as phone-shaped.
     """
     fixture = tmp_path / "leaky_mid_token_probe.json"
     fixture.write_text(
@@ -1826,7 +1845,11 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
                             "notreal.person@nonexistent-employer\n.invalid "
                             "or 604-555-12\n12."
                         ),
-                    }
+                    },
+                    {
+                        "chunk_id": "c_probe_joint_break",
+                        "text": "Alternate line: 555\n1212, business hours only.",
+                    },
                 ]
             }
         ),
@@ -1849,6 +1872,15 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
         "_scan_texts did not surface the mid-token-broken phone "
         "'604-555-12\\n12' -- either the de-wrap pass is missing from "
         "_scan_texts, or it never reached the phone scanner"
+    )
+    assert any(re.sub(r"\D", "", o) == "5551212" for o in phone_offenders), (
+        "_scan_texts did not surface the JOINT-BREAK-ONLY phone '555\\n1212' "
+        "-- this shape is caught ONLY by the plain decoded-string pass (a "
+        "real newline satisfies _PHONE_SEP as the group separator itself); "
+        "de-wrapping it collapses the newline and leaves 7 contiguous digits "
+        "that match neither _PHONE_SHAPED_RE branch. If this fails, "
+        "`texts.extend(decoded)` is missing from _scan_texts, or it never "
+        "reached the phone scanner."
     )
 
 
