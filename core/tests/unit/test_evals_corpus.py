@@ -165,9 +165,15 @@ still asserted things nothing checked. Round 4:
   while its own docstring, ``thresholds.toml`` and the agent doc all claimed
   "only the EVIDENCE verifier may reject it". r09 now holds a JD-allowed
   ``BSc Computer Science``, and the potency test asserts education AND the
-  vector sub-score's embedded input. With the bait repaired, the no-op-
-  verifier engine puts r09 at rank 2 -> precision@5 = 0.80 -> the adversarial
-  arm FAILS, which is the whole point of the fixture.
+  vector sub-score's embedded input. Round 4 then wrote: "with the bait
+  repaired, the no-op-verifier engine puts r09 at rank 2 -> precision@5 = 0.80
+  -> the adversarial arm FAILS". **THAT NUMBER IS WRONG (superseded by round-5
+  F1)** -- it was asserted, never measured. Round 5 MEASURED that same corpus
+  state: seniority 0.271 -> r09 rank 8 -> precision@5 = 1.00 -> the arm was
+  still INERT. Round 4 relocated the hole; it did not close it. (Round 7 / M-1:
+  three files each stated a DIFFERENT, and false, rank for this one state --
+  "rank 2" here, "3rd" in labels.json, "~11/17" in the docs. The narrative is
+  kept; every stale number is now marked wrong rather than quietly re-tuned.)
 * **B2** the "three-way key-set contract" was enforced in ZERO directions
   against the two consumer DOCS: only ``thresholds.toml`` <-> the
   ``_THRESHOLD_KEYS`` literal in this file was machine-checked, and the test
@@ -263,13 +269,79 @@ asserts what the engine COMPUTES rather than what a sub-score's name suggests.
   assert BOTH ``rank(hi) < rank(lo)`` AND
   ``score_final(hi) - score_final(lo) >= min_score_gap``. An exact tie can then
   never pass under any tie-break, on any input order. The correct engine's gaps
-  (+0.0397 / +0.0120 / +0.0900) clear it by four orders of magnitude, and every
-  one of the three is ARITHMETIC (see
-  ``test_min_score_gap_is_far_below_the_smallest_gap_a_correct_engine_produces``).
+  (+0.0397 / +0.0120 / +0.0900) clear it by four orders of magnitude.
+
+  ROUND-7 CORRECTION (N-1): round 6 wrote "and every one of the three is
+  ARITHMETIC". Only ONE of them is, and it is the only one that matters here:
+
+  * overqual    +0.0120 = 0.6 * 0.25 * (1.00 - 0.92) -- pure arithmetic off
+    ``MatchWeights`` and the twins' years. This is the SMALLEST gap, so it is the
+    one that bounds ``min_score_gap`` from above, and it is the only one asserted
+    (``test_min_score_gap_is_far_below_the_smallest_gap_a_correct_engine_produces``).
+  * education   +0.0391 = 0.6 * 0.10 * (1 - education_partial * 2/3) = 0.0400
+    MINUS an embedder-MEASURED vector residual (~9e-04). Arithmetic upper bound,
+    measured correction.
+  * motivation  +0.0900 = 0.1 * 0.9, where the ``0.9`` is the LLM's MEASURED
+    confidence on r04's cover-letter evidence -- NOT a ``MatchWeights`` constant.
+    Nothing in ``MatchWeights`` fixes it; a different extractor moves it.
+
   ``test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists``
   pins the byte-identical embedding input, so the tie cannot be "fixed" later by
   narrating years/motivation into a twin's ``summary`` -- which would put the
   signal back into ``summary_emb`` and re-confound the pair.
+
+--- Phase-4a FALSIFIABILITY hardening (round 7: R7-1 / R7-2) ---
+
+Round 6 shipped, again, the defect this branch exists to kill: a claim STAMPED AS
+ASSERTED but ENFORCED BY NOTHING. Fifth instance in five rounds. Both are one
+assertion each:
+
+* **R7-1** ``SKILL_EVIDENCE_MARKERS`` -- the dict that is the SOLE definition of
+  "JD-relevant" for
+  ``test_jd_relevant_skill_claims_match_their_tag_evidence_property`` (which this
+  file itself calls "the core falsifiable property of this corpus"), for r10's
+  recency guard and for r17 -- carried the comment "Covers every required_skill
+  AND nice_to_have_skill name used anywhere in the corpus". NOTHING enforced
+  that. Three mutations stayed GREEN (305 passed): delete the ``kubernetes``
+  entry; delete it AND re-ground r09's Kubernetes claim in its cited chunk (i.e.
+  silently defang one arm of the fabrication trap -- and note that grounding a
+  claim whose marker is still PRESENT goes RED, which proves the trap's coverage
+  WAS exactly this unpinned dict); give the JD a nice-to-have ``Redis`` that r09
+  AND honest-strong r03 both claim with zero textual support (neither the
+  "adversarial must be ungrounded" arm nor the "honest must be grounded" arm
+  fires). It is the enumerate-instead-of-derive shape, on exactly the surface
+  4b/4d touch when they add JD fixtures. Coverage is now DERIVED from the JD
+  fixture and asserted --
+  ``test_skill_evidence_markers_cover_every_jd_skill``.
+* **R7-2** the education twins' ``institution`` / ``year`` were UNPINNED, so the
+  F2 residual could be INVERTED back. ``_build_summary_text`` embeds
+  ``f"{degree}, {institution} ({year})"``; the twin test pinned skills /
+  experience / summary / chunks / years and NOT the education entry's institution
+  or year, and ``test_twins_that_share_an_embedding_input_...`` compares only the
+  segment BEFORE ``"Education: "``. The twins even shipped DIFFERENT institutions
+  for no stated reason. The entire F2 defence -- "the residual is 40x dominated
+  and points at the LOWER twin" -- therefore rested on an embedder-MEASURED
+  quantity with a free second contributor. MEASURED mutation: rewrite r14's
+  institution to "Backend Data Engineering Institute of Python and Airflow" and
+  the residual flips to +0.0043, the education-BLIND engine's twin separation
+  becomes +6.399e-04 >= ``min_score_gap``, and it PASSES the pair on BOTH input
+  orders -- the exact vector confound round 5 certified as inverted, re-created,
+  with all 305 tests green. The twins now SHARE an institution and a year, so the
+  degree text is the residual's only contributor, and both the education dicts and
+  the embedded ``Education: `` segment are pinned to differ ONLY in degree/field.
+
+ROUND NUMBERING (round 7 / N-3). Rounds are numbered CUMULATIVELY over the
+corpus's hardening history -- rounds 1-2 on ``feat/phase-4a-ranking-evals-corpus``,
+rounds 3-7 on ``fix/phase-4a-corpus-falsifiability`` -- and that is the scheme
+this file, ``thresholds.toml``, ``labels.json``, ``docs/activity/`` and
+``docs/EXTRACTION_PLAN.md`` all use. The branch's COMMIT names count gate
+iterations on the branch, which is an offset of 2:
+
+  cumulative round 3 (A-H) = branch gate iteration 1
+  cumulative round 4 (B1-B6/N1-N6) = ``red|green(4a-hard-2)``
+  cumulative round 5 (F1/F2)       = ``red|green(4a-hard-3)``
+  cumulative round 6 (F5)          = ``red|green(4a-hard-4)``
+  cumulative round 7 (R7-1/R7-2)   = ``red|green(4a-hard-5)``
 
 PII scanner scope (accepted residuals, round 4 / finding N6) -- what these
 scanners do NOT claim:
@@ -403,9 +475,21 @@ _PHONE_SHAPED_RE = re.compile(
 _ALLOWED_PHONE_DIGITS_RE = re.compile(r"(?:1)?(?:\d{3})?55501\d{2}")
 
 # JD-relevant skill name -> a short lowercase substring that must appear in a
-# cited chunk's text as proof the claim is textually grounded. Covers every
-# required_skill AND nice_to_have_skill name used anywhere in the corpus
-# (see fixtures/jd_backend_data_engineer.json). Keyed by skill.name.lower().
+# cited chunk's text as proof the claim is textually grounded. Keyed by
+# skill.name.lower().
+#
+# THIS DICT IS THE SOLE DEFINITION OF "JD-RELEVANT" for the corpus's core
+# falsifiable property (test_jd_relevant_skill_claims_match_their_tag_evidence_
+# property), for r10's recency guard and for r17's no-JD-skill control. Its
+# COVERAGE of the JD -- "every required_skill AND every nice_to_have_skill" --
+# used to be a COMMENT, enforced by nothing (round-7 finding R7-1), so a JD skill
+# with no marker here was simply INVISIBLE to the fabrication trap: three
+# mutations stayed green, including "the JD gains a nice-to-have `Redis` that both
+# the keyword-stuffer and an honest strong fixture claim with zero textual
+# support". `test_skill_evidence_markers_cover_every_jd_skill` now DERIVES the
+# required set from fixtures/jd_backend_data_engineer.json and fails if any JD
+# skill is missing a marker -- so adding a JD skill (4b/4d will) forces a marker
+# here in the same diff, and deleting a marker goes RED.
 SKILL_EVIDENCE_MARKERS: dict[str, str] = {
     "python": "python",
     "postgresql": "postgresql",
@@ -432,6 +516,14 @@ CURRENT_YEAR = 2026
 # only against the REAL algorithm, so the corpus is now written against the port,
 # not against the idea of the port. These helpers mirror the shipped code exactly;
 # if 4c changes them, these must change in the same diff.
+#
+# ROUND-7 (M-2): "must change in the same diff" was itself enforced by NOTHING --
+# the same unenforced-claim class this whole branch exists to kill. They are
+# verbatim-faithful today (diffed against hris, `"ma "` landmine and all), but a
+# 4c coder who edits `src/pipeline/matching/{stages,orchestrator}.py` gets no
+# signal from here. `test_ported_engine_helpers_agree_with_the_real_ones` (bottom
+# of this file) imports the real modules WHEN THEY EXIST (it skips until 4c) and
+# asserts these four functions agree with them over an input table.
 #
 #   * SENIORITY is NOT a years check (orchestrator.py:331-340). It is the COSINE
 #     between the JD title and the candidate's MOST-RECENT ROLE TITLE, rescaled
@@ -635,6 +727,28 @@ def _load_labels() -> dict[str, Any]:
     return _load_json(LABELS_PATH)
 
 
+def _load_jd() -> JDExtracted:
+    """The JD the whole corpus is ranked against, straight from the fixture the
+    manifest names -- never a literal, never a copy."""
+    labels = _load_labels()
+    jd_path = FIXTURES_DIR / labels["job"]["fixture"]
+    return JDExtracted.model_validate(_load_json(jd_path))
+
+
+def _jd_skill_names() -> set[str]:
+    """Every skill name the JD asks for -- required AND nice-to-have -- lowercased.
+
+    DERIVED from the JD fixture (round-7 finding R7-1). This is the set
+    ``SKILL_EVIDENCE_MARKERS`` must cover, and the reason it is a function rather
+    than a constant: a JD skill added by 4b/4d must not be able to slip into the
+    corpus without a marker, which is exactly what an enumerated literal would
+    allow."""
+    jd = _load_jd()
+    return {s.name.lower() for s in jd.required_skills} | {
+        s.name.lower() for s in jd.nice_to_have_skills
+    }
+
+
 def _load_resume_raw(resume_id: str) -> dict[str, Any]:
     """Raw (un-validated) JSON dict for a resume fixture, keyed by manifest
     id. Used by the round-2 "identical except X" twin-pair integrity tests,
@@ -784,8 +898,25 @@ def test_thresholds_toml_has_required_section_key(section: str, key: str) -> Non
 def test_thresholds_toml_has_no_key_outside_the_enumerated_contract() -> None:
     """The reverse direction of the same contract: a key that exists in the
     toml but is not in ``_THRESHOLD_KEYS`` is a key neither consumer doc
-    knows about. Fail here and add it in all three places at once."""
+    knows about. Fail here and add it in all three places at once.
+
+    Round-7 finding N-4: this walked ONLY the section tables
+    (``if isinstance(body, dict)``), so a TOP-LEVEL scalar -- ``min_precision =
+    0.2`` written above the first ``[section]`` header, which is valid TOML and
+    exactly what a hurried edit produces -- was silently skipped by the reverse
+    check and therefore invisible to the entire three-way contract. The contract
+    is keyed by ``(section, key)``, so there is no honest way to represent a
+    bare top-level key in it: forbid them instead.
+    """
     data = _load_thresholds()
+    orphans = sorted(key for key, body in data.items() if not isinstance(body, dict))
+    assert not orphans, (
+        f"thresholds.toml has TOP-LEVEL key(s) {orphans} outside any [section]. "
+        f"The three-way key contract (this file, .claude/agents/ranking-evals.md, "
+        f"tests/evals/run_evals.py) is keyed by (section, key) and cannot see a "
+        f"bare top-level key at all -- so a threshold written there would be "
+        f"enforced by nobody. Move it into a section."
+    )
     actual = {
         (section, key)
         for section, body in data.items()
@@ -894,7 +1025,10 @@ def test_every_threshold_key_is_enumerated_by_both_consumers() -> None:
 # min_precision=0.8 tolerates exactly one bad entry in the top-5 -- so an
 # engine that ranks r09 (the keyword-stuffer this metric exists to catch) at
 # rank 5 PASSES; with 11 good / 6 bad fixtures even a uniformly random ranker
-# clears 0.8 roughly half the time. It also contradicts the toml's own prose
+# clears 0.8 about 40% of the time (round-7 finding N-2: this said "roughly half",
+# which was made up. Hypergeometric, k=5: P(>= 4 good) = [C(11,4)C(6,1) +
+# C(11,5)] / C(17,5) = (1980 + 462) / 6188 = 39.5%). It also contradicts the
+# toml's own prose
 # ("none may be 'weak' or 'adversarial'" == 1.0) and
 # [adversarial].must_not_surface_in_topk. The old range check
 # (0.0 < min_precision <= 1.0) let a 0.8 -> 0.2 mutation stay green, which
@@ -1115,15 +1249,27 @@ def test_min_score_gap_is_far_below_the_smallest_gap_a_correct_engine_produces()
     CORRECT engine.
 
     The smallest of the three pairs' correct-engine gaps is the overqual pair's,
-    and it is pure arithmetic off ``MatchWeights`` + the two twins'
-    ``total_years_experience`` -- no embedder, no LLM, no measurement:
+    and it is the only one that is pure arithmetic off ``MatchWeights`` + the two
+    twins' ``total_years_experience`` -- no embedder, no LLM, no measurement:
 
         gap = structured_weight * experience_weight
               * (score_experience(r15) - score_experience(r13))
             = 0.6 * 0.25 * (1.00 - 0.92) = 0.0120
 
-    (The education pair's is 0.6 * 0.10 * (1 - education_partial * 2/3) = 0.0400
-    minus a ~3e-04 vector residual; the motivation pair's is 0.1 * 0.9 = 0.0900.)
+    Being both the SMALLEST and the only fully-arithmetic one is why it is the one
+    that bounds ``min_score_gap`` from above, and the only one asserted here.
+
+    ROUND-7 (N-1) -- the other two are NOT arithmetic, and round 6 saying they were
+    is corrected:
+
+    * education:  0.6 * 0.10 * (1 - education_partial * 2/3) = 0.0400 MINUS an
+      embedder-MEASURED vector residual (~9e-04 -> a measured +0.0391 total).
+    * motivation: 0.1 * 0.9 = 0.0900, where ``0.9`` is the LLM's MEASURED
+      confidence on r04's cover-letter evidence -- it is NOT a ``MatchWeights``
+      constant and a different extractor moves it.
+
+    Neither is asserted here, precisely because neither can be recomputed without a
+    model. The sandwich needs only the smallest, and the smallest is arithmetic.
 
     ``min_score_gap`` must sit orders of magnitude below that, or a correct 4c
     engine could be failed by the very guard meant to protect the pair. It is
@@ -1278,6 +1424,55 @@ def _chunk_text_by_id(parsed: ResumeParsed) -> dict[str, str]:
 def _cited_text(parsed: ResumeParsed, chunk_ids: list[str]) -> str:
     by_id = _chunk_text_by_id(parsed)
     return " ".join(by_id[cid] for cid in chunk_ids if cid in by_id).lower()
+
+
+def test_skill_evidence_markers_cover_every_jd_skill() -> None:
+    """Round-7 finding R7-1. ``SKILL_EVIDENCE_MARKERS`` is the SOLE definition of
+    "JD-relevant" for the corpus's core falsifiable property (the very next test),
+    for r10's recency guard and for r17's no-JD-skill control -- and its own
+    comment claimed it "covers every required_skill AND nice_to_have_skill name
+    used anywhere in the corpus". NOTHING enforced that. A JD skill with no marker
+    is INVISIBLE to the fabrication trap: it is filtered out of ``relevant`` before
+    either arm of the trap ever looks at it.
+
+    Three mutations stayed GREEN (all 305 corpus tests) before this test existed:
+
+    1. delete ``"kubernetes": "kubernetes",`` -- the JD's nice-to-have Kubernetes
+       claims stop being checked on every fixture at once;
+    2. delete it AND re-ground r09's Kubernetes claim in its cited chunk -- i.e.
+       silently defang one arm of the fabrication trap. (Grounding that claim while
+       the marker is still PRESENT goes RED, which is the proof that the trap's
+       coverage was exactly this unpinned dict, and nothing else.)
+    3. give the JD a nice-to-have ``Redis`` and have r09 AND honest-strong r03 both
+       claim it with zero textual support: neither the "adversarial claims must be
+       UNGROUNDED" arm nor the "honest claims must be GROUNDED" arm fires.
+
+    Mutation 3 is the one that matters going forward: it is the enumerate-instead-
+    of-derive shape sitting on exactly the surface 4b/4d touch when they add JD
+    fixtures. So the requirement is DERIVED from the JD fixture, and a JD skill
+    without a marker is now a RED test rather than a silent hole.
+
+    Direction: SUBSET, not equality. Every JD skill MUST have a marker (a missing
+    marker is a hole in the trap). A marker for a skill the JD no longer asks for
+    is harmless -- it only makes the grounding arm stricter -- and equality here
+    would fail a future corpus that ranks against more than one JD.
+    """
+    jd_skills = _jd_skill_names()
+    assert jd_skills, (
+        "the JD fixture declares no skills at all -- this test would then pass "
+        "VACUOUSLY, which is the failure mode it exists to prevent"
+    )
+    missing = jd_skills - SKILL_EVIDENCE_MARKERS.keys()
+    assert not missing, (
+        f"JD skill(s) {sorted(missing)} have no SKILL_EVIDENCE_MARKERS entry. "
+        f"SKILL_EVIDENCE_MARKERS is the only thing that decides which skill claims "
+        f"the fabrication trap checks, so a JD skill without a marker is one the "
+        f"adversarial fixture may claim with NO textual support and no test will "
+        f"notice -- and one an honest fixture may claim ungrounded too. Add "
+        f"{sorted(missing)} to SKILL_EVIDENCE_MARKERS (skill.name.lower() -> a "
+        f"short lowercase substring that must appear in the cited chunk) in the "
+        f"SAME diff that adds it to the JD."
+    )
 
 
 @pytest.mark.parametrize("resume_id", _resume_ids_from_labels())
@@ -1890,11 +2085,23 @@ def test_r10_recency_relevant_skills_are_grounded_and_in_the_mid_or_old_bucket()
 #     whether `score_education` should read `fields` (docs/EXTRACTION_PLAN.md).
 #
 # Measured on the repaired corpus (faithful engine, real embedder):
-#   correct engine:          r14 rank 3, r11 rank 7  (gap +0.0397, education-driven)
+#   correct engine:          r14 rank 3, r11 rank 7  (gap +0.0391, education-driven)
 #   weights.education = 0.0: r14 rank 4, r11 rank 3  -> the pair FLIPS -> FAIL
 # The residual embedded-degree vector confound now points at r11 (the LOWER
-# twin, -0.0003), so the ONLY way an engine can put r14 above r11 is by
-# actually implementing the education sub-score.
+# twin, -0.00087 of score_final), so the ONLY way an engine can put r14 above r11
+# is by actually implementing the education sub-score.
+#
+# ROUND-7 (R7-2): that residual's SIGN is the load-bearing half of this fix, and
+# it is MEASURED, not arithmetic -- so its inputs must be pinned or it can be
+# inverted back. The twins' `institution` and `year` were free, and they even
+# shipped DIFFERENT institutions; rewriting r14's toward the JD flips the residual
+# positive and an education-blind engine then PASSES the pair. The twins now share
+# an institution and a year, and both the education dicts and the embedded
+# `Education: ` segment are pinned to differ ONLY in degree/field (see
+# test_r14_education_twin_is_identical_to_r11_except_education_level). The degree
+# TEXT is now the residual's only contributor: r11's "Data Engineering" embeds
+# closer to the "Backend Data Engineer" JD than r14's "Computer Science", which is
+# what aims it at the LOWER twin.
 
 
 def test_r11_education_candidate_is_tagged_strong() -> None:
@@ -2576,6 +2783,76 @@ def test_r14_education_twin_is_identical_to_r11_except_education_level() -> None
     ), "r11's field must ALSO be JD-allowed -- the level is the sole dimension"
     assert r14_edu["field"].lower() in allowed_fields, "r14's field must be JD-allowed"
 
+    # ── ROUND-7 FINDING R7-2: the residual's SECOND contributor was UNPINNED ──
+    #
+    # `_build_summary_text` (core/src/worker/resume_tasks.py) embeds the education
+    # entry as `f"{degree}, {institution} ({year})"` -- THREE fields, of which this
+    # test pinned NONE, while `test_twins_that_share_an_embedding_input_...`
+    # compares only the segment BEFORE "Education: ". The twins even shipped
+    # DIFFERENT institutions ("Fredericton Polytechnic College" vs "Fredericton
+    # Institute of Technology") for no stated reason.
+    #
+    # That matters because the F2 defence above is not arithmetic -- it is a
+    # MEASURED claim about an embedder: "the residual is 40x dominated AND points
+    # at the LOWER twin". The `points at the LOWER twin` half is what makes the
+    # education-BLIND engine FAIL the pair; invert it and the blind engine PASSES,
+    # because a positive separation >= min_score_gap satisfies the round-6 contract
+    # just as well as a correct engine's does.
+    #
+    # MEASURED (nomic-embed-text 768-d, cosine, the ported engine):
+    #   twins as shipped (institutions differ)   residual -3.30e-04 -> blind FAILS
+    #   r14's institution -> "Backend Data Engineering Institute of Python and
+    #     Airflow"                               residual +4.30e-03 -> blind engine
+    #     separation +6.399e-04 >= min_score_gap -> blind engine PASSES on BOTH
+    #     input orders -> the education arm goes INERT. All 305 tests stayed green.
+    #
+    # So the education entry may differ ONLY in the two fields this pair is ABOUT:
+    # `degree` (the level -- the one thing `score_education` reads) and `field`
+    # (which tracks the degree string, and is JD-allowed on both sides). Everything
+    # else is pinned EQUAL, which leaves the degree TEXT as the sole contributor to
+    # the irreducible vector residual. The twins now also SHARE an institution:
+    # there was never a reason for them not to, and a shared one cannot drift.
+    assert r11_edu.keys() == r14_edu.keys(), (
+        f"the twins' education entries must carry the SAME field set -- a field "
+        f"present on one and absent from the other is an unpinned differentiator: "
+        f"r11={sorted(r11_edu)} r14={sorted(r14_edu)}"
+    )
+    differing = {k for k in r11_edu if r11_edu[k] != r14_edu[k]}
+    assert differing == {"degree", "field"}, (
+        f"the education twins' education[] entries must be identical EXCEPT "
+        f"`degree` and `field`; they differ in {sorted(differing)}. `institution` "
+        f"and `year` are EMBEDDED by _build_summary_text (`{{degree}}, "
+        f"{{institution}} ({{year}})`), so any difference there is a second, "
+        f"uncontrolled contributor to the vector residual -- and the residual's "
+        f"SIGN is the whole F2 defence. Measured: an institution rewritten toward "
+        f"the JD flips the residual to +0.0043 and an education-BLIND engine then "
+        f"PASSES this pair on both input orders. If you must change one of these, "
+        f"re-measure the education-blind separation and re-derive the bands."
+    )
+
+    # ...and the same invariant at the surface that actually reaches the embedder,
+    # which is what survives a future `_build_summary_text` change: the
+    # `Education: ` SEGMENT of the embedded text must differ ONLY in the degree
+    # token. If _build_summary_text starts embedding `field` (or drops
+    # `institution`), the dict-level check above still passes and THIS one goes RED
+    # -- which is correct: the residual would then have a new contributor and must
+    # be re-measured in the same diff.
+    marker = "Education: "
+    seg_r11 = _embedding_input("r11_skyler_brooks").split(marker, 1)[1]
+    seg_r14 = _embedding_input("r14_devon_ashworth").split(marker, 1)[1]
+    assert seg_r11 != seg_r14, (
+        "the twins' embedded Education: segment MUST differ -- a differing degree "
+        "LEVEL requires a differing degree string"
+    )
+    assert seg_r11.replace(r11_edu["degree"], r14_edu["degree"]) == seg_r14, (
+        f"the twins' embedded `Education: ` segment must differ ONLY in the degree "
+        f"token:\n  r11: {seg_r11!r}\n  r14: {seg_r14!r}\nSubstituting r11's degree "
+        f"{r11_edu['degree']!r} for r14's {r14_edu['degree']!r} must make the two "
+        f"segments identical. Anything left over (an institution, a year) is a "
+        f"second embedded differentiator feeding the vector residual that the F2 "
+        f"fix depends on being small and NEGATIVE."
+    )
+
 
 def test_r15_overqual_twin_is_identical_to_r13_except_total_years_experience() -> None:
     """r15 (overqual twin) must differ from r13 ONLY in
@@ -2688,8 +2965,12 @@ def test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists
 
     The education pair is the deliberate exception: a differing degree LEVEL
     REQUIRES a differing degree string, so its embedding input cannot be
-    byte-identical. That residual is dominated (0.0400 vs ~3e-04) and points at
-    the LOWER twin (F2), which is why that pair is decisive on ranks alone.
+    byte-identical. That residual is dominated (0.0400 vs ~9e-04) and points at
+    the LOWER twin (F2), which is why that pair is decisive on ranks alone. Its
+    two OTHER embedded contributors (institution, year) are pinned equal by
+    ``test_r14_education_twin_is_identical_to_r11_except_education_level``
+    (round-7 R7-2) -- without that, the residual could be inverted back and the
+    education arm would go inert again.
     """
     tie_pairs = [
         ("overqual", "r15_cameron_whitfield", "r13_quinn_delgado"),
@@ -2913,3 +3194,128 @@ def test_run_evals_load_corpus_rejects_a_fixture_path_outside_the_fixtures_dir(
 
     with pytest.raises(ValueError, match="outside"):
         module.load_corpus()
+
+
+# ── Round-7 M-2: the PORTED helpers must track the real engine once 4c lands ──
+#
+# The four helpers at the top of this file (`_level_from_degree`,
+# `_most_recent_title`, `_score_education`, `_score_experience`) are verbatim
+# ports of hris `matching/{stages,orchestrator}.py` -- the code
+# docs/EXTRACTION_PLAN.md says 4c extracts. Round 5 wrote "if 4c changes them,
+# these must change in the same diff" and enforced it with NOTHING, which is the
+# defect class of every other finding on this branch. If 4c's real
+# `score_education` diverges from the copy here, every assertion the corpus makes
+# about the engine's sub-scores (r09's potency, r11's partial credit, the
+# education twin pair) silently starts testing a fiction.
+#
+# This test closes it from the corpus side: it imports the REAL modules when they
+# exist and compares. It SKIPS until 4c lands them -- deliberately, and it must not
+# be deleted then: at that point it is the only thing tying the corpus's model of
+# the engine to the engine.
+
+_DEGREE_PROBES: tuple[str | None, ...] = (
+    "BSc Computer Science",
+    "Associate Degree in Data Engineering",
+    # The `"ma "` landmine: "diplo-MA -in" matches the MASTERS bucket, which is
+    # tested BEFORE `associate`. If a refactor "cleans up" _DEGREE_KEYWORDS, this
+    # probe is what tells the corpus its r11 fixture is now scoring 1.00.
+    "Associate Diploma in Data Engineering",
+    "Bachelor of Applied Science",
+    "MSc Data Science",
+    "Master of Engineering",
+    "MBA",
+    "PhD in Distributed Systems",
+    "Doctorate in Statistics",
+    "High school diploma",
+    "BA English",
+    "BS Mathematics",
+    "BFA Design",
+    "Diploma, General Studies",  # the old r09 bait's degree -> None
+    "Certificate in Welding",
+    "",
+    None,
+)
+
+_EDUCATION_PROBES: tuple[tuple[list[str | None], str | None], ...] = (
+    (["bachelors"], "bachelors"),
+    (["associate"], "bachelors"),
+    (["high_school"], "bachelors"),
+    (["masters"], "bachelors"),
+    (["phd"], "bachelors"),
+    ([], "bachelors"),
+    ([None], "bachelors"),
+    ([None, "associate"], "bachelors"),
+    (["bachelors"], None),
+    (["associate"], "phd"),
+)
+
+_EXPERIENCE_PROBES: tuple[tuple[float | None, int | None], ...] = (
+    (None, 5),
+    (0.0, 5),
+    (2.5, 5),
+    (5.0, 5),
+    (6.0, 5),  # r15
+    (9.0, 5),
+    (10.0, 5),  # exactly overqual_ratio
+    (14.0, 5),  # r13
+    (30.0, 5),  # floors out
+    (6.0, None),
+    (6.0, 0),
+)
+
+_TITLE_PROBES: tuple[list[dict[str, Any]], ...] = (
+    [],
+    [{"title": "Backend Engineer"}],
+    [{"title": "Backend Engineer"}, {"title": "Staff Engineer", "is_current": True}],
+    [{"title": "Backend Engineer", "is_current": False}, {"title": "Data Engineer"}],
+    [{"is_current": True}],
+    [{"title": None}],
+)
+
+
+def test_ported_engine_helpers_agree_with_the_real_ones() -> None:
+    """Round-7 M-2. SKIPS until Phase 4c lands ``src.pipeline.matching``.
+
+    When it lands, the four ported helpers in this file must agree with the real
+    ones over the probe tables above -- including the ``"ma "`` landmine, which is
+    the one behaviour a well-meaning cleanup is most likely to "fix" (and which
+    would silently re-confound the r11/r14 education pair).
+
+    If this fails in 4c, the correct response is to update the ports in this file
+    AND re-derive every corpus claim that depends on them (r09's potency, r11's
+    partial credit, the education twins, the ordering-pair gaps) -- not to relax
+    the comparison.
+    """
+    try:
+        stages = importlib.import_module("src.pipeline.matching.stages")
+        orchestrator = importlib.import_module("src.pipeline.matching.orchestrator")
+    except ModuleNotFoundError:
+        pytest.skip(
+            "src.pipeline.matching.{stages,orchestrator} do not exist yet "
+            "(Phase 4c). This test is the guard that the ported helpers at the "
+            "top of this file stay faithful once they do -- do not delete it."
+        )
+
+    for degree in _DEGREE_PROBES:
+        assert _level_from_degree(degree) == orchestrator._level_from_degree(degree), (
+            f"_level_from_degree drifted from the real engine on {degree!r} -- the "
+            f"corpus's education claims (r09 potency, r11 partial credit, the "
+            f"r14/r11 pair) are all computed from this mapping"
+        )
+
+    for levels, min_level in _EDUCATION_PROBES:
+        assert _score_education(levels, min_level) == pytest.approx(
+            stages.score_education(levels, min_level)
+        ), f"score_education drifted on ({levels!r}, {min_level!r})"
+
+    for total_years, min_years in _EXPERIENCE_PROBES:
+        assert _score_experience(total_years, min_years) == pytest.approx(
+            stages.score_experience(total_years, min_years)
+        ), f"score_experience drifted on ({total_years!r}, {min_years!r})"
+
+    for roles in _TITLE_PROBES:
+        parsed = {"experience": roles}
+        assert _most_recent_title(parsed) == orchestrator._most_recent_title(parsed), (
+            f"_most_recent_title drifted on {roles!r} -- this is the string the "
+            f"SENIORITY sub-score embeds, and r09's bait pins it to the JD title"
+        )
