@@ -1428,9 +1428,7 @@ def test_gold_evidence_anchor_is_an_exact_substring_of_its_cited_chunk(
         # below relies on: a genuine (exact-substring) anchor must clear the
         # threshold under it, or a "< fuzz_threshold" assertion would be
         # vacuously true for every string on earth.
-        assert (
-            _best_partial_ratio(quote, cited) >= DEFAULT_WEIGHTS.evidence_verify_fuzz
-        )
+        assert _best_partial_ratio(quote, cited) >= DEFAULT_WEIGHTS.evidence_verify_fuzz
 
 
 # ── Falsifiability hardening G1: negative (fabricated) evidence anchors ───
@@ -1864,8 +1862,7 @@ def test_run_evals_load_corpus_confines_fixture_paths_to_the_fixtures_dir() -> N
     for resume in corpus.resumes:
         resolved = Path(resume.path).resolve()
         assert resolved.is_relative_to(fixtures_dir), (
-            f"{resume.resume_id}: fixture path {resolved} escaped "
-            f"{fixtures_dir}"
+            f"{resume.resume_id}: fixture path {resolved} escaped " f"{fixtures_dir}"
         )
 
 

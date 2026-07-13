@@ -1,0 +1,80 @@
+{
+  "candidate": {
+    "name": "Harper Nakamura",
+    "email": "harper.nakamura@example.test",
+    "phone": "604 555 0117",
+    "location": "Victoria, BC"
+  },
+  "summary": "Harper Nakamura is a studio graphic designer with 7 years of brand identity, print production, and packaging work; no software engineering or data pipeline background.",
+  "total_years_experience": 7,
+  "skills": [
+    { "name": "Graphic Design", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_005"] },
+    { "name": "Adobe InDesign", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_006"] }
+  ],
+  "experience": [
+    {
+      "company": "Meridian Print Studio",
+      "title": "Senior Graphic Designer",
+      "start": "2019-05",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Directed brand identity and print production for 20+ retail campaigns at Meridian Print Studio.", "chunk_id": "c_005" },
+        { "text": "Produced the packaging artwork system in Adobe InDesign for the studio's largest retail client.", "chunk_id": "c_006" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BA Visual Communication Design",
+      "institution": "Island Coastal College",
+      "field": "Visual Communication Design",
+      "year": 2018
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "header",
+      "page": 1,
+      "text": "Harper Nakamura\nharper.nakamura@example.test | 604 555 0117 | Victoria, BC"
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Harper\nNakamura was profiled in the studio newsletter after the seasonal packaging refresh shipped."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Studio direct line: 604  555\n0117 (reception forwards calls after hours)."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Portfolio requests go through the intranet handle harper.nakamura rather than the studio inbox."
+    },
+    {
+      "id": "c_005",
+      "section": "experience",
+      "page": 1,
+      "text": "Directed brand identity and print production for 20+ retail campaigns at Meridian Print Studio."
+    },
+    {
+      "id": "c_006",
+      "section": "experience",
+      "page": 1,
+      "text": "Produced the packaging artwork system in Adobe InDesign for the studio's largest retail client."
+    },
+    {
+      "id": "c_007",
+      "section": "education",
+      "page": 1,
+      "text": "BA Visual Communication Design, Island Coastal College, graduated 2018."
+    }
+  ],
+  "cover_letter_chunks": []
+}

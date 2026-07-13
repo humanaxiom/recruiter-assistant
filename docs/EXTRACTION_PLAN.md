@@ -55,9 +55,9 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
-| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. [activity](activity/phase-4a-ranking-evals-corpus.md) |
-| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`) | not started |
-| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate | not started |
+| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **+ falsifiability hardening** (branch `fix/phase-4a-corpus-falsifiability`, 2026-07-12) — see "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
+| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`). **Carried-forward requirement (from the 4a hardening audit): add an OUTBOX-SHAPED FIXTURE** to `core/tests/evals/` — nothing today encodes what the outbox payload is *allowed* to contain (no `candidate` block, no `chunks[].text`, no `summary`), so 4b would project to Neo4j with no fixture asserting that boundary | not started |
+| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9` | not started |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started |
@@ -87,6 +87,35 @@ next starts. The split mirrors Phases 0–3's
 one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
 tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
 isolating them keeps each diff auditable.
+
+**4a hardening — `fix/phase-4a-corpus-falsifiability` (landed BEFORE 4b/4c, zero product code).** Three
+opus-tier gates audited the merged corpus and found it **could not fail a bad 4c engine**: every finding
+was proven by a mutation that left all 226 corpus tests green. Fixed fix-forward so 4c's first green
+build is genuinely falsifiable:
+- **precision@k pinned to its exact contract** (`k = 5`, `min_precision = 1.0`). `0.8` at k=5 tolerated
+  exactly one bad entry — i.e. it PASSED an engine that ranked the r09 keyword-stuffer at rank 5 — and
+  contradicted `[adversarial].must_not_surface_in_topk`. A range check let a `0.8 → 0.2` mutation stay green.
+- **The adversarial bait's potency is now asserted** (r09 must be structurally top-tier on every
+  *non-evidence* signal: all required + nice-to-have skills, `years ≥ min_years`, `recency_recent`
+  bucket, clears `min_years_experience` without tripping `overqual_ratio`). **Only evidence verification
+  may reject it** — a defanged bait is rejected by any scorer and the fabrication trap stops trapping.
+- **`negative_evidence`** — fabricated quotes that MUST score below `fuzz_threshold`. Every
+  `gold_evidence` anchor is an exact substring, so `verification_rate_min = 1.0` was satisfiable by a
+  verifier that returns `True` unconditionally.
+- **`[ordering_controls]` is now a real toml key**, not prose: the matched-pair assertions
+  (r14>r11 education, r15>r13 overqual, r04>r16 motivation) are the corpus's most discriminating
+  artifact and nothing forced 4c to implement them. The **education twins' chunk lists are now
+  byte-identical** (the differing education chunk was embedded + evidence-retrieved, so r14 could
+  out-score r11 through the 0.3 evidence path with `education_partial` a total no-op).
+- **PII scanners inverted to allowlists** (every email-shaped match must be `@example.test`; every
+  phone-shaped match must normalise to `555-01xx`) — the old 6-domain blocklist passed `asalah@sfu.ca`
+  and every corporate/university/ISP domain. The `[pii]` structured-field exemption is **surface-qualified**
+  (ADR-007 N1 exempts the *outbox/at-rest payload only*; embedding input and exported output must be
+  PII-free **regardless of originating field**), and **r17** is the ADR-007 **F1-R** regression control
+  (name in `summary`, line-broken name, reflowed phone, bare email local-part) — the residual that took
+  Phase 3 four audit rounds to close had zero eval coverage.
+- The **`thresholds.toml` key set is a three-way contract** with `.claude/agents/ranking-evals.md` and
+  `run_evals.py`; a test fails if any of the three drifts.
 
 **Phase-4 decisions adopted from the planner pass** (recommended defaults; reversible):
 - **Chunk-text preview source (required deviation, Risk #1):** hris's `_resume_projection_tx` reads

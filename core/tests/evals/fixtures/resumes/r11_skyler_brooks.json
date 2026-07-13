@@ -71,12 +71,6 @@
       "section": "experience",
       "page": 1,
       "text": "Deployed every pipeline service with Docker and wrote the Kubernetes manifests used in staging at Northbridge Analytics."
-    },
-    {
-      "id": "c_005",
-      "section": "education",
-      "page": 1,
-      "text": "BSc Mechanical Engineering, Fredericton Institute of Technology, graduated 2019."
     }
   ],
   "cover_letter_chunks": []

@@ -96,3 +96,33 @@ coverage number is unmoved from Phase 3.
 - Pre-existing tech debt (not 4a's, not gated): `mypy src tests --strict` surfaces ~18 typing errors
   in Phase-3 test files (`test_worker_parse_resume.py` etc.) merged to `main`; `make gates` runs
   `mypy src` only. Worth a cleanup pass but out of 4a's scope.
+
+---
+
+## Round 3 — falsifiability hardening (`fix/phase-4a-corpus-falsifiability`, post-merge fix-forward)
+
+Three opus-tier gates re-audited the corpus **after** it merged (PR #8) and reached the same verdict
+from three directions: **the corpus as merged could not fail a bad Phase-4c engine.** Every finding
+below was *proven* by a mutation that left all 226 corpus tests green. Landed before 4b/4c, zero
+product code (`core/tests/evals/**`, `core/tests/unit/test_evals_corpus.py`,
+`.claude/agents/ranking-evals.md`, docs).
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| A | `min_precision = 0.8` at `k = 5` tolerates one bad entry — an engine ranking r09 **at rank 5 passes** the metric built to catch it; contradicts the file's own prose and `[adversarial].must_not_surface_in_topk`. The test only range-checked `0 < p ≤ 1` | `0.8 → 0.2` | `min_precision = 1.0`; `k` and `min_precision` **pinned to exact values** |
+| B | The bait's potency was **unasserted** — the toml promises r09 is caught "however high its keyword overlap" and labels.json claims that overlap is the corpus's highest; nothing checked it | Defang r09 to a single ungrounded `Python` (`years: 1`, `last_used_year: 2005`) | r09 asserted structurally **top-tier on every non-evidence signal**; only evidence verification may reject it |
+| C | The toml grew `[adversarial]` + `min_completeness_in_topk`; **neither consumer** (agent doc, `run_evals.py` docstring) enumerated them. The matched-pair ordering controls existed only as **prose** | — (contract drift) | Key set is a **three-way contract**, test-enforced both directions; **`[ordering_controls]`** is now a real key |
+| D | The r11/r14 education twins relaxed to *cited*-chunk equality, so the education chunk `c_005` differed — but every chunk is embedded and evidence-retrieved, so r14 could out-score r11 through the **0.3 evidence path** with `education_partial` a total no-op | — (structural confound) | `c_005` deleted from both; **full chunk-list equality** asserted, matching the other two pairs |
+| E | PII email scan was a **6-domain blocklist**; the phone scan missed `(604) 555-1212` and bare 10-digit numbers (its `(?<!555-01)` lookbehind was dead code). r12 pinned its name only in the ADR-007-N1-**permitted** bullet surface, never in the §7-F1-**scrubbed** chunk surface. `[pii].allow_structured_fields` named no surface. F1-R format-divergent leaks had zero coverage | Plant `asalah@sfu.ca` / `j.smith@shopify.com` in chunk text; strip the name from r12's `c_003` | Scanners **inverted to allowlists**; r12's name pinned in `chunks[].text`; `[pii]` **surface-qualified**; **r17** added (name-in-`summary`, line-broken name, reflowed phone, bare email local-part) |
+| F | `max_score_delta = 0.0` flakes or lies: no `seed` reaches Ollama, and the Redis embed cache makes a warm second run compare the **cache to itself** | — (vacuous pass) | Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` gets a `1e-9` epsilon; `seed` + cache-state pinned as a **4c requirement** |
+| G | Every `gold_evidence` anchor is an exact substring → verifies at 1.0 → `verification_rate_min = 1.0` is satisfiable by a verifier that **returns `True` unconditionally** | — (no negative control existed) | **`negative_evidence`**: fabricated quotes that MUST score below `fuzz_threshold`, on r09 *and* on fixtures that also carry gold anchors (so the verifier must **discriminate**) |
+| H | Nothing executed `run_evals.py`; `load_corpus()` joined `FIXTURES_DIR` with an unvalidated labels-supplied path (an absolute RHS silently replaces the LHS in pathlib) | — | `main()`'s pre-4c non-zero exit is now **gated**; fixture paths `resolve()` + confined to `FIXTURES_DIR` |
+
+Corpus is now **17 fixtures** (7 strong / 4 borderline / 5 weak / 1 adversarial).
+
+**Gates:** ruff · black · `mypy src --strict` clean; **993 unit tests @ 96.63% coverage** (264 corpus
+tests, up from 226). Coverage unmoved — still zero product code.
+
+**Recorded, deliberately NOT done here:** no **outbox-shaped fixture** exists — nothing encodes what
+the outbox payload is *allowed* to contain (no `candidate`, no `chunks[].text`, no `summary`). 4b
+projects to Neo4j and must add it (recorded as a 4b requirement in `docs/EXTRACTION_PLAN.md`).

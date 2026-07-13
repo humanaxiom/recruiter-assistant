@@ -12,14 +12,75 @@ fixture corpus + thresholds.toml are well-formed right now.
 Usage (once 4c lands):
     cd core && python tests/evals/run_evals.py
 
-Computes, against `fixtures/` + `thresholds.toml`:
-  - precision@k        -- fraction of the top-k shortlist tagged strong/borderline
-  - evidence-verification-rate -- fraction of surfaced quotes that fuzzy-match
-                          (>= thresholds.evidence.fuzz_threshold) their cited chunk
-  - PII-leak check      -- candidate name/email/phone must never appear in
-                          embedding text or exported output
-  - determinism         -- repeated runs at temperature=0 produce identical
-                          score_final / ranking order
+THE THRESHOLD KEY SET IS A THREE-WAY CONTRACT between `thresholds.toml`, this
+docstring, and `.claude/agents/ranking-evals.md`. Every key below is read
+literally; `core/tests/unit/test_evals_corpus.py` fails if the toml grows or
+loses a key without both consumers being updated in the same change. (That
+drift already happened once: the toml grew `[adversarial]` and
+`[evidence].min_completeness_in_topk` and neither consumer enumerated them --
+so a 4c coder wiring this harness from this docstring would have built a gate
+that a naive pure-vector ranker passes.)
+
+Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
+
+  [precision_at_k]
+    k = 5                       -- shortlist window
+    min_precision = 1.0         -- ALL of the top-k must be tagged strong/
+                                   borderline in labels.json. Exactly 1.0: a
+                                   lower floor admits a weak/adversarial
+                                   fixture into the top-k and contradicts
+                                   [adversarial].must_not_surface_in_topk.
+  [evidence]
+    verification_rate_min = 1.0 -- fraction of SURFACED quotes that fuzzy-match
+                                   (>= fuzz_threshold) their cited chunk. Any
+                                   unverifiable quote reaching output is a hard
+                                   fail (anti-fabrication invariant).
+    fuzz_threshold = 0.85       -- == MatchWeights.evidence_verify_fuzz.
+    min_completeness_in_topk    -- fraction of top-k entries carrying >= 1
+                                   VERIFIED quote. Stops verification_rate_min
+                                   passing vacuously over an empty quote set.
+    negative_evidence_must_fail -- labels.json's `negative_evidence` quotes are
+                                   FABRICATED and MUST score below
+                                   fuzz_threshold against their cited chunk.
+                                   Without these, verification_rate_min = 1.0 is
+                                   satisfiable by a verifier that always returns
+                                   True.
+  [adversarial]
+    must_not_surface_in_topk    -- r09 (the keyword-stuffer, structurally
+                                   top-tier on every NON-evidence signal) must
+                                   never appear in the top-k. Same for every
+                                   fixture flagged must_not_surface_in_topk in
+                                   labels.json.
+  [ordering_controls]
+    enforce = true              -- for every pair below, the live ranker must
+    pairs = [...]                  place higher_id STRICTLY above lower_id:
+                                   rank(higher) < rank(lower). Each pair is
+                                   identical in every scoring-relevant field
+                                   except one dimension (education / overqual /
+                                   motivation), so a ranker blind to that
+                                   dimension fails. These are the corpus's most
+                                   discriminating assertions.
+  [pii]
+    leak_check = true           -- no fixture's candidate name/email/phone may
+                                   appear in embedding input or exported output.
+    allow_structured_fields     -- ADR-007 N1: structured experience/education
+    structured_fields_surface      free text may carry identity ONLY on the
+                                   surface named here (`outbox_at_rest`).
+    embedding_input_pii_free    -- embedding input must contain no name/email/
+    exported_output_pii_free       phone REGARDLESS of the originating field
+                                   (ADR-007 §7-F1). A bullet-derived chunk is
+                                   NOT exempt: r12's c_003 is byte-identical to
+                                   its bullet text.
+  [determinism]
+    temperature = 0.0           -- pinned for the eval runs.
+    max_rank_delta = 0          -- ZERO tolerance: ranking ORDER must be
+                                   identical across two runs.
+    max_score_delta = 1e-9      -- score_final gets an epsilon, not exact
+                                   equality. 4c REQUIREMENT: pin `seed` on the
+                                   eval path and state the embedding-cache state
+                                   (cold vs warm) across the two runs -- with a
+                                   warm Redis cache this check compares the
+                                   cache to itself, not the model to itself.
 """
 
 from __future__ import annotations
@@ -101,6 +162,24 @@ def load_thresholds() -> dict[str, Any]:
         return tomllib.load(fh)
 
 
+def _fixture_path(relative: str) -> Path:
+    """Resolve a labels.json `fixture` value inside FIXTURES_DIR.
+
+    Defense in depth (test-only surface, low severity): the value comes from a
+    JSON file, and in pathlib an ABSOLUTE right-hand side silently REPLACES the
+    left-hand side (``Path("/a") / "/etc/passwd" == Path("/etc/passwd")``), so
+    a plain join would happily read anything on disk. Resolve and confine.
+    """
+    root = FIXTURES_DIR.resolve()
+    candidate = (root / relative).resolve()
+    if not candidate.is_relative_to(root):
+        raise ValueError(
+            f"labels.json fixture path {relative!r} resolves to {candidate}, "
+            f"which is outside the fixtures directory {root}"
+        )
+    return candidate
+
+
 def load_corpus() -> Corpus:
     """Load the JD + labelled resumes from fixtures/. Pure I/O -- no
     orchestrator needed; this is what test_evals_corpus.py exercises today."""
@@ -108,18 +187,19 @@ def load_corpus() -> Corpus:
         labels = json.load(fh)
 
     job_meta = labels["job"]
-    with (FIXTURES_DIR / job_meta["fixture"]).open("r", encoding="utf-8") as fh:
+    with _fixture_path(job_meta["fixture"]).open("r", encoding="utf-8") as fh:
         job_extracted = json.load(fh)
 
     resumes: list[ResumeFixture] = []
     for resume_id, entry in labels["resumes"].items():
-        with (FIXTURES_DIR / entry["fixture"]).open("r", encoding="utf-8") as fh:
+        path = _fixture_path(entry["fixture"])
+        with path.open("r", encoding="utf-8") as fh:
             parsed = json.load(fh)
         resumes.append(
             ResumeFixture(
                 resume_id=resume_id,
                 tag=entry["tag"],
-                path=FIXTURES_DIR / entry["fixture"],
+                path=path,
                 parsed=parsed,
             )
         )
