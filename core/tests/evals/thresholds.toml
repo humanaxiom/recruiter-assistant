@@ -177,9 +177,13 @@ must_not_surface_in_topk = true
 # rapidfuzz + an engine replica of the ported hris stages/orchestrator):
 #
 #   pair        blind engine             twin separation   labels order  reversed
-#   education   weights.education = 0    -3.266e-04        FAIL          FAIL
+#   education   weights.education = 0    -3.266e-04 [1]    FAIL          FAIL
 #   overqual    overqual_ratio = 99      +0.000e+00 TIE    FAIL          PASS
 #   motivation  weights.motivation = 0   +0.000e+00 TIE    PASS          FAIL
+#
+#   [1] PRE-round-7. Round 7 (R7-2, below) unified the education twins'
+#       institution and re-measured this at -8.716e-04 -- same sign, same
+#       verdict, larger margin.
 #
 # i.e. a MOTIVATION-BLIND ENGINE PASSED the motivation pair in the fixtures'
 # natural order, and the overqual pair failed only by tie-break luck.

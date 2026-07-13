@@ -243,10 +243,14 @@ asserts what the engine COMPUTES rather than what a sub-score's name suggests.
   =============  ==========================  ==================  =============
   pair           blind engine                twin separation     verdict
   =============  ==========================  ==================  =============
-  education      ``weights.education = 0``   -3.266e-04          FAIL (both orders)
+  education      ``weights.education = 0``   -3.266e-04 [#]_     FAIL (both orders)
   overqual       ``overqual_ratio = 99``     **+0.000e+00**      coin flip
   motivation     ``weights.motivation = 0``  **+0.000e+00**      coin flip
   =============  ==========================  ==================  =============
+
+  .. [#] PRE-round-7. Round 7 (R7-2, below) unified the twins' institution
+     and re-measured this at -8.716e-04 -- same sign, same verdict, larger
+     margin.
 
   The motivation pair PASSED a motivation-blind engine in the fixtures' natural
   order, and the overqual pair failed only by tie-break luck (it PASSES on the
