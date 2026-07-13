@@ -32,9 +32,9 @@
   ],
   "education": [
     {
-      "degree": "Diploma, General Studies",
-      "institution": "Wascana Community College",
-      "field": "General Studies",
+      "degree": "BSc Computer Science",
+      "institution": "Wascana Institute of Technology",
+      "field": "Computer Science",
       "year": 2017
     }
   ],
@@ -73,7 +73,7 @@
       "id": "c_006",
       "section": "education",
       "page": 1,
-      "text": "Diploma, General Studies, Wascana Community College, graduated 2017."
+      "text": "BSc Computer Science, Wascana Institute of Technology, graduated 2017."
     }
   ],
   "cover_letter_chunks": []

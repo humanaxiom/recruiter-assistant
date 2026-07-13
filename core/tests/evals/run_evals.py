@@ -14,12 +14,15 @@ Usage (once 4c lands):
 
 THE THRESHOLD KEY SET IS A THREE-WAY CONTRACT between `thresholds.toml`, this
 docstring, and `.claude/agents/ranking-evals.md`. Every key below is read
-literally; `core/tests/unit/test_evals_corpus.py` fails if the toml grows or
-loses a key without both consumers being updated in the same change. (That
-drift already happened once: the toml grew `[adversarial]` and
-`[evidence].min_completeness_in_topk` and neither consumer enumerated them --
-so a 4c coder wiring this harness from this docstring would have built a gate
-that a naive pure-vector ranker passes.)
+literally, and `core/tests/unit/test_evals_corpus.py::
+test_every_threshold_key_is_enumerated_by_both_consumers` PARSES this docstring
+(a section is a 2-space-indented `[name]`; a key is a 4-space-indented token)
+and fails if the toml grows or loses a key without both consumers being updated
+in the same change. Keep the indentation shape. (That drift already happened
+once: the toml grew `[adversarial]` and `[evidence].min_completeness_in_topk`
+and neither consumer enumerated them -- so a 4c coder wiring this harness from
+this docstring would have built a gate that a naive pure-vector ranker passes.
+And until round 4 the contract test the comments named did not exist at all.)
 
 Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
 
@@ -32,25 +35,41 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    [adversarial].must_not_surface_in_topk.
   [evidence]
     verification_rate_min = 1.0 -- fraction of SURFACED quotes that fuzzy-match
-                                   (>= fuzz_threshold) their cited chunk. Any
-                                   unverifiable quote reaching output is a hard
-                                   fail (anti-fabrication invariant).
+                                   (>= fuzz_threshold, rapidfuzz partial_ratio
+                                   or token_set_ratio -- NOT fuzz.ratio, which
+                                   scores this corpus's own gold anchors at
+                                   0.648/0.796 and so can never reach 1.0)
+                                   against their cited chunk. Any unverifiable
+                                   quote reaching output is a hard fail
+                                   (anti-fabrication invariant).
     fuzz_threshold = 0.85       -- == MatchWeights.evidence_verify_fuzz.
-    min_completeness_in_topk    -- fraction of top-k entries carrying >= 1
-                                   VERIFIED quote. Stops verification_rate_min
-                                   passing vacuously over an empty quote set.
+    min_completeness_in_topk    -- = 1.0, PINNED. Fraction of top-k entries
+                                   carrying >= 1 VERIFIED quote. Stops
+                                   verification_rate_min passing vacuously over
+                                   an empty quote set.
     negative_evidence_must_fail -- labels.json's `negative_evidence` quotes are
                                    FABRICATED and MUST score below
                                    fuzz_threshold against their cited chunk.
                                    Without these, verification_rate_min = 1.0 is
                                    satisfiable by a verifier that always returns
-                                   True.
+                                   True. Beware the measure: fuzz.WRatio scores
+                                   r02's fabricated anchor at 0.855 >= 0.85, and
+                                   partial_token_set_ratio returns 1.000 on 2 of
+                                   the 4 negatives.
   [adversarial]
-    must_not_surface_in_topk    -- r09 (the keyword-stuffer, structurally
-                                   top-tier on every NON-evidence signal) must
-                                   never appear in the top-k. Same for every
-                                   fixture flagged must_not_surface_in_topk in
-                                   labels.json.
+    must_not_surface_in_topk    -- r09 (the keyword-stuffer) must never appear
+                                   in the top-k. Same for every fixture flagged
+                                   must_not_surface_in_topk in labels.json. r09
+                                   is structurally top-tier on ALL FIVE
+                                   structured sub-scores -- skill, experience,
+                                   seniority, education (a JD-allowed BSc) and
+                                   vector (every JD skill in the embedded
+                                   summary) -- so ONLY the evidence verifier can
+                                   reject it. It ranks ~11, ADJACENT to the
+                                   borderline tier and not below every weak
+                                   fixture: 0.6*structured + 0.3*0 + 0.1*0 is
+                                   arithmetic. Do not "fix" that by re-tagging
+                                   r09 or moving a threshold.
   [ordering_controls]
     enforce = true              -- for every pair below, the live ranker must
     pairs = [...]                  place higher_id STRICTLY above lower_id:

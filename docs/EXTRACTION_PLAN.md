@@ -108,14 +108,54 @@ build is genuinely falsifiable:
   byte-identical** (the differing education chunk was embedded + evidence-retrieved, so r14 could
   out-score r11 through the 0.3 evidence path with `education_partial` a total no-op).
 - **PII scanners inverted to allowlists** (every email-shaped match must be `@example.test`; every
-  phone-shaped match must normalise to `555-01xx`) — the old 6-domain blocklist passed `asalah@sfu.ca`
-  and every corporate/university/ISP domain. The `[pii]` structured-field exemption is **surface-qualified**
+  phone-shaped match must normalise to `555-01xx`) — the old 6-domain blocklist passed
+  `<user>@<real-university>.ca` and every corporate/university/ISP domain. The `[pii]` structured-field
+  exemption is **surface-qualified**
   (ADR-007 N1 exempts the *outbox/at-rest payload only*; embedding input and exported output must be
   PII-free **regardless of originating field**), and **r17** is the ADR-007 **F1-R** regression control
   (name in `summary`, line-broken name, reflowed phone, bare email local-part) — the residual that took
   Phase 3 four audit rounds to close had zero eval coverage.
 - The **`thresholds.toml` key set is a three-way contract** with `.claude/agents/ranking-evals.md` and
   `run_evals.py`; a test fails if any of the three drifts.
+
+**4a hardening, round 2 (same branch).** A re-audit found the round-1 hardening had itself shipped an
+unasserted claim stamped as asserted. Fixed:
+- **The `[adversarial]` arm was INERT.** r09 held a sub-bachelor `Diploma, General Studies`, failing the
+  JD's `min_level: bachelors` on its own — so a MatchWeights-faithful engine with a **no-op evidence
+  verifier** still dropped it to rank 8 (outside k=5) and **passed** `must_not_surface_in_topk` *and*
+  `precision@5 = 1.0`. The potency test asserted 3 of MatchWeights' 5 structured sub-scores and omitted
+  the two on which r09 was weak (education 0.10, vector 0.10). r09 now holds a **JD-allowed BSc**, all
+  five sub-scores are asserted, and the repaired bait puts a no-op-verifier engine at **precision@5 =
+  0.80 → FAIL**. Knock-on, re-derived not papered over: `0.6·structured + 0.3·0 + 0.1·0 ≈ 0.547` lands
+  the bait **adjacent to the borderline tier** (rank ~11, vs the 0.844 top-5 cutoff), so `weak` and
+  `adversarial` **no longer share a rank band** and the band-feasibility check is now a full
+  **Hall's-condition** test (the round-1 "bands must tile 1..N" check cannot express an overlapping band).
+- **The three-way key-set contract was enforced in zero directions** against the two consumer docs (only
+  the toml ↔ a list literal inside the test file was checked, and the test the comments named did not
+  exist). It now reads both docs and asserts set equality. `[evidence].min_completeness_in_topk` — the
+  one key whose job is to stop `verification_rate_min = 1.0` passing vacuously — was the last unpinned
+  numeric threshold; it is pinned.
+- **PII scan scoping + shape.** The fixture scan enumerated *filenames*, so any new non-resume fixture
+  (4b's outbox-shaped fixture, 4d's reverse-match JDs) would never be scanned — it now globs the
+  directory. The email scanner required `local@domain` **contiguous**, which is exactly backwards for a
+  corpus whose thesis (r17 / ADR-007 F1-R) is that *format-divergent* identifiers are the leak class that
+  matters; whitespace around the `@` is now tolerated and stripped, and the phone scanner learned the
+  unicode dashes and `/` a real PDF paste carries. Both scanners are now themselves gated by probe tests.
+
+**4c evidence-verifier requirement — WHICH fuzz measure (measured against this corpus, do not re-litigate
+at implementation time).** `evidence_verify_fuzz = 0.85` is a **`partial_ratio`** (or `token_set_ratio`)
+threshold — the quote is a *span* of its cited chunk, not the whole chunk. Three measures are already
+known-broken for this job:
+- `fuzz.ratio` scores the corpus's own **gold** anchors at **0.648 / 0.796** — below 0.85. An engine
+  implementing "ratio" literally can never reach `verification_rate_min = 1.0`.
+- `fuzz.WRatio` scores r02's **fabricated** negative anchor at **0.855 ≥ 0.85** — it *verifies a
+  fabrication*. The corpus correctly fails such an engine via `negative_evidence_must_fail`.
+- `partial_token_set_ratio` returns **1.000** on **2 of the 4** negative anchors.
+The corpus's stand-in (`_best_partial_ratio`, stdlib `SequenceMatcher`) was cross-checked against real
+rapidfuzz: every gold anchor ≥ 0.85 and every negative < 0.85 under **both**, minimum margin 0.392. It is
+*stricter* than rapidfuzz on the similarity axis (Ratcliff–Obershelp ≤ LCS/indel) and *more lenient* on
+the window axis; if an anchor is ever tightened until its margin is thin, re-check it against real
+rapidfuzz rather than trusting the stand-in at the boundary.
 
 **Phase-4 decisions adopted from the planner pass** (recommended defaults; reversible):
 - **Chunk-text preview source (required deviation, Risk #1):** hris's `_resume_projection_tx` reads
