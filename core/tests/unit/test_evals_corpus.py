@@ -88,16 +88,78 @@ X", which is what makes the eventual Phase-4c ``rank(higher) < rank(lower)``
 assertion trustworthy rather than confounded. The ordering assertion itself
 needs the live ranker and is NOT implemented here.
 
+--- Phase-4a FALSIFIABILITY hardening (round 3: A-H) ---
+
+Three opus-tier gate audits proved the merged corpus could NOT fail a bad 4c
+engine: every finding below was demonstrated by a mutation that left the
+suite green. Each is now guarded:
+
+* **A** ``precision_at_k`` is PINNED to the exact contract (``k = 5``,
+  ``min_precision = 1.0``). ``min_precision = 0.8`` at k=5 tolerated exactly
+  one bad entry in the top-5 -- i.e. an engine that ranked r09 (the
+  keyword-stuffer the metric exists to catch) at rank 5 still PASSED -- and
+  it contradicted both the file's own prose and
+  ``[adversarial].must_not_surface_in_topk``. A range check alone
+  (``0 < min_precision <= 1``) let a ``0.8 -> 0.2`` mutation stay green.
+* **B** the adversarial bait's POTENCY is asserted: r09 must be structurally
+  top-tier on every non-evidence signal (claims every required + nice-to-have
+  skill, every ``years`` clears the JD's ``min_years``, every
+  ``last_used_year`` sits in the ``recency_recent`` bucket, and its total
+  years clears the JD minimum without tripping ``overqual_ratio``). Only
+  EVIDENCE verification may reject it. A defanged bait (single ungrounded
+  ``Python``, ``years: 1``, ``last_used_year: 2005``) is rejected by any
+  scorer, so the fabrication trap silently stops trapping.
+* **C** ``thresholds.toml``'s key set is a CONTRACT between three consumers
+  (the toml, ``.claude/agents/ranking-evals.md``, and
+  ``tests/evals/run_evals.py``); ``[ordering_controls]`` now exists as a
+  real, machine-readable key (it was prose in ``labels.json`` only, so
+  nothing forced 4c to implement the matched-pair assertion) and is pinned
+  against ``labels.json`` so the two cannot drift.
+* **D** the r11/r14 education twins now share a BYTE-IDENTICAL chunk list.
+  Relaxing to *cited*-chunk equality left the degree-narrating ``c_005``
+  differing between them -- and every chunk is embedded and searched by
+  stage-3 evidence retrieval, so r14 could out-score r11 through the
+  evidence path (0.3) even with ``education_partial`` a total no-op, which is
+  exactly what the pair exists to detect.
+* **E** the PII scanners are ALLOWLISTS, not blocklists: every email-shaped
+  match in a fixture must be ``@example.test`` and every phone-shaped match
+  must normalise into the reserved-for-fiction ``555-01xx`` block. The old
+  6-domain blocklist passed ``asalah@sfu.ca`` / ``j.smith@shopify.com``
+  (i.e. every corporate/university/ISP domain -- the exact surface a real
+  person's data would enter through), and the old phone regex missed
+  ``(604) 555-1212`` and bare 10-digit numbers. r12 additionally pins the
+  candidate name in ``chunks[].text`` (the §7-F1 embed-boundary surface that
+  is SCRUBBED), not only in ``experience[].bullets[].text`` (the ADR-007 N1
+  surface that is PERMITTED at rest); and r17 is the format-divergent
+  (ADR-007 F1-R) positive control -- name-in-``summary``, line-broken name,
+  reflowed phone, bare email local-part.
+* **F** determinism: ranking-ORDER stability is the zero-tolerance invariant;
+  ``score_final`` gets an epsilon. ``max_score_delta = 0.0`` would flake or
+  lie (no ``seed`` is passed to Ollama, and the Redis embed cache makes a
+  warm second run compare the cache to itself, not the model to itself).
+* **G** ``negative_evidence``: at least one FABRICATED quote per relevant
+  fixture that MUST fail verification below ``fuzz_threshold``. Every
+  ``gold_evidence`` anchor is an exact substring (verifies at 1.0), so
+  ``verification_rate_min = 1.0`` was satisfiable by a verifier that returns
+  ``True`` unconditionally.
+* **H** ``run_evals.py`` is EXECUTED here (its "cannot go green before 4c"
+  honesty is now gated, not merely structural) and its ``load_corpus()``
+  path-join is confined to ``FIXTURES_DIR``.
+
 This test suite is expected to PASS today -- it needs only the Phase 2
 schemas, which are already merged.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import sys
 import tomllib
+from difflib import SequenceMatcher
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -136,20 +198,41 @@ FAKE_NAMES = {
     "Devon Ashworth",
     "Cameron Whitfield",
     "Rowan Castillo",
+    "Harper Nakamura",
 }
 
 _EMAIL_RE = re.compile(r"^[a-z]+\.[a-z]+@example\.test$")
-_PHONE_RE = re.compile(r"^555-01\d{2}$")
+# The reserved-for-fiction NANP block is `(XXX) 555-0100`..`555-0199`: the
+# AREA code is irrelevant to the reservation, so an optional area-code prefix
+# is allowed (r17 carries one, because its ADR-007 F1-R "reflowed phone"
+# control needs whitespace BETWEEN groups to diverge on). The 555-01xx
+# exchange+line is still pinned exactly.
+_PHONE_RE = re.compile(r"^(?:\d{3}[ -])?555[ -]01\d{2}$")
 
-# Suspicious real-looking patterns to grep for across every fixture's raw
-# text (not just the structured candidate fields) -- catches PII leaking
-# into summary/bullet/chunk free text, not only the CandidateInfo block.
-_REAL_EMAIL_DOMAIN_RE = re.compile(
-    r"@(gmail|yahoo|hotmail|outlook|icloud|proton(mail)?)\.\w+", re.IGNORECASE
+# ── PII scanners: ALLOWLISTS, not blocklists (findings E1 / E2) ───────────
+#
+# The merged corpus scanned for six consumer email domains and for a 3-3-4
+# phone shape behind a dead lookbehind. Planting `asalah@sfu.ca` and
+# `j.smith@shopify.com` in chunk free text left all 226 corpus tests green
+# (every corporate/university/ISP domain passed the blocklist -- the exact
+# surface through which a real person's data from the hris source repo would
+# enter), as did `(604) 555-1212` and a bare 10-digit `6045551212`. A
+# blocklist can never enumerate that surface, so both scanners are INVERTED:
+# every email-shaped / phone-shaped match found anywhere in a fixture must be
+# one of the synthetic markers.
+_EMAIL_SHAPED_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_ALLOWED_EMAIL_DOMAIN = "@example.test"
+
+# Anything phone-shaped: an optional country code, an area code (bare or
+# parenthesised), then a 3-4 split with ANY (incl. empty) separator -- so a
+# bare 10-digit run matches too -- OR the local 7-digit form the fixtures use.
+_PHONE_SHAPED_RE = re.compile(
+    r"(?<!\d)(?:\+?1[\s.-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}(?!\d)"
+    r"|(?<!\d)\d{3}[\s.-]\d{4}(?!\d)"
 )
-# A NANP-shaped phone number (xxx-xxx-xxxx / (xxx) xxx-xxxx) that is NOT in
-# the reserved-fake 555-01xx block.
-_REAL_PHONE_RE = re.compile(r"(?<!555-01)\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b")
+# ...and with every non-digit stripped, it must land in the reserved 555-01xx
+# block, with or without an (any) area code / leading country code.
+_ALLOWED_PHONE_DIGITS_RE = re.compile(r"(?:1)?(?:\d{3})?55501\d{2}")
 
 # JD-relevant skill name -> a short lowercase substring that must appear in a
 # cited chunk's text as proof the claim is textually grounded. Covers every
@@ -176,6 +259,82 @@ def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
         result: dict[str, Any] = json.load(fh)
     return result
+
+
+def _load_thresholds() -> dict[str, Any]:
+    with THRESHOLDS_PATH.open("rb") as fh:
+        data: dict[str, Any] = tomllib.load(fh)
+    return data
+
+
+def _string_values(node: object) -> list[str]:
+    """Every string anywhere in a decoded JSON document."""
+    out: list[str] = []
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        for value in node.values():
+            out.extend(_string_values(value))
+    elif isinstance(node, list):
+        for value in node:
+            out.extend(_string_values(value))
+    return out
+
+
+def _scan_texts(path: Path) -> list[str]:
+    """Every text surface of a fixture the PII scanners must cover: the raw
+    file source AND every decoded string value.
+
+    Both are needed. The raw source catches anything outside a JSON string
+    (and is what a `grep` of the repo would see); the decoded values are the
+    only place a JSON-escaped newline (`\\n` in source) is a REAL newline, so
+    a format-divergent leak like a line-broken phone number is invisible to a
+    raw-source scan alone (see r17, the ADR-007 F1-R control)."""
+    raw = path.read_text(encoding="utf-8")
+    texts = [raw]
+    texts.extend(_string_values(json.loads(raw)))
+    return texts
+
+
+def _best_partial_ratio(needle: str, haystack: str) -> float:
+    """A conservative, stdlib-only stand-in for rapidfuzz's ``partial_ratio``
+    (which the 4c verifier will use against ``evidence_verify_fuzz``): the max
+    SequenceMatcher ratio over every ``len(needle)``-wide window of the
+    haystack. Case-insensitive.
+
+    Deliberately the LENIENT measure (a plain full-string ratio would score
+    every fabricated quote far lower and make the negative-evidence guard
+    trivially satisfiable). If a quote cannot clear ``fuzz_threshold`` even
+    under best-window matching, no reasonable verifier will verify it."""
+    a, b = needle.lower(), haystack.lower()
+    if len(a) > len(b):
+        a, b = b, a
+    if not a:
+        return 0.0
+    return max(
+        SequenceMatcher(None, a, b[i : i + len(a)]).ratio()
+        for i in range(len(b) - len(a) + 1)
+    )
+
+
+def _import_run_evals() -> ModuleType:
+    """Import ``tests/evals/run_evals.py`` by path.
+
+    ``tests/evals`` is not a package (no ``__init__.py``) -- it is a script
+    directory the ranking-evals gate invokes directly -- so it is loaded from
+    its file location rather than imported by dotted name."""
+    name = "run_evals_under_test"
+    path = EVALS_DIR / "run_evals.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # run_evals uses `from __future__ import annotations` + @dataclass, and
+    # dataclasses resolves string annotations via sys.modules[cls.__module__]
+    # -- so the module must be registered BEFORE exec_module, or the class
+    # bodies raise AttributeError on a None module.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_labels() -> dict[str, Any]:
@@ -292,33 +451,85 @@ def test_thresholds_toml_parses() -> None:
     assert isinstance(data, dict)
 
 
-@pytest.mark.parametrize(
-    "section, key",
-    [
-        ("precision_at_k", "k"),
-        ("precision_at_k", "min_precision"),
-        ("evidence", "verification_rate_min"),
-        ("evidence", "fuzz_threshold"),
-        ("evidence", "min_completeness_in_topk"),
-        ("pii", "leak_check"),
-        ("pii", "allow_structured_fields"),
-        ("determinism", "temperature"),
-        ("determinism", "max_score_delta"),
-        ("adversarial", "must_not_surface_in_topk"),
-    ],
-)
+# The FULL key contract. thresholds.toml, .claude/agents/ranking-evals.md and
+# tests/evals/run_evals.py's docstring must all enumerate exactly these keys
+# (finding C1: the toml grew `[adversarial]` and `min_completeness_in_topk`
+# and neither consumer noticed -- a 4c coder wiring run_evals.py from its own
+# docstring would have built a gate a pure-vector ranker passes). Adding a key
+# here without updating BOTH consumer docs is the drift this list exists to
+# stop; `test_every_threshold_key_is_enumerated_by_both_consumers` enforces it.
+_THRESHOLD_KEYS: list[tuple[str, str]] = [
+    ("precision_at_k", "k"),
+    ("precision_at_k", "min_precision"),
+    ("evidence", "verification_rate_min"),
+    ("evidence", "fuzz_threshold"),
+    ("evidence", "min_completeness_in_topk"),
+    ("evidence", "negative_evidence_must_fail"),
+    ("adversarial", "must_not_surface_in_topk"),
+    ("ordering_controls", "enforce"),
+    ("ordering_controls", "pairs"),
+    ("pii", "leak_check"),
+    ("pii", "allow_structured_fields"),
+    ("pii", "structured_fields_surface"),
+    ("pii", "embedding_input_pii_free"),
+    ("pii", "exported_output_pii_free"),
+    ("determinism", "temperature"),
+    ("determinism", "max_rank_delta"),
+    ("determinism", "max_score_delta"),
+]
+
+
+@pytest.mark.parametrize("section, key", _THRESHOLD_KEYS)
 def test_thresholds_toml_has_required_section_key(section: str, key: str) -> None:
-    with THRESHOLDS_PATH.open("rb") as fh:
-        data = tomllib.load(fh)
+    data = _load_thresholds()
     assert section in data, f"missing [{section}] section in thresholds.toml"
     assert key in data[section], f"missing {section}.{key} in thresholds.toml"
 
 
-def test_thresholds_precision_at_k_values_are_sane() -> None:
-    with THRESHOLDS_PATH.open("rb") as fh:
-        data = tomllib.load(fh)
-    assert data["precision_at_k"]["k"] >= 1
-    assert 0.0 < data["precision_at_k"]["min_precision"] <= 1.0
+def test_thresholds_toml_has_no_key_outside_the_enumerated_contract() -> None:
+    """The reverse direction of the same contract: a key that exists in the
+    toml but is not in ``_THRESHOLD_KEYS`` is a key neither consumer doc
+    knows about. Fail here and add it in all three places at once."""
+    data = _load_thresholds()
+    actual = {
+        (section, key)
+        for section, body in data.items()
+        if isinstance(body, dict)
+        for key in body
+    }
+    assert actual == set(_THRESHOLD_KEYS), (
+        f"thresholds.toml key set drifted from the enumerated contract: "
+        f"extra={sorted(actual - set(_THRESHOLD_KEYS))} "
+        f"missing={sorted(set(_THRESHOLD_KEYS) - actual)} -- update "
+        f"thresholds.toml, .claude/agents/ranking-evals.md AND "
+        f"tests/evals/run_evals.py together"
+    )
+
+
+# precision@k is an EXACT contract, not a range (finding A1/A2). At k=5,
+# min_precision=0.8 tolerates exactly one bad entry in the top-5 -- so an
+# engine that ranks r09 (the keyword-stuffer this metric exists to catch) at
+# rank 5 PASSES; with 11 good / 6 bad fixtures even a uniformly random ranker
+# clears 0.8 roughly half the time. It also contradicts the toml's own prose
+# ("none may be 'weak' or 'adversarial'" == 1.0) and
+# [adversarial].must_not_surface_in_topk. The old range check
+# (0.0 < min_precision <= 1.0) let a 0.8 -> 0.2 mutation stay green, which
+# CLAUDE.md forbids. CHANGING EITHER NUMBER BELOW NEEDS A HUMAN.
+_PRECISION_K = 5
+_MIN_PRECISION = 1.0
+
+
+def test_thresholds_precision_at_k_is_pinned_to_its_exact_contract() -> None:
+    data = _load_thresholds()
+    assert data["precision_at_k"]["k"] == _PRECISION_K, (
+        "k is pinned: the corpus's tier populations and expected_rank_bands "
+        "are built around a 5-wide shortlist window"
+    )
+    assert data["precision_at_k"]["min_precision"] == _MIN_PRECISION, (
+        "min_precision must be exactly 1.0 -- any lower value admits a "
+        "'weak'/'adversarial' fixture into the top-k and directly contradicts "
+        "[adversarial].must_not_surface_in_topk"
+    )
 
 
 def test_thresholds_evidence_verification_rate_is_perfect() -> None:
@@ -339,17 +550,68 @@ def test_thresholds_fuzz_threshold_matches_matchweights_single_source_of_truth()
     assert data["evidence"]["fuzz_threshold"] == DEFAULT_WEIGHTS.evidence_verify_fuzz
 
 
-def test_thresholds_determinism_pins_zero_temperature_and_zero_drift() -> None:
-    with THRESHOLDS_PATH.open("rb") as fh:
-        data = tomllib.load(fh)
+# Determinism is a two-part contract (finding F1). The zero-tolerance half is
+# ranking-ORDER stability -- which is what ranking-evals.md actually names --
+# NOT bit-identical floats: src/pipeline/llm/client.py passes only
+# temperature/num_predict to Ollama (no `seed`), and greedy decode is not
+# bit-stable across batch/kv-cache splits, so `max_score_delta = 0.0` would
+# either flake or (worse) pass vacuously, because src/pipeline/llm/cache.py
+# caches embeddings by text hash and a warm-Redis second run compares the
+# CACHE to itself rather than the model to itself. score_final therefore gets
+# an epsilon, and "pin `seed`, and specify the cache state across the two
+# runs" is carried forward as an explicit 4c requirement (docs/
+# EXTRACTION_PLAN.md). CHANGING THESE NEEDS A HUMAN.
+_MAX_RANK_DELTA = 0
+_MAX_SCORE_DELTA = 1e-9
+
+
+def test_thresholds_determinism_pins_zero_temperature_and_zero_rank_drift() -> None:
+    data = _load_thresholds()
     assert data["determinism"]["temperature"] == 0.0
-    assert data["determinism"]["max_score_delta"] == 0.0
+    assert data["determinism"]["max_rank_delta"] == _MAX_RANK_DELTA, (
+        "ranking-order stability is the zero-tolerance determinism invariant: "
+        "no candidate may move rank between two identical runs"
+    )
+
+
+def test_thresholds_determinism_score_delta_is_a_nonzero_epsilon() -> None:
+    """An EXACT 0.0 float tolerance is not honourable against a seed-less
+    local model (see the comment above): it is either a flake or a vacuous
+    pass off the embedding cache. Pin the epsilon instead so a real drift
+    (not a float ulp) still fails."""
+    data = _load_thresholds()
+    delta = data["determinism"]["max_score_delta"]
+    assert delta == _MAX_SCORE_DELTA
+    assert 0.0 < delta <= 1e-6, "score tolerance must be a tight, non-zero epsilon"
 
 
 def test_thresholds_pii_leak_check_is_enabled() -> None:
-    with THRESHOLDS_PATH.open("rb") as fh:
-        data = tomllib.load(fh)
+    data = _load_thresholds()
     assert data["pii"]["leak_check"] is True
+
+
+def test_thresholds_pii_structured_field_exemption_is_scoped_to_one_surface() -> None:
+    """Finding E4. ADR-007 N1 exempts structured experience/education free
+    text (e.g. a self-doxxing achievement bullet) from scrubbing ONLY in the
+    outbox / at-rest payload, and states that candidate identifiers are
+    separately scrubbed from ALL embeddings. The merged toml dropped that
+    qualifier while declaring its keys "read literally by both consumers", so
+    a 4c implementer could exempt bullet-DERIVED text from the leak scan and
+    ride a real candidate name into a Neo4j vector (PIPEDA/FIPPA-relevant).
+    r12's chunk c_003 is byte-identical to its bullet text, so this is
+    reachable, not theoretical. The exemption must therefore be surface-
+    qualified, and the two PII-free surfaces must be pinned True."""
+    data = _load_thresholds()
+    assert data["pii"]["allow_structured_fields"] is True
+    assert data["pii"]["structured_fields_surface"] == "outbox_at_rest", (
+        "the N1 exemption is scoped to the outbox/at-rest payload ONLY -- it "
+        "is not a licence to skip the leak scan on embedding input or export"
+    )
+    assert data["pii"]["embedding_input_pii_free"] is True, (
+        "embedding input must contain no name/email/phone REGARDLESS of the "
+        "originating field (ADR-007 §7-F1)"
+    )
+    assert data["pii"]["exported_output_pii_free"] is True
 
 
 def test_thresholds_adversarial_must_not_surface_in_topk_is_enabled() -> None:
@@ -361,10 +623,48 @@ def test_thresholds_adversarial_must_not_surface_in_topk_is_enabled() -> None:
 
 
 def test_thresholds_min_completeness_in_topk_is_a_sane_fraction() -> None:
-    with THRESHOLDS_PATH.open("rb") as fh:
-        data = tomllib.load(fh)
+    data = _load_thresholds()
     value = data["evidence"]["min_completeness_in_topk"]
     assert 0.0 < value <= 1.0
+
+
+def test_thresholds_negative_evidence_must_fail_is_enabled() -> None:
+    """Finding G1. Every gold_evidence anchor is an exact substring, so it
+    verifies at 1.0 -- meaning verification_rate_min = 1.0 is satisfiable
+    today by a verifier that returns True unconditionally. The corpus's
+    ``negative_evidence`` quotes (fabricated, must score BELOW fuzz_threshold
+    against their cited chunk) are what make the anti-fabrication invariant
+    falsifiable, and this key is what forces 4c to run them."""
+    data = _load_thresholds()
+    assert data["evidence"]["negative_evidence_must_fail"] is True
+
+
+def test_thresholds_ordering_controls_are_enforced() -> None:
+    """Finding C2. The matched-pair ordering controls (r14/r11 education,
+    r15/r13 overqualification, r16/r04 motivation) are the corpus's most
+    discriminating artifact and existed ONLY as prose in labels.json -- there
+    was no thresholds.toml key for run_evals.py to read, so nothing forced 4c
+    to implement the pairwise assertion at all."""
+    data = _load_thresholds()
+    assert data["ordering_controls"]["enforce"] is True
+
+
+def test_thresholds_ordering_control_pairs_match_labels_json_exactly() -> None:
+    """The toml is the machine-readable half and labels.json carries the
+    rationale; they must never drift apart."""
+    data = _load_thresholds()
+    toml_pairs = {
+        (p["dimension"], p["higher_id"], p["lower_id"])
+        for p in data["ordering_controls"]["pairs"]
+    }
+    label_pairs = {
+        (c["dimension"], c["higher_id"], c["lower_id"]) for c in _ordering_controls()
+    }
+    assert toml_pairs == label_pairs, (
+        f"thresholds.toml [ordering_controls].pairs {sorted(toml_pairs)} != "
+        f"labels.json ordering_controls {sorted(label_pairs)}"
+    )
+    assert {d for d, _, _ in toml_pairs} == _EXPECTED_ORDERING_CONTROL_DIMENSIONS
 
 
 # ── Label manifest <-> fixture files agree in both directions ────────────
@@ -564,23 +864,45 @@ _ALL_FIXTURE_FILES = sorted(RESUMES_DIR.glob("*.json")) + [
 
 
 @pytest.mark.parametrize("path", _ALL_FIXTURE_FILES)
-def test_no_fixture_file_contains_a_real_looking_email_domain(path: Path) -> None:
-    raw = path.read_text(encoding="utf-8")
-    match = _REAL_EMAIL_DOMAIN_RE.search(raw)
-    assert (
-        match is None
-    ), f"{path.name}: looks like a real email domain: {match.group()!r}"
+def test_every_email_shaped_string_in_a_fixture_is_on_the_synthetic_domain(
+    path: Path,
+) -> None:
+    """ALLOWLIST (finding E1): not "does this look like gmail?" but "is this
+    the one domain we allow?". The previous 6-domain blocklist passed
+    `asalah@sfu.ca` and `j.smith@shopify.com` -- i.e. every corporate,
+    university and ISP domain -- which is precisely the surface through which
+    a real person's data (e.g. copied from the hris source repo) would enter
+    the corpus."""
+    for text in _scan_texts(path):
+        for match in _EMAIL_SHAPED_RE.finditer(text):
+            email = match.group()
+            assert email.lower().endswith(_ALLOWED_EMAIL_DOMAIN), (
+                f"{path.name}: email-shaped string {email!r} is not on the "
+                f"reserved synthetic domain {_ALLOWED_EMAIL_DOMAIN!r} (RFC 2606 "
+                f"'test' TLD). Every email in the corpus must be synthetic -- "
+                f"no real/plausible domain may appear, anywhere in the file."
+            )
 
 
 @pytest.mark.parametrize("path", _ALL_FIXTURE_FILES)
-def test_no_fixture_file_contains_a_phone_number_outside_the_fake_range(
+def test_every_phone_shaped_string_in_a_fixture_is_in_the_reserved_fake_range(
     path: Path,
 ) -> None:
-    raw = path.read_text(encoding="utf-8")
-    match = _REAL_PHONE_RE.search(raw)
-    assert (
-        match is None
-    ), f"{path.name}: looks like a real phone number: {match.group()!r}"
+    """ALLOWLIST (finding E2): every phone-shaped match -- `604-555-1212`,
+    `(604) 555-1212`, a bare 10-digit `6045551212`, or the local 7-digit form
+    -- must normalise into the NANP reserved-for-fiction 555-01xx block. The
+    previous scanner missed the parenthesised and bare-digit forms outright
+    (the `(?<!555-01)` lookbehind was dead code against a 3-3-4 match, and
+    would have false-positived on a legitimate `604-555-0101`)."""
+    for text in _scan_texts(path):
+        for match in _PHONE_SHAPED_RE.finditer(text):
+            found = match.group()
+            digits = re.sub(r"\D", "", found)
+            assert _ALLOWED_PHONE_DIGITS_RE.fullmatch(digits), (
+                f"{path.name}: phone-shaped string {found!r} (digits "
+                f"{digits!r}) is not in the reserved-for-fiction 555-01xx "
+                f"block. Every phone number in the corpus must be synthetic."
+            )
 
 
 # ── Phase-4a strengthening item 1: adversarial/weak backstop flag ────────
@@ -604,6 +926,84 @@ def test_r09_adversarial_keyword_stuffer_is_flagged_must_not_surface_in_topk() -
     entry = labels["resumes"]["r09_sam_ortiz"]
     assert entry["tag"] == "adversarial"
     assert entry["must_not_surface_in_topk"] is True
+
+
+def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None:
+    """Finding B1 -- the bait's POTENCY, which nothing asserted.
+
+    thresholds.toml promises r09 is caught "however high its raw
+    skill-keyword overlap with the JD is" and labels.json claims that overlap
+    "is the highest of the whole corpus" -- but no test checked either.
+    Mutation proof: cutting r09 down to a single ungrounded ``Python`` skill
+    (``years: 1``, ``last_used_year: 2005``, generic summary) left all 226
+    corpus tests green. A DEFANGED bait is rejected by any scorer at stage 2,
+    so the fabrication trap silently stops trapping: 4c could ship an
+    evidence verifier that returns True unconditionally and still see r09 fall
+    out of the top-k for the wrong reason.
+
+    So: r09 must be structurally TOP-TIER on every non-evidence signal. Only
+    EVIDENCE verification may reject it.
+    """
+    labels = _load_labels()
+    entry = labels["resumes"]["r09_sam_ortiz"]
+    assert entry["tag"] == "adversarial"
+    parsed = ResumeParsed.model_validate(_load_json(FIXTURES_DIR / entry["fixture"]))
+    jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
+
+    claimed = {s.name.lower(): s for s in parsed.skills}
+
+    # (a) Claims EVERY required and EVERY nice-to-have skill -- maximal
+    #     keyword overlap, so stage-2 skill coverage cannot be what sinks it.
+    required = {s.name.lower() for s in jd.required_skills}
+    nice = {s.name.lower() for s in jd.nice_to_have_skills}
+    assert required <= claimed.keys(), (
+        f"r09 must claim every required skill to be the corpus's maximal "
+        f"keyword-stuffer; missing {sorted(required - claimed.keys())}"
+    )
+    assert nice <= claimed.keys(), (
+        f"r09 must claim every nice-to-have skill too; missing "
+        f"{sorted(nice - claimed.keys())}"
+    )
+
+    # (b) Every required skill's claimed years clears the JD's min_years, so
+    #     the years component of the skill sub-score is maxed out.
+    for jd_skill in jd.required_skills:
+        assert jd_skill.min_years is not None
+        claim = claimed[jd_skill.name.lower()]
+        assert claim.years is not None
+        assert claim.years >= jd_skill.min_years, (
+            f"r09: {jd_skill.name!r} claims {claim.years} years but the JD asks "
+            f"for {jd_skill.min_years} -- a years-short bait is demoted by the "
+            f"structured scorer, not by the evidence verifier"
+        )
+
+    # (c) Every claimed JD-relevant skill sits in the TOP recency bucket, so
+    #     recency decay cannot be what sinks it either.
+    for name in required | nice:
+        claim = claimed[name]
+        assert claim.last_used_year is not None
+        age = CURRENT_YEAR - claim.last_used_year
+        assert age <= DEFAULT_WEIGHTS.recency_recent_years, (
+            f"r09: {claim.name!r} last_used_year={claim.last_used_year} is {age} "
+            f"years stale -- it must sit in the recency_recent bucket "
+            f"(<= {DEFAULT_WEIGHTS.recency_recent_years}y) so recency is not "
+            f"doing the rejection work the evidence verifier must do"
+        )
+
+    # (d) Seniority/experience: clears the JD minimum WITHOUT tripping the
+    #     overqualification penalty.
+    assert jd.min_years_experience > 0
+    years = parsed.total_years_experience
+    assert years >= jd.min_years_experience, (
+        f"r09: total_years_experience={years} must clear the JD's "
+        f"min_years_experience={jd.min_years_experience}"
+    )
+    assert years < DEFAULT_WEIGHTS.overqual_ratio * jd.min_years_experience, (
+        f"r09: total_years_experience={years} must stay below the overqual "
+        f"trigger ({DEFAULT_WEIGHTS.overqual_ratio} x "
+        f"{jd.min_years_experience}) -- an overqualified bait would be demoted "
+        f"by the overqual penalty rather than by the fabrication verifier"
+    )
 
 
 def test_only_weak_and_adversarial_labels_carry_the_must_not_surface_flag() -> None:
@@ -765,7 +1165,9 @@ def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
 _TAG_POPULATIONS_AT_AUTHORING_TIME = {
     "strong": 7,
     "borderline": 4,
-    "weak": 4,
+    # 5 since the round-3 hardening added r17, the ADR-007 F1-R
+    # format-divergent PII positive control (an honestly-weak candidate).
+    "weak": 5,
     "adversarial": 1,
 }
 _STRONG_MAX = _TAG_POPULATIONS_AT_AUTHORING_TIME["strong"]
@@ -923,6 +1325,39 @@ def test_r12_candidate_name_appears_in_bullet_and_in_candidate_name() -> None:
     )
 
 
+def test_r12_candidate_name_appears_in_chunk_text_the_embed_boundary_surface() -> None:
+    """Finding E3 -- the OTHER half of r12's control, which was unasserted.
+
+    ADR-007 draws a line between two surfaces that r12 straddles:
+
+    * ``experience[].bullets[].text`` -- the N1 residual: identity here rides
+      the outbox/at-rest payload unscrubbed, and is PERMITTED. That is what
+      the test above pins.
+    * ``chunks[].text`` -- the §7-F1 surface: every chunk is fed to
+      ``embed()``, so ``_redact_candidate_pii`` MUST scrub identity out of it
+      before the vector is built. A name reaching a Neo4j vector index is
+      PII-equivalent under PIPEDA/FIPPA.
+
+    Nothing pinned the second one: stripping the name out of r12's chunk
+    ``c_003`` left all 226 corpus tests green, so the embed-boundary control
+    could be silently neutered and 4c's leak scan would have no positive
+    control to fail against. (c_003's text is byte-identical to the bullet's,
+    which is exactly why both surfaces must be asserted separately.)
+    """
+    parsed = ResumeParsed.model_validate(
+        _load_json(RESUMES_DIR / "r12_reese_dawson.json")
+    )
+    name = parsed.candidate.name
+    assert name == "Reese Dawson"
+    chunk_texts = [c.text for c in parsed.chunks]
+    assert any(name in text for text in chunk_texts), (
+        "r12: the candidate's own name must appear verbatim in >= 1 "
+        "chunks[].text -- chunks are EMBEDDED, so this is the positive "
+        "control the 4c embed-boundary leak scan must catch (ADR-007 §7-F1). "
+        "Without it, a no-op _redact_candidate_pii passes the gate."
+    )
+
+
 # ── Phase-4a strengthening item 7: overqualified fixture ─────────────────
 
 
@@ -988,6 +1423,88 @@ def test_gold_evidence_anchor_is_an_exact_substring_of_its_cited_chunk(
         assert quote in cited, (
             f"{resume_id}: gold_evidence[{skill_name!r}] = {quote!r} is not an "
             f"exact substring of its cited chunk text {cited!r}"
+        )
+        # Sanity-check the stand-in fuzz measure the negative-evidence guard
+        # below relies on: a genuine (exact-substring) anchor must clear the
+        # threshold under it, or a "< fuzz_threshold" assertion would be
+        # vacuously true for every string on earth.
+        assert (
+            _best_partial_ratio(quote, cited) >= DEFAULT_WEIGHTS.evidence_verify_fuzz
+        )
+
+
+# ── Falsifiability hardening G1: negative (fabricated) evidence anchors ───
+
+
+def _resume_ids_with_negative_evidence() -> list[str]:
+    labels = _load_labels()
+    return sorted(
+        resume_id
+        for resume_id, entry in labels["resumes"].items()
+        if entry.get("negative_evidence")
+    )
+
+
+def test_negative_evidence_anchors_exist_including_on_the_adversarial_fixture() -> None:
+    """Finding G1. Every ``gold_evidence`` anchor is an exact substring of its
+    cited chunk, so every one of them verifies at 1.0 -- which means
+    ``[evidence].verification_rate_min = 1.0`` is satisfiable TODAY by a
+    verifier that returns ``True`` unconditionally. Nothing in the corpus
+    pinned a quote that MUST score below ``fuzz_threshold``, so the
+    anti-fabrication invariant was deferred to 4c on trust. The
+    ``negative_evidence`` block is the in-corpus falsifier."""
+    with_negative = _resume_ids_with_negative_evidence()
+    assert len(with_negative) >= 2, (
+        "at least one fabricated quote per relevant fixture -- the adversarial "
+        "bait AND >= 1 genuine fixture (so the verifier is shown to "
+        "DISCRIMINATE, not merely to reject everything)"
+    )
+    assert "r09_sam_ortiz" in with_negative, (
+        "the keyword-stuffer must carry the fabrication the verifier has to "
+        "catch -- it is the whole reason the fixture exists"
+    )
+    labels = _load_labels()
+    assert any(
+        labels["resumes"][rid].get("gold_evidence") for rid in with_negative
+    ), "at least one fixture must carry BOTH gold and negative anchors"
+
+
+@pytest.mark.parametrize("resume_id", _resume_ids_with_negative_evidence())
+def test_negative_evidence_quote_cannot_verify_against_its_cited_chunk(
+    resume_id: str,
+) -> None:
+    """Each ``negative_evidence`` entry maps a chunk id -> a FABRICATED quote
+    that a correct anti-fabrication verifier must fail to verify against that
+    chunk (score < ``MatchWeights.evidence_verify_fuzz``), so it gets blanked
+    rather than surfaced.
+
+    Scored with ``_best_partial_ratio`` -- the LENIENT best-window measure --
+    so a quote that fails here fails under any reasonable rapidfuzz-style
+    ratio the 4c verifier picks."""
+    labels = _load_labels()
+    entry = labels["resumes"][resume_id]
+    parsed = ResumeParsed.model_validate(_load_json(FIXTURES_DIR / entry["fixture"]))
+    chunk_text = _chunk_text_by_id(parsed)
+    fuzz = DEFAULT_WEIGHTS.evidence_verify_fuzz
+
+    assert entry["negative_evidence"], f"{resume_id}: negative_evidence is empty"
+    for chunk_id, quote in entry["negative_evidence"].items():
+        assert chunk_id in chunk_text, (
+            f"{resume_id}: negative_evidence cites unknown chunk {chunk_id!r} -- "
+            f"a fabricated quote must be anchored to a REAL chunk, or the "
+            f"verifier never gets the chance to reject it"
+        )
+        cited = chunk_text[chunk_id]
+        assert quote not in cited, (
+            f"{resume_id}: negative_evidence[{chunk_id!r}] is an exact substring "
+            f"of the chunk -- it is not a fabrication at all"
+        )
+        score = _best_partial_ratio(quote, cited)
+        assert score < fuzz, (
+            f"{resume_id}: negative_evidence[{chunk_id!r}] = {quote!r} scores "
+            f"{score:.3f} against its cited chunk, which is >= the "
+            f"anti-fabrication threshold {fuzz} -- a correct verifier would "
+            f"VERIFY it, so it is not a usable fabrication control"
         )
 
 
@@ -1081,23 +1598,24 @@ def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None
         r11["summary"] == r14["summary"]
     ), "twins must share a byte-identical, degree-neutral summary (it is embedded)"
 
-    # Every chunk cited by a skill or experience bullet must be byte-identical
-    # between the twins; only the (uncited) education chunk may narrate the
-    # differing degree.
-    r11_chunks = {c["id"]: c["text"] for c in r11["chunks"]}
-    r14_chunks = {c["id"]: c["text"] for c in r14["chunks"]}
-    cited_ids = {cid for s in r11["skills"] for cid in s["evidence_chunk_ids"]}
-    cited_ids |= {
-        b["chunk_id"]
-        for exp in r11["experience"]
-        for b in exp["bullets"]
-        if b.get("chunk_id")
-    }
-    assert cited_ids, "sanity: r11 must actually cite chunks"
-    for cid in cited_ids:
-        assert (
-            r11_chunks[cid] == r14_chunks[cid]
-        ), f"cited chunk {cid!r} must be byte-identical between the twins"
+    # Finding D1: FULL chunk-list equality, matching the other two pairs.
+    #
+    # This test used to relax to *cited*-chunk equality, which let the
+    # education chunk c_005 differ between the twins ("BSc Mechanical
+    # Engineering, ..." vs "BSc Computer Science, ..."). But EVERY chunk is
+    # embedded (_embed_batched -> chunk_embs) and stage-3 evidence retrieval
+    # runs over the whole chunk list against a JD that carries an education
+    # requirement -- so r14 could out-score r11 through the EVIDENCE path (0.3
+    # of score_final) even if MatchWeights.education_partial were a total
+    # no-op, which is exactly what this pair exists to detect. c_005 is cited
+    # by nothing in either twin, and education_partial reads the structured
+    # education[] entry rather than a chunk, so the education chunk is simply
+    # deleted from both fixtures. (Same confound commit e8e83be fixed for
+    # `summary`, not carried over to the chunk list at the time.)
+    assert r11["chunks"] == r14["chunks"], (
+        "twins must share a byte-identical chunk LIST -- a differing chunk is "
+        "embedded and evidence-retrieved, so it confounds the education signal"
+    )
 
     r11_edu = r11["education"][0]
     r14_edu = r14["education"][0]
@@ -1187,3 +1705,195 @@ def test_r16_motivation_twin_is_identical_to_r04_except_cover_letter_chunks() ->
     assert (
         r16["cover_letter_chunks"] == []
     ), "r16 (target) must have NO cover letter -- the sole target dimension"
+
+
+# ── Falsifiability hardening E5: format-divergent PII positive controls ───
+#
+# Two gaps in the merged corpus's PII arm:
+#   1. NO fixture put a candidate name in `summary` (the `summary_emb`
+#      boundary), and email/phone appeared ONLY inside the structured
+#      `candidate` block -- so those arms of the 4c leak check had no positive
+#      control in EMBEDDABLE text at all. A no-op scrub would pass.
+#   2. ADR-007's round-4 F1-R finding was specifically about FORMAT-DIVERGENT
+#      leaks (a line-broken name, a reflowed phone, a bare email local-part)
+#      slipping past a scrub built from the LLM's *normalized* identifiers --
+#      the fix that took Phase 3 four audit rounds to land had ZERO
+#      eval-corpus regression coverage.
+#
+# r17 is the positive control for both. It is an honestly-weak candidate (no
+# JD-relevant skills), so it exercises the PII surface without perturbing any
+# ranking-quality signal.
+
+_R17 = "r17_harper_nakamura"
+
+
+def test_r17_is_tagged_weak_and_flagged_must_not_surface() -> None:
+    labels = _load_labels()
+    entry = labels["resumes"][_R17]
+    assert entry["tag"] == "weak"
+    assert entry["must_not_surface_in_topk"] is True
+    assert entry["decision_point"] == "pii_format_divergent_positive_control"
+
+
+def test_r17_candidate_name_appears_verbatim_in_the_summary() -> None:
+    """The `summary_emb` boundary: `_build_summary_text` composes the summary
+    into the embedded text, and ADR-007 §7-F1 scrubs identity out of it before
+    `embed()`. No fixture exercised that arm."""
+    parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{_R17}.json"))
+    name = parsed.candidate.name
+    assert name == "Harper Nakamura"
+    assert name in parsed.summary, (
+        "r17: the candidate's own name must appear verbatim in `summary` -- it "
+        "is the only positive control for the summary_emb leak boundary"
+    )
+
+
+def test_r17_email_and_phone_appear_verbatim_in_embeddable_chunk_text() -> None:
+    """A résumé header chunk carries name + email + phone. Before r17, email
+    and phone existed ONLY in the structured `candidate` block, so the
+    email/phone arms of the leak check had nothing to catch in embedded
+    text."""
+    parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{_R17}.json"))
+    email, phone = parsed.candidate.email, parsed.candidate.phone
+    assert email is not None and phone is not None
+    chunk_texts = [c.text for c in parsed.chunks]
+    assert any(email in t for t in chunk_texts), "r17: email must be in a chunk"
+    assert any(phone in t for t in chunk_texts), "r17: phone must be in a chunk"
+
+
+def test_r17_carries_every_adr007_f1r_format_divergent_variant() -> None:
+    """The three F1-R shapes, each one a whitespace/format divergence between
+    the structured identifier and the résumé body -- exactly what defeated the
+    round-3 scrub and what the round-4 whitespace-flexible pattern +
+    email-local-part scrubbing closed:
+
+    * a LINE-BROKEN name  (`Harper\\nNakamura` vs `Harper Nakamura`)
+    * a REFLOWED phone    (whitespace runs differing from the structured value)
+    * a BARE email LOCAL-PART (`harper.nakamura`, no `@domain`)
+
+    Each must be present verbatim in embeddable chunk text, and must NOT be a
+    literal copy of the structured value (or it would be caught by a naive
+    `re.escape` scrub and prove nothing)."""
+    parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{_R17}.json"))
+    name = parsed.candidate.name
+    email = parsed.candidate.email
+    phone = parsed.candidate.phone
+    assert name is not None and email is not None and phone is not None
+    blob = "\n".join(c.text for c in parsed.chunks)
+
+    first, last = name.split(" ", 1)
+
+    # (1) line-broken name: both tokens, in order, separated by a newline.
+    assert re.search(rf"{re.escape(first)}\n{re.escape(last)}", blob), (
+        "r17: a LINE-BROKEN name (first\\nlast) must appear in chunk text -- "
+        "the ADR-007 F1-R regression control for the whitespace-flexible scrub"
+    )
+
+    # (2) reflowed phone: same digits, different whitespace runs.
+    divergent_phones = [
+        m.group()
+        for m in _PHONE_SHAPED_RE.finditer(blob)
+        if re.sub(r"\D", "", m.group()) == re.sub(r"\D", "", phone)
+        and m.group() != phone
+    ]
+    assert divergent_phones, (
+        f"r17: a REFLOWED phone (same digits as {phone!r}, different "
+        f"whitespace) must appear in chunk text"
+    )
+    assert any(
+        re.search(r"\s\s|\n|\t", p) for p in divergent_phones
+    ), "r17: the reflowed phone must actually diverge on WHITESPACE runs"
+
+    # (3) bare email local-part, with no @domain following it.
+    local = email.split("@", 1)[0]
+    assert re.search(rf"{re.escape(local)}(?!@)", blob), (
+        "r17: a BARE email LOCAL-PART (no @domain) must appear in chunk text -- "
+        "the ADR-007 F1-R control for local-part scrubbing"
+    )
+
+
+def test_r17_claims_no_jd_relevant_skill_so_it_perturbs_no_ranking_signal() -> None:
+    """r17 exists to exercise the PII surface, not the ranker: it must stay an
+    honestly-weak candidate so it cannot quietly change precision@k or any
+    matched-pair ordering control."""
+    parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{_R17}.json"))
+    claimed = {s.name.lower() for s in parsed.skills}
+    assert not (claimed & SKILL_EVIDENCE_MARKERS.keys()), (
+        f"r17 must claim no JD-relevant skill; found "
+        f"{sorted(claimed & SKILL_EVIDENCE_MARKERS.keys())}"
+    )
+
+
+# ── Falsifiability hardening H: run_evals.py is executed, not just read ──
+
+
+def test_run_evals_main_returns_nonzero_until_4c_lands() -> None:
+    """Finding H1. No test executed ``run_evals.py``, so its "cannot go green
+    before 4c" honesty was structural, not gated: a stray `return 0`, or an
+    accidentally-importable stub orchestrator, would have made the
+    merge-blocking ranking-evals gate pass on an engine that does not exist.
+
+    When 4c lands ``src.pipeline.matching.orchestrator``, this test must be
+    replaced by a real assertion on the computed metrics -- do NOT delete it
+    to make a green run possible."""
+    module = _import_run_evals()
+    assert module.main() != 0, (
+        "run_evals.main() must fail while src.pipeline.matching.orchestrator "
+        "does not exist (Phase 4c). A zero exit here means the ranking-evals "
+        "gate would PASS with no ranking engine at all."
+    )
+
+
+def test_run_evals_loads_the_same_corpus_the_unit_tests_guard() -> None:
+    module = _import_run_evals()
+    corpus = module.load_corpus()
+    thresholds = module.load_thresholds()
+    assert {r.resume_id for r in corpus.resumes} == set(_resume_ids_from_labels())
+    assert thresholds["precision_at_k"]["min_precision"] == _MIN_PRECISION
+
+
+def test_run_evals_load_corpus_confines_fixture_paths_to_the_fixtures_dir() -> None:
+    """Finding H2 (defense in depth, test-only surface). ``load_corpus()``
+    joins ``FIXTURES_DIR`` with a path read from ``labels.json``, and in
+    pathlib an ABSOLUTE right-hand side silently REPLACES the left-hand side
+    (``Path('/a') / '/etc/passwd' == Path('/etc/passwd')``). Every resolved
+    fixture path must stay inside ``FIXTURES_DIR``."""
+    module = _import_run_evals()
+    corpus = module.load_corpus()
+    fixtures_dir = module.FIXTURES_DIR.resolve()
+    for resume in corpus.resumes:
+        resolved = Path(resume.path).resolve()
+        assert resolved.is_relative_to(fixtures_dir), (
+            f"{resume.resume_id}: fixture path {resolved} escaped "
+            f"{fixtures_dir}"
+        )
+
+
+def test_run_evals_load_corpus_rejects_a_fixture_path_outside_the_fixtures_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation of the corpus, not of the code: point a labels entry at an
+    ABSOLUTE path outside ``fixtures/`` and ``load_corpus()`` must refuse
+    rather than silently loading it (pathlib's absolute-RHS replacement)."""
+    module = _import_run_evals()
+
+    escapee = tmp_path / "outside" / "evil.json"
+    escapee.parent.mkdir()
+    escapee.write_text(json.dumps({"chunks": []}), encoding="utf-8")
+
+    fake_fixtures = tmp_path / "fixtures"
+    fake_fixtures.mkdir()
+    (fake_fixtures / "jd.json").write_text("{}", encoding="utf-8")
+    (fake_fixtures / "labels.json").write_text(
+        json.dumps(
+            {
+                "job": {"id": "job_x", "fixture": "jd.json"},
+                "resumes": {"r_evil": {"tag": "weak", "fixture": str(escapee)}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "FIXTURES_DIR", fake_fixtures)
+
+    with pytest.raises(ValueError, match="outside"):
+        module.load_corpus()
