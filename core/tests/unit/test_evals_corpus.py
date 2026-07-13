@@ -1653,6 +1653,8 @@ _LEAKY_EMAIL_PROBES = [
     "notreal.person@ nonexistent-employer.invalid",  # space AFTER the @ (B6)
     "notreal.person\n@nonexistent-employer.invalid",  # line-broken (B6)
     "notreal.person @ nonexistent-university.invalid",  # both sides (B6)
+    "notreal.person@nonexistent-employer\n.invalid",  # INTRA-token: before the dot (S1)
+    "notreal.person@nonexistent-employer.\ninvalid",  # INTRA-token: after the dot (S1)
 ]
 
 _CLEAN_EMAIL_PROBES = [
@@ -1668,6 +1670,8 @@ _LEAKY_PHONE_PROBES = [
     "604–555–1212",  # U+2013 en-dash (N5)
     "604‑555‑1212",  # U+2011 non-breaking hyphen (N5)
     "604/555/1212",  # slash separators (N5)
+    "604-555-12\n12",  # INTRA-token: break inside the last digit group (S1)
+    "60455\n51212",  # INTRA-token: break inside the digit run, no separator (S1)
 ]
 
 _CLEAN_PHONE_PROBES = [
