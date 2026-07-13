@@ -1816,6 +1816,25 @@ def test_phone_scanner_does_not_flag_the_reserved_fake_range(probe: str) -> None
 # require an actual separator character between the digit groups in the local
 # 7-digit form). ``555\n1212`` is that probe: caught ONLY by the plain
 # decoded pass, never by the de-wrapped one.
+#
+# Finding F-4 (round 9, continued). ``texts = [raw]`` -- the THIRD and last of
+# `_scan_texts`'s passes -- was itself completely ungated: deleting it (i.e.
+# replacing it with `texts = []`) left the corpus at 1040 passed, because
+# `_string_values` (which feeds both the decoded and de-wrapped passes) only
+# ever recurses `node.values()`. Two shapes are therefore invisible to BOTH of
+# the other passes and visible ONLY to a scan of the raw file source:
+#   * a disallowed identifier living in a JSON dict KEY (never a value, so
+#     `_string_values` never descends into it) -- the key-only email probe
+#     below.
+#   * a disallowed identifier stored as a JSON NUMBER rather than a string
+#     (e.g. `"phone": 6045551299`, no quotes) -- `json.loads` turns this into
+#     an `int`, and `_string_values` only ever collects `str` leaves, so the
+#     value is silently dropped before either the decoded or de-wrapped pass
+#     ever sees it -- the numeric-phone probe below.
+# Both shapes are realistic for fixtures this branch's own plan adds next
+# (4b's outbox-shaped fixture, 4d's reverse-match JDs), neither of which is
+# pydantic-validated the way `ResumeParsed.model_validate` backstops resume
+# fixtures.
 def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
     tmp_path: Path,
 ) -> None:
@@ -1832,6 +1851,17 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
     that match neither phone-shaped branch, and only the plain decoded pass
     (a literal ``\\n`` satisfying ``_PHONE_SEP`` as the joint separator
     itself) ever saw it as phone-shaped.
+
+    Two more probes (finding F-4) mutation-prove the THIRD pass, ``texts =
+    [raw]``: a disallowed email living in a JSON dict KEY, and a disallowed
+    phone stored as a JSON NUMBER. Neither is reachable by ``_string_values``
+    (it only recurses ``node.values()``, and only ever collects ``str``
+    leaves), so both are invisible to the decoded and de-wrapped passes and
+    visible ONLY to a scan of the raw file source. Replace ``texts = [raw]``
+    with ``texts = []`` and the two new asserts below go RED while the four
+    asserts above stay GREEN (the de-wrap and plain-decoded passes are
+    untouched by that mutation) -- the mirror image of the two mutations
+    above, each of which leaves these two new asserts GREEN.
     """
     fixture = tmp_path / "leaky_mid_token_probe.json"
     fixture.write_text(
@@ -1850,7 +1880,11 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
                         "chunk_id": "c_probe_joint_break",
                         "text": "Alternate line: 555\n1212, business hours only.",
                     },
-                ]
+                ],
+                "notreal.contact@disallowed-key-only.invalid": (
+                    "the KEY on this entry carries the leak; this value is clean"
+                ),
+                "phone": 6045551299,
             }
         ),
         encoding="utf-8",
@@ -1862,16 +1896,26 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
         email_offenders.extend(_offending_emails(text))
         phone_offenders.extend(_offending_phones(text))
 
-    assert email_offenders, (
+    # Scoped to the specific rejoined value (not a bare non-empty check):
+    # with the two finding-F-4 probes also in this fixture, a generic
+    # ``assert email_offenders`` / ``assert phone_offenders`` would be
+    # satisfied by the KEY-only email or numeric-phone offender regardless of
+    # whether the de-wrap pass ran at all, so it would no longer gate this
+    # mutation on its OWN distinct assertion.
+    assert any(
+        re.sub(r"\s+", "", o).lower() == "notreal.person@nonexistent-employer.invalid"
+        for o in email_offenders
+    ), (
         "_scan_texts did not surface the mid-token-broken email "
-        "'notreal.person@nonexistent-employer\\n.invalid' -- either the "
-        "de-wrap pass is missing from _scan_texts, or it never reached the "
-        "email scanner"
+        "'notreal.person@nonexistent-employer\\n.invalid' rejoined across "
+        "the dot -- either the de-wrap pass is missing from _scan_texts, or "
+        "it never reached the email scanner"
     )
-    assert phone_offenders, (
+    assert any(re.sub(r"\D", "", o) == "6045551212" for o in phone_offenders), (
         "_scan_texts did not surface the mid-token-broken phone "
-        "'604-555-12\\n12' -- either the de-wrap pass is missing from "
-        "_scan_texts, or it never reached the phone scanner"
+        "'604-555-12\\n12' rejoined across the last digit group -- either "
+        "the de-wrap pass is missing from _scan_texts, or it never reached "
+        "the phone scanner"
     )
     assert any(re.sub(r"\D", "", o) == "5551212" for o in phone_offenders), (
         "_scan_texts did not surface the JOINT-BREAK-ONLY phone '555\\n1212' "
@@ -1880,6 +1924,24 @@ def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
         "de-wrapping it collapses the newline and leaves 7 contiguous digits "
         "that match neither _PHONE_SHAPED_RE branch. If this fails, "
         "`texts.extend(decoded)` is missing from _scan_texts, or it never "
+        "reached the phone scanner."
+    )
+    assert any("disallowed-key-only.invalid" in o for o in email_offenders), (
+        "_scan_texts did not surface the disallowed email hiding in a JSON "
+        "dict KEY ('notreal.contact@disallowed-key-only.invalid') -- "
+        "_string_values only recurses node.values(), so a leak that lives in "
+        "a KEY (never a value) is invisible to the decoded and de-wrapped "
+        "passes; only a scan of the raw file source (`texts = [raw]`) can "
+        "ever see it. If this fails, the raw pass is missing from "
+        "_scan_texts, or it never reached the email scanner."
+    )
+    assert any(re.sub(r"\D", "", o) == "6045551299" for o in phone_offenders), (
+        "_scan_texts did not surface the disallowed phone stored as a JSON "
+        'NUMBER (`"phone": 6045551299`, no surrounding quotes) -- '
+        "json.loads turns this into an int, and _string_values only ever "
+        "collects str leaves, so neither the decoded nor the de-wrapped pass "
+        "ever sees it; only a scan of the raw file source can. If this "
+        "fails, the raw pass is missing from _scan_texts, or it never "
         "reached the phone scanner."
     )
 
