@@ -118,18 +118,31 @@ build is genuinely falsifiable:
 - The **`thresholds.toml` key set is a three-way contract** with `.claude/agents/ranking-evals.md` and
   `run_evals.py`; a test fails if any of the three drifts.
 
-**4a hardening, round 2 (same branch).** A re-audit found the round-1 hardening had itself shipped an
+**4a hardening, round 4 (same branch).** A re-audit found the round-3 hardening had itself shipped an
 unasserted claim stamped as asserted. Fixed:
 - **The `[adversarial]` arm was INERT.** r09 held a sub-bachelor `Diploma, General Studies`, failing the
   JD's `min_level: bachelors` on its own — so a MatchWeights-faithful engine with a **no-op evidence
   verifier** still dropped it to rank 8 (outside k=5) and **passed** `must_not_surface_in_topk` *and*
   `precision@5 = 1.0`. The potency test asserted 3 of MatchWeights' 5 structured sub-scores and omitted
-  the two on which r09 was weak (education 0.10, vector 0.10). r09 now holds a **JD-allowed BSc**, all
-  five sub-scores are asserted, and the repaired bait puts a no-op-verifier engine at **precision@5 =
-  0.80 → FAIL**. Knock-on, re-derived not papered over: `0.6·structured + 0.3·0 + 0.1·0 ≈ 0.547` lands
-  the bait **adjacent to the borderline tier** (rank ~11, vs the 0.844 top-5 cutoff), so `weak` and
-  `adversarial` **no longer share a rank band** and the band-feasibility check is now a full
-  **Hall's-condition** test (the round-1 "bands must tile 1..N" check cannot express an overlapping band).
+  the two on which r09 was weak (education 0.10, vector 0.10). r09 now holds a **JD-allowed BSc** and all
+  five sub-scores are asserted.
+  > **Every number round 4 claimed for the repaired bait was wrong — superseded by round-5 F1** (and by
+  > round-7 M-1, which found the three surviving copies of it disagreeing with each other). Round 4 wrote
+  > "the repaired bait puts a no-op-verifier engine at precision@5 = 0.80 → FAIL", and "`0.6·structured +
+  > 0.3·0 + 0.1·0 ≈ 0.547` lands the bait adjacent to the borderline tier (rank ~11, vs the 0.844 top-5
+  > cutoff)". None of that was measured. Round 5 **measured** the same corpus state: seniority **0.271** →
+  > r09 **rank 8** → **precision@5 = 1.00** → *a bad engine still PASSED*. Round 4 did not close the bait
+  > hole; it **relocated** it from education (0.10) onto seniority (0.15). The three files that carried
+  > this figure each stated a *different* false rank for the one state ("rank 2", "3rd", "~11/17"); all
+  > are now marked wrong in place rather than quietly re-tuned. What was *right* is the shape of the
+  > knock-on argument, and it survives — see the next bullet.
+- **Knock-on, re-derived not papered over.** A bait that is top-tier on every non-evidence signal and
+  scores zero on evidence lands **just below the strong tier** by construction, not below every
+  honestly-weak candidate — so `weak` and `adversarial` **no longer share a rank band**, and the
+  band-feasibility check is now a full **Hall's-condition** test (the "bands must tile 1..N" check cannot
+  express an overlapping band). (Current measured figure, post-round-5: score ≈ **0.597** vs the **0.785**
+  top-5 cutoff — ~0.19 of margin. The bait's *exact rank* is deliberately not written anywhere; see
+  "Stale figure reconciled" below.)
 - **The three-way key-set contract was enforced in zero directions** against the two consumer docs (only
   the toml ↔ a list literal inside the test file was checked, and the test the comments named did not
   exist). It now reads both docs and asserts set equality. `[evidence].min_completeness_in_topk` — the
@@ -142,8 +155,8 @@ unasserted claim stamped as asserted. Fixed:
   matters; whitespace around the `@` is now tolerated and stripped, and the phone scanner learned the
   unicode dashes and `/` a real PDF paste carries. Both scanners are now themselves gated by probe tests.
 
-**4a hardening, round 3 (same branch) — the first round that read the ENGINE.** Rounds 1–2 hardened the
-corpus against an *idealized* algorithm. Round 3 ported the one 4c actually extracts (hris
+**4a hardening, round 5 (same branch) — the first round that read the ENGINE.** Rounds 1–4 hardened the
+corpus against an *idealized* algorithm. Round 5 ported the one 4c actually extracts (hris
 `packages/pipeline/src/pipeline/matching/{stages,orchestrator}.py`) and found **two of `MatchWeights`' five
 structured sub-scores do not compute what their names imply.** Both holes existed *only* against the real
 code, which is why three prior audits missed them:
@@ -154,7 +167,7 @@ code, which is why three prior audits missed them:
   asserted `experience` **twice** and `seniority` **never**, while r09 carried `"title": "Software
   Professional"`, the most JD-distant title of any non-weak fixture. Measured (faithful engine + **no-op
   evidence verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. The
-  round-2 fix had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it.
+  round-4 fix had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it.
   r09's most-recent title is now the **JD title verbatim** — also the most realistic keyword-stuffer
   behaviour — so `cosine(x, x) = 1.0` and seniority is **exactly 1.0 under any embedder, by arithmetic**.
   That matters: `Senior Backend Engineer` measured **0.755** on one nomic-embed-text build and **0.581** on
@@ -166,14 +179,23 @@ code, which is why three prior audits missed them:
   were `BSc` → `bachelors` → education = **1.00 for both**. It also passed an education-blind ranker through
   the **vector** path: `_build_summary_text` embeds `education[].degree` into `summary_emb`, so with
   `weights.education = 0.0` r14 *still* outranked r11 — the whole gap was vector. (This is the D1 confound
-  round 2 thought it had closed by deleting the education *chunk*; the degree still rode in via the
+  round 3 thought it had closed by deleting the education *chunk*; the degree still rode in via the
   structured `education[]` entry.) The twins now differ in **level** (bachelor's vs a sub-bachelor
   associate), both fields are JD-allowed so the field cannot be a second differentiator, and the education
-  signal (0.040 of `score_final`) now **dominates** the 0.0003 vector residual — which now points at the
-  *lower* twin, so the only way to order the pair is to implement the sub-score. **4c must verify the
-  `weights.education = 0.0` mutation FLIPS the pair.**
+  signal (0.040 of `score_final`) **dominates** the ~0.0009 vector residual — which points at the *lower*
+  twin, so the only way to order the pair is to implement the sub-score. The `weights.education = 0.0`
+  mutation must FLIP the pair — a **review obligation on the 4c PR**, not a gate (see round-7 M-3 below).
+  **Round 7 (R7-2) closed the hole this fix left open:** the residual's *sign* is the load-bearing half of
+  the argument, it is **measured, not arithmetic**, and its inputs were unpinned. `_build_summary_text`
+  embeds `{degree}, {institution} ({year})`, and the twin test pinned none of those three (the
+  embedding-input test compares only the segment *before* `"Education: "`) — the twins even shipped
+  *different* institutions. Rewriting r14's institution to `"Backend Data Engineering Institute of Python
+  and Airflow"` flips the residual to **+0.0043**, gives the education-blind engine a separation of
+  **+6.399e-04 ≥ `min_score_gap`**, and it then **PASSES** the pair on both input orders — the confound
+  re-created, with every corpus test green. The twins now **share an institution and a year**, and the
+  education dicts *and* the embedded `Education:` segment are asserted to differ **only in degree/field**.
 
-**4a hardening, round 4 (same branch) — finding F5: two of the three ordering pairs did not gate their
+**4a hardening, round 6 (same branch) — finding F5: two of the three ordering pairs did not gate their
 dimension.** The pairwise contract was `rank(higher) < rank(lower)` and nothing more — and a rank
 comparison is satisfiable by a **tie-break**. Measured against an engine made *blind* to each pair's own
 dimension (real `nomic-embed-text` 768-d + real rapidfuzz + an engine replica of the ported hris
@@ -181,7 +203,7 @@ dimension (real `nomic-embed-text` 768-d + real rapidfuzz + an engine replica of
 
 | pair | blind engine | twin separation | labels order | reversed order |
 |---|---|---|---|---|
-| education | `weights.education = 0` | −3.266e-04 | FAIL | FAIL |
+| education | `weights.education = 0` | −3.266e-04 (−8.716e-04 after round 7) | FAIL | FAIL |
 | overqual | `overqual_ratio = 99` | **+0.000e+00 (exact tie)** | FAIL | **PASS** |
 | motivation | `weights.motivation = 0` | **+0.000e+00 (exact tie)** | **PASS** | FAIL |
 
@@ -198,18 +220,34 @@ it at the **lower** twin.)
 Fixed in the **contract**, not the fixtures: `[ordering_controls].min_score_gap = 1e-6` is new, and the
 assertion is now **`rank(hi) < rank(lo)` AND `score_final(hi) − score_final(lo) ≥ min_score_gap`**, so an
 exact tie can never pass under any tie-break, on any input order. The correct engine's gaps
-(**+0.0397 / +0.0120 / +0.0900**) clear it by four orders of magnitude and are all **arithmetic**
-(`0.6·0.10·(1 − 0.5·2/3)` less the vector residual; `0.6·0.25·0.08`; `0.1·0.9`). The alternative —
+(**+0.0391 / +0.0120 / +0.0900**) clear it by four orders of magnitude. The alternative —
 copying F2's inverted-residual trick into the other two twins — was **rejected**: it would re-introduce an
 embedder-dependent magnitude, which is precisely the F1 lesson (*pin by arithmetic, not by measurement*).
 The twins' byte-identical embedding input is now itself asserted, so the tie cannot later be "fixed" by
 narrating years/motivation into a twin's `summary` (that would put the signal back into `summary_emb` and
-re-create the F2 confound). **4c must run all three blind-engine mutations and confirm each FAILS on both
-input orders.**
+re-create the F2 confound).
 
-**Baseline battery (measured, corrected — round 4).** Every arm scored against the *full* contract
-(precision@5 · adversarial · all three ordering pairs with rank **and** gap), on both input orders. Only
-the faithful engine with a correct verifier passes:
+> **Round-7 correction (N-1).** Round 6 wrote that all three gaps "are **arithmetic**". Exactly one is:
+> **overqual +0.0120 = `0.6·0.25·(1.00 − 0.92)`**, straight off `MatchWeights` and the twins' years — and
+> it is also the *smallest*, hence the one that bounds `min_score_gap` from above, and the only one the
+> corpus asserts. **education +0.0391** is an arithmetic `0.6·0.10·(1 − 0.5·2/3) = 0.0400` **less an
+> embedder-measured vector residual** (~9e-04). **motivation +0.0900 = `0.1 × 0.9`**, where the `0.9` is
+> the **LLM's measured confidence** on r04's cover-letter evidence — not a `MatchWeights` constant at all.
+> The sandwich only ever needed the smallest, and the smallest is the arithmetic one.
+
+> **Review obligation, not a gate (round-7 M-3).** The three blind-engine mutations (`weights.education =
+> 0`, `overqual_ratio = 99`, `weights.motivation = 0`) are what prove these pairs gate their dimension —
+> each must FAIL on **both** input orders. But **nothing in `thresholds.toml` or `run_evals.py` can run
+> them**: they require the engine with *mutated* `MatchWeights`, which is a property of 4c's own test
+> suite. Adding a toml key for it would be precisely the defect this branch keeps finding (a claim stamped
+> as asserted, enforced by nobody). So it is stated plainly instead: **the 4c PR must carry these three
+> mutations as tests, and the 4c reviewer must check that each fails on both orders.** Same for the
+> `_fuzz_substring` replacement below — a requirement on the 4c *code review*, not a mechanical gate.
+
+**Baseline battery (measured — round 6, re-measured unchanged in round 7 after the R7-2 fixture fix).**
+Every arm scored against the *full* contract (precision@5 · adversarial · all three ordering pairs with
+rank **and** gap), on both input orders, against a real `nomic-embed-text` 768-d embedder on a cold cache.
+Only the faithful engine with a correct verifier passes:
 
 | arm | p@5 | r09 rank | ordering pairs | verdict |
 |---|---|---|---|---|
@@ -220,13 +258,19 @@ the faithful engine with a correct verifier passes:
 | faithful + hris `_fuzz_substring` | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
 | faithful + **correct** verifier | 1.00 | 8 | all 3 ✓ | **PASS** |
 
-(The round-3 report's "tf-idf pure-vector" row conflated two different engines and was not reproducible as
+(The round-5 report's "tf-idf pure-vector" row conflated two different engines and was not reproducible as
 stated. A *lexical* tf-idf and the *embedding* pure-vector ranker are different baselines with different
 failure modes — both fail, but the mechanism differs, and the embedding one is the one that matters
 because it is the engine's own stage-1 signal. The rank of r09 under a lexical tf-idf is also
 implementation-dependent (sublinear tf / idf weighting), which is a further reason not to gate on it.)
 
-**Stale figure reconciled (round 4).** r09's *exact* rank under the correct verifier is **not gated and
+Round 7 re-ran the whole battery after unifying the education twins' institution (the R7-2 fix, the only
+fixture change on that round): **every row above is unchanged**, the top-5 is unchanged, and the rank bands
+did not move (0 violations, populations 7/4/5/1). The only measured deltas are r11's score (0.7578 →
+0.7583, still rank 7) and the education pair's numbers — correct-engine gap +0.0397 → **+0.0391**, and the
+education-blind separation **−3.30e-04 → −8.72e-04**, i.e. the inversion the fix depends on got *stronger*.
+
+**Stale figure reconciled (round 6).** r09's *exact* rank under the correct verifier is **not gated and
 not build-stable** — it is near-tied with r04 (0.596994 vs 0.596711, a 2.8e-04 spread whose **sign flips
 between `nomic-embed-text` builds**), so "rank 9" (and the older "rank 11") is no longer written anywhere.
 What is build-independent, and what the corpus actually gates: r09 ranks **below every strong fixture**,
@@ -243,7 +287,44 @@ scorer is a *new requirement*, not a port, and the corpus must not smuggle one i
 The r14/r11 ordering pair is deliberately built to survive **either** choice (both twins' fields are
 JD-allowed, so the pair turns on level alone).
 
+**4a hardening, round 7 (same branch) — R7-1 / R7-2: the fifth consecutive round to find a claim *stamped
+as asserted and enforced by nothing*.** Both fixes are one assertion each.
+- **R7-1 — `SKILL_EVIDENCE_MARKERS` claimed coverage it did not enforce.** That dict is the **sole
+  definition of "JD-relevant"** for the corpus's core falsifiable property (every non-adversarial fixture's
+  JD-skill claims must be textually grounded; the adversarial one's must not be), for r10's recency guard
+  and for r17. Its comment said it "covers every required_skill AND nice_to_have_skill name used anywhere
+  in the corpus" — **nothing checked that**, and a JD skill with no marker is *filtered out* before either
+  arm of the trap ever sees it. Three mutations stayed green: delete the `kubernetes` marker; delete it
+  *and* re-ground r09's Kubernetes claim (defanging one arm of the fabrication trap outright); and — the
+  one that matters for 4b/4d — **give the JD a nice-to-have `Redis` that both r09 and honest-strong r03
+  claim with zero textual support**, so neither the "adversarial must be ungrounded" arm nor the "honest
+  must be grounded" arm fires. Coverage is now **derived from the JD fixture**
+  (`test_skill_evidence_markers_cover_every_jd_skill`): adding a JD skill without a marker is RED, and so
+  is deleting a marker. This is the enumerate-instead-of-derive shape, sitting on exactly the surface 4b/4d
+  touch when they add JD fixtures.
+- **R7-2 — the education twins' `institution`/`year` were unpinned, so the F2 residual could be inverted
+  back.** Detailed under round 5 above. One fixture changed (r11 adopts r14's institution); the full
+  battery and the bands were re-measured and are unchanged.
+- Also: the `min_score_gap` sandwich's "all three gaps are arithmetic" claim was false (**N-1**, corrected
+  above); the "4c MUST run these mutations" lines were prose obligations dressed as mechanical ones
+  (**M-3**, now stated as review obligations); `min_precision = 0.8` was said to be clearable by a random
+  ranker "roughly half the time" when the hypergeometric answer is **39.5%** (**N-2**); the toml's
+  reverse-direction key check walked only section tables, so a **top-level scalar key was invisible to the
+  three-way contract** (**N-4**, closed); the four ported engine helpers' "if 4c changes them, these must
+  change in the same diff" was enforced by nothing (**M-2** — there is now a test that imports the real
+  `src.pipeline.matching.{stages,orchestrator}` *when they exist* and compares, skipping until 4c).
+
+**Round numbering (round-7 N-3).** Rounds are counted **cumulatively** over the corpus's hardening history
+— rounds 1–2 on `feat/phase-4a-ranking-evals-corpus`, rounds 3–7 on `fix/phase-4a-corpus-falsifiability` —
+and that is the scheme `thresholds.toml`, `labels.json`, `test_evals_corpus.py`, `docs/activity/` and this
+file all use. The branch's **commit** names count gate iterations *on the branch*, an offset of 2:
+cumulative round 4 = `red|green(4a-hard-2)`, round 5 = `(4a-hard-3)`, round 6 = `(4a-hard-4)`, round 7 =
+`(4a-hard-5)`. (Before round 7 the docs numbered the same rounds 2/3/4 while the corpus files numbered them
+4/5/6, which made every cross-reference ambiguous.)
+
 **4c evidence-verifier requirement — the ported `_fuzz_substring` must be REPLACED, NOT PORTED.**
+*(A review obligation on the 4c PR — see M-3 above. No gate in this repo can enforce it: `run_evals.py`
+scores whatever verifier 4c ships, and a corpus cannot make a coder not-port a function.)*
 `stages._fuzz_substring` — the verifier 4c is told to extract — is a **character-set overlap ratio**: it
 slides a window over the haystack and scores `|{chars of window} ∩ {chars of needle}| / len(needle)`. Any
 fluent English sentence of the right length scores ~0.9 against any other, because they share an alphabet.
@@ -272,7 +353,7 @@ rapidfuzz rather than trusting the stand-in at the boundary.
 
 ### ACCEPTED 4a RESIDUALS — the class of wrong engine this corpus still lets through
 
-Recorded at the end of 4a's hardening (round 4), **deliberately not fixed here**, so 4c/4d inherit them
+Recorded at the end of 4a's hardening (round 6), **deliberately not fixed here**, so 4c/4d inherit them
 with eyes open rather than discovering them after a green `ranking-evals` run. Each was demonstrated by a
 mutation of the engine replica that the corpus **passed**.
 

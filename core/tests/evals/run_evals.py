@@ -94,12 +94,19 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    PASSED the rank-only assertion. min_score_gap
                                    is an anti-tie epsilon: > 0 (else the tie
                                    passes) and far below the smallest correct-
-                                   engine gap (0.0120). 4c MUST also run the
-                                   three blind-engine mutations (education = 0,
-                                   overqual_ratio = 99, motivation = 0) and
-                                   confirm each FAILS on BOTH input orders.
-                                   These are the corpus's most discriminating
-                                   assertions.
+                                   engine gap (0.0120 -- the overqual pair's, and
+                                   the ONLY one of the three that is arithmetic
+                                   rather than measured; see thresholds.toml).
+                                   REVIEW OBLIGATION, NOT A GATE (round-7 M-3):
+                                   the three blind-engine mutations (education =
+                                   0, overqual_ratio = 99, motivation = 0) are
+                                   what prove these pairs gate their dimension at
+                                   all, and each must FAIL on BOTH input orders --
+                                   but nothing in this file or thresholds.toml can
+                                   run them, because they need the engine with
+                                   MUTATED MatchWeights. They belong in 4c's own
+                                   test suite, and 4c's reviewer must check for
+                                   them. Do not read this key as enforcing them.
   [pii]
     leak_check = true           -- no fixture's candidate name/email/phone may
                                    appear in embedding input or exported output.

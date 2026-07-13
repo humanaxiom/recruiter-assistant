@@ -120,15 +120,23 @@ product code (`core/tests/evals/**`, `core/tests/unit/test_evals_corpus.py`,
 
 Corpus is now **17 fixtures** (7 strong / 4 borderline / 5 weak / 1 adversarial).
 
-### Round 2 of findings-and-fix (`red(4a-hard-2)` → `green(4a-hard-2)`)
+### Round 4 — B1–B6 / N1–N6 (`red(4a-hard-2)` → `green(4a-hard-2)`)
 
-The round-1 hardening had itself shipped an unasserted claim stamped as asserted — the defect class the
+> **Round numbering (round-7 finding N-3).** Rounds are counted **cumulatively** over the corpus's
+> hardening history — rounds 1–2 on `feat/phase-4a-ranking-evals-corpus`, rounds 3–7 on this branch — and
+> that is now the scheme used by `thresholds.toml`, `labels.json`, `test_evals_corpus.py`,
+> `docs/EXTRACTION_PLAN.md` and this file. The branch's **commit** names count gate iterations *on the
+> branch*, an offset of 2: round 4 = `(4a-hard-2)`, round 5 = `(4a-hard-3)`, round 6 = `(4a-hard-4)`,
+> round 7 = `(4a-hard-5)`. Until round 7 these sections were headed "Round 2/3/4 of findings-and-fix"
+> while the corpus files called the same rounds 4/5/6, so every cross-reference between them was ambiguous.
+
+The round-3 hardening had itself shipped an unasserted claim stamped as asserted — the defect class the
 branch exists to kill. Re-audited by all three merge-blocking gates; security returned **PASS**.
 
 | # | Finding | Mutation that stayed green | Fix |
 |---|---|---|---|
-| B1 | **The `[adversarial]` arm was INERT.** r09 held a sub-bachelor `Diploma, General Studies` — it fails the JD's `min_level: bachelors` on its own, so a MatchWeights-faithful engine with a **no-op evidence verifier** scored it 0.788 → **rank 8**, outside `k=5`, and **passed** `must_not_surface_in_topk` *and* `precision@5 = 1.0`. Education alone is `0.10 × 0.6 = 0.06` of `score_final`, more than the **0.0485** gap to the top-5 cutoff. The potency test asserted 3 of MatchWeights' **5** structured sub-scores and omitted the two on which r09 was weak (education, vector) — while the toml, the agent doc and its own docstring all said "only the EVIDENCE verifier may reject it" | Give r09 a `BSc Computer Science` — **264 tests stay green**. Delete its education entirely — also green | r09 holds a **JD-allowed BSc** (chunk `c_006` narrates it); **all five** structured sub-scores asserted. Repaired, the no-op-verifier engine ranks r09 **3rd** → `precision@5 = 0.80` → the adversarial arm **correctly FAILS** it |
-| B1↩ | **Knock-on, re-derived not papered over.** A bait that is top-tier on every non-evidence signal scores `0.6·structured + 0.3·0 + 0.1·0 ≈ 0.547` and *must* land **adjacent to the borderline tier** (measured rank **11/17**, one slot above the weakest borderline fixture) — so its old `expected_rank_band {min: 12}` and the `weak == adversarial` shared band were **arithmetically infeasible**. This is the round-1 infeasible-band bug pointed at a different tier | — | `adversarial` gets **its own band** `[8, null]` ("below every *strong* fixture, hence outside top-k" — the invariant that survives); `borderline` gains **exactly one** slot of slack `[8, 12]` for the rank the bait displaces. Feasibility check upgraded from "bands tile 1..N" to a full **Hall's-condition** test, which *can* express an overlapping band. 0.547 ≪ the 0.844 top-5 cutoff, so every gate still bites |
+| B1 | **The `[adversarial]` arm was INERT.** r09 held a sub-bachelor `Diploma, General Studies` — it fails the JD's `min_level: bachelors` on its own, so a MatchWeights-faithful engine with a **no-op evidence verifier** scored it 0.788 → **rank 8**, outside `k=5`, and **passed** `must_not_surface_in_topk` *and* `precision@5 = 1.0`. Education alone is `0.10 × 0.6 = 0.06` of `score_final`, more than the **0.0485** gap to the top-5 cutoff. The potency test asserted 3 of MatchWeights' **5** structured sub-scores and omitted the two on which r09 was weak (education, vector) — while the toml, the agent doc and its own docstring all said "only the EVIDENCE verifier may reject it" | Give r09 a `BSc Computer Science` — **264 tests stay green**. Delete its education entirely — also green | r09 holds a **JD-allowed BSc** (chunk `c_006` narrates it); **all five** structured sub-scores asserted. ~~Repaired, the no-op-verifier engine ranks r09 **3rd** → `precision@5 = 0.80` → the adversarial arm correctly FAILS it~~ — **that number was wrong; see round 5, F1.** It was asserted, never measured: round 5 measured the same state at seniority 0.271 → **rank 8** → **`precision@5` = 1.00** → the arm was *still* inert. Round 4 relocated the hole onto seniority; round 5 closed it |
+| B1↩ | **Knock-on, re-derived not papered over.** A bait that is top-tier on every non-evidence signal scores `0.6·structured + 0.3·0 + 0.1·0` and *must* land **just below the strong tier** — not below every honestly-weak candidate — so its old `expected_rank_band {min: 12}` and the `weak == adversarial` shared band were **arithmetically infeasible**. This is the round-1 infeasible-band bug pointed at a different tier | — | `adversarial` gets **its own band** `[8, null]` ("below every *strong* fixture, hence outside top-k" — the invariant that survives); `borderline` gains **exactly one** slot of slack `[8, 12]` for the rank the bait displaces. Feasibility check upgraded from "bands tile 1..N" to a full **Hall's-condition** test, which *can* express an overlapping band. ~~≈0.547, measured rank 11/17, vs the 0.844 top-5 cutoff~~ — **those figures were wrong too (round-7 M-1); they were never measured.** Post-round-5 the bait scores **0.597** against a **0.785** cutoff (~0.19 of margin) and its exact rank is deliberately **not** pinned anywhere. The *argument* — the bait lands adjacent to the borderline tier, not below the weak one — is unchanged, and it is the argument the band encodes |
 | B2 | The "three-way key-set contract enforced in **both** directions" **did not exist**: only the toml ↔ a list literal *inside the test file* was checked; nothing opened the agent doc or `run_evals.py`'s docstring, and `test_every_threshold_key_is_enumerated_by_both_consumers` — named in three places — **was not in the repo** | Delete the `[ordering_controls]` block from `run_evals.py`'s docstring **and** the agent-doc row; delete `[adversarial]` + `min_completeness_in_topk` from the docstring; add a new toml key with both consumer docs left stale | That test now **exists**, asserts `AGENT_DOC_PATH.is_file()` first (a bad path would pass vacuously), and compares **set equality in both directions** against both docs. The agent-doc table is **one row per key** — merged rows were invisible to the parse |
 | B3 | `min_completeness_in_topk` was the **last unpinned numeric threshold** (range-checked only) — on the one key whose job is to stop `verification_rate_min = 1.0` passing vacuously | `1.0 → 0.2`, `1.0 → 0.01` | Pinned exactly |
 | B4 | **Real email addresses committed as prose** in 6 places while documenting the PII fixes — including in the guard's own source file, which therefore carried exactly the strings its invariant bans | — (scanner scope is JSON fixtures only) | All 6 replaced with non-resolving placeholders that preserve the narrative |
@@ -156,19 +164,19 @@ tests, up from 226). Coverage unmoved — still zero product code.
 the outbox payload is *allowed* to contain (no `candidate`, no `chunks[].text`, no `summary`). 4b
 projects to Neo4j and must add it (recorded as a 4b requirement in `docs/EXTRACTION_PLAN.md`).
 
-### Round 3 of findings-and-fix (`red(4a-hard-3)` → `green(4a-hard-3)`) — the first round that read the ENGINE
+### Round 5 — F1 / F2 (`red(4a-hard-3)` → `green(4a-hard-3)`) — the first round that read the ENGINE
 
-Rounds 1–2 hardened the corpus against an *idealized* algorithm. Round 3 ported the one 4c actually
+Rounds 1–4 hardened the corpus against an *idealized* algorithm. Round 5 ported the one 4c actually
 extracts (hris `matching/{stages,orchestrator}.py`) and found **two of `MatchWeights`' five structured
 sub-scores do not compute what their names imply**. Both holes existed only against the real code.
 
 | # | Finding | Fix |
 |---|---|---|
-| F1 | **`seniority` (0.15) is not a years check** — it is `cosine(jd.title, most-recent role title)`, rescaled. The toml and the potency test justified **both** `experience` and `seniority` with one years claim, so the corpus asserted `experience` twice and `seniority` **never**, while r09 carried the most JD-distant title in the corpus. Measured (faithful + **no-op verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. Round 2 had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it | r09's most-recent title is the **JD title verbatim** → `cosine(x,x) = 1.0` → seniority **exactly 1.0 by arithmetic, under any embedder**. That matters: `Senior Backend Engineer` measured **0.755** on one `nomic-embed-text` build and **0.581** on another, straddling the **0.638** break-even at which the trap arms |
-| F2 | **`education` (0.10) reads the degree LEVEL only**, never `jd.education.fields` — so the r14/r11 twins (differing in *field*) asserted a mechanism that **does not exist** (both `BSc` → education = 1.00), and the pair still passed an education-blind ranker through the **embedded-degree vector leak** | Twins now differ in **level**; both fields JD-allowed. Education moves `score_final` by 0.0400 and **dominates** the ~3e-04 vector residual, which now points at the **lower** twin — so ordering the pair *requires* implementing the sub-score |
+| F1 | **`seniority` (0.15) is not a years check** — it is `cosine(jd.title, most-recent role title)`, rescaled. The toml and the potency test justified **both** `experience` and `seniority` with one years claim, so the corpus asserted `experience` twice and `seniority` **never**, while r09 carried the most JD-distant title in the corpus. Measured (faithful + **no-op verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. Round 4 had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it | r09's most-recent title is the **JD title verbatim** → `cosine(x,x) = 1.0` → seniority **exactly 1.0 by arithmetic, under any embedder**. That matters: `Senior Backend Engineer` measured **0.755** on one `nomic-embed-text` build and **0.581** on another, straddling the **0.638** break-even at which the trap arms |
+| F2 | **`education` (0.10) reads the degree LEVEL only**, never `jd.education.fields` — so the r14/r11 twins (differing in *field*) asserted a mechanism that **does not exist** (both `BSc` → education = 1.00), and the pair still passed an education-blind ranker through the **embedded-degree vector leak** | Twins now differ in **level**; both fields JD-allowed. Education moves `score_final` by 0.0400 and **dominates** the vector residual, which now points at the **lower** twin — so ordering the pair *requires* implementing the sub-score. (Round 7 found the residual's inputs were themselves unpinned — see R7-2) |
 | F3 | hris's shipped `_fuzz_substring` is a **character-set overlap ratio**: it **verifies all four** of the corpus's fabricated anchors (0.928/0.943/0.988/0.935) | Recorded as a hard 4c requirement: **replace it, do not port it** (rapidfuzz `partial_ratio` scores the same negatives 0.36–0.46) |
 
-### Round 4 of findings-and-fix (`red(4a-hard-4)` → `green(4a-hard-4)`)
+### Round 6 — F5 (`red(4a-hard-4)` → `green(4a-hard-4)`)
 
 | # | Finding | Mutation that stayed green | Fix |
 |---|---|---|---|
@@ -197,3 +205,55 @@ evidence **verifier** but never the evidence **extractor**. Both are 4c requirem
 
 **Gates:** ruff · black · `mypy src --strict` clean; **1034 unit tests @ 96.63% coverage** (305 corpus
 tests); `run_evals.py` still exits 1. Zero `core/src/` changes.
+
+### Round 7 — R7-1 / R7-2 (`red(4a-hard-5)` → `green(4a-hard-5)`)
+
+`ranking-evals` **PASSED** round 6 (cold cache, freshly-pulled embedder: keyword-overlap, lexical tf-idf,
+embedding pure-vector, faithful + no-op-verifier and faithful + hris `_fuzz_substring` all FAIL the corpus;
+only a faithful engine with a correct `rapidfuzz.partial_ratio` verifier PASSES; 34 mutations RED). The
+**reviewer** returned CHANGES-REQUIRED, having gone hunting for the *fifth* instance of this branch's
+signature bug: **a claim stamped as asserted but enforced by nothing.** It found two.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| R7-1 | **`SKILL_EVIDENCE_MARKERS` claimed coverage it did not enforce.** Its comment said it "covers every `required_skill` AND `nice_to_have_skill` name used anywhere in the corpus" — and that dict is the **sole definition of "JD-relevant"** for the test the file itself calls "the core falsifiable property of this corpus", plus r10's recency guard and r17. A JD skill with no marker is filtered out *before* either arm of the fabrication trap sees it | (1) delete `"kubernetes"`; (2) delete it **and** re-ground r09's Kubernetes claim — i.e. silently defang one arm of the trap (grounding a claim whose marker is *still present* goes RED, which proves the trap's coverage **was** exactly this unpinned dict); (3) **the JD gains a nice-to-have `Redis`** that r09 *and* honest-strong r03 both claim with zero textual support — neither the "adversarial must be ungrounded" arm nor the "honest must be grounded" arm fires | Coverage is **derived from the JD fixture** (`test_skill_evidence_markers_cover_every_jd_skill`). Deleting a marker → RED; adding a JD skill without a marker → RED. This is the enumerate-instead-of-derive shape, on **exactly the surface 4b/4d touch when they add JD fixtures** |
+| R7-2 | **The education twins' `institution`/`year` were unpinned, so the F2 residual could be inverted back.** `_build_summary_text` embeds `{degree}, {institution} ({year})`; the twin test pinned skills/experience/summary/chunks/years and **none of those three**, and the embedding-input test compares only the segment *before* `"Education: "`. The twins even shipped **different** institutions. So the whole F2 defence — "the residual is 40× dominated and points at the **lower** twin" — rested on an **embedder-measured** quantity with a free second contributor | Rewrite r14's institution to `"Backend Data Engineering Institute of Python and Airflow"` → raw residual flips to **+0.0043**, the education-**blind** engine's twin separation becomes **+6.399e-04 ≥ `min_score_gap`**, and it **PASSES** the pair on **both** input orders — the exact vector confound round 5 certified as inverted, re-created | The twins now **share an institution and a year**. The twin test asserts (a) the two `education[]` dicts are equal **except `degree`/`field`**, and (b) the **embedded `Education:` segment differs only in the degree token** — the second survives a future `_build_summary_text` change. The degree *text* is now the residual's only contributor |
+
+Also fixed (all real, all the same class): **M-1** — three files stated three *different*, and false, ranks
+for one corpus state ("rank 2" / "3rd" / "~11 of 17", when the gate measured that state at **rank 8,
+p@5 = 1.00, i.e. a bad engine passing**); each stale number is now marked wrong in place, narrative kept.
+**M-2** — the ported engine helpers' "if 4c changes them, these must change in the same diff" was enforced
+by nothing; there is now a test that imports the real `src.pipeline.matching.{stages,orchestrator}` *when
+they exist* and compares over an input table (skips until 4c, including the `"ma "` landmine probe).
+**M-3** — "4c MUST run those three mutations" / "must REPLACE `_fuzz_substring`" were prose obligations
+dressed as mechanical ones; nothing can gate them (they need the engine run with *mutated* `MatchWeights`),
+so they are now stated plainly as **review obligations on the 4c PR**. **N-1** — "all three ordering gaps
+are ARITHMETIC" was false: only overqual (`0.6·0.25·0.08 = 0.0120`) is, and it is the only one the sandwich
+needs or asserts; education subtracts a *measured* residual and motivation's `0.9` is a *measured* LLM
+confidence, not a `MatchWeights` constant. **N-2** — `min_precision = 0.8` is clearable by a random ranker
+**39.5%** of the time (hypergeometric, 11 good / 6 bad, k=5), not "roughly half". **N-3** — round numbering
+diverged by 2 between the docs and the corpus files; one cumulative scheme now, with the commit-name
+mapping written down. **N-4** — the toml's reverse-direction key check walked only section tables, so a
+**top-level scalar key** would have been invisible to the three-way contract; closed.
+
+**Battery re-measured after the one fixture change** (r11 adopts r14's institution), real `nomic-embed-text`
+768-d on a **cold cache**, both input orders — **every arm's verdict, the top-5, and the rank bands are
+unchanged**:
+
+| arm | p@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | all 3 ✗ | FAIL |
+| lexical tf-idf | 1.00 | 8 | all 3 ✗ | FAIL |
+| embedding pure-vector | 0.80 | 4 | all 3 ✗ | FAIL |
+| faithful + no-op verifier | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + hris `_fuzz_substring` | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + **correct** verifier | 1.00 | 8 | all 3 ✓ | **PASS** |
+
+Bands: **0 violations**, populations unchanged (7 strong / 4 borderline / 5 weak / 1 adversarial), top-5
+unchanged, 5th-place cutoff **0.785**, r09 **0.597** (~0.19 margin). The only deltas anywhere: r11's score
+0.7578 → 0.7583 (still rank 7), the education pair's correct-engine gap +0.0397 → **+0.0391**, and the
+education-blind separation **−3.30e-04 → −8.72e-04** — i.e. the inversion the F2 fix depends on got
+*stronger*, and it is now pinned rather than accidental.
+
+**Gates:** ruff · black · `mypy src --strict` clean; **1035 unit tests @ 96.63% coverage** (306 corpus
+tests, 1 skipped until 4c); `run_evals.py` still exits 1. Zero `core/src/` changes.
