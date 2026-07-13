@@ -227,6 +227,50 @@ The engine's own ``_level_from_degree`` / ``_most_recent_title`` /
 ``score_education`` are now PORTED into this module (above), so the corpus
 asserts what the engine COMPUTES rather than what a sub-score's name suggests.
 
+--- Phase-4a FALSIFIABILITY hardening (round 6: F5) ---
+
+* **F5** TWO of the three ordering pairs did not gate their dimension. The
+  contract was ``rank(higher_id) < rank(lower_id)`` and nothing more, so it was
+  satisfiable by a TIE-BREAK. Measured against an engine made BLIND to each
+  pair's own dimension:
+
+  =============  ==========================  ==================  =============
+  pair           blind engine                twin separation     verdict
+  =============  ==========================  ==================  =============
+  education      ``weights.education = 0``   -3.266e-04          FAIL (both orders)
+  overqual       ``overqual_ratio = 99``     **+0.000e+00**      coin flip
+  motivation     ``weights.motivation = 0``  **+0.000e+00**      coin flip
+  =============  ==========================  ==================  =============
+
+  The motivation pair PASSED a motivation-blind engine in the fixtures' natural
+  order, and the overqual pair failed only by tie-break luck (it PASSES on the
+  reversed input order). Root cause -- the mirror image of F2:
+  ``_build_summary_text`` (``core/src/worker/resume_tasks.py``) embeds
+  ``summary`` / ``skills`` / ``experience`` / ``education`` and NOTHING ELSE. It
+  does not read ``total_years_experience`` or ``cover_letter_chunks``, which are
+  exactly the fields the overqual and motivation twins differ in -- so those
+  twins' embedding input is BYTE-IDENTICAL, their vector sub-scores are equal to
+  the last bit, and with the target dimension switched off their ``score_final``
+  is an EXACT tie. ``stage4_combine``'s stable sort then inherits stage-1's
+  ``ORDER BY vec_score DESC``, which for identical vectors is arbitrary. (The F2
+  fix works precisely BECAUSE the education twins keep a residual, aimed at the
+  LOWER twin.)
+
+  Fixed by strengthening the contract rather than by copying F2's
+  inverted-residual trick into the other two twins -- that would re-introduce an
+  embedder-dependent magnitude, which is the F1 lesson (pin by ARITHMETIC, not by
+  measurement). ``[ordering_controls].min_score_gap = 1e-6`` is new, and 4c must
+  assert BOTH ``rank(hi) < rank(lo)`` AND
+  ``score_final(hi) - score_final(lo) >= min_score_gap``. An exact tie can then
+  never pass under any tie-break, on any input order. The correct engine's gaps
+  (+0.0397 / +0.0120 / +0.0900) clear it by four orders of magnitude, and every
+  one of the three is ARITHMETIC (see
+  ``test_min_score_gap_is_far_below_the_smallest_gap_a_correct_engine_produces``).
+  ``test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists``
+  pins the byte-identical embedding input, so the tie cannot be "fixed" later by
+  narrating years/motivation into a twin's ``summary`` -- which would put the
+  signal back into ``summary_emb`` and re-confound the pair.
+
 PII scanner scope (accepted residuals, round 4 / finding N6) -- what these
 scanners do NOT claim:
 
@@ -265,6 +309,7 @@ from pydantic import ValidationError
 from src.schemas.jobs import JDExtracted
 from src.schemas.matching import DEFAULT_WEIGHTS
 from src.schemas.resumes import ResumeParsed
+from src.worker.resume_tasks import _build_summary_text
 
 EVALS_DIR = Path(__file__).resolve().parent.parent / "evals"
 FIXTURES_DIR = EVALS_DIR / "fixtures"
@@ -446,6 +491,25 @@ def _score_education(levels: list[str | None], jd_min_level: str | None) -> floa
     if best >= req:
         return 1.0
     return DEFAULT_WEIGHTS.education_partial * (best / req) if req else 0.0
+
+
+def _score_experience(total_years: float | None, jd_min_years: int | None) -> float:
+    """stages.py::score_experience, ported verbatim. The ONLY sub-score that
+    reads years -- and the one the overqual ordering pair turns on (round-6
+    finding F5 uses it to DERIVE, arithmetically, the smallest score gap a
+    correct engine can put between any ordering-control pair)."""
+    if not jd_min_years:
+        return 1.0
+    total = total_years or 0
+    raw = total / jd_min_years
+    if raw <= 1.0:
+        return raw
+    if raw <= DEFAULT_WEIGHTS.overqual_ratio:
+        return 1.0
+    return max(
+        DEFAULT_WEIGHTS.overqual_floor,
+        1.0 - (raw - DEFAULT_WEIGHTS.overqual_ratio) * DEFAULT_WEIGHTS.overqual_slope,
+    )
 
 
 def _most_recent_title(parsed: dict[str, Any]) -> str | None:
@@ -698,6 +762,7 @@ _THRESHOLD_KEYS: list[tuple[str, str]] = [
     ("adversarial", "must_not_surface_in_topk"),
     ("ordering_controls", "enforce"),
     ("ordering_controls", "pairs"),
+    ("ordering_controls", "min_score_gap"),
     ("pii", "leak_check"),
     ("pii", "allow_structured_fields"),
     ("pii", "structured_fields_surface"),
@@ -1000,6 +1065,94 @@ def test_thresholds_ordering_control_pairs_match_labels_json_exactly() -> None:
         f"labels.json ordering_controls {sorted(label_pairs)}"
     )
     assert {d for d, _, _ in toml_pairs} == _EXPECTED_ORDERING_CONTROL_DIMENSIONS
+
+
+# Round-6 finding F5. `rank(higher) < rank(lower)` ALONE is satisfiable by a
+# TIE-BREAK, and two of the three pairs were being decided by exactly that: with
+# the pair's own dimension switched off, the overqual and motivation twins score
+# an EXACT tie (+0.000e+00), because `_build_summary_text` embeds neither
+# `total_years_experience` nor `cover_letter_chunks`, so those twins' embedding
+# input -- and therefore their vector sub-score -- is byte-identical. The
+# motivation pair PASSED a motivation-blind engine in the fixtures' natural
+# order; the overqual pair failed only by luck (it PASSES on the reversed order).
+#
+# The pairwise contract is therefore rank AND gap:
+#     rank(hi) < rank(lo)  AND  score_final(hi) - score_final(lo) >= min_score_gap
+# so an exact tie can never pass under any tie-break, on any input order.
+#
+# PINNED EXACTLY, like every other numeric threshold in the file. It is bounded
+# on BOTH sides, and both bounds are load-bearing:
+#   * > 0          -- a zero gap re-admits the exact tie this key exists to kill;
+#   * << the smallest gap a CORRECT engine produces (0.0120, and it is
+#     ARITHMETIC, not a measurement -- see the test below) -- otherwise the guard
+#     would fail a correct engine.
+# CHANGING IT NEEDS A HUMAN.
+_MIN_SCORE_GAP = 1e-6
+
+
+def test_thresholds_ordering_controls_min_score_gap_is_pinned_exactly() -> None:
+    data = _load_thresholds()
+    gap = data["ordering_controls"]["min_score_gap"]
+    assert gap == _MIN_SCORE_GAP, (
+        "min_score_gap must be exactly 1e-6 -- it is the half of the "
+        "ordering-control contract that makes the pairs falsifiable at all: "
+        "without it, `rank(higher) < rank(lower)` is satisfiable by the stable "
+        "sort's arbitrary tie-break, and a motivation-blind engine PASSES the "
+        "motivation pair"
+    )
+    assert gap > 0.0, (
+        "a zero (or negative) gap re-admits the exact tie: with the target "
+        "dimension off, the overqual and motivation twins score EXACTLY the "
+        "same, so only a strictly positive gap can fail such an engine on BOTH "
+        "input orders"
+    )
+
+
+def test_min_score_gap_is_far_below_the_smallest_gap_a_correct_engine_produces() -> (
+    None
+):
+    """The other side of the sandwich: the guard must not be able to fail a
+    CORRECT engine.
+
+    The smallest of the three pairs' correct-engine gaps is the overqual pair's,
+    and it is pure arithmetic off ``MatchWeights`` + the two twins'
+    ``total_years_experience`` -- no embedder, no LLM, no measurement:
+
+        gap = structured_weight * experience_weight
+              * (score_experience(r15) - score_experience(r13))
+            = 0.6 * 0.25 * (1.00 - 0.92) = 0.0120
+
+    (The education pair's is 0.6 * 0.10 * (1 - education_partial * 2/3) = 0.0400
+    minus a ~3e-04 vector residual; the motivation pair's is 0.1 * 0.9 = 0.0900.)
+
+    ``min_score_gap`` must sit orders of magnitude below that, or a correct 4c
+    engine could be failed by the very guard meant to protect the pair. It is
+    also the reason this file does NOT try to fix the tie by inflating the twins'
+    score difference: the gap threshold is an epsilon against float noise, not a
+    tuned separation.
+    """
+    labels = _load_labels()
+    jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
+    r13 = _load_resume_raw("r13_quinn_delgado")
+    r15 = _load_resume_raw("r15_cameron_whitfield")
+
+    exp_r13 = _score_experience(r13["total_years_experience"], jd.min_years_experience)
+    exp_r15 = _score_experience(r15["total_years_experience"], jd.min_years_experience)
+    overqual_gap = (
+        DEFAULT_WEIGHTS.structured * DEFAULT_WEIGHTS.experience * (exp_r15 - exp_r13)
+    )
+
+    assert overqual_gap == pytest.approx(0.012), (
+        f"the overqual pair's correct-engine gap is arithmetic and must stay "
+        f"0.0120; got {overqual_gap!r} (r15 exp={exp_r15}, r13 exp={exp_r13})"
+    )
+    data = _load_thresholds()
+    gap = data["ordering_controls"]["min_score_gap"]
+    assert 0.0 < gap < overqual_gap / 1000, (
+        f"min_score_gap ({gap}) must sit far below the smallest gap a correct "
+        f"engine produces ({overqual_gap}) -- it is an anti-tie epsilon, not a "
+        f"separation the fixtures have to earn"
+    )
 
 
 # ── Label manifest <-> fixture files agree in both directions ────────────
@@ -2489,6 +2642,80 @@ def test_r16_motivation_twin_is_identical_to_r04_except_cover_letter_chunks() ->
     assert (
         r16["cover_letter_chunks"] == []
     ), "r16 (target) must have NO cover letter -- the sole target dimension"
+
+
+# ── Round-6 F5: WHY the pairs need a score gap, not just a rank compare ───
+
+
+def _embedding_input(resume_id: str) -> str:
+    """The exact string the pipeline embeds for a fixture -- the PRODUCT's own
+    ``_build_summary_text``, not a re-implementation of it (round-6 finding F5
+    is a bug in the corpus's model of that function, so the test must not copy
+    the model)."""
+    parsed = ResumeParsed.model_validate(_load_resume_raw(resume_id))
+    return _build_summary_text(parsed)
+
+
+def test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists() -> (
+    None
+):
+    """Finding F5, pinned from the fixture side.
+
+    ``_build_summary_text`` reads ``summary`` / ``skills`` / ``experience`` /
+    ``education`` -- and NOTHING else. It never reads ``total_years_experience``
+    and never reads ``cover_letter_chunks``, which are precisely the fields the
+    overqual and motivation twins differ in. So each of those pairs has a
+    BYTE-IDENTICAL embedding input, an identical vector sub-score, and -- once
+    the pair's own dimension is switched off -- an EXACT TIE on ``score_final``
+    (measured: +0.000e+00 for both). A rank-only assertion then decides the pair
+    by ``stage4_combine``'s stable sort inheriting stage-1's
+    ``ORDER BY vec_score DESC``, which for identical vectors is arbitrary: the
+    motivation pair PASSED a motivation-blind engine in the fixtures' natural
+    order, and the overqual pair PASSES one on the reversed order.
+
+    That byte-identity is DESIRABLE and deliberate (it is what keeps the
+    dimension out of ``summary_emb``; see labels.json's overqual rationale), so
+    the fix is the ``min_score_gap`` half of the contract -- NOT narrating the
+    dimension back into a twin's ``summary``. This test is what makes that
+    tempting "fix" fail loudly: it re-introduces an embedder-dependent
+    differentiator and turns the pair back into a vector test.
+
+    The education pair is the deliberate exception: a differing degree LEVEL
+    REQUIRES a differing degree string, so its embedding input cannot be
+    byte-identical. That residual is dominated (0.0400 vs ~3e-04) and points at
+    the LOWER twin (F2), which is why that pair is decisive on ranks alone.
+    """
+    tie_pairs = [
+        ("overqual", "r15_cameron_whitfield", "r13_quinn_delgado"),
+        ("motivation", "r04_morgan_lee", "r16_rowan_castillo"),
+    ]
+    for dimension, higher_id, lower_id in tie_pairs:
+        higher = _embedding_input(higher_id)
+        lower = _embedding_input(lower_id)
+        assert higher == lower, (
+            f"{dimension}: the twins' EMBEDDING INPUT must stay byte-identical "
+            f"({higher_id} vs {lower_id}) -- the dimension must not leak into "
+            f"summary_emb. If you changed a twin's summary to break the "
+            f"score_final tie, revert it: the tie is handled by "
+            f"[ordering_controls].min_score_gap, and a narrated summary makes "
+            f"this pair a VECTOR test that a dimension-blind ranker passes "
+            f"(round-5 finding F2, on the education pair)."
+        )
+
+    edu_higher = _embedding_input("r14_devon_ashworth")
+    edu_lower = _embedding_input("r11_skyler_brooks")
+    assert edu_higher != edu_lower, (
+        "the education twins' embedding input MUST differ -- a differing degree "
+        "LEVEL requires a differing degree string, and pretending otherwise "
+        "would mean the fixtures no longer encode the level difference"
+    )
+    marker = "Education: "
+    assert marker in edu_higher and marker in edu_lower
+    assert edu_higher.split(marker)[0] == edu_lower.split(marker)[0], (
+        "the education twins' embedding input may differ ONLY in the trailing "
+        "`Education: ...` segment -- anything else is a second, uncontrolled "
+        "differentiator in summary_emb"
+    )
 
 
 # ── Falsifiability hardening E5: format-divergent PII positive controls ───
