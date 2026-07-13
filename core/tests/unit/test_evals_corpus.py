@@ -341,6 +341,96 @@ SKILL_EVIDENCE_MARKERS: dict[str, str] = {
 CURRENT_YEAR = 2026
 
 
+# ── The ENGINE's own sub-score inputs, ported (round-5 findings F1 / F2) ──
+#
+# Round 4's corpus asserted what each sub-score was *supposed* to mean; round 5
+# read `hris packages/pipeline/src/pipeline/matching/{stages,orchestrator}.py`
+# -- the code `docs/EXTRACTION_PLAN.md` says 4c ports -- and found two of the
+# five sub-scores compute something ELSE entirely. Both bait-holes below existed
+# only against the REAL algorithm, so the corpus is now written against the port,
+# not against the idea of the port. These helpers mirror the shipped code exactly;
+# if 4c changes them, these must change in the same diff.
+#
+#   * SENIORITY is NOT a years check (orchestrator.py:331-340). It is the COSINE
+#     between the JD title and the candidate's MOST-RECENT ROLE TITLE, rescaled
+#     from [seniority_floor, 1] to [0, 1]. `score_experience` is the only thing
+#     that reads years.
+#   * EDUCATION reads the degree LEVEL only (stages.py:185-201). It NEVER reads
+#     `jd.education.fields` -- field relevance is currently DECORATIVE. See the
+#     open decision recorded in docs/EXTRACTION_PLAN.md.
+
+# stages.py::_LEVEL_ORDER
+_LEVEL_ORDER: dict[str, int] = {
+    "high_school": 1,
+    "associate": 2,
+    "bachelors": 3,
+    "masters": 4,
+    "phd": 5,
+}
+
+# orchestrator.py::_DEGREE_KEYWORDS -- ORDER IS LOAD-BEARING (first match wins).
+#
+# LANDMINE, and it is live: the masters bucket contains the keyword ``"ma "``
+# -- WITH A TRAILING SPACE -- and it is tested BEFORE ``associate``. So the
+# obvious sub-bachelor string "Associate Diploma in Data Engineering" contains
+# "diplo-MA -in" and maps to **masters**, scoring education 1.00 instead of the
+# intended partial credit. Writing that string into r11 would have silently
+# re-confounded the education ordering pair with no test failing anywhere.
+# `test_r11_degree_string_does_not_collide_with_a_higher_level_keyword` pins it.
+_DEGREE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("phd", ("phd", "doctor")),
+    ("masters", ("master", "msc", "mba", "ma ")),
+    ("bachelors", ("bachelor", "bsc", "ba ", "bs ", "bfa")),
+    ("associate", ("associate",)),
+    ("high_school", ("high school",)),
+)
+
+
+def _level_from_degree(degree: str | None) -> str | None:
+    """orchestrator.py::_level_from_degree, ported verbatim."""
+    if not degree:
+        return None
+    d = degree.lower()
+    for level, keywords in _DEGREE_KEYWORDS:
+        if any(k in d for k in keywords):
+            return level
+    return None
+
+
+def _score_education(levels: list[str | None], jd_min_level: str | None) -> float:
+    """stages.py::score_education, ported verbatim. Reads the LEVEL only."""
+    if not jd_min_level:
+        return 1.0
+    req = _LEVEL_ORDER.get(jd_min_level, 0)
+    cand = [_LEVEL_ORDER.get(lvl, 0) for lvl in levels if lvl]
+    if not cand:
+        return 0.0
+    best = max(cand)
+    if best >= req:
+        return 1.0
+    return DEFAULT_WEIGHTS.education_partial * (best / req) if req else 0.0
+
+
+def _most_recent_title(parsed: dict[str, Any]) -> str | None:
+    """orchestrator.py::_most_recent_title, ported verbatim -- `is_current`
+    first, else the first role. This is the string the engine feeds to the
+    embedder for the SENIORITY sub-score."""
+    roles = parsed.get("experience") or []
+    if not roles:
+        return None
+    current = [r for r in roles if r.get("is_current")]
+    role = current[0] if current else roles[0]
+    title = role.get("title")
+    return str(title) if title else None
+
+
+def _education_sub_score(resume_id: str, jd: JDExtracted) -> float:
+    raw = _load_resume_raw(resume_id)
+    levels = [_level_from_degree(e.get("degree")) for e in raw.get("education", [])]
+    assert jd.education is not None
+    return _score_education(levels, jd.education.min_level)
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
         result: dict[str, Any] = json.load(fh)
@@ -1287,15 +1377,45 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
     evidence verifier is supposed to do. Giving r09 a JD-allowed BSc leaves
     all 264 tests green; so did deleting its education entirely.
 
-    With the bait repaired (BSc Computer Science, a JD-allowed field), the
-    no-op-verifier engine ranks r09 **2nd** -> precision@5 = 0.80 -> the
-    adversarial arm correctly FAILS. Under a CORRECT verifier r09 scores
-    ~0.547 and lands at rank 11 -- far below the 0.844 top-5 cutoff. See
-    labels.json for why an adversarial fixture that is top-tier on every
-    non-evidence signal MUST land adjacent to the borderline tier: that is
-    arithmetic (``0.6*structured + 0.3*0 + 0.1*0``), not a mislabel.
+    ROUND 5 -- and the hole was still open, because round 4 fixed the sub-score
+    it could see and MOVED the hole onto the one it could not. Round 5 stopped
+    modelling the engine and PORTED it (hris ``matching/{stages,orchestrator}
+    .py``). Two of the five structured sub-scores do not compute what this test
+    assumed:
 
-    So: r09 must be structurally TOP-TIER on every non-evidence signal. Only
+    * ``seniority`` is a COSINE between the JD title and the candidate's
+      most-recent role title -- it does not read years at ALL. But
+      ``thresholds.toml`` and step (d) justified BOTH ``experience`` (0.25) and
+      ``seniority`` (0.15) with one claim about years, so this test asserted
+      ``experience`` TWICE and ``seniority`` NEVER -- while r09 carried
+      ``"title": "Software Professional"``, the most JD-distant title in the
+      whole non-weak corpus. Measured (faithful engine + no-op verifier):
+      seniority 0.271, r09 -> rank 8, precision@5 = 1.00 -> **a bad engine
+      PASSES**. Break-even: the trap fires iff seniority(r09) >= 0.638.
+    * ``education`` reads the degree LEVEL only and never
+      ``jd.education.fields`` (open decision, docs/EXTRACTION_PLAN.md).
+
+    r09 now copies the JD title VERBATIM, so seniority is EXACTLY 1.0 under
+    every embedder by arithmetic (step (d2)) rather than by a model-dependent
+    measurement. MEASURED against the faithful engine on the repaired corpus
+    (nomic-embed-text v1.5, 768-d, real rapidfuzz):
+
+    * no-op evidence verifier -> r09 rank **1**, precision@5 = 0.80 -> FAIL.
+      (The bait now BEATS every honest candidate when nothing verifies its
+      quotes, which is the strongest possible statement of the trap.)
+    * hris's own shipped ``_fuzz_substring`` -> r09 rank **1** -> FAIL. The
+      verifier 4c is told to port VERIFIES all four fabricated anchors
+      (0.928-0.988). It must be REPLACED, not ported (docs/EXTRACTION_PLAN.md).
+    * correct verifier (rapidfuzz ``partial_ratio``) -> r09 rank **8**,
+      precision@5 = 1.00 -> PASS, 0.1875 of margin below the 5th-place cutoff.
+
+    (The round-4 docstring claimed rank 2 here while thresholds.toml and
+    labels.json said 3 -- finding F4. Neither is live any more; the numbers
+    above are re-derived on the repaired corpus and now agree across all three
+    files.)
+
+    So: r09 must be structurally TOP-TIER on every non-evidence signal -- all
+    FIVE of them, as the ENGINE computes them, not as their names suggest. Only
     EVIDENCE verification may reject it.
     """
     labels = _load_labels()
@@ -1344,8 +1464,18 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
             f"doing the rejection work the evidence verifier must do"
         )
 
-    # (d) Seniority/experience: clears the JD minimum WITHOUT tripping the
-    #     overqualification penalty.
+    # (d) EXPERIENCE (0.25) -- and ONLY experience. `score_experience` is the
+    #     one sub-score that reads years: it clears the JD minimum WITHOUT
+    #     tripping the overqualification penalty.
+    #
+    #     ROUND-5 FINDING F1: this step used to be labelled
+    #     "Seniority/experience" and was cited by thresholds.toml as the
+    #     justification for BOTH the experience (0.25) AND seniority (0.15)
+    #     sub-scores. That is one assertion wearing two hats, and the second hat
+    #     was a fiction: `seniority` does not read years AT ALL (see (d2)). So
+    #     the potency test asserted `experience` twice and `seniority` never --
+    #     the round-4 bait hole was not fixed, it was RELOCATED from education
+    #     (0.10) onto seniority (0.15), a BIGGER hole than the one it replaced.
     assert jd.min_years_experience > 0
     years = parsed.total_years_experience
     assert years >= jd.min_years_experience, (
@@ -1359,29 +1489,82 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
         f"by the overqual penalty rather than by the fabrication verifier"
     )
 
-    # (e) EDUCATION (0.10 of the structured score) -- the sub-score the round-3
-    #     test omitted and that was silently defusing the whole trap. r09 must
-    #     MEET the JD's min_level AND hold one of its allowed fields, so
-    #     neither the level check nor education_partial can demote it.
+    # (d2) SENIORITY (0.15) -- the sub-score NOTHING in the corpus asserted, and
+    #      the one r09 was weakest on. It is NOT a years check. In
+    #      `orchestrator.py:331-340` it is the COSINE between the JD title and
+    #      the candidate's most-recent role title, rescaled from
+    #      [seniority_floor, 1.0] to [0, 1].
+    #
+    #      r09 shipped `"title": "Software Professional"` -- the most JD-DISTANT
+    #      title of any non-weak fixture (every strong fixture is a
+    #      Backend/Data/Staff/Principal Engineer). Measured against the faithful
+    #      engine + a NO-OP evidence verifier, that scored seniority 0.000-0.271
+    #      (embedder-dependent) and let a BAD ENGINE PASS: the whole adversarial
+    #      arm went inert, exactly as in round 4, just one sub-score over.
+    #
+    #      THE PIN. The corpus has no embedder, so it cannot assert a measured
+    #      cosine -- and it must not, because a measured cosine is a property of
+    #      the embedding MODEL, not of the fixture: re-measuring
+    #      "Senior Backend Engineer" across two nomic-embed-text builds gave
+    #      0.755 and 0.581, straddling the 0.638 break-even at which the trap
+    #      arms. A corpus whose most important guard flips on a model rebuild is
+    #      not a guard.
+    #
+    #      So the bait copies the JD title VERBATIM -- which is also the most
+    #      realistic keyword-stuffer behaviour there is. Then
+    #      cosine(embed(t), embed(t)) == 1.0 for ANY embedder, and the rescale
+    #      (1.0 - floor)/(1.0 - floor) == 1.0, so seniority is EXACTLY 1.0 by
+    #      ARITHMETIC, under every model, forever. That is assertable here with
+    #      no embedder at all -- a string comparison -- and it is a strictly
+    #      stronger guarantee than any measured value.
+    recent_title = _most_recent_title(_load_resume_raw("r09_sam_ortiz"))
+    assert recent_title == jd.title, (
+        f"r09: the engine's most-recent role title (per orchestrator.py's "
+        f"`_most_recent_title`: is_current first, else roles[0]) is "
+        f"{recent_title!r}, but the SENIORITY sub-score is "
+        f"cosine(jd.title, that_title) -- so it must equal the JD title "
+        f"{jd.title!r} EXACTLY. cosine(x, x) == 1.0 for every embedder, which "
+        f"pins seniority at its 1.0 ceiling by arithmetic rather than by a "
+        f"model-dependent measurement. A JD-distant title (the shipped "
+        f"'Software Professional') silently demotes the bait on 0.15 of the "
+        f"structured score and the fabrication trap stops trapping."
+    )
+
+    # (e) EDUCATION (0.10). Assert what the engine READS, not what the fixture
+    #     means: `score_education` (stages.py:185-201) reads the degree LEVEL
+    #     via `_level_from_degree` and compares it to the JD's `min_level`. It
+    #     NEVER reads `jd.education.fields`.
     assert jd.education is not None
     assert jd.education.min_level == "bachelors"
     assert parsed.education, "r09 must carry an education entry"
     edu = parsed.education[0]
-    assert edu.degree.lower().startswith("bsc"), (
-        f"r09: degree {edu.degree!r} must be a bachelor's-LEVEL degree meeting "
-        f"the JD's min_level={jd.education.min_level!r}. A sub-bachelor degree "
-        f"fails the education check on its own -- which is exactly how the "
-        f"shipped `Diploma, General Studies` made the [adversarial] arm inert: "
-        f"a no-op-evidence-verifier engine dropped r09 out of the top-5 on "
-        f"EDUCATION, so the fabrication trap never fired"
+    level = _level_from_degree(edu.degree)
+    assert level is not None and _LEVEL_ORDER[level] >= _LEVEL_ORDER[
+        jd.education.min_level
+    ], (
+        f"r09: degree {edu.degree!r} maps to level {level!r}, which does not "
+        f"meet the JD's min_level={jd.education.min_level!r}. A sub-bachelor "
+        f"degree fails the education check on its own -- which is exactly how "
+        f"the shipped `Diploma, General Studies` made the [adversarial] arm "
+        f"inert in round 4."
     )
+    assert _education_sub_score("r09_sam_ortiz", jd) == 1.0, (
+        "r09's education sub-score must be a maximal 1.0 -- education must not "
+        "be doing the rejection work the EVIDENCE verifier is supposed to do"
+    )
+    # The FIELD is asserted too, but be honest about why: the ported
+    # `score_education` IGNORES `jd.education.fields`, so this assertion is
+    # decorative against today's engine (see the open decision in
+    # docs/EXTRACTION_PLAN.md). It is kept as forward-insurance: if a human
+    # resolves that decision by EXTENDING the scorer to read fields, the bait
+    # must still be top-tier on education rather than silently going inert for
+    # a third time.
     allowed_fields = {f.lower() for f in jd.education.fields}
     assert edu.field is not None
     assert edu.field.lower() in allowed_fields, (
         f"r09: education field {edu.field!r} must be one of the JD's allowed "
-        f"fields {sorted(allowed_fields)} -- a non-allowed field only earns "
-        f"MatchWeights.education_partial ({DEFAULT_WEIGHTS.education_partial}), "
-        f"which is a structured demotion the evidence verifier must not need"
+        f"fields {sorted(allowed_fields)} -- forward-insurance for the open 4c "
+        f"decision on whether `score_education` should read `fields` at all"
     )
     # ...and the education CHUNK must narrate the same degree, so the bait is
     # not top-tier in the structured education[] entry while confessing a
@@ -1478,41 +1661,116 @@ def test_r10_recency_relevant_skills_are_grounded_and_in_the_mid_or_old_bucket()
         )
 
 
-# ── Phase-4a strengthening item 3: non-CS-education partial-credit fixture ──
+# ── Phase-4a strengthening item 3: education partial-credit fixture ──────
+#
+# ROUND-5 FINDING F2. r11 used to be "a strong candidate with a bachelor's in a
+# NON-ALLOWED FIELD (Mechanical Engineering)", and labels.json claimed
+# `MatchWeights.education_partial (0.5)` would demote it relative to its twin
+# r14 (Computer Science). That mechanism DOES NOT EXIST:
+#
+#   `stages.score_education()` reads the degree LEVEL and compares it to
+#   `jd.education.min_level`. It NEVER reads `jd.education.fields`.
+#
+# Both twins were `BSc` -> `bachelors` -> `best >= req` -> education = **1.00
+# for both**. `education_partial` could not fire for r11 in a faithful port, so
+# the corpus's education ordering pair did not test education at all.
+#
+# Worse, the pair still PASSED an education-blind ranker -- through the VECTOR
+# path. `core/src/worker/resume_tasks.py::_build_summary_text` embeds
+# `education[].degree` + institution into `summary_emb`, so the degree
+# difference leaked into the vector sub-score. Measured with the education
+# sub-score DELETED outright (`weights.education = 0.0`), r14 still outranked
+# r11 -- the entire gap was vector. That is the D1 confound round 3 thought it
+# had closed by deleting the education CHUNK: the degree still rode into
+# `summary_emb` via the structured `education[]` entry.
+#
+# THE FIX -- port-faithful, and it makes the pair DECISIVE rather than merely
+# uncofounded. The twins now differ in degree LEVEL (the only thing the scorer
+# reads): r14 holds a bachelor's (level 3 >= req 3 -> education = 1.00), r11
+# holds a sub-bachelor associate credential (level 2 < req 3 -> education =
+# education_partial * 2/3 = 0.333). Both FIELDS are JD-ALLOWED, deliberately:
+#   * it removes the field as a possible discriminator, so the pair cannot be
+#     passed by a field-reading ranker either, and
+#   * the pair therefore survives EITHER resolution of the open 4c decision on
+#     whether `score_education` should read `fields` (docs/EXTRACTION_PLAN.md).
+#
+# Measured on the repaired corpus (faithful engine, real embedder):
+#   correct engine:          r14 rank 3, r11 rank 7  (gap +0.0397, education-driven)
+#   weights.education = 0.0: r14 rank 4, r11 rank 3  -> the pair FLIPS -> FAIL
+# The residual embedded-degree vector confound now points at r11 (the LOWER
+# twin, -0.0003), so the ONLY way an engine can put r14 above r11 is by
+# actually implementing the education sub-score.
 
 
-def test_r11_non_cs_education_candidate_is_tagged_strong() -> None:
+def test_r11_education_candidate_is_tagged_strong() -> None:
     labels = _load_labels()
     assert labels["resumes"]["r11_skyler_brooks"]["tag"] == "strong"
 
 
-def test_r11_covers_every_required_skill_with_a_non_cs_bachelors_degree() -> None:
+def test_r11_covers_every_required_skill_with_a_sub_bachelor_credential() -> None:
     labels = _load_labels()
     entry = labels["resumes"]["r11_skyler_brooks"]
     parsed = ResumeParsed.model_validate(_load_json(FIXTURES_DIR / entry["fixture"]))
     jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
     assert jd.education is not None
+    assert jd.education.min_level is not None
 
     required_names = {s.name.lower() for s in jd.required_skills}
     candidate_names = {s.name.lower() for s in parsed.skills}
     assert required_names <= candidate_names, (
         "r11 must claim every required skill -- the point is that skills are "
-        "fully covered and ONLY the education field differs from the "
-        "all-CS-bachelor strong tier"
+        "fully covered and ONLY the education LEVEL differs from the strong tier"
     )
 
     assert parsed.education, "r11 must have an education entry"
     edu = parsed.education[0]
-    assert edu.degree.lower().startswith("bsc"), (
-        "r11 must hold a genuine bachelor's-level degree (min_level is met) "
-        "so the only discriminator is the FIELD, not the level"
+    level = _level_from_degree(edu.degree)
+    assert level is not None, (
+        f"r11: degree {edu.degree!r} maps to NO level at all -- "
+        f"`score_education` returns 0.0 for a candidate with no recognisable "
+        f"level, which is a total education MISS, not the PARTIAL credit this "
+        f"fixture exists to exercise (that is what the old r09 "
+        f"'Diploma, General Studies' did)"
     )
-    allowed_fields = {f.lower() for f in jd.education.fields}
-    assert edu.field is not None
-    assert edu.field.lower() not in allowed_fields, (
-        f"r11: education field {edu.field!r} must NOT be one of the JD's "
-        f"approved fields {jd.education.fields!r} -- that mismatch is what "
-        f"exercises MatchWeights.education_partial"
+    assert _LEVEL_ORDER[level] < _LEVEL_ORDER[jd.education.min_level], (
+        f"r11: degree {edu.degree!r} maps to level {level!r}, which MEETS the "
+        f"JD's min_level={jd.education.min_level!r} -- so `score_education` "
+        f"returns 1.00 and `education_partial` never fires. The LEVEL is the "
+        f"only thing the ported scorer reads; a field mismatch does nothing."
+    )
+
+    score = _education_sub_score("r11_skyler_brooks", jd)
+    expected = DEFAULT_WEIGHTS.education_partial * (
+        _LEVEL_ORDER[level] / _LEVEL_ORDER[jd.education.min_level]
+    )
+    assert score == pytest.approx(expected), (
+        f"r11's education sub-score must be the PARTIAL-credit value "
+        f"{expected:.4f} that `MatchWeights.education_partial` produces"
+    )
+    assert 0.0 < score < 1.0, "partial credit means strictly between a miss and a meet"
+
+
+def test_r11_degree_string_does_not_collide_with_a_higher_level_keyword() -> None:
+    """The `_DEGREE_KEYWORDS` landmine, pinned.
+
+    `orchestrator._level_from_degree` substring-matches in priority order, and
+    the MASTERS bucket contains the keyword ``"ma "`` (with a trailing space),
+    tested BEFORE ``associate``. So the natural sub-bachelor string
+    ``"Associate Diploma in Data Engineering"`` contains ``"diplo-MA -in"`` and
+    maps to **masters** -> level 4 >= 3 -> education = 1.00 -> `education_partial`
+    never fires and the r11/r14 ordering pair is silently re-confounded, with
+    NOTHING failing.
+
+    This is not hypothetical: it is the first string this fixture was written
+    with. Guard the level mapping directly.
+    """
+    raw = _load_resume_raw("r11_skyler_brooks")
+    degree = raw["education"][0]["degree"]
+    assert _level_from_degree(degree) == "associate", (
+        f"r11's degree {degree!r} must map to the 'associate' level. If you "
+        f"changed this string, check it against `_DEGREE_KEYWORDS` -- 'ma ', "
+        f"'ba ', 'bs ' and 'msc' are substring-matched and will silently "
+        f"promote the level."
     )
 
 
@@ -2027,16 +2285,27 @@ def test_ordering_control_pair_members_share_the_same_tag() -> None:
 # ordering is itself part of the fixture contract already checked above).
 
 
-def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None:
+def test_r14_education_twin_is_identical_to_r11_except_education_level() -> None:
     """r14 (education twin) must differ from r11 ONLY in the education
-    field: identical skills, cited chunks, and experience, both hold a
-    genuine bachelor's-LEVEL degree, but r14's field is JD-allowed
-    (Computer Science) and r11's is not (Mechanical Engineering). If the
-    twins accidentally differed anywhere else, a future 4c ordering
-    assertion built on this pair would be confounded."""
+    LEVEL -- the one thing `stages.score_education` actually reads.
+
+    ROUND-5 FINDING F2. This test used to assert the twins differed only in the
+    education FIELD (r14 Computer Science, r11 Mechanical Engineering) and
+    labels.json claimed `education_partial` would demote r11. It cannot:
+    `score_education` never reads `jd.education.fields`, and both twins were
+    `BSc` -> `bachelors` -> education = 1.00 for BOTH. The pair asserted a
+    mechanism that does not exist, and passed an education-blind ranker via the
+    embedded-degree vector leak. See the block comment above
+    `test_r11_covers_every_required_skill_with_a_sub_bachelor_credential`.
+
+    The pair now differs in LEVEL (bachelor's vs associate), and BOTH fields are
+    JD-allowed so the field cannot be the discriminator either -- which also
+    makes the pair survive either resolution of the open `fields` decision.
+    """
     labels = _load_labels()
     jd = JDExtracted.model_validate(_load_json(FIXTURES_DIR / labels["job"]["fixture"]))
     assert jd.education is not None
+    assert jd.education.min_level is not None
     allowed_fields = {f.lower() for f in jd.education.fields}
 
     r11 = _load_resume_raw("r11_skyler_brooks")
@@ -2057,17 +2326,18 @@ def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None
     # Finding D1: FULL chunk-list equality, matching the other two pairs.
     #
     # This test used to relax to *cited*-chunk equality, which let the
-    # education chunk c_005 differ between the twins ("BSc Mechanical
-    # Engineering, ..." vs "BSc Computer Science, ..."). But EVERY chunk is
+    # education chunk c_005 differ between the twins. But EVERY chunk is
     # embedded (_embed_batched -> chunk_embs) and stage-3 evidence retrieval
-    # runs over the whole chunk list against a JD that carries an education
-    # requirement -- so r14 could out-score r11 through the EVIDENCE path (0.3
-    # of score_final) even if MatchWeights.education_partial were a total
-    # no-op, which is exactly what this pair exists to detect. c_005 is cited
-    # by nothing in either twin, and education_partial reads the structured
-    # education[] entry rather than a chunk, so the education chunk is simply
-    # deleted from both fixtures. (Same confound commit e8e83be fixed for
-    # `summary`, not carried over to the chunk list at the time.)
+    # runs over the whole chunk list, so r14 could out-score r11 through the
+    # EVIDENCE path (0.3 of score_final) even if education were a total no-op.
+    # The education chunk is simply deleted from both fixtures.
+    #
+    # NB (round 5): byte-identical CHUNKS are necessary but were never
+    # SUFFICIENT. `_build_summary_text` also embeds the structured
+    # `education[].degree` + institution, so the degree rides into `summary_emb`
+    # no matter what the chunk list says. That residual cannot be removed (a
+    # differing level REQUIRES a differing degree string), so instead it is
+    # DOMINATED and pointed the other way -- see the block comment above.
     assert r11["chunks"] == r14["chunks"], (
         "twins must share a byte-identical chunk LIST -- a differing chunk is "
         "embedded and evidence-retrieved, so it confounds the education signal"
@@ -2075,19 +2345,40 @@ def test_r14_education_twin_is_identical_to_r11_except_education_field() -> None
 
     r11_edu = r11["education"][0]
     r14_edu = r14["education"][0]
+    r11_level = _level_from_degree(r11_edu["degree"])
+    r14_level = _level_from_degree(r14_edu["degree"])
+    req = _LEVEL_ORDER[jd.education.min_level]
+
+    assert r14_level is not None and _LEVEL_ORDER[r14_level] >= req, (
+        f"r14 (the HIGHER twin) must MEET the JD's min_level "
+        f"{jd.education.min_level!r}: degree {r14_edu['degree']!r} -> "
+        f"{r14_level!r}"
+    )
+    assert r11_level is not None and _LEVEL_ORDER[r11_level] < req, (
+        f"r11 (the LOWER twin) must fall BELOW the JD's min_level "
+        f"{jd.education.min_level!r} so `education_partial` actually fires: "
+        f"degree {r11_edu['degree']!r} -> {r11_level!r}"
+    )
+
+    # The sub-scores the ENGINE computes must actually separate the twins --
+    # this is the assertion whose absence let the pair test nothing.
+    r14_score = _education_sub_score("r14_devon_ashworth", jd)
+    r11_score = _education_sub_score("r11_skyler_brooks", jd)
+    assert r14_score == 1.0
+    assert 0.0 < r11_score < 1.0
+    assert r14_score > r11_score, (
+        f"the ported `score_education` must SEPARATE the twins: r14={r14_score} "
+        f"vs r11={r11_score}. If these are equal, this ordering pair is "
+        f"decorative and an education-blind ranker passes it."
+    )
+
+    # BOTH fields JD-allowed: the field must not be a second differentiator.
     assert (
-        r11_edu["degree"].lower().startswith("bsc")
-    ), "r11 must hold a bachelor's-level degree"
-    assert (
-        r14_edu["degree"].lower().startswith("bsc")
-    ), "r14 must hold the SAME degree level -- only field differs"
-    assert (
-        r11_edu["field"].lower() not in allowed_fields
-    ), "r11's field must stay outside the JD's allowed set (the control baseline)"
+        r11_edu["field"].lower() in allowed_fields
+    ), "r11's field must ALSO be JD-allowed -- the level is the sole dimension"
     assert (
         r14_edu["field"].lower() in allowed_fields
-    ), "r14's field must be inside the JD's allowed set -- the target dimension"
-    assert r11_edu["field"] != r14_edu["field"]
+    ), "r14's field must be JD-allowed"
 
 
 def test_r15_overqual_twin_is_identical_to_r13_except_total_years_experience() -> None:
