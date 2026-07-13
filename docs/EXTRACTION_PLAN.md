@@ -142,10 +142,64 @@ unasserted claim stamped as asserted. Fixed:
   matters; whitespace around the `@` is now tolerated and stripped, and the phone scanner learned the
   unicode dashes and `/` a real PDF paste carries. Both scanners are now themselves gated by probe tests.
 
+**4a hardening, round 3 (same branch) — the first round that read the ENGINE.** Rounds 1–2 hardened the
+corpus against an *idealized* algorithm. Round 3 ported the one 4c actually extracts (hris
+`packages/pipeline/src/pipeline/matching/{stages,orchestrator}.py`) and found **two of `MatchWeights`' five
+structured sub-scores do not compute what their names imply.** Both holes existed *only* against the real
+code, which is why three prior audits missed them:
+- **`seniority` (0.15) is not a years check.** `orchestrator.py:331-340` computes
+  `cosine(jd.title, most-recent role title)`, rescaled from `[seniority_floor, 1]` → `[0, 1]`.
+  `score_experience` is the **only** sub-score that reads years. But `thresholds.toml` and the potency test
+  justified **both** `experience` (0.25) and `seniority` (0.15) with one years-based claim — so the corpus
+  asserted `experience` **twice** and `seniority` **never**, while r09 carried `"title": "Software
+  Professional"`, the most JD-distant title of any non-weak fixture. Measured (faithful engine + **no-op
+  evidence verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. The
+  round-2 fix had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it.
+  r09's most-recent title is now the **JD title verbatim** — also the most realistic keyword-stuffer
+  behaviour — so `cosine(x, x) = 1.0` and seniority is **exactly 1.0 under any embedder, by arithmetic**.
+  That matters: `Senior Backend Engineer` measured **0.755** on one nomic-embed-text build and **0.581** on
+  another, straddling the **0.638** break-even at which the trap arms — a merely-plausible title would leave
+  the corpus's most important guard dependent on the embedding model. A no-op-verifier engine now ranks the
+  bait **1st** (precision@5 = 0.80 → FAIL).
+- **`education` (0.10) reads the degree LEVEL only** and never `jd.education.fields`, so the r14/r11
+  education ordering pair (twins differing in *field*) asserted a mechanism that **does not exist** — both
+  were `BSc` → `bachelors` → education = **1.00 for both**. It also passed an education-blind ranker through
+  the **vector** path: `_build_summary_text` embeds `education[].degree` into `summary_emb`, so with
+  `weights.education = 0.0` r14 *still* outranked r11 — the whole gap was vector. (This is the D1 confound
+  round 2 thought it had closed by deleting the education *chunk*; the degree still rode in via the
+  structured `education[]` entry.) The twins now differ in **level** (bachelor's vs a sub-bachelor
+  associate), both fields are JD-allowed so the field cannot be a second differentiator, and the education
+  signal (0.040 of `score_final`) now **dominates** the 0.0003 vector residual — which now points at the
+  *lower* twin, so the only way to order the pair is to implement the sub-score. **4c must verify the
+  `weights.education = 0.0` mutation FLIPS the pair.**
+
+**4c OPEN DECISION for a human — `jd.education.fields` is decorative.** The JD fixture declares
+`education.fields: ["Computer Science", "Software Engineering", "Data Engineering"]`, and the ported
+`stages.score_education()` **ignores them entirely** (it compares the degree *level* to `min_level`). So
+field-relevance is currently dead weight in the contract. Two options, **not resolved here** — extending the
+scorer is a *new requirement*, not a port, and the corpus must not smuggle one in:
+1. **Extend `score_education`** to read `fields` (e.g. a non-allowed field earns only `education_partial`).
+   New behaviour; needs its own ADR + tests.
+2. **Drop `fields`** from the JD contract as unused.
+The r14/r11 ordering pair is deliberately built to survive **either** choice (both twins' fields are
+JD-allowed, so the pair turns on level alone).
+
+**4c evidence-verifier requirement — the ported `_fuzz_substring` must be REPLACED, NOT PORTED.**
+`stages._fuzz_substring` — the verifier 4c is told to extract — is a **character-set overlap ratio**: it
+slides a window over the haystack and scores `|{chars of window} ∩ {chars of needle}| / len(needle)`. Any
+fluent English sentence of the right length scores ~0.9 against any other, because they share an alphabet.
+Measured against this corpus's four fabricated `negative_evidence` anchors, it **verifies all four**:
+**0.928 / 0.943 / 0.988 / 0.935**, every one ≥ the 0.85 threshold. An engine that ports it verbatim ships a
+**fabrication verifier that verifies fabrications** — and it is caught only because
+`[evidence].negative_evidence_must_fail` exists, which makes that the single most valuable check in the
+corpus. End-to-end, a faithful engine wired with hris's own verifier ranks the r09 bait **1st** →
+precision@5 = 0.80 → **FAIL**. Replace it with rapidfuzz `partial_ratio` or `token_set_ratio` (both measured
+safe: the same negatives score **0.36–0.46**).
+
 **4c evidence-verifier requirement — WHICH fuzz measure (measured against this corpus, do not re-litigate
 at implementation time).** `evidence_verify_fuzz = 0.85` is a **`partial_ratio`** (or `token_set_ratio`)
-threshold — the quote is a *span* of its cited chunk, not the whole chunk. Three measures are already
-known-broken for this job:
+threshold — the quote is a *span* of its cited chunk, not the whole chunk. Three further measures are
+already known-broken for this job:
 - `fuzz.ratio` scores the corpus's own **gold** anchors at **0.648 / 0.796** — below 0.85. An engine
   implementing "ratio" literally can never reach `verification_rate_min = 1.0`.
 - `fuzz.WRatio` scores r02's **fabricated** negative anchor at **0.855 ≥ 0.85** — it *verifies a

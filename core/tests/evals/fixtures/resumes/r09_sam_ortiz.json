@@ -5,7 +5,7 @@
     "phone": "555-0109",
     "location": "Regina, SK"
   },
-  "summary": "Results-driven software professional with expertise in Python, PostgreSQL, Apache Airflow, Docker, REST API design, Kubernetes, Kafka, and Terraform, consistently exceeding expectations in fast-paced, cross-functional environments.",
+  "summary": "Results-driven Backend Data Engineer with expertise in Python, PostgreSQL, Apache Airflow, Docker, REST API design, Kubernetes, Kafka, and Terraform, consistently exceeding expectations in fast-paced, cross-functional environments.",
   "total_years_experience": 8,
   "skills": [
     { "name": "Python", "years": 8, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
@@ -20,7 +20,7 @@
   "experience": [
     {
       "company": "Global Solutions Group",
-      "title": "Software Professional",
+      "title": "Backend Data Engineer",
       "start": "2018-01",
       "end": null,
       "is_current": true,

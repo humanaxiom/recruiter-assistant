@@ -85,29 +85,61 @@ negative_evidence_must_fail = true
 #
 # "however high its overlap" is now an ASSERTED property, not a promise:
 # test_evals_corpus.py pins r09 as structurally top-tier on EVERY NON-evidence
-# signal -- all five of MatchWeights' structured sub-scores, not a subset:
+# signal -- all five of MatchWeights' structured sub-scores, each stated as the
+# ENGINE COMPUTES IT (round-5 finding F1: the previous version of this comment
+# stated two of them as their NAMES suggest, which is how the bait hole kept
+# moving instead of closing):
 #   skill      (0.40) -- claims all 5 required + all 3 nice-to-have skills;
 #                        every `years` clears the JD's min_years; every
 #                        `last_used_year` is in the recency_recent bucket
-#   experience (0.25) -- clears min_years_experience without tripping
-#   seniority  (0.15)    overqual_ratio
-#   education  (0.10) -- a JD-ALLOWED bachelor's (BSc Computer Science)
-#   vector     (0.10) -- every JD skill named in the embedded `summary`
+#   experience (0.25) -- `score_experience`: total_years_experience clears
+#                        min_years_experience without tripping overqual_ratio.
+#                        This is the ONLY sub-score that reads years.
+#   seniority  (0.15) -- NOT a years check. `orchestrator.py:331-340` computes
+#                        cosine(jd.title, most-recent role title), rescaled from
+#                        [seniority_floor, 1] to [0, 1]. r09's most-recent title
+#                        is the JD title VERBATIM, so cosine(x, x) = 1.0 and
+#                        seniority = 1.0 EXACTLY, under any embedder.
+#   education  (0.10) -- `score_education` reads the degree LEVEL only. r09
+#                        holds a bachelor's, meeting the JD's min_level.
+#                        (It never reads `jd.education.fields` -- see the open
+#                        decision in docs/EXTRACTION_PLAN.md.)
+#   vector     (0.10) -- every JD skill named in the embedded `summary`.
 # Only the EVIDENCE verifier may reject it.
 #
 # ROUND-4 FINDING B1 -- this arm was INERT and this comment was a falsehood.
 # r09 shipped with a sub-bachelor `Diploma, General Studies`, failing the JD's
 # education min_level outright, and the potency test asserted only skill /
 # experience / seniority -- omitting education and vector, the two sub-scores
-# on which the bait was weak. Measured: a MatchWeights-faithful engine with a
-# NO-OP evidence verifier scored r09 at 0.7878 -> rank 8, outside the k=5
-# window, so it PASSED this flag and precision@5 = 1.0. Education alone is
-# 0.10 x 0.6 = 0.06 of score_final, larger than the 0.0485 gap to the top-5
-# cutoff: one unasserted fixture field was doing the evidence verifier's job.
-# With the bait repaired, that same no-op-verifier engine ranks r09 3rd ->
-# precision@5 = 0.80 -> it FAILS here, which is the point of the fixture.
+# on which the bait was weak.
+#
+# ROUND-5 FINDING F1 -- and the round-4 fix RELOCATED the hole rather than
+# closing it. The lines above used to justify BOTH `experience (0.25)` and
+# `seniority (0.15)` with a single claim ("clears min_years_experience without
+# tripping overqual_ratio"). That claim is `score_experience`, and SENIORITY
+# DOES NOT READ YEARS AT ALL. So the potency test asserted experience TWICE and
+# seniority NEVER -- while r09 carried `"title": "Software Professional"`, the
+# most JD-distant title of any non-weak fixture (every strong fixture is a
+# Backend/Data/Staff/Principal Engineer). Measured against the faithful engine
+# with a NO-OP evidence verifier: seniority 0.271 -> r09 rank 8 -> precision@5 =
+# 1.00 -> a BAD ENGINE PASSES. The trap fires iff seniority(r09) >= 0.638, and
+# the strong tier sits at 0.71-0.88. The hole moved from a 0.10 sub-score to a
+# 0.15 one.
+#
+# Fixed by giving the bait the JD's own title (which is also what a real
+# keyword-stuffer does), pinning seniority at 1.0 by ARITHMETIC rather than by a
+# model-dependent measurement -- re-measuring 'Senior Backend Engineer' across
+# two nomic-embed-text builds gave 0.755 and 0.581, straddling the 0.638
+# break-even, so a measured title would leave this arm's arming dependent on the
+# embedding model. MEASURED on the repaired corpus (faithful engine, real
+# embedder + real rapidfuzz):
+#   no-op evidence verifier    -> r09 rank 1, precision@5 = 0.80 -> FAILS (armed)
+#   hris's own _fuzz_substring -> r09 rank 1, precision@5 = 0.80 -> FAILS
+#   correct verifier           -> r09 rank 9, precision@5 = 1.00 -> PASSES,
+#                                 with 0.1881 of margin below the 5th-place
+#                                 cutoff (0.5972 vs 0.7852).
 # See fixtures/labels.json (r09 `expected_rank_band_note`) for why the repaired
-# bait's expected rank is ~11 and NOT "below every weak candidate".
+# bait's expected rank is ~9 and NOT "below every weak candidate".
 must_not_surface_in_topk = true
 
 [ordering_controls]
@@ -121,6 +153,27 @@ must_not_surface_in_topk = true
 # and the twin-integrity tests that prove "identical except X"). For each
 # pair, a correct ranker MUST place higher_id strictly above lower_id:
 # rank(higher_id) < rank(lower_id). A ranker blind to the dimension fails.
+#
+# ROUND-5 FINDING F2 -- the `education` pair did not test education.
+# labels.json claimed r14/r11 were "identical EXCEPT the education[] entry" and
+# that `MatchWeights.education_partial (0.5)` would demote r11 (a bachelor's in
+# a NON-ALLOWED field). That mechanism does not exist: `stages.score_education`
+# reads the degree LEVEL and NEVER reads `jd.education.fields`. Both twins were
+# `BSc` -> `bachelors` -> education = 1.00 for BOTH, so education_partial could
+# never fire. Worse, the pair still PASSED an education-blind ranker via the
+# VECTOR path -- `_build_summary_text` embeds `education[].degree` into
+# `summary_emb`, so the degree leaked into the vector sub-score and the whole
+# r14>r11 gap was vector, not education (measured with `weights.education = 0.0`
+# the pair still passed).
+#
+# The twins now differ in degree LEVEL (bachelor's vs a sub-bachelor associate),
+# which is the only thing the ported scorer reads, and BOTH fields are
+# JD-allowed so the field cannot be a second differentiator. Measured:
+#   correct engine:          r14 rank 3, r11 rank 7 (gap +0.0397, education-driven)
+#   weights.education = 0.0: the pair FLIPS (r11 rank 3, r14 rank 4) -> FAILS
+# The residual embedded-degree vector confound (-0.0003) now points at r11, the
+# LOWER twin, so the ONLY way to order this pair correctly is to implement the
+# education sub-score. 4c MUST verify the `education = 0.0` mutation flips it.
 enforce = true
 pairs = [
   { dimension = "education", higher_id = "r14_devon_ashworth", lower_id = "r11_skyler_brooks" },

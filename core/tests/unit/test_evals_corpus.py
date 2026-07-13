@@ -190,6 +190,43 @@ still asserted things nothing checked. Round 4:
   stripped before the allowlist check, and ``_PHONE_SHAPED_RE``'s separator
   class grew the unicode dashes and ``/`` a real PDF paste carries.
 
+--- Phase-4a FALSIFIABILITY hardening (round 5: F1 / F2) ---
+
+Rounds 1-4 hardened the corpus against an IDEALIZED engine. Round 5 read the
+one Phase 4c actually ports (hris ``packages/pipeline/src/pipeline/matching/
+{stages,orchestrator}.py``, per ``docs/EXTRACTION_PLAN.md``) and found that TWO
+of ``MatchWeights``' five structured sub-scores do not compute what their names
+imply. Both defects below exist ONLY against the real algorithm -- which is why
+four rounds of review against the idealized model never saw them:
+
+* **F1** ``seniority`` (0.15) is NOT a years check. It is
+  ``cosine(jd.title, most-recent role title)`` rescaled from
+  ``[seniority_floor, 1]`` to ``[0, 1]`` (``orchestrator.py:331-340``);
+  ``score_experience`` is the only sub-score that reads years. But
+  ``thresholds.toml`` and this file's potency test justified BOTH
+  ``experience`` (0.25) AND ``seniority`` (0.15) with one years-based claim --
+  so the corpus asserted ``experience`` twice and ``seniority`` never, while
+  r09 shipped ``"title": "Software Professional"``, the most JD-distant title
+  of any non-weak fixture. Measured (faithful engine + NO-OP verifier):
+  seniority 0.271 -> r09 rank 8 -> precision@5 = 1.00 -> **a bad engine
+  PASSES**. Round 4 did not close the round-3 bait hole; it RELOCATED it from
+  education (0.10) onto seniority (0.15) -- a bigger hole than the one it
+  replaced. r09's most-recent title is now the JD title VERBATIM, which pins
+  seniority at exactly 1.0 by arithmetic under every embedder.
+* **F2** ``education`` (0.10) reads the degree LEVEL only and NEVER reads
+  ``jd.education.fields``, so the r14/r11 education ordering pair -- twins
+  differing in FIELD -- asserted a mechanism that does not exist (both were
+  ``BSc`` -> ``bachelors`` -> education = 1.00) AND passed an education-blind
+  ranker through the embedded-degree vector leak. The twins now differ in
+  LEVEL. There is an OPEN DECISION for a human on whether ``score_education``
+  should read ``fields`` at all (docs/EXTRACTION_PLAN.md) -- it is recorded,
+  deliberately NOT resolved here, because extending the scorer would be a new
+  requirement rather than a port.
+
+The engine's own ``_level_from_degree`` / ``_most_recent_title`` /
+``score_education`` are now PORTED into this module (above), so the corpus
+asserts what the engine COMPUTES rather than what a sub-score's name suggests.
+
 PII scanner scope (accepted residuals, round 4 / finding N6) -- what these
 scanners do NOT claim:
 
@@ -1406,8 +1443,9 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
     * hris's own shipped ``_fuzz_substring`` -> r09 rank **1** -> FAIL. The
       verifier 4c is told to port VERIFIES all four fabricated anchors
       (0.928-0.988). It must be REPLACED, not ported (docs/EXTRACTION_PLAN.md).
-    * correct verifier (rapidfuzz ``partial_ratio``) -> r09 rank **8**,
-      precision@5 = 1.00 -> PASS, 0.1875 of margin below the 5th-place cutoff.
+    * correct verifier (rapidfuzz ``partial_ratio``) -> r09 rank **9**,
+      precision@5 = 1.00 -> PASS, with 0.1881 of margin below the 5th-place
+      cutoff (0.5972 vs 0.7852).
 
     (The round-4 docstring claimed rank 2 here while thresholds.toml and
     labels.json said 3 -- finding F4. Neither is live any more; the numbers
@@ -1539,9 +1577,10 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
     assert parsed.education, "r09 must carry an education entry"
     edu = parsed.education[0]
     level = _level_from_degree(edu.degree)
-    assert level is not None and _LEVEL_ORDER[level] >= _LEVEL_ORDER[
-        jd.education.min_level
-    ], (
+    assert (
+        level is not None
+        and _LEVEL_ORDER[level] >= _LEVEL_ORDER[jd.education.min_level]
+    ), (
         f"r09: degree {edu.degree!r} maps to level {level!r}, which does not "
         f"meet the JD's min_level={jd.education.min_level!r}. A sub-bachelor "
         f"degree fails the education check on its own -- which is exactly how "
@@ -2376,9 +2415,7 @@ def test_r14_education_twin_is_identical_to_r11_except_education_level() -> None
     assert (
         r11_edu["field"].lower() in allowed_fields
     ), "r11's field must ALSO be JD-allowed -- the level is the sole dimension"
-    assert (
-        r14_edu["field"].lower() in allowed_fields
-    ), "r14's field must be JD-allowed"
+    assert r14_edu["field"].lower() in allowed_fields, "r14's field must be JD-allowed"
 
 
 def test_r15_overqual_twin_is_identical_to_r13_except_total_years_experience() -> None:
