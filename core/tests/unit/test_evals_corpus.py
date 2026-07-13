@@ -1776,6 +1776,78 @@ def test_phone_scanner_does_not_flag_the_reserved_fake_range(probe: str) -> None
     assert _offending_phones(probe) == []
 
 
+# ── `_scan_texts`'s OWN wiring is gated, not just the helpers it calls ────
+#
+# Finding F-1 (round 9). Every ``_LEAKY_*_PROBES`` test above calls
+# ``_offending_emails`` / ``_offending_phones`` DIRECTLY and re-implements the
+# de-wrap inline (``re.sub(r"\s*\n\s*", "", probe)``) to decide whether the
+# probe *would* be caught -- so those tests gate the SCANNER LOGIC but cannot
+# gate whether ``_scan_texts`` itself actually performs that de-wrap pass over
+# a real fixture file. Deleting the one line in ``_scan_texts`` that does so
+# (``texts.extend(re.sub(r"\s*\n\s*", "", t) for t in decoded)``) leaves the
+# entire corpus suite green (310 passed) -- including every test above --
+# because nothing exercises the wiring end-to-end. ``c_008`` (round 8's
+# control for this exact fix) uses the allowed ``@example.test`` domain, so it
+# can never flag either way and cannot serve as a regression guard.
+#
+# This probe writes a REAL fixture file (to ``tmp_path``, never a shipped
+# fixture) carrying a disallowed identifier broken MID-TOKEN by a literal
+# newline -- the same shape S1 fixed -- and calls ``_scan_texts`` on it, the
+# way every scanner test above does against the shipped corpus. Per finding
+# B4, the probe uses the RFC-2606 ``.invalid`` / reserved-555-01xx
+# conventions already used elsewhere in this file, never a real-looking
+# corporate/institutional string, even though it only ever touches a tmp file.
+def test_scan_texts_surfaces_a_mid_token_broken_leak_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Mutation-proves ``_scan_texts``'s own de-wrap pass, not the helpers it
+    calls. With the ``texts.extend(re.sub(...))`` line present in
+    ``_scan_texts`` (today), this test is GREEN. Delete that line and it goes
+    RED -- the ``_offending_emails`` / ``_offending_phones`` calls below only
+    ever see ``raw`` and the still-wrapped decoded value, neither of which
+    can match a mid-token break, so no offender is found and the asserts
+    below fail. That is exactly the gap the round-8 (S1) fix closed and that
+    nothing before this test regression-gated end-to-end through
+    ``_scan_texts`` itself.
+    """
+    fixture = tmp_path / "leaky_mid_token_probe.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "chunks": [
+                    {
+                        "chunk_id": "c_probe",
+                        "text": (
+                            "Reach the candidate at "
+                            "notreal.person@nonexistent-employer\n.invalid "
+                            "or 604-555-12\n12."
+                        ),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    email_offenders: list[str] = []
+    phone_offenders: list[str] = []
+    for text in _scan_texts(fixture):
+        email_offenders.extend(_offending_emails(text))
+        phone_offenders.extend(_offending_phones(text))
+
+    assert email_offenders, (
+        "_scan_texts did not surface the mid-token-broken email "
+        "'notreal.person@nonexistent-employer\\n.invalid' -- either the "
+        "de-wrap pass is missing from _scan_texts, or it never reached the "
+        "email scanner"
+    )
+    assert phone_offenders, (
+        "_scan_texts did not surface the mid-token-broken phone "
+        "'604-555-12\\n12' -- either the de-wrap pass is missing from "
+        "_scan_texts, or it never reached the phone scanner"
+    )
+
+
 # ── Phase-4a strengthening item 1: adversarial/weak backstop flag ────────
 
 
