@@ -3234,18 +3234,27 @@ def test_r17_email_and_phone_appear_verbatim_in_embeddable_chunk_text() -> None:
 
 
 def test_r17_carries_every_adr007_f1r_format_divergent_variant() -> None:
-    """The three F1-R shapes, each one a whitespace/format divergence between
+    """The four F1-R shapes, each one a whitespace/format divergence between
     the structured identifier and the résumé body -- exactly what defeated the
     round-3 scrub and what the round-4 whitespace-flexible pattern +
-    email-local-part scrubbing closed:
+    email-local-part scrubbing closed, plus the round-8 (S1) INTRA-token
+    break the de-wrap pass exists for:
 
     * a LINE-BROKEN name  (`Harper\\nNakamura` vs `Harper Nakamura`)
     * a REFLOWED phone    (whitespace runs differing from the structured value)
     * a BARE email LOCAL-PART (`harper.nakamura`, no `@domain`)
+    * an INTRA-TOKEN broken email (a newline landing INSIDE the domain
+      itself, e.g. `example\\n.test` -- not merely at the `@` joint)
 
     Each must be present verbatim in embeddable chunk text, and must NOT be a
     literal copy of the structured value (or it would be caught by a naive
-    `re.escape` scrub and prove nothing)."""
+    `re.escape` scrub and prove nothing). The fourth is `c_008`'s ENTIRE
+    reason for existing: round-8 (S1) added the de-wrapped scan pass
+    specifically because a break landing INSIDE a token (not at a joint like
+    the other three) is invisible to both the raw-source and the plain
+    decoded-string scans. Deleting `c_008`, or corrupting its break so
+    de-wrapping no longer reconstructs `candidate.email`, leaves this fixture
+    without any positive control for that gap -- and must fail here."""
     parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{_R17}.json"))
     name = parsed.candidate.name
     email = parsed.candidate.email
@@ -3281,6 +3290,30 @@ def test_r17_carries_every_adr007_f1r_format_divergent_variant() -> None:
     assert re.search(rf"{re.escape(local)}(?!@)", blob), (
         "r17: a BARE email LOCAL-PART (no @domain) must appear in chunk text -- "
         "the ADR-007 F1-R control for local-part scrubbing"
+    )
+
+    # (4) intra-token email break (round-8 / S1): a newline landing INSIDE the
+    # domain token itself -- NOT merely at the `@` joint (which (1)-(3) above,
+    # and the joint-break email probes elsewhere in this file, already cover).
+    # `[A-Za-z0-9.-]+\n[A-Za-z0-9.-]+` requires at least one domain character
+    # on BOTH sides of the newline, so a break sitting right next to the `@`
+    # cannot satisfy it -- only a genuinely mid-token break can. This is
+    # `c_008`'s sole reason for existing in this fixture.
+    intra_token_breaks = re.findall(
+        rf"{re.escape(local)}\s*@\s*[A-Za-z0-9.-]+\n[A-Za-z0-9.-]+", blob
+    )
+    assert intra_token_breaks, (
+        "r17: an INTRA-TOKEN broken email (a newline landing INSIDE the "
+        "domain, not at the @ joint) must appear in chunk text -- this is "
+        "c_008's only reason for existing, and the round-8 (S1) positive "
+        "control for the de-wrapped scan pass. Deleting c_008 must fail here."
+    )
+    dewrapped = {re.sub(r"\s*\n\s*", "", match) for match in intra_token_breaks}
+    assert email in dewrapped, (
+        f"r17: de-wrapping the intra-token-broken email must reconstruct "
+        f"{email!r} EXACTLY -- otherwise c_008 models a broken shape that "
+        f"is not actually this candidate's address, and proves nothing about "
+        f"the de-wrap pass"
     )
 
 
