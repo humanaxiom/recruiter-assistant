@@ -21,10 +21,11 @@ and stays well-formed as it's edited:
   verifier must catch), while every non-adversarial fixture's claimed
   JD-relevant skills DO have textual support (so the trap is genuinely a
   trap, not just an artifact of sparse fixtures),
-* no fixture contains anything resembling real PII -- every fixture uses the
-  ``*@example.test`` / ``555-01xx`` synthetic markers and a name drawn from a
-  fixed, obviously-fake allowlist; no fixture text contains a real-looking
-  email domain or a phone-number pattern outside the reserved fake range.
+* no fixture contains any email address, phone number or *candidate name*
+  outside the synthetic markers -- every fixture uses ``*@example.test`` /
+  ``555-01xx`` and a ``candidate.name`` drawn from a fixed, obviously-fake
+  allowlist. See "PII scanner scope" below for what this does and does NOT
+  claim: it is narrower than "nothing resembling real PII".
 
 --- Phase-4a strengthening (adequacy-review round 1) additions ---
 
@@ -55,15 +56,12 @@ GAP 1 -- ``expected_rank_band`` feasibility. Round 1 shipped a bug: the
 'strong' band was the STATIC range ``[1, 3]`` while the corpus had 5 'strong'
 fixtures -- no correct ranker could ever satisfy that (5 candidates cannot
 fit in a 3-wide window). ``TAG_RANK_BANDS`` below is now computed FROM the
-corpus's actual tier population counts, so it is feasible by construction:
-strong -> ``[1, Nstrong]``, borderline -> ``[Nstrong+1, Nstrong+Nborderline]``,
-weak/adversarial (share one band) -> ``[Nstrong+Nborderline+1, null]``.
+corpus's actual tier population counts, so it is feasible by construction.
 ``test_expected_rank_bands_fit_tier_populations`` independently re-derives
-the required window widths from ``labels.json``'s tag counts on every run
-(it does NOT just trust ``TAG_RANK_BANDS``) and performs a Hall-style
-cumulative feasibility check -- it fails if any tier's band is narrower than
-its population, or if the bands don't tile ranks 1..N with no gap/overlap.
-This is the guard that would have caught the round-1 bug.
+feasibility from ``labels.json``'s tag counts on every run (it does NOT just
+trust ``TAG_RANK_BANDS``) via a Hall's-condition check over every contiguous
+rank window. This is the guard that would have caught the round-1 bug. (Round
+4 split the shared weak/adversarial band -- see TAG_RANK_BANDS.)
 
 GAP 2 -- matched-pair ``ordering_controls``. r11 (education), r13 (overqual),
 and r04 (motivation) each only moved score WITHIN a tier (~0.03), so a
@@ -124,10 +122,14 @@ suite green. Each is now guarded:
 * **E** the PII scanners are ALLOWLISTS, not blocklists: every email-shaped
   match in a fixture must be ``@example.test`` and every phone-shaped match
   must normalise into the reserved-for-fiction ``555-01xx`` block. The old
-  6-domain blocklist passed ``asalah@sfu.ca`` / ``j.smith@shopify.com``
-  (i.e. every corporate/university/ISP domain -- the exact surface a real
-  person's data would enter through), and the old phone regex missed
-  ``(604) 555-1212`` and bare 10-digit numbers. r12 additionally pins the
+  6-domain blocklist passed ``<user>@<real-university>.ca`` /
+  ``<name>@<real-employer>.com`` (i.e. every corporate/university/ISP domain
+  -- the exact surface a real person's data would enter through), and the old
+  phone regex missed ``(604) 555-1212`` and bare 10-digit numbers. NB the
+  placeholders: round-4 finding B4 was that documenting this fix with LIVE
+  addresses put a real institutional address and a plausible corporate one
+  into the guard's own source file -- the one file whose invariant bans
+  exactly those strings. r12 additionally pins the
   candidate name in ``chunks[].text`` (the §7-F1 embed-boundary surface that
   is SCRUBBED), not only in ``experience[].bullets[].text`` (the ADR-007 N1
   surface that is PERMITTED at rest); and r17 is the format-divergent
@@ -145,6 +147,64 @@ suite green. Each is now guarded:
 * **H** ``run_evals.py`` is EXECUTED here (its "cannot go green before 4c"
   honesty is now gated, not merely structural) and its ``load_corpus()``
   path-join is confined to ``FIXTURES_DIR``.
+
+--- Phase-4a FALSIFIABILITY hardening (round 4: B1-B6 / N1-N6) ---
+
+Round 3 shipped the guards; a second three-gate audit proved several of them
+still asserted things nothing checked. Round 4:
+
+* **B1** the ``[adversarial]`` arm was INERT. r09 held a sub-bachelor
+  ``Diploma, General Studies``, which fails the JD's ``min_level:
+  bachelors`` on its own -- so a MatchWeights-faithful engine with a
+  **no-op evidence verifier** still dropped r09 to rank 8 (outside the k=5
+  window) and PASSED ``must_not_surface_in_topk`` + ``precision@5 = 1.0``.
+  The education sub-score alone (0.10 x 0.6 = 0.06 of ``score_final``)
+  exceeded the 0.0485 gap to the top-5 cutoff. The round-3 potency test
+  asserted 3 of MatchWeights' 5 structured sub-scores (skill/experience/
+  seniority) and OMITTED the two on which r09 was weak (education, vector),
+  while its own docstring, ``thresholds.toml`` and the agent doc all claimed
+  "only the EVIDENCE verifier may reject it". r09 now holds a JD-allowed
+  ``BSc Computer Science``, and the potency test asserts education AND the
+  vector sub-score's embedded input. With the bait repaired, the no-op-
+  verifier engine puts r09 at rank 2 -> precision@5 = 0.80 -> the adversarial
+  arm FAILS, which is the whole point of the fixture.
+* **B2** the "three-way key-set contract" was enforced in ZERO directions
+  against the two consumer DOCS: only ``thresholds.toml`` <-> the
+  ``_THRESHOLD_KEYS`` literal in this file was machine-checked, and the test
+  the comments named (``test_every_threshold_key_is_enumerated_by_both_
+  consumers``) did not exist. Deleting the ``[ordering_controls]`` block from
+  BOTH consumer docs left the suite green. That test now exists and reads
+  both docs.
+* **B3** ``[evidence].min_completeness_in_topk`` was the last unpinned
+  numeric threshold (range-checked only); ``1.0 -> 0.01`` stayed green. It is
+  the key whose job is to stop ``verification_rate_min = 1.0`` passing
+  vacuously, so it is now pinned exactly.
+* **B5** the PII scanner enumerated fixture FILENAMES (``resumes/*.json`` +
+  a hardcoded JD path + labels.json), so a NEW non-resume fixture was never
+  scanned -- and 4b/4d are about to add exactly that. It now globs the
+  fixtures directory.
+* **B6** the email scanner required ``local@domain`` CONTIGUOUS, while the
+  corpus's whole thesis (r17 / ADR-007 F1-R) is that FORMAT-DIVERGENT
+  identifiers are the leak class that matters: ``<user> @<domain>`` with one
+  space was not flagged. Whitespace is now allowed around the ``@`` and
+  stripped before the allowlist check, and ``_PHONE_SHAPED_RE``'s separator
+  class grew the unicode dashes and ``/`` a real PDF paste carries.
+
+PII scanner scope (accepted residuals, round 4 / finding N6) -- what these
+scanners do NOT claim:
+
+* ``FAKE_NAMES`` constrains ``candidate.name`` only. A real THIRD PARTY's
+  name in free text ("Worked with <real person> at <real company>") passes
+  every scanner. Closing that needs NER; it is deliberately out of scope.
+* The threat model is an ACCIDENTAL paste of real data (e.g. from the hris
+  source repo), not a malicious insider. Deliberate-evasion classes --
+  homoglyph domains, ``[at]``/``(dot)`` obfuscation, base64 -- are accepted
+  residuals.
+* The phone scanner is NANP-shaped. ``+44 20 7946 0958`` /
+  ``+33 6 12 34 56 78`` are not flagged.
+* ``_ALLOWED_EMAIL_DOMAIN`` is checked with ``endswith("@example.test")``, so
+  a legitimate SUBDOMAIN (``casey@mail.example.test``) is flagged. Over-strict
+  and fails safe; relax deliberately if a fixture ever needs a subdomain.
 
 This test suite is expected to PASS today -- it needs only the Phase 2
 schemas, which are already merged.
@@ -174,6 +234,13 @@ FIXTURES_DIR = EVALS_DIR / "fixtures"
 RESUMES_DIR = FIXTURES_DIR / "resumes"
 LABELS_PATH = FIXTURES_DIR / "labels.json"
 THRESHOLDS_PATH = EVALS_DIR / "thresholds.toml"
+
+# The two OTHER consumers of thresholds.toml's key set (finding B2). The agent
+# doc lives outside `core/`, so its existence is asserted before it is parsed --
+# a bad path would otherwise make the contract test pass VACUOUSLY.
+REPO_ROOT = EVALS_DIR.parents[2]
+AGENT_DOC_PATH = REPO_ROOT / ".claude" / "agents" / "ranking-evals.md"
+RUN_EVALS_PATH = EVALS_DIR / "run_evals.py"
 
 ALLOWED_TAGS = {"strong", "borderline", "weak", "adversarial"}
 
@@ -209,26 +276,45 @@ _EMAIL_RE = re.compile(r"^[a-z]+\.[a-z]+@example\.test$")
 # exchange+line is still pinned exactly.
 _PHONE_RE = re.compile(r"^(?:\d{3}[ -])?555[ -]01\d{2}$")
 
-# ── PII scanners: ALLOWLISTS, not blocklists (findings E1 / E2) ───────────
+# ── PII scanners: ALLOWLISTS, not blocklists (findings E1 / E2 / B6 / N5) ──
 #
 # The merged corpus scanned for six consumer email domains and for a 3-3-4
-# phone shape behind a dead lookbehind. Planting `asalah@sfu.ca` and
-# `j.smith@shopify.com` in chunk free text left all 226 corpus tests green
-# (every corporate/university/ISP domain passed the blocklist -- the exact
-# surface through which a real person's data from the hris source repo would
-# enter), as did `(604) 555-1212` and a bare 10-digit `6045551212`. A
-# blocklist can never enumerate that surface, so both scanners are INVERTED:
+# phone shape behind a dead lookbehind. Planting a real institutional address
+# (`<user>@<real-university>.ca`) and a plausible corporate one
+# (`<name>@<real-employer>.com`) in chunk free text left all 226 corpus tests
+# green -- every corporate/university/ISP domain passed the blocklist, which is
+# the exact surface through which a real person's data from the hris source
+# repo would enter -- as did `(604) 555-1212` and a bare 10-digit `6045551212`.
+# A blocklist can never enumerate that surface, so both scanners are INVERTED:
 # every email-shaped / phone-shaped match found anywhere in a fixture must be
 # one of the synthetic markers.
-_EMAIL_SHAPED_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+#
+# Round-4 finding B6: the email pattern required `local@domain` CONTIGUOUS,
+# which is exactly backwards for a corpus whose thesis (r17 / ADR-007 F1-R) is
+# that FORMAT-DIVERGENT identifiers are the leak class that matters -- a leak
+# reflowed by a PDF extractor into `<user> @<domain>` was not flagged at all.
+# Whitespace (including a line break) is now allowed around the `@` and
+# stripped out of the match before the allowlist check, the same way
+# `_PHONE_SHAPED_RE` already tolerated separators.
+_EMAIL_SHAPED_RE = re.compile(r"[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# NOTE (accepted, deliberate): this is `endswith`, so a legitimate SUBDOMAIN of
+# the reserved domain (`casey@mail.example.test`) is FLAGGED. Over-strict, and
+# it fails safe; relax deliberately if a fixture ever needs a subdomain.
 _ALLOWED_EMAIL_DOMAIN = "@example.test"
+
+# Separator class for phone-shaped matches (round-4 finding N5). ASCII space /
+# dot / hyphen is not enough: a number pasted out of a real PDF plausibly
+# carries a unicode hyphen or dash (U+2010..U+2015) or a slash, and
+# `604–555–1212` must be caught exactly like `604-555-1212`.
+_PHONE_SEP = r"[\s./‐‑‒–—―-]"
 
 # Anything phone-shaped: an optional country code, an area code (bare or
 # parenthesised), then a 3-4 split with ANY (incl. empty) separator -- so a
 # bare 10-digit run matches too -- OR the local 7-digit form the fixtures use.
 _PHONE_SHAPED_RE = re.compile(
-    r"(?<!\d)(?:\+?1[\s.-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}(?!\d)"
-    r"|(?<!\d)\d{3}[\s.-]\d{4}(?!\d)"
+    rf"(?<!\d)(?:\+?1{_PHONE_SEP}*)?(?:\(\d{{3}}\)|\d{{3}}){_PHONE_SEP}*\d{{3}}"
+    rf"{_PHONE_SEP}*\d{{4}}(?!\d)"
+    rf"|(?<!\d)\d{{3}}{_PHONE_SEP}\d{{4}}(?!\d)"
 )
 # ...and with every non-digit stripped, it must land in the reserved 555-01xx
 # block, with or without an (any) area code / leading country code.
@@ -302,10 +388,27 @@ def _best_partial_ratio(needle: str, haystack: str) -> float:
     SequenceMatcher ratio over every ``len(needle)``-wide window of the
     haystack. Case-insensitive.
 
-    Deliberately the LENIENT measure (a plain full-string ratio would score
-    every fabricated quote far lower and make the negative-evidence guard
-    trivially satisfiable). If a quote cannot clear ``fuzz_threshold`` even
-    under best-window matching, no reasonable verifier will verify it."""
+    DIRECTION OF THE APPROXIMATION (round-4 finding N3 -- record it, because
+    whoever tightens the anchors later needs it). It differs from rapidfuzz on
+    two independent axes, and they point OPPOSITE ways:
+
+    * window-vs-full-string: taking the best ``len(needle)``-wide window is
+      LENIENT relative to a plain full-string ratio. That leniency is
+      deliberate -- a fabricated quote that cannot clear ``fuzz_threshold``
+      even under best-window matching will not be verified by any reasonable
+      verifier, so the negative-evidence guard is not trivially satisfiable.
+    * similarity measure: ``SequenceMatcher.ratio()`` is Ratcliff-Obershelp
+      (``2*M/T`` over matching blocks), which is always **<=** rapidfuzz's
+      LCS/indel-based ratio. On this axis the stand-in is STRICTER, i.e. it
+      scores a near-miss LOWER than rapidfuzz would.
+
+    Net: the corpus's negative anchors were cross-checked against real
+    rapidfuzz and clear the bar under BOTH measures (worst negative scores
+    0.454 under a rapidfuzz-equivalent LCS ratio vs 0.349 under this stand-in;
+    0.396 of headroom to the 0.85 threshold, minimum gold-vs-negative margin
+    0.392). If a future anchor is tightened until its margin is thin, re-check
+    it against real rapidfuzz ``partial_ratio`` -- do NOT trust this stand-in
+    alone at the boundary."""
     a, b = needle.lower(), haystack.lower()
     if len(a) > len(b):
         a, b = b, a
@@ -506,6 +609,95 @@ def test_thresholds_toml_has_no_key_outside_the_enumerated_contract() -> None:
     )
 
 
+def _threshold_keys_enumerated_by_the_agent_doc() -> set[tuple[str, str]]:
+    """Every ``(section, key)`` the ranking-evals agent doc's threshold table
+    enumerates. The table gives each key its OWN row, formatted
+    ``| `[section] key` | what it gates |`` -- one row per key precisely so
+    this parse can be an exact set comparison rather than a substring sniff."""
+    text = AGENT_DOC_PATH.read_text(encoding="utf-8")
+    found: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        for section, key in re.findall(r"`\[([a-z_]+)\]\s+([a-z_]+)`", line):
+            found.add((section, key))
+    return found
+
+
+def _threshold_keys_enumerated_by_run_evals() -> set[tuple[str, str]]:
+    """Every ``(section, key)`` ``run_evals.py``'s module docstring
+    enumerates, parsed out of its "Computes, against ..." block: a section is
+    a line indented 2 spaces holding ``[name]``; a key is a line indented
+    EXACTLY 4 spaces starting with the key token (prose continuation lines are
+    indented far deeper, so they cannot be mistaken for keys)."""
+    doc = _import_run_evals().__doc__ or ""
+    found: set[tuple[str, str]] = set()
+    section: str | None = None
+    started = False
+    for line in doc.splitlines():
+        if line.startswith("Computes, against"):
+            started = True
+            continue
+        if not started:
+            continue
+        section_match = re.fullmatch(r" {2}\[([a-z_]+)\]", line.rstrip())
+        if section_match is not None:
+            section = section_match.group(1)
+            continue
+        key_match = re.match(r" {4}([a-z_]+)\b", line)
+        if key_match is not None and section is not None:
+            found.add((section, key_match.group(1)))
+    return found
+
+
+def test_every_threshold_key_is_enumerated_by_both_consumers() -> None:
+    """Finding B2. ``thresholds.toml``, ``.claude/agents/ranking-evals.md``
+    and ``tests/evals/run_evals.py``'s docstring all assert -- in prose -- that
+    their key sets are a THREE-WAY contract that cannot drift. It was not
+    enforced in ANY direction against the two consumer DOCS: only
+    ``thresholds.toml`` <-> ``_THRESHOLD_KEYS`` (a literal in this very file)
+    was machine-checked, and the test the comments named --
+    ``test_every_threshold_key_is_enumerated_by_both_consumers`` -- did not
+    exist anywhere in the repo.
+
+    Mutations that stayed GREEN before this test existed: deleting the
+    ``[ordering_controls]`` block from run_evals.py's docstring AND the row
+    from the agent doc's table; deleting ``[adversarial]`` +
+    ``min_completeness_in_topk`` from the docstring; adding a new toml key to
+    both the toml and ``_THRESHOLD_KEYS`` with both consumer docs left stale.
+    A 4c coder wiring the harness from a stale docstring would have built a
+    gate a naive pure-vector ranker passes.
+
+    The comparison is set EQUALITY in both directions, so a doc that grows a
+    key the toml does not have fails too.
+    """
+    assert AGENT_DOC_PATH.is_file(), (
+        f"the ranking-evals agent doc is missing at {AGENT_DOC_PATH} -- without "
+        f"this existence check the contract below would pass VACUOUSLY on a bad "
+        f"path (an empty doc enumerates nothing, and so would match an empty "
+        f"expectation)"
+    )
+    assert RUN_EVALS_PATH.is_file(), f"run_evals.py is missing at {RUN_EVALS_PATH}"
+
+    expected = set(_THRESHOLD_KEYS)
+    assert expected, "the contract must not be empty (guards against a vacuous pass)"
+
+    agent_doc = _threshold_keys_enumerated_by_the_agent_doc()
+    assert agent_doc == expected, (
+        f".claude/agents/ranking-evals.md's threshold table drifted from "
+        f"thresholds.toml: missing={sorted(expected - agent_doc)} "
+        f"extra={sorted(agent_doc - expected)} -- every key needs its own "
+        f"`| `[section] key` |` row"
+    )
+
+    run_evals_doc = _threshold_keys_enumerated_by_run_evals()
+    assert run_evals_doc == expected, (
+        f"tests/evals/run_evals.py's docstring drifted from thresholds.toml: "
+        f"missing={sorted(expected - run_evals_doc)} "
+        f"extra={sorted(run_evals_doc - expected)}"
+    )
+
+
 # precision@k is an EXACT contract, not a range (finding A1/A2). At k=5,
 # min_precision=0.8 tolerates exactly one bad entry in the top-5 -- so an
 # engine that ranks r09 (the keyword-stuffer this metric exists to catch) at
@@ -622,9 +814,25 @@ def test_thresholds_adversarial_must_not_surface_in_topk_is_enabled() -> None:
     assert data["adversarial"]["must_not_surface_in_topk"] is True
 
 
-def test_thresholds_min_completeness_in_topk_is_a_sane_fraction() -> None:
+# Finding B3: this was the LAST unpinned numeric threshold -- range-checked
+# only (`0.0 < v <= 1.0`), so `1.0 -> 0.2` and `1.0 -> 0.01` both stayed
+# GREEN. It is exactly the defect class of the original min_precision finding,
+# left on the one key whose job is to stop `verification_rate_min = 1.0`
+# passing VACUOUSLY over an empty surfaced-quote set. Every other value in the
+# file is pinned exactly; so is this one now. CHANGING IT NEEDS A HUMAN.
+_MIN_COMPLETENESS_IN_TOPK = 1.0
+
+
+def test_thresholds_min_completeness_in_topk_is_pinned_exactly() -> None:
     data = _load_thresholds()
     value = data["evidence"]["min_completeness_in_topk"]
+    assert value == _MIN_COMPLETENESS_IN_TOPK, (
+        "min_completeness_in_topk must be exactly 1.0 -- it is the recall half "
+        "of the evidence contract: EVERY top-k entry must carry >= 1 VERIFIED "
+        "quote. Any lower value lets an engine surface a shortlist entry with "
+        "zero verified evidence and still report verification_rate = 1.0 over "
+        "the (empty) set of quotes it did surface"
+    )
     assert 0.0 < value <= 1.0
 
 
@@ -726,6 +934,25 @@ def test_resume_fixture_validates_against_resumeparsed(resume_id: str) -> None:
     assert all(
         re.fullmatch(r"c_\d{3}", c.id) for c in parsed.chunks
     ), f"{resume_id}: chunk ids must be one-based c_NNN tokens"
+
+
+@pytest.mark.parametrize("resume_id", _resume_ids_from_fixture_files())
+def test_resume_chunk_ids_are_contiguous_and_one_based(resume_id: str) -> None:
+    """Finding N4. Contiguity was CLAIMED ("one-based c_NNN tokens") but only
+    the FORMAT was enforced -- ``re.fullmatch(r"c_\\d{3}")`` is happy with
+    ``c_001, c_002, c_004``. The fixtures are contiguous today, but the
+    round-3 change set DELETED a mid-list chunk from two fixtures (the r11/r14
+    education twins), and the next such deletion would leave a hole with no
+    gate: a dangling ``evidence_chunk_ids`` reference is caught, but a chunk
+    list with a hole silently changes what stage-3 evidence retrieval sees."""
+    parsed = ResumeParsed.model_validate(_load_json(RESUMES_DIR / f"{resume_id}.json"))
+    ids = [c.id for c in parsed.chunks]
+    expected = [f"c_{i:03d}" for i in range(1, len(ids) + 1)]
+    assert ids == expected, (
+        f"{resume_id}: chunk ids {ids} are not a contiguous one-based run "
+        f"{expected} -- renumber the chunks (and every evidence_chunk_ids / "
+        f"bullet chunk_id citing them) rather than leaving a hole"
+    )
 
 
 @pytest.mark.parametrize("resume_id", _resume_ids_from_fixture_files())
@@ -857,10 +1084,41 @@ def test_candidate_phone_is_in_the_reserved_fake_range(resume_id: str) -> None:
     )
 
 
-_ALL_FIXTURE_FILES = sorted(RESUMES_DIR.glob("*.json")) + [
-    FIXTURES_DIR / "jd_backend_data_engineer.json",
-    LABELS_PATH,
-]
+# Finding B5: this used to be `RESUMES_DIR.glob("*.json")` plus a HARDCODED
+# `jd_backend_data_engineer.json` and `labels.json` -- so any NEW non-resume
+# file under fixtures/ was never PII-scanned at all. Proven: adding
+# `fixtures/jd_second_role.json` carrying a real email and phone left all 264
+# tests green. The trigger is imminent and self-inflicted: this branch's own
+# EXTRACTION_PLAN update has 4b adding an outbox-shaped fixture under
+# core/tests/evals/ and 4d adding reverse-match JDs. Scope the scan by
+# DIRECTORY, never by enumerated filename.
+_ALL_FIXTURE_FILES = sorted(FIXTURES_DIR.rglob("*.json"))
+
+
+def _offending_emails(text: str) -> list[str]:
+    """Every email-shaped string in ``text`` that is NOT on the reserved
+    synthetic domain. Whitespace inside the match (a PDF-reflowed
+    ``<user> @<domain>``) is stripped before the allowlist check -- finding
+    B6: requiring ``local@domain`` contiguous is exactly backwards for a
+    corpus whose thesis is that FORMAT-DIVERGENT identifiers are the leak
+    class that matters."""
+    offenders: list[str] = []
+    for match in _EMAIL_SHAPED_RE.finditer(text):
+        normalised = re.sub(r"\s+", "", match.group()).lower()
+        if not normalised.endswith(_ALLOWED_EMAIL_DOMAIN):
+            offenders.append(match.group())
+    return offenders
+
+
+def _offending_phones(text: str) -> list[str]:
+    """Every phone-shaped string in ``text`` whose digits do not normalise
+    into the reserved-for-fiction 555-01xx block."""
+    offenders: list[str] = []
+    for match in _PHONE_SHAPED_RE.finditer(text):
+        digits = re.sub(r"\D", "", match.group())
+        if not _ALLOWED_PHONE_DIGITS_RE.fullmatch(digits):
+            offenders.append(match.group())
+    return offenders
 
 
 @pytest.mark.parametrize("path", _ALL_FIXTURE_FILES)
@@ -868,20 +1126,19 @@ def test_every_email_shaped_string_in_a_fixture_is_on_the_synthetic_domain(
     path: Path,
 ) -> None:
     """ALLOWLIST (finding E1): not "does this look like gmail?" but "is this
-    the one domain we allow?". The previous 6-domain blocklist passed
-    `asalah@sfu.ca` and `j.smith@shopify.com` -- i.e. every corporate,
-    university and ISP domain -- which is precisely the surface through which
-    a real person's data (e.g. copied from the hris source repo) would enter
-    the corpus."""
+    the one domain we allow?". The previous 6-domain blocklist passed a real
+    institutional address and a plausible corporate one -- i.e. every
+    corporate, university and ISP domain -- which is precisely the surface
+    through which a real person's data (e.g. copied from the hris source repo)
+    would enter the corpus."""
     for text in _scan_texts(path):
-        for match in _EMAIL_SHAPED_RE.finditer(text):
-            email = match.group()
-            assert email.lower().endswith(_ALLOWED_EMAIL_DOMAIN), (
-                f"{path.name}: email-shaped string {email!r} is not on the "
-                f"reserved synthetic domain {_ALLOWED_EMAIL_DOMAIN!r} (RFC 2606 "
-                f"'test' TLD). Every email in the corpus must be synthetic -- "
-                f"no real/plausible domain may appear, anywhere in the file."
-            )
+        offenders = _offending_emails(text)
+        assert not offenders, (
+            f"{path.name}: email-shaped string(s) {offenders!r} are not on the "
+            f"reserved synthetic domain {_ALLOWED_EMAIL_DOMAIN!r} (RFC 2606 "
+            f"'test' TLD). Every email in the corpus must be synthetic -- "
+            f"no real/plausible domain may appear, anywhere in the file."
+        )
 
 
 @pytest.mark.parametrize("path", _ALL_FIXTURE_FILES)
@@ -895,14 +1152,87 @@ def test_every_phone_shaped_string_in_a_fixture_is_in_the_reserved_fake_range(
     (the `(?<!555-01)` lookbehind was dead code against a 3-3-4 match, and
     would have false-positived on a legitimate `604-555-0101`)."""
     for text in _scan_texts(path):
-        for match in _PHONE_SHAPED_RE.finditer(text):
-            found = match.group()
-            digits = re.sub(r"\D", "", found)
-            assert _ALLOWED_PHONE_DIGITS_RE.fullmatch(digits), (
-                f"{path.name}: phone-shaped string {found!r} (digits "
-                f"{digits!r}) is not in the reserved-for-fiction 555-01xx "
-                f"block. Every phone number in the corpus must be synthetic."
-            )
+        offenders = _offending_phones(text)
+        assert not offenders, (
+            f"{path.name}: phone-shaped string(s) {offenders!r} do not "
+            f"normalise into the reserved-for-fiction 555-01xx block. Every "
+            f"phone number in the corpus must be synthetic."
+        )
+
+
+# ── The PII scanners are themselves gated (findings B6 / N5) ──────────────
+#
+# A scanner nobody tested is a scanner nobody can trust: the round-3 email
+# regex demanded `local@domain` CONTIGUOUS, so `<user> @<domain>.ca` -- one
+# space, the single most likely artifact of a PDF text extractor, and the very
+# leak SHAPE r17/ADR-007-F1-R exists to model -- sailed straight through. The
+# `\n`-split case was caught only INCIDENTALLY (the raw-source pass sees the
+# literal `n` of the JSON `\n` escape as a local-part), i.e. by luck.
+#
+# Every probe below uses an RFC-2606 reserved, non-resolving domain
+# (`.invalid`) or the reserved-for-fiction NANP block: the guard's own source
+# file must not carry the strings its invariant bans (finding B4).
+_LEAKY_EMAIL_PROBES = [
+    "notreal.person@nonexistent-employer.invalid",  # contiguous (round-3 case)
+    "notreal.person @nonexistent-employer.invalid",  # space BEFORE the @ (B6)
+    "notreal.person@ nonexistent-employer.invalid",  # space AFTER the @ (B6)
+    "notreal.person\n@nonexistent-employer.invalid",  # line-broken (B6)
+    "notreal.person @ nonexistent-university.invalid",  # both sides (B6)
+]
+
+_CLEAN_EMAIL_PROBES = [
+    "casey.rivera@example.test",
+    "harper.nakamura @example.test",  # reflowed, but still synthetic
+]
+
+_LEAKY_PHONE_PROBES = [
+    "604-555-1212",
+    "(604) 555-1212",
+    "6045551212",
+    "+1 604 555 1212",
+    "604–555–1212",  # U+2013 en-dash (N5)
+    "604‑555‑1212",  # U+2011 non-breaking hyphen (N5)
+    "604/555/1212",  # slash separators (N5)
+]
+
+_CLEAN_PHONE_PROBES = [
+    "555-0101",
+    "604 555 0117",
+    "604  555\n0117",  # r17's reflowed-but-synthetic phone
+    "604–555–0117",  # en-dash, still inside the reserved block
+]
+
+
+@pytest.mark.parametrize("probe", _LEAKY_EMAIL_PROBES)
+def test_email_scanner_flags_format_divergent_addresses(probe: str) -> None:
+    """Finding B6. Whitespace around the `@` must NOT defeat the scanner."""
+    assert _offending_emails(probe) == [probe], (
+        f"the email scanner did not flag {probe!r} -- a leak reflowed by a PDF "
+        f"extractor is the exact class ADR-007 F1-R is about, and it is the "
+        f"class this corpus's r17 fixture exists to model"
+    )
+
+
+@pytest.mark.parametrize("probe", _CLEAN_EMAIL_PROBES)
+def test_email_scanner_does_not_flag_the_synthetic_domain(probe: str) -> None:
+    """Negative control: the scanner must not be a blanket 'any @ is a leak'
+    check, or the corpus's own synthetic addresses would fail it."""
+    assert _offending_emails(probe) == []
+
+
+@pytest.mark.parametrize("probe", _LEAKY_PHONE_PROBES)
+def test_phone_scanner_flags_every_separator_style(probe: str) -> None:
+    """Finding N5. A number pasted out of a real PDF plausibly carries a
+    unicode hyphen/dash or a slash instead of an ASCII hyphen."""
+    assert _offending_phones(probe), (
+        f"the phone scanner did not flag {probe!r} -- it is a real-range NANP "
+        f"number outside the reserved-for-fiction 555-01xx block"
+    )
+
+
+@pytest.mark.parametrize("probe", _CLEAN_PHONE_PROBES)
+def test_phone_scanner_does_not_flag_the_reserved_fake_range(probe: str) -> None:
+    assert _offending_phones(probe) == []
 
 
 # ── Phase-4a strengthening item 1: adversarial/weak backstop flag ────────
@@ -929,7 +1259,7 @@ def test_r09_adversarial_keyword_stuffer_is_flagged_must_not_surface_in_topk() -
 
 
 def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None:
-    """Finding B1 -- the bait's POTENCY, which nothing asserted.
+    """Finding B1 (round 3 opened it; round 4 closed it) -- the bait's POTENCY.
 
     thresholds.toml promises r09 is caught "however high its raw
     skill-keyword overlap with the JD is" and labels.json claims that overlap
@@ -940,6 +1270,30 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
     so the fabrication trap silently stops trapping: 4c could ship an
     evidence verifier that returns True unconditionally and still see r09 fall
     out of the top-k for the wrong reason.
+
+    ROUND 4 -- the round-3 version of this test WAS that defanged bait, in the
+    one place nobody looked. MatchWeights' structured score has FIVE
+    sub-scores (skill 0.40, experience 0.25, education 0.10, seniority 0.15,
+    vector 0.10); this test asserted three and omitted EDUCATION and VECTOR --
+    precisely the two on which r09 was weak. r09 shipped with a sub-bachelor
+    ``Diploma, General Studies``, which fails the JD's ``min_level:
+    bachelors`` outright, so the ``[adversarial]`` arm was INERT: a
+    MatchWeights-faithful engine with a **no-op evidence verifier** scored r09
+    at 0.7878 -> rank 8, i.e. outside the k=5 window, and PASSED both
+    ``must_not_surface_in_topk`` and ``precision@5 = 1.0``. The trap never
+    fired. Education alone is 0.10 x 0.6 = 0.06 of ``score_final``, which
+    exceeded the 0.0485 gap between r09 and the top-5 cutoff -- so a single
+    fixture field, asserted by nothing, was doing the rejection work the
+    evidence verifier is supposed to do. Giving r09 a JD-allowed BSc leaves
+    all 264 tests green; so did deleting its education entirely.
+
+    With the bait repaired (BSc Computer Science, a JD-allowed field), the
+    no-op-verifier engine ranks r09 **2nd** -> precision@5 = 0.80 -> the
+    adversarial arm correctly FAILS. Under a CORRECT verifier r09 scores
+    ~0.547 and lands at rank 11 -- far below the 0.844 top-5 cutoff. See
+    labels.json for why an adversarial fixture that is top-tier on every
+    non-evidence signal MUST land adjacent to the borderline tier: that is
+    arithmetic (``0.6*structured + 0.3*0 + 0.1*0``), not a mislabel.
 
     So: r09 must be structurally TOP-TIER on every non-evidence signal. Only
     EVIDENCE verification may reject it.
@@ -1004,6 +1358,59 @@ def test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal() -> None
         f"{jd.min_years_experience}) -- an overqualified bait would be demoted "
         f"by the overqual penalty rather than by the fabrication verifier"
     )
+
+    # (e) EDUCATION (0.10 of the structured score) -- the sub-score the round-3
+    #     test omitted and that was silently defusing the whole trap. r09 must
+    #     MEET the JD's min_level AND hold one of its allowed fields, so
+    #     neither the level check nor education_partial can demote it.
+    assert jd.education is not None
+    assert jd.education.min_level == "bachelors"
+    assert parsed.education, "r09 must carry an education entry"
+    edu = parsed.education[0]
+    assert edu.degree.lower().startswith("bsc"), (
+        f"r09: degree {edu.degree!r} must be a bachelor's-LEVEL degree meeting "
+        f"the JD's min_level={jd.education.min_level!r}. A sub-bachelor degree "
+        f"fails the education check on its own -- which is exactly how the "
+        f"shipped `Diploma, General Studies` made the [adversarial] arm inert: "
+        f"a no-op-evidence-verifier engine dropped r09 out of the top-5 on "
+        f"EDUCATION, so the fabrication trap never fired"
+    )
+    allowed_fields = {f.lower() for f in jd.education.fields}
+    assert edu.field is not None
+    assert edu.field.lower() in allowed_fields, (
+        f"r09: education field {edu.field!r} must be one of the JD's allowed "
+        f"fields {sorted(allowed_fields)} -- a non-allowed field only earns "
+        f"MatchWeights.education_partial ({DEFAULT_WEIGHTS.education_partial}), "
+        f"which is a structured demotion the evidence verifier must not need"
+    )
+    # ...and the education CHUNK must narrate the same degree, so the bait is
+    # not top-tier in the structured education[] entry while confessing a
+    # diploma in the text an evidence/vector pass actually reads.
+    chunk_blob = " ".join(c.text for c in parsed.chunks)
+    assert edu.degree in chunk_blob, (
+        f"r09: the structured degree {edu.degree!r} must also appear in a "
+        f"chunk -- fixture and narrated text must not disagree"
+    )
+
+    # (f) VECTOR (0.10 of the structured score) -- the other omitted sub-score.
+    #     The corpus CANNOT pin a cosine (it has no embedder and 4c's vector
+    #     sub-score is model-computed), so it pins the vector sub-score's
+    #     INPUT instead: `summary` is what `_build_summary_text` embeds into
+    #     `summary_emb`, and r09's must name every JD skill so the bait is
+    #     maximally on-topic in embedding space too. This is a weaker guarantee
+    #     than (a)-(e) and is recorded as such: the residual is that a vector
+    #     sub-score could still demote r09 by a few points. Measured, it does
+    #     (r09 loses ~0.007 of structured to the 5th-place fixture on vector) --
+    #     an order of magnitude below the 0.06 that education was worth, and it
+    #     does NOT keep the repaired bait out of a no-op verifier's top-5.
+    summary = parsed.summary.lower()
+    for name in sorted(required | nice):
+        assert name in summary, (
+            f"r09: skill {name!r} must appear in `summary` -- summary is the "
+            f"text embedded into summary_emb, and the bait must be maximally "
+            f"on-topic in the vector sub-score's input, not only in the "
+            f"structured skills[] list"
+        )
 
 
 def test_only_weak_and_adversarial_labels_carry_the_must_not_surface_flag() -> None:
@@ -1155,13 +1562,38 @@ def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
 
 # Canonical per-tag expected_rank_band, COMPUTED from the corpus's tier
 # population counts (round-2 GAP 1 fix) so the bands are feasible BY
-# CONSTRUCTION -- a correct ranker can always satisfy them. Walked in
-# ascending-rank order: strong -> borderline -> weak/adversarial (weak and
-# adversarial share one band -- both mean "outside the top-k shortlist").
-# Whenever a fixture's tag changes, THIS constant must be recomputed to
-# match; test_expected_rank_bands_fit_tier_populations (below) independently
-# re-derives the required window widths from labels.json on every run and
-# will fail if this constant falls out of sync.
+# CONSTRUCTION -- a correct ranker can always satisfy them.
+# test_expected_rank_bands_fit_tier_populations (below) independently
+# re-derives feasibility from labels.json on every run and will fail if this
+# constant falls out of sync.
+#
+# ROUND 4 (the B1 knock-on): 'weak' and 'adversarial' NO LONGER SHARE A BAND.
+#
+# Round 3 gave both [Nstrong+Nborderline+1, null] -- "below every borderline".
+# That was only true because the bait was BROKEN: r09 held a sub-bachelor
+# diploma, so it lost the whole education sub-score and sank below the
+# borderline tier for a reason that had nothing to do with fabrication (see
+# test_r09_adversarial_bait_is_top_tier_on_every_non_evidence_signal). Repair
+# the bait -- as finding B1 requires -- and the arithmetic is unavoidable:
+#
+#   score_final(r09) = 0.6*structured + 0.3*evidence_completeness + 0.1*motivation
+#                    = 0.6*~0.91      + 0.3*0                     + 0.1*0
+#                    ~= 0.547
+#
+# A candidate that is top-tier on EVERY non-evidence signal and scores ZERO on
+# evidence lands, by construction, adjacent to the borderline tier -- measured:
+# rank 11 of 17, one slot above the weakest borderline fixture (r05, 0.507).
+# It is nowhere near the top-5 cutoff (0.844), so every gate still bites; it
+# simply is not "below every borderline candidate", and a band that claimed
+# otherwise would be the round-1 infeasible-band bug all over again, just
+# pointed at a different tier. THIS IS ARITHMETIC, NOT A MISLABEL: do not
+# "fix" it by weakening a threshold or by re-tagging r09.
+#
+# So the adversarial bait gets its OWN band -- "somewhere below every strong
+# fixture, and therefore outside the top-k" -- and the borderline band gains
+# exactly ONE slot of slack, because the bait consumes exactly one rank slot
+# inside the borderline/weak region and pushes whatever it outranks down by
+# one. The tiers otherwise keep their round-2 meaning.
 _TAG_POPULATIONS_AT_AUTHORING_TIME = {
     "strong": 7,
     "borderline": 4,
@@ -1170,16 +1602,22 @@ _TAG_POPULATIONS_AT_AUTHORING_TIME = {
     "weak": 5,
     "adversarial": 1,
 }
-_STRONG_MAX = _TAG_POPULATIONS_AT_AUTHORING_TIME["strong"]
-_BORDERLINE_MIN = _STRONG_MAX + 1
-_BORDERLINE_MAX = _STRONG_MAX + _TAG_POPULATIONS_AT_AUTHORING_TIME["borderline"]
-_BAD_MIN = _BORDERLINE_MAX + 1
+_N_STRONG = _TAG_POPULATIONS_AT_AUTHORING_TIME["strong"]
+_N_BORDERLINE = _TAG_POPULATIONS_AT_AUTHORING_TIME["borderline"]
+_N_ADVERSARIAL = _TAG_POPULATIONS_AT_AUTHORING_TIME["adversarial"]
+
+_STRONG_MAX = _N_STRONG  # 7
+_BORDERLINE_MIN = _N_STRONG + 1  # 8
+# +_N_ADVERSARIAL: the one rank slot the bait may consume inside this region.
+_BORDERLINE_MAX = _N_STRONG + _N_BORDERLINE + _N_ADVERSARIAL  # 12
+_WEAK_MIN = _N_STRONG + _N_BORDERLINE + 1  # 12
+_ADVERSARIAL_MIN = _BORDERLINE_MIN  # 8
 
 TAG_RANK_BANDS: dict[str, dict[str, int | None]] = {
     "strong": {"min": 1, "max": _STRONG_MAX},
     "borderline": {"min": _BORDERLINE_MIN, "max": _BORDERLINE_MAX},
-    "weak": {"min": _BAD_MIN, "max": None},
-    "adversarial": {"min": _BAD_MIN, "max": None},
+    "weak": {"min": _WEAK_MIN, "max": None},
+    "adversarial": {"min": _ADVERSARIAL_MIN, "max": None},
 }
 
 
@@ -1207,7 +1645,19 @@ def test_expected_rank_bands_are_internally_consistent() -> None:
             assert band["min"] <= band["max"], f"{tag}: min > max ({band})"
 
 
-def test_expected_rank_bands_are_strictly_ordered_and_non_overlapping() -> None:
+def test_expected_rank_bands_are_ordered_with_only_the_adversarial_slack() -> None:
+    """The quality tiers stay strictly ordered; the ONLY relaxation is the one
+    rank slot the adversarial bait may consume in the borderline/weak region
+    (see the TAG_RANK_BANDS comment for why that is arithmetic, not slop).
+
+    The round-3 version of this test asserted
+    ``TAG_RANK_BANDS["weak"] == TAG_RANK_BANDS["adversarial"]``. That
+    invariant was an artifact of the DEFANGED bait and cannot survive finding
+    B1's fix, so it is replaced -- deliberately, and with the weaker claim
+    stated out loud -- by: the bait ranks below every STRONG fixture, and
+    therefore outside the top-k. It is NOT claimed to rank below every
+    borderline fixture.
+    """
     strong_max = TAG_RANK_BANDS["strong"]["max"]
     borderline_min = TAG_RANK_BANDS["borderline"]["min"]
     borderline_max = TAG_RANK_BANDS["borderline"]["max"]
@@ -1218,12 +1668,28 @@ def test_expected_rank_bands_are_strictly_ordered_and_non_overlapping() -> None:
     assert (
         strong_max < borderline_min
     ), "strong tier must rank entirely above borderline"
+
     assert borderline_max is not None and weak_min is not None
-    assert borderline_max < weak_min, "borderline tier must rank entirely above weak"
-    assert (
-        TAG_RANK_BANDS["weak"] == TAG_RANK_BANDS["adversarial"]
-    ), "weak and adversarial share the 'outside top-k' band"
+    assert weak_min > strong_max, "weak tier must rank entirely below strong"
+    assert borderline_max - weak_min == _N_ADVERSARIAL - 1, (
+        f"the borderline band may overrun the weak band's start by exactly the "
+        f"number of adversarial fixtures ({_N_ADVERSARIAL}) minus one -- one "
+        f"displaced rank slot per bait, no more. Got borderline_max="
+        f"{borderline_max}, weak_min={weak_min}"
+    )
+
     assert adversarial_min is not None
+    assert TAG_RANK_BANDS["weak"] != TAG_RANK_BANDS["adversarial"], (
+        "weak and adversarial no longer share a band (round-4 finding B1): a "
+        "bait that is top-tier on every non-evidence signal scores "
+        "0.6*structured and lands ADJACENT to the borderline tier, not below "
+        "every honestly-weak candidate"
+    )
+    assert adversarial_min > strong_max, (
+        "the adversarial bait must rank below EVERY strong fixture -- that is "
+        "the invariant that survives, and the one the evidence verifier earns"
+    )
+    assert TAG_RANK_BANDS["adversarial"]["max"] is None
 
 
 def test_weak_and_adversarial_bands_sit_strictly_outside_top_k() -> None:
@@ -1240,63 +1706,55 @@ def test_expected_rank_bands_fit_tier_populations() -> None:
     """Round-2 GAP-1 integrity guard: a per-tag expected_rank_band is only
     useful if a CORRECT ranker can actually satisfy it.
 
-    This performs a Hall-style cumulative feasibility check against the
-    corpus's ACTUAL tier populations, recomputed FRESH from labels.json on
-    every run -- independent of (does not trust) the TAG_RANK_BANDS
-    constant above. Walking tiers in ascending-rank order (strong ->
-    borderline -> weak/adversarial, which share one band since both mean
-    "outside the top-k shortlist"), each tier's [min, max] window must:
+    Round 3 checked feasibility by requiring the bands to TILE ranks 1..N with
+    no gap/overlap. That check is no longer expressive enough: after finding
+    B1 the adversarial band deliberately OVERLAPS the borderline and weak
+    bands (the bait consumes one rank slot somewhere in that region -- see
+    TAG_RANK_BANDS). Overlapping windows are still perfectly gateable, they
+    just need the general criterion instead of the tiling special case.
 
-    (a) start exactly where the previous tier's window ended (no gap, no
-        overlap when tiling ranks 1..N), and
-    (b) be wide enough to hold every fixture actually tagged into that tier.
+    So this is now a full **Hall's-condition** check on the interval bipartite
+    graph "fixtures -> rank slots": a system of interval domains admits a
+    perfect matching iff for EVERY contiguous window of ranks [lo, hi], the
+    number of fixtures whose whole allowed band is CONTAINED in that window is
+    at most the window's width. Populations are recomputed FRESH from
+    labels.json on every run (this test does not trust TAG_RANK_BANDS to
+    describe the corpus; it checks that it does).
 
-    This is exactly the bug that shipped in round 1: expected_rank_band was
-    [1, 3] for 'strong' while the corpus had 5 'strong' fixtures -- no
-    correct ranker could ever place all 5 inside a 3-wide window. Run
-    against that state, this test fails with exactly that message; against
-    today's corpus (computed bands, see TAG_RANK_BANDS) it passes.
+    This still catches the round-1 bug exactly: 5 'strong' fixtures with band
+    [1, 3] means the window [1, 3] contains 5 fixtures in 3 slots -> RED.
     """
     populations = _tag_populations()
     n_total = sum(populations.values())
     assert n_total == len(_load_labels()["resumes"])
 
-    combined_populations = {
-        "strong": populations["strong"],
-        "borderline": populations["borderline"],
-        "weak_adversarial": populations["weak"] + populations["adversarial"],
-    }
-
-    expected_next_min = 1
-    for tier_key in ("strong", "borderline", "weak_adversarial"):
-        pop = combined_populations[tier_key]
+    windows: list[tuple[str, int, int]] = []
+    for tag, pop in populations.items():
         if pop == 0:
             continue
-        tag_key = "weak" if tier_key == "weak_adversarial" else tier_key
-        band = TAG_RANK_BANDS[tag_key]
-        band_min = band["min"]
-        assert band_min is not None
-        assert band_min == expected_next_min, (
-            f"{tier_key} band starts at {band_min}, but the previous tier's "
-            f"window ended at {expected_next_min - 1} -- bands must tile "
-            f"ranks 1..N with no gap/overlap"
+        band = TAG_RANK_BANDS[tag]
+        lo = band["min"]
+        assert lo is not None
+        hi = band["max"] if band["max"] is not None else n_total
+        assert 1 <= lo <= hi <= n_total, (
+            f"{tag}: band [{lo}, {band['max']}] does not fit inside the "
+            f"corpus's rank space 1..{n_total}"
         )
-        band_max = band["max"] if band["max"] is not None else n_total
-        window_width = band_max - band_min + 1
-        assert window_width >= pop, (
-            f"{tier_key}: expected_rank_band window [{band_min}, {band['max']}] "
-            f"is only {window_width} rank(s) wide but the corpus has {pop} "
-            f"fixture(s) tagged in this tier -- a correct ranker CANNOT place "
-            f"all {pop} candidates inside this band. (This is exactly the "
-            f"round-1 bug: expected_rank_band=[1,3] for 'strong' while the "
-            f"corpus had 5 'strong' fixtures.)"
-        )
-        expected_next_min = band_max + 1
+        windows.extend([(tag, lo, hi)] * pop)
 
-    assert expected_next_min - 1 == n_total, (
-        "the tiered bands must together cover every rank from 1..N with no "
-        "gap left uncovered at the end of the corpus"
-    )
+    assert len(windows) == n_total
+
+    for lo in range(1, n_total + 1):
+        for hi in range(lo, n_total + 1):
+            contained = [(t, a, b) for (t, a, b) in windows if lo <= a and b <= hi]
+            assert len(contained) <= hi - lo + 1, (
+                f"rank window [{lo}, {hi}] is {hi - lo + 1} slot(s) wide but "
+                f"{len(contained)} fixture(s) are confined to it "
+                f"({sorted({t for t, _, _ in contained})}) -- a correct ranker "
+                f"CANNOT place them all. (This is the round-1 bug: "
+                f"expected_rank_band=[1,3] for 'strong' while the corpus had 5 "
+                f"'strong' fixtures.)"
+            )
 
 
 # ── Phase-4a strengthening item 6: self-dox positive control ─────────────
