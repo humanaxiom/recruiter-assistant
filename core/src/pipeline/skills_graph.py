@@ -158,6 +158,61 @@ personal name) apart from ``Casey Rivera`` (both tokens are). See
   BOTH the shape arm and the (now three-part) lexicon/script arm, so a
   candidate genuinely surnamed ``Kafka``/``Django``/``Cassandra`` is still
   kept.
+
+Round-5 (security re-audit, round 4 of the audit series) — S10/S11/S12:
+Decision C's lexicon arm was itself a recall regression, one layer down.
+``_hits_person_name_lexicon`` shipped as ``any(tok in lexicon for tok in
+tokens)``, which makes ONE name-shaped token condemn the WHOLE candidate:
+782 of the lexicon's 783 entries rejected every skill title-cased as a
+solo token, and a genuine two-word vendor/product skill built from one
+common-name-shaped word plus one technical word (``Amazon Aurora`` —
+"aurora" is a common given name; ``IBM Watson`` — "watson" is a common
+surname; ``Victoria Metrics`` — "victoria" is a common given name) was
+dropped in every casing, since ``multi_token`` case-folding applies
+regardless of which half of the compound is the "real" tech word.
+
+* **S10** — ``any(...)`` -> ``all(...)``: reject only when EVERY real
+  token hits the lexicon (see ``_hits_person_name_lexicon``'s updated
+  docstring). This alone recovers every MULTI-token false positive above,
+  since the vendor/generic half of each pair ("amazon", "ibm", "metrics")
+  is not itself a lexicon entry. It does NOT recover a single-real-token
+  product name that also happens to BE a common given name/surname
+  (``Julia``, ``Hudson``) — ``all`` and ``any`` agree on a length-1
+  sequence, so those need the vocab backstop below instead. A
+  vendor-prefix veto (``_hits_vendor_prefix_veto``) adds a second,
+  independent line of defence for the multi-token case: a name LEADING
+  with a known vendor/brand word ("Amazon", "IBM", "Apache", ...) is never
+  treated as person-shaped, regardless of what the lexicon says about the
+  other token — belt-and-braces, not load-bearing on its own for the
+  fixtures above (the quantifier fix alone already saves them).
+* **``aliases.yaml`` backstop** — ``julia``/``hudson`` are now 220-term-
+  vocabulary entries. The vocab arm of Decision A's conjunction always wins
+  (S9), so these two are exempted from the person-name check entirely,
+  independent of the lexicon/quantifier/vendor-veto machinery — the only
+  fix that reaches the single-real-token cases the quantifier change
+  structurally cannot. Deliberately NOT extended to the multi-token
+  compounds (``Amazon Aurora``/``IBM Watson``/``Apache Felix``/``Victoria
+  Metrics``): those are already recovered by the ``all(...)`` quantifier
+  fix on its own, and ``VictoriaMetrics`` (no space) was never rejected in
+  the first place — see the recall-guard test file for the mutation proof
+  that this quantifier fix, not a vocab shortcut, is what saves them.
+* **S11** — the round-4 recall guard (``test_non_vocab_multiword_skill_is_
+  kept_not_rejected_as_a_name``) only ever exercised the lexicon-MISS arm
+  (none of its fixtures contain a person-name token at all); it never
+  tested a skill whose token IS a name, so it was blind to the exact S10
+  defect. New KEEP fixtures (``Amazon Aurora``, ``IBM Watson``, ``Apache
+  Felix``, ``Julia``, ``VictoriaMetrics``, ``Hudson``) plus a casing-
+  invariance assertion (raw/Title/lower/UPPER all agree) close that gap.
+* **S12** (``src.worker.resume_tasks``) — see ``_redact_skill_names_pii``'s
+  docstring: an empty ``CandidateInfo`` collapses ``reject_reason_for_
+  skill_name`` to ``strict_lexicon=True`` for the skill-name scrub, since
+  there is no candidate identity left to justify the recall exemptions
+  above.
+* **S13** (test-only) — the R7 concurrency integration test now pins
+  ``outbox_drain_deadline_seconds`` to a large value; the 4.0s default let
+  a cold-host run legitimately early-exit the bounded-work deadline before
+  both drainers finished, which is correct ``project_to_graph`` behaviour,
+  not a locking bug — see ``test_graph_projection_e2e.py``.
 """
 
 from __future__ import annotations
@@ -553,20 +608,88 @@ def _name_lexicon() -> frozenset[str] | None:
 
 
 def _hits_person_name_lexicon(tokens: Iterable[str]) -> bool:
-    """Decision C: does at least one of ``tokens`` (already lower-cased real
-    name-shape tokens — see ``_name_shape_real_tokens``) hit the offline
-    personal-name lexicon?
+    """Decision C, S10-corrected (round-5 security re-audit): do ALL of
+    ``tokens`` (already lower-cased real name-shape tokens — see
+    ``_name_shape_real_tokens``) hit the offline personal-name lexicon?
+
+    Round-4 shipped this as ``any(...)``, which made the lexicon arm
+    INCIDENTAL rather than decisive: one name-shaped token anywhere in a
+    multi-word candidate condemned the WHOLE name, so a real vendor/product
+    skill built from one common-name-shaped word plus one technical word
+    (``Amazon Aurora`` — "aurora" hits; ``IBM Watson`` — "watson" hits;
+    ``Victoria Metrics`` — "victoria" hits) was rejected as PII even though
+    the OTHER token ("amazon"/"ibm"/"metrics") is plainly not a person's
+    name at all. ``all(...)`` makes the lexicon arm DECISIVE instead:
+    reject only when EVERY real token is itself a lexicon hit — exactly
+    what "every real token looks like a personal name" should mean. A
+    single-real-token candidate (``Rivera``, ``Julia``) is unaffected
+    (``all`` and ``any`` agree on a length-1 sequence); a genuine
+    ``Casey Rivera`` (BOTH tokens are names) still fails closed. See
+    ``aliases.yaml``'s S10 backstop for the single-token product-name cases
+    (``Julia``, ``Hudson``) this quantifier change cannot reach on its own.
 
     Fails CLOSED (S7 precedent), not open, if the lexicon could not be
     loaded at all — collapsing back to the OLDER, stricter two-way
     conjunction (name-shape AND vocab-miss) rather than silently widening
     recall (and reopening the F3 PII leak) on a broken deployment where the
-    bundled data file went missing.
+    bundled data file went missing. This sentinel is checked BEFORE the
+    ``all()``/``any()`` distinction even arises, so it is unaffected by the
+    S10 quantifier change — confirmed by
+    ``test_lexicon_file_missing_fails_closed_not_open``.
     """
     lexicon = _name_lexicon()
     if lexicon is None:
         return True
-    return any(tok in lexicon for tok in tokens)
+    return all(tok in lexicon for tok in tokens)
+
+
+# S10 (round-5 security re-audit) — a vendor/brand prefix leading an
+# otherwise name-shaped, vocab-miss candidate ("Amazon Aurora", "IBM
+# Watson", "Apache Felix") marks it as a PRODUCT name, not a person's name,
+# regardless of what the (necessarily imperfect) personal-name lexicon says
+# about the OTHER token. This is deliberately narrow (a short, well-known
+# set of enterprise-tech vendors) rather than a general "any capitalised
+# word could be a brand" rule, which would reopen the same recall-vs-strict-
+# allowlist tension Decision A's human-locked call already rejected once.
+# Checked case-insensitively against the FIRST real name-shape token, since
+# every one of these vendor patterns leads with the vendor word
+# ("Amazon Aurora", never "Aurora Amazon").
+_VENDOR_PREFIX_TOKENS = frozenset(
+    {
+        "amazon",
+        "apache",
+        "ibm",
+        "microsoft",
+        "google",
+        "oracle",
+        "elastic",
+        "redhat",
+        "salesforce",
+        "adobe",
+        "cisco",
+        "vmware",
+    }
+)
+# The one two-word vendor name in the set above ("Red Hat") needs its own
+# phrase check — neither "red" nor "hat" alone is a useful single-token
+# vendor marker, and "red" in particular is common enough as an ordinary
+# word that adding it to `_VENDOR_PREFIX_TOKENS` unscoped would be a
+# needless widening.
+_VENDOR_PREFIX_PHRASES = ("red hat",)
+
+
+def _hits_vendor_prefix_veto(name: str, real_tokens: list[str]) -> bool:
+    """S10: does ``name`` lead with a known vendor/brand prefix? When true,
+    this OVERRIDES the person-name-shape verdict for the whole candidate —
+    a vendor-prefixed product name is never treated as PII, independent of
+    whatever the lexicon/script arms below would otherwise conclude about
+    the candidate's other token(s). ``real_tokens`` is the SAME lower-cased
+    list ``_hits_person_name_lexicon`` consumes, so the two never see a
+    different tokenisation of the same name."""
+    if real_tokens and real_tokens[0] in _VENDOR_PREFIX_TOKENS:
+        return True
+    lowered = name.strip().lower()
+    return any(lowered.startswith(phrase) for phrase in _VENDOR_PREFIX_PHRASES)
 
 
 def _skill_log_ref(canonical: str) -> str:
@@ -597,24 +720,44 @@ def _is_known_vocab_term(name: str) -> bool:
     )
 
 
-def reject_reason_for_skill_name(name: str) -> str | None:
+def reject_reason_for_skill_name(
+    name: str, *, strict_lexicon: bool = False
+) -> str | None:
     """The single shape(+vocab+lexicon) reject decision for a skill name —
     shared by ``_resolve_one`` (this module) AND
-    ``src.worker.resume_tasks._extract_skills_merged`` (which calls this
-    directly on the RAW LLM skill name, BEFORE canonicalisation — see the
-    module docstring's F3b note). Returns a rejection-reason CATEGORY
-    (``email_shape`` / ``phone_shape`` / ``length_or_token_cap`` /
+    ``src.worker.resume_tasks._extract_skills_merged``/``_redact_skill_names_pii``
+    (which call this directly on a skill name outside any Neo4j write —
+    see the module docstring's F3b note). Returns a rejection-reason
+    CATEGORY (``email_shape`` / ``phone_shape`` / ``length_or_token_cap`` /
     ``person_name_shape``), never the value that triggered it (R3
     discipline) — or ``None`` when the name is fine.
 
     Decision C (round-4 recall regression fix, see the module docstring's
-    "Round-4" section): ``person_name_shape`` is now a THREE-way
+    "Round-4" section): ``person_name_shape`` is normally a THREE-way
     conjunction — name-SHAPED, AND a vocabulary miss, AND (at least one real
     token hits the offline personal-name lexicon OR the name contains a
     non-Latin script). Shape and vocab-miss alone (the old two-way rule)
     cannot tell ``distributed systems`` apart from ``Casey Rivera`` — both
     are two Title-Case-able alphabetic tokens outside the 220-term
     vocabulary; the lexicon/script check supplies the missing signal.
+    Round-5 (S10) makes the lexicon arm ``all(...)`` rather than
+    ``any(...)`` (see ``_hits_person_name_lexicon``) and adds a vendor-
+    prefix veto (``_hits_vendor_prefix_veto``) that overrides the lexicon/
+    script arms entirely for a known vendor-prefixed product name.
+
+    ``strict_lexicon`` (S12, round-5 security re-audit): when true, the
+    lexicon AND vendor-prefix arms are skipped entirely and the decision
+    collapses to the OLDER, stricter two-way rule — name-SHAPED AND
+    vocabulary-miss is sufficient to reject, full stop, exactly as if the
+    lexicon had hit unconditionally (the SAME fail-closed collapse that
+    already happens automatically when the lexicon file itself cannot be
+    read — see ``_hits_person_name_lexicon``). Used by
+    ``src.worker.resume_tasks._redact_skill_names_pii`` when
+    ``_redaction_available(candidate)`` is False: with no candidate
+    identifiers at all to pattern-match a skill name against, there is no
+    context left to justify the recall-preserving lexicon/vendor
+    exemptions, so this trades recall for privacy exactly the way the
+    fail-closed lexicon-missing case already does.
     """
     if len(name) > _MAX_SKILL_NAME_CHARS:
         return "length_or_token_cap"
@@ -626,7 +769,11 @@ def reject_reason_for_skill_name(name: str) -> str | None:
         return "phone_shape"
     real_tokens = _name_shape_real_tokens(name)
     if real_tokens and not _is_known_vocab_term(name):
-        if _hits_person_name_lexicon(real_tokens) or _contains_non_latin_script(name):
+        if strict_lexicon:
+            return "person_name_shape"
+        if not _hits_vendor_prefix_veto(name, real_tokens) and (
+            _hits_person_name_lexicon(real_tokens) or _contains_non_latin_script(name)
+        ):
             return "person_name_shape"
     return None
 

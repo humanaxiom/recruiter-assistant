@@ -27,8 +27,8 @@
 # lookup, at build time or runtime -- this list ships in the repo, offline,
 # exactly like `aliases.yaml`/`categories.yaml` beside it.
 #
-# Size: ~780 unique entries (some given-name/surname duplicates across
-# lines collapse into the same set at load time -- lru_cache-loaded into a
+# Size: 783 unique entries at load time (some given-name/surname duplicates
+# across lines collapse into the same set -- lru_cache-loaded into a
 # frozenset, so a duplicate line costs nothing but is not "double-counted").
 # Small by design -- a lookup table this size loads and
 # checks in microseconds, and the module's OWN recall guard

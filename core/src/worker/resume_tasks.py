@@ -260,10 +260,41 @@ def _redact_skill_names_pii(
     verbatim) is dropped outright rather than kept as an empty string.
 
     R3 discipline: the drop is logged as a COUNT only — never the name.
+
+    S12 (round-5 security re-audit): ``_redact_candidate_pii`` above is a
+    STRUCTURED, pattern-based scrub — it needs at least one of
+    ``candidate``'s own fields to build a pattern from. When
+    ``_redaction_available(candidate)`` is False (a completely empty
+    ``CandidateInfo`` — the ``core`` LLM call produced nothing usable), that
+    scrub has nothing to match against and falls through to
+    ``_generic_contact_scrub``, which by its own docstring cannot catch a
+    bare NAME. Left unhandled, a name-shaped "skill" the LLM copied off a
+    header block (e.g. an uncommon full name the offline personal-name
+    lexicon does not cover, so ``skills_graph``'s NORMAL three-way
+    conjunction lets it through too) would reach ``resumes.parsed``/the
+    outbox verbatim — the candidate's OWN identity, landing as a ``:Skill``
+    node in Neo4j.
+
+    Fail CLOSED here exactly as ``parse_resume``'s header-chunk skip (S7)
+    already does for the embedder: with no candidate identity at all to
+    reason about, drop ANY skill name that is name-SHAPED and misses the
+    220-term vocabulary, unconditionally — ``reject_reason_for_skill_name(
+    ..., strict_lexicon=True)`` collapses Decision C's three-way conjunction
+    back to the older, stricter two-way rule for exactly this reason (see
+    that function's docstring). Privacy wins when we have no identity
+    context to reason with; a real, uncommon-but-legitimate skill name lost
+    this way is the accepted cost, same class as S7's header-chunk skip.
     """
+    strict = not _redaction_available(candidate)
     out: list[ResumeSkill] = []
     dropped = 0
     for skill in skills:
+        if strict and (
+            skills_graph.reject_reason_for_skill_name(skill.name, strict_lexicon=True)
+            is not None
+        ):
+            dropped += 1
+            continue
         redacted_name = _redact_candidate_pii(skill.name, candidate)
         if not redacted_name:
             dropped += 1
