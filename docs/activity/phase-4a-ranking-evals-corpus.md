@@ -1,11 +1,18 @@
 # Phase 4a — Ranking-evals corpus
 
-**Status:** complete, all three merge-blocking gates green on HEAD `e8e83be`
-(reviewer APPROVE, security PASS, ranking-evals PASS). Branch
-`feat/phase-4a-ranking-evals-corpus`. **Zero product code** — this sub-phase
-builds only the labelled evaluation corpus the Phase-4c matching engine will be
-scored against, so that 4c's first `ranking-evals` run is falsifiable rather
-than a rubber stamp.
+**Status:** corpus complete and MERGED to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12,
+on HEAD `e8e83be` at merge time (reviewer APPROVE, security PASS, ranking-evals PASS). Branch
+`feat/phase-4a-ranking-evals-corpus` (deleted post-merge). **Zero product code** — this sub-phase
+builds only the labelled evaluation corpus the Phase-4c matching engine will be scored against, so
+that 4c's first `ranking-evals` run is falsifiable rather than a rubber stamp.
+
+**Falsifiability hardening (rounds 3–9, this doc's "Round 3" section onward) is also complete**, on
+branch `fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
+(https://github.com/humanaxiom/recruiter-assistant/pull/10), tip `583427f`, 18 commits. **CI is fully
+green — but the PR is OPEN, awaiting human merge, NOT yet merged.** Final gate verdicts: reviewer
+**APPROVE**, security **PASS**, ranking-evals **PASS**; **1040 unit tests @ 96.63% coverage** (up from
+955 on `main`); **65 integration tests**; zero `core/src/` changes. See "Round 9" at the end of this
+document for the full final-state writeup.
 
 ## What landed
 
@@ -257,3 +264,69 @@ education-blind separation **−3.30e-04 → −8.72e-04** — i.e. the inversio
 
 **Gates:** ruff · black · `mypy src --strict` clean; **1035 unit tests @ 96.63% coverage** (306 corpus
 tests, 1 skipped until 4c); `run_evals.py` still exits 1. Zero `core/src/` changes.
+
+### Round 8 — the eighth consecutive instance (commits `0edc722` docs, `6a24c10`, `23176cf`)
+
+The reviewer found the **eighth consecutive instance** of the branch's signature defect (a claim stamped
+as asserted but enforced by nobody). This is the same class as round-3 finding E3 (stripping r12's name
+from `c_003` left the suite green because the embed-boundary control could be silently neutered) —
+recurring on a different fixture.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| — | `test_r17_carries_every_adr007_f1r_format_divergent_variant` enumerated only **three** of the four ADR-007 F1-R break shapes (line-broken name, reflowed phone, bare email local-part) and never checked the fourth — the **intra-token** break r17's chunk `c_008` exists for | Delete `c_008` entirely — **all 1040 tests stay green** | Added a **4th assertion**: a chunk must carry the candidate email broken **inside the domain token**, with de-wrap reconstructing `candidate.email` |
+| — | `texts.extend(decoded)` — the de-wrap pass's sibling in `_scan_texts` — was **ungated** | Delete the line — suite stays green | The e2e probe gained a **joint-break-only** phone (`555\n1212`) that only the plain decoded pass catches |
+
+Also fixed (housekeeping, same round, not a defect in the corpus itself): commit `49e85bf`, labelled
+`red(4a-hard-7)`, **was not actually red** — 311 passed / 0 failed, because it gated a fix round 6 had
+already landed. The last two commits of that sequence were rebuilt as `b996810` / `830965d` with the
+honest label `test(4a-hard-7)`; the six genuinely-red commits from rounds 3–6 are untouched, original
+hashes preserved. See `docs/EXTRACTION_PLAN.md`'s "Update after round 9" note for the full commit-label
+reconciliation.
+
+**Gates:** ruff · black · `mypy src --strict` clean; all green; test count continues rising toward the
+final 1040 (see round 9). Zero `core/src/` changes.
+
+### Round 9 — L1, the last finding (commit `583427f`, `test(4a-hard-9)`)
+
+Security's last finding on this branch (**L1, low, non-blocking**): `_scan_texts`'s **raw-source pass**
+(`texts = [raw]`) was the third and last of its three passes still ungated.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| L1 | `_scan_texts`'s raw-source pass (`texts = [raw]`) was ungated. Its unique coverage is PII in a JSON **key** or as a **non-string scalar** (e.g. a phone stored as a JSON number) — both invisible to `_string_values`, which recurses `node.values()` and collects only `str` leaves | Replace `[raw]` with `[]` — suite stays green | Added an assertion unique to the raw-source pass; all three `_scan_texts` passes (decoded, de-wrap, raw) are now independently gated, each failing on its own distinct assertion |
+
+Closed rather than deferred because the `ResumeParsed.model_validate` backstop **only covers résumé
+fixtures** — the scan is scoped by directory (round-4 finding B5), so it also covers `labels.json`, the
+JD, and — per `docs/EXTRACTION_PLAN.md`'s 4b/4d rows — 4b's outbox-shaped fixture and 4d's reverse-match
+JDs, **none of which are pydantic-validated**.
+
+**Round 9 is the final round on this branch.** Final state, HEAD `583427f`:
+
+- **reviewer: APPROVE** (31 of 32 mutations killed across the whole branch's history; the one survivor is
+  **R1** — the skill-sub-score-internals gap — a consciously-carried residual into 4c, not an open defect;
+  see "Accepted 4a residuals" in `docs/EXTRACTION_PLAN.md`).
+- **security: PASS** (empty findings table).
+- **ranking-evals: PASS.**
+- Offline: ruff · black · `mypy --strict` clean · **1040 unit tests @ 96.63% coverage** (up from **955** on
+  `main` before this branch — zero `core/src/` changes, so the entire delta is new eval-corpus tests) ·
+  **65 integration tests** vs real Postgres+Neo4j · `run_evals.py` still exits 1 (the correct, expected
+  pre-4c RED state).
+- **Zero `core/src/` changes** across the whole branch's 18 commits.
+
+**Baseline battery — unchanged from round 7** (re-confirmed; no fixture changes in rounds 8–9 touched
+scoring-relevant fields), measured against a real `nomic-embed-text` 768-d embedder on a cold cache and
+real `rapidfuzz`, both input orders:
+
+| arm | precision@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | 0/3 | FAIL |
+| lexical tf-idf | 1.00 | 8 | 0/3 | FAIL |
+| embedding pure-vector | 0.80 | 4 | 0/3 | FAIL |
+| faithful + **no-op** evidence verifier | 0.80 | 1 | 3/3 | FAIL (adversarial arm) |
+| faithful + **hris `_fuzz_substring`** | 0.80 | 1 | 3/3 | FAIL |
+| faithful + **correct** verifier | 1.00 | 8 | 3/3 | **PASS** |
+
+**PR:** [#10](https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip
+`583427f`, 18 commits. **CI is fully green** (branch-name · ruff/black/mypy · unit/coverage ·
+integration pg+neo4j+redis · "ALL GATES GREEN"). **Open, awaiting human merge — not yet merged.**

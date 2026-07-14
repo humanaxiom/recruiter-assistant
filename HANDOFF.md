@@ -19,7 +19,102 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases; sub-phase 4a (evals corpus) is MERGED to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. 4b (graph projection) is next.**
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12. Its **falsifiability hardening is done and gate-green on branch `fix/phase-4a-corpus-falsifiability`, opened as PR #10** (https://github.com/humanaxiom/recruiter-assistant/pull/10, tip `583427f`, 18 commits) — **CI fully green, but the PR is still OPEN, awaiting human merge — it has NOT merged.** **4b (graph projection) is the next sub-phase to build.** See "Phase 4a status" and "Phase 4 resume" below.
+
+### Phase 4a status — corpus MERGED, hardening in PR #10 OPEN (read this before starting 4b)
+
+**Corpus.** `core/tests/evals/` (JD fixture + labelled synthetic résumés + `labels.json` + `thresholds.toml`
++ RED-pending-4c harness stub `run_evals.py`) is **MERGED to `main` via PR #8** (merge `875eac2`), CI
+green, 2026-07-12. Zero product code.
+
+**Falsifiability hardening.** Branch `fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
+(https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip `583427f`, 18
+commits. **CI is fully green — but the PR is OPEN, awaiting human merge; it has NOT merged.** Why this
+branch exists: the three merge-blocking gates audited the *merged* corpus and proved by mutation that it
+**could not fail a bad Phase-4c engine** — the artifact whose whole purpose is to make 4c's first green
+build falsifiable. Nine cumulative rounds of findings-and-fix closed every hole found (rounds 1–2 pre-merge
+on the original 4a branch; rounds 3–9 on this branch). Full history:
+[docs/activity/phase-4a-ranking-evals-corpus.md](docs/activity/phase-4a-ranking-evals-corpus.md); contract
+detail: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) ("4a hardening" subsections and "Current status
+& next step").
+
+**Final gate verdicts, HEAD `583427f`:**
+- reviewer: **APPROVE** (31 of 32 mutations killed across the branch's history; the one survivor is **R1**
+  below — a consciously-carried residual, not an open defect)
+- security: **PASS** (empty findings table)
+- ranking-evals: **PASS**
+- Offline: ruff · black · `mypy --strict` clean · **1040 unit tests @ 96.63% coverage** (up from **955** on
+  `main` before this branch — zero `core/src/` changes, so the whole delta is new eval-corpus tests) ·
+  **65 integration tests** vs real Postgres+Neo4j · `run_evals.py` still exits 1 (correct pre-4c RED state)
+- **Zero `core/src/` changes** across the whole branch
+
+**The six-arm baseline battery** (verified against an engine replica ported from hris
+`packages/pipeline/src/pipeline/matching/{stages,orchestrator}.py`, real `nomic-embed-text` on a cold
+cache, real `rapidfuzz`, both input orders):
+
+| engine | precision@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | 0/3 | FAIL |
+| lexical tf-idf | 1.00 | 8 | 0/3 | FAIL |
+| embedding pure-vector | 0.80 | 4 | 0/3 | FAIL |
+| faithful + no-op evidence verifier | 0.80 | 1 | 3/3 | FAIL (adversarial arm) |
+| faithful + hris `_fuzz_substring` | 0.80 | 1 | 3/3 | FAIL |
+| faithful + correct verifier | 1.00 | 8 | 3/3 | **PASS** |
+
+**The single most important finding for 4c.** hris's `_fuzz_substring` — the evidence verifier 4c is
+slated to port verbatim — **verifies all four of the corpus's fabricated quotes** (0.928 / 0.943 / 0.988 /
+0.935, all ≥ the 0.85 bar) and puts the keyword-stuffer at **rank 1**. It is a character-**set** overlap
+ratio, not a sequence ratio. **It must be REPLACED, not ported** — use `rapidfuzz.partial_ratio` or
+`token_set_ratio` (both measured safe: negatives score 0.36–0.46, golds 1.000). Other measured landmines:
+`fuzz.WRatio` scores a fabricated anchor at **0.855** (leaks); `partial_token_set_ratio` returns **1.000**
+on 2 of 4 negatives; `fuzz.ratio` scores the corpus's own **gold** anchors at 0.648/0.796 (would reject
+valid evidence).
+
+**The recurring lesson, worth stating once, plainly.** The corpus was wrong three separate times in the
+**same way**: it asserted what a sub-score *should* mean rather than what the code *does*. `seniority` is
+**not** a years check — it is `cosine(jd.title, most-recent job title)` rescaled from `seniority_floor`.
+`score_education` reads only the degree **level** and never `jd.education.fields`. Each time, a control
+that looked rigorous was **inert**. The gates only caught it once they stopped reasoning from the spec and
+**ported the actual `stages.py`**. **4c should read `stages.py` first, not third.**
+
+**Open decisions / accepted residuals carried into 4c:**
+- **R1 — the corpus is blind to the skill sub-score's internals.** `weights.skill = 0.0` **passes**;
+  recency decay disabled passes (even though r10's `decision_point` is literally
+  `recency_decay_stale_skills` — that label is decorative); `must_have_miss_penalty 0.5 → 1.0` passes; the
+  implied-experience relief path and the ontology junk-bucket are never exercised decisively.
+  **Deliberately CARRIED INTO 4c, not closed on this branch** — closing it needs skill-dimension twin
+  fixtures, which churns the rank bands. 4c must add: a recency twin for r10, a must-have-miss twin, and
+  confirm `weights.skill = 0` **FAILS**.
+- **R2 — the corpus gates the evidence *verifier*, never the *extractor*.** An LLM that simply fails to
+  *find* real evidence is caught only in the limit (`min_completeness_in_topk` catches "no quote at all").
+- **Open decision needing a human:** `score_education` ignores `jd.education.fields`, so JD field-relevance
+  is **decorative** today. Either extend the scorer, or drop `fields` from the JD contract. The r14/r11
+  ordering pair is deliberately built to survive **either** resolution.
+- **Ported engine helpers are trusted, not verified, until 4c lands.**
+  `test_ported_engine_helpers_agree_with_the_real_ones` **skips** today and wakes up when
+  `src.pipeline.matching.{stages,orchestrator}` exists. **If it fails then, re-derive every corpus claim
+  that depends on the ports** (r09's potency, r11/r14's partial credit, the education twins, the
+  ordering-pair gaps) — do NOT relax the comparison.
+- **The three blind-engine mutations are a documented review OBLIGATION, not a gate**
+  (`weights.education = 0`, `overqual_ratio = 99`, `weights.motivation = 0` must each FAIL on **both**
+  input orders). No gate in this repo can run them — they need the engine with *mutated* `MatchWeights`,
+  which is a property of 4c's own test suite. **The 4c reviewer is the last line of defence on the
+  ordering pairs.**
+
+**Documented process deviation (flag for the human, not silently absorbed).** Three commits on the
+hardening branch are labelled `test(...)` rather than `red:`/`green:` — a deliberate, reviewer-verified
+deviation from CLAUDE.md's mandatory TDD order, because the guards they add pass against the unmutated
+tree and can only be shown red by *mutation*, not by an honest failing-test-first commit. Detail in
+`docs/EXTRACTION_PLAN.md`'s round-numbering note.
+
+**Suggested chores flagged by security, OUTSIDE this branch's scope (not fixed, just flagged):**
+- `recruiter@sfu.ca` appears in `core/tests/unit/test_schemas_jobs.py` and `test_schemas_resumes.py`
+  (Phase-2 code, already on `main`) — a real institutional domain used as test data, in a repo whose own
+  PII invariant (this corpus) bans exactly that shape. Suggested chore branch: replace with `@example.test`.
+- The repo owner's real email is also in **this file's own git-identity recipe** below (see "Environment
+  quirks") — kept here only as a placeholder now; the real value lives in the owner's git config.
+- Pre-existing: **18 `mypy --strict` errors in `core/tests/unit/`** — the gate is `mypy src --strict`
+  only, so repo *tests* are not type-gated at all. Suggested chore, not a blocker.
 
 ### Phase 3 is MERGED to `main` (PR #6, merge `49196d7`) — DONE
 
@@ -80,7 +175,7 @@ Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ing
   (The `--fix` + `black` write pass auto-formats; the following `check`/`--check` then verify.)
 - **Docker is available.** Integration/e2e that need live Postgres/Neo4j/Redis run via Docker/testcontainers (CI does `gates-all`). For testcontainers in the container, mount the docker socket + install `docker.io` + set `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`.
 - **Two container gotchas:** (1) prefix `docker run` with `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` or Git Bash mangles `/w/core`→`W:/core`. (2) stale `__pycache__` on the Windows bind mount can mask source edits (coarse mtime → reused bytecode); when re-running pytest after editing source, add `PYTHONDONTWRITEBYTECODE=1` or clear `__pycache__`.
-- **No git identity configured** — commit with inline `git -c user.name='Adam Salah' -c user.email=asalah@sfu.ca commit …`.
+- **No git identity configured** — commit with inline `git -c user.name='Adam Salah' -c user.email=<owner-email> commit …` (the real address is in the owner's git config / the owner knows it — kept as a placeholder here per the security-flagged chore above: this repo's own PII invariant bans real personal emails in committed text, and this file is committed text).
 - **Windows 11**, PowerShell primary; Bash tool available (Git Bash). `.claude/settings.json` hooks shell to `bash`, so Git Bash must be on PATH.
 - **`gh` CLI** authed as `adamsalah13`, **admin on the `humanaxiom` org**. Pushing to `humanaxiom/recruiter-assistant` is authorized.
 - Template Python is **3.11**; hris is **3.12**. Keep 3.11 (the template's) and port hris code to it — nothing in the ranking core needs 3.12.
@@ -103,33 +198,31 @@ Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); 
 
 Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). Phase 4
 (Ranking engine) is split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
-table). **Sub-phase 4a (evals corpus) is COMPLETE and gate-green** on branch
-`feat/phase-4a-ranking-evals-corpus`.
+table). **Sub-phase 4a (evals corpus) is COMPLETE and MERGED** (PR #8), and its **falsifiability
+hardening is also COMPLETE and gate-green**, sitting in **PR #10, currently OPEN and awaiting human
+merge** (see "Phase 4a status" above for the full detail — gate verdicts, the six-arm battery, the 4c
+warnings, and the accepted residuals). **4b (graph projection) is the next sub-phase to build.**
 
-### 4a status (done this session, 2026-07-12) — branch `feat/phase-4a-ranking-evals-corpus`
-`core/tests/evals/` now holds the labelled corpus: JD fixture + **16 synthetic résumés**
-(7 strong / 4 borderline / 4 weak / 1 adversarial), `labels.json` (tags + tier-derived rank bands +
-gold_evidence + matched-pair `ordering_controls`), `thresholds.toml`, a RED-pending-4c harness stub
-`run_evals.py`, and 226 self-verifying tests in `test_evals_corpus.py`. **All three merge-blocking gates
-green** (reviewer APPROVE, security PASS, ranking-evals PASS), and **MERGED to `main` via PR #8
-(merge `875eac2`), CI green (branch-name · ruff/black/mypy · unit/coverage · integration pg+neo4j+redis),
-2026-07-12** — branch deleted. Zero product code, so src coverage is unmoved (955 unit @ 96.63%). Full
-write-up: [docs/activity/phase-4a-ranking-evals-corpus.md](docs/activity/phase-4a-ranking-evals-corpus.md).
-Key gate fix: the education/overqual twin controls had a **confound** — they narrated their target
-dimension in `summary`, which `_build_summary_text` embeds into `summary_emb` (the vector sub-score) —
-now neutralized to byte-identical summaries with a guarding assertion. (A reviewer "CRITICAL" was a
-false alarm from running a mutation-testing gate concurrently with the reviewer on the shared tree —
-**re-gate sequentially, never concurrently, when a gate mutates the working tree.**) 4a is done; **the
-next action is 4b.**
+### 4a recap (see "Phase 4a status" above for the full write-up)
+`core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
+`thresholds.toml`, harness stub `run_evals.py`) and is now gate-hardened by 9 cumulative rounds of
+findings-and-fix (1040 unit tests, 65 integration tests, reviewer/security/ranking-evals all green on
+PR #10's tip `583427f`). **Do not start 4b's own PR without first reading the 4c warnings in "Phase 4a
+status" above** — several of them (the `_fuzz_substring` replacement, reading `stages.py` first, the
+skill-sub-score residual R1) apply to how 4b's own graph-projection code should be reviewed even though
+4b itself doesn't touch the matching engine.
 
-### THEN — 4b (Graph projection) is the next sub-phase
+### 4b (Graph projection) is the next sub-phase
 Run the per-phase subagent loop on a fresh `feat/phase-4b-...` branch: planner → tester (+ evals fixture)
 → `data-pipeline` coder (override UP to **opus** — 4b/4c are the Neo4j scoring / 4-stage algorithm /
 evidence verifier diffs the model policy escalates) → reviewer + security + ranking-evals (all
 merge-blocking) → docs. `make gates` green, then PR to `main` and let CI go green. 4b builds the outbox
 drainer `project_to_graph` + the Neo4j skill-graph half of `skill_normalize` (see the plan's 4b row and
 the Phase-4 decisions block, esp. the **required chunk-text-preview deviation**: read chunk text from
-`resumes.parsed`, NOT the ADR-007-stripped outbox).
+`resumes.parsed`, NOT the ADR-007-stripped outbox). **4b must also add an outbox-shaped fixture to
+`core/tests/evals/`** (carried-forward requirement from the 4a hardening audit) — nothing today encodes
+what the outbox payload is *allowed* to contain (no `candidate` block, no `chunks[].text`, no `summary`),
+so without it 4b could project to Neo4j with no fixture asserting that boundary.
 
 **Carried into Phase 4** (from Phase 3 gate findings — don't lose these):
 - The **outbox drainer** (`project_to_graph`) lands in Phase 4 — it consumes the `job.parsed`/`resume.parsed` rows Phase 3 enqueues. It **must not** project `parsed.candidate` into Neo4j and **must not** log the payload. hris's `_resume_projection_tx` only sets `total_years_experience` on the `Resume` node — keep it that way.
@@ -172,44 +265,77 @@ Resume the recruiter-assistant build. Working dir C:\repos\recruiter-assistant
 docs/EXTRACTION_PLAN.md first — they are the source of truth for state,
 decisions, environment quirks, and the hris source-file map (Appendix A).
 Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md,
-Phase 2 in docs/adr/006-*.md.
+Phase 2 in docs/adr/006-*.md, Phase 3 in docs/adr/007-*.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
 cover-letter/reverse-match/minimal viewer/blind-default). Phases 0, 1, 2, and 3 are
 ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
 (storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3, Phase 3 (ingest +
-parse) PR #6 (merge 49196d7). main now holds the full ingest/parse pipeline (729 unit
-tests, ~96.6% coverage): parsing/{extract,chunk}, the httpx LLM client + Redis embed
-cache, parse_job/parse_resume, PII encryption on parse, and the PII-clean outbox
-boundary (ADR-007). The pydantic contract layer (core/src/schemas) exists,
-review workflow cut, MatchWeights = the ranking-weight contract.
+parse) PR #6 (merge 49196d7). Phase 4 (Ranking engine) is split into 4 gated
+sub-phases: 4a (evals corpus) is MERGED (PR #8, merge 875eac2), and its
+falsifiability hardening is done and gate-green in PR #10
+(https://github.com/humanaxiom/recruiter-assistant/pull/10, tip 583427f, 18
+commits) — CI is fully green there, but PR #10 is still OPEN, awaiting human
+merge, NOT yet merged. main today has 955 unit tests; PR #10 (once merged) brings
+that to 1040 unit tests @ 96.63% coverage + 65 integration tests, all in
+core/tests/evals — zero core/src changes on that branch.
 
-The next phase is Phase 4 — Ranking engine. See "Phase 4 resume — EXACT next step"
-in HANDOFF.md. Do the evals corpus FIRST (core/tests/evals/ + thresholds.toml —
-precision@k / evidence-verification-rate; it does NOT exist yet and is a hard
-prerequisite so the matching engine's first green build is falsifiable), THEN run
-the per-phase subagent loop (planner → tester → data-pipeline coder → reviewer +
-security + ranking-evals → docs) on a feat/phase-4-... branch.
+**The corpus is now a REAL gate** — nine rounds of adversarial hardening proved by
+mutation that the pre-hardening corpus could not fail a bad matching engine, and
+closed every hole found. Read the "Phase 4a status" section in HANDOFF.md in full
+before touching 4b or 4c — it has the final gate verdicts, the six-arm baseline
+battery, and several requirements that apply beyond just 4c.
+
+**Your next action is Phase 4b (graph projection)** — NOT the evals corpus (done)
+and NOT 4c yet. Confirm PR #10's merge status with the human first (check
+`gh pr view 10` or ask) since 4b should build on top of it. Then run the
+per-phase subagent loop (planner → tester → data-pipeline coder → reviewer +
+security + ranking-evals → docs) on a feat/phase-4b-... branch. 4b builds the
+outbox drainer project_to_graph + the Neo4j skill-graph half of
+skill_normalize, and MUST add an outbox-shaped fixture to core/tests/evals/ (no
+fixture today encodes what the outbox payload is allowed to contain — no
+candidate block, no chunks[].text, no summary).
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 (data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
 data-pipeline UP to opus for the 4-stage ranking algorithm / evidence verifier /
-PII crypto / Neo4j scoring diffs (Phase 4 is squarely this). Defaults live in
-.claude/agents/*.md frontmatter.
+PII crypto / Neo4j scoring diffs (4b's Neo4j scoring half and all of 4c are
+squarely this). Defaults live in .claude/agents/*.md frontmatter.
 
 Phase 4 carries forward from Phase 3's gate findings: the outbox drainer
-(project_to_graph) must not project parsed.candidate or log the payload;
-core/tests/evals/ must exist before the matching engine; a chunk-cap coupling nit;
-and the N1/N2 accepted residuals from ADR-007 §7 (structured fields ride the outbox
-unscrubbed — non-contact; the embed scrub errs toward over-redaction). Further out:
-Phase 5 redaction MUST mask candidate.*/candidate_name/cover_letter_text before
-building ResumeOut (schema can't enforce it, ADR-006 §4); Phase 6 must set
-JobOut.blind_review explicitly (the DTO defaults it False, fail-open).
+(project_to_graph) must not project parsed.candidate or log the payload; read
+chunk text from resumes.parsed, NOT the ADR-007-stripped outbox; a chunk-cap
+coupling nit; and the N1/N2 accepted residuals from ADR-007 §7 (structured
+fields ride the outbox unscrubbed — non-contact; the embed scrub errs toward
+over-redaction). Further out: Phase 5 redaction MUST mask
+candidate.*/candidate_name/cover_letter_text before building ResumeOut (schema
+can't enforce it, ADR-006 §4); Phase 6 must set JobOut.blind_review explicitly
+(the DTO defaults it False, fail-open).
+
+When you get to Phase 4c, carry these warnings (all detailed in HANDOFF.md /
+docs/EXTRACTION_PLAN.md, do not re-derive from scratch):
+- **hris's `_fuzz_substring` must be REPLACED, not ported** — it's a character-set
+  overlap ratio and verifies all four of the corpus's fabricated evidence quotes.
+  Use rapidfuzz partial_ratio or token_set_ratio instead.
+- **Read stages.py FIRST, not third** — the corpus was wrong three times because
+  it assumed what a sub-score should mean instead of reading what the code does
+  (seniority is a title-cosine, not a years check; score_education ignores
+  jd.education.fields).
+- `test_ported_engine_helpers_agree_with_the_real_ones` is currently SKIPPED and
+  wakes up once src.pipeline.matching.{stages,orchestrator} exist — if it fails,
+  re-derive the corpus claims that depend on the ports, don't relax the test.
+- **R1 (accepted residual, deliberately carried into 4c):** the corpus is blind to
+  the skill sub-score's internals (weights.skill = 0 passes today) — 4c must add
+  skill-dimension twin fixtures (a recency twin for r10, a must-have-miss twin).
+- **R2 (accepted residual):** the corpus gates the evidence verifier, never the
+  extractor — 4c should add an evidence-recall assertion against gold_evidence.
+- **Open decision needing a human:** score_education ignores jd.education.fields
+  — either extend the scorer or drop fields from the JD contract.
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening the Phase 4 PR.
+HANDOFF.md. Check in with me before opening any Phase 4b PR.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

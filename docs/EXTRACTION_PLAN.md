@@ -55,7 +55,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
-| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **+ falsifiability hardening** (branch `fix/phase-4a-corpus-falsifiability`, 2026-07-12) — see "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
+| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ corpus done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **Falsifiability hardening also done** on branch `fix/phase-4a-corpus-falsifiability`: **PR #10** (https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip `583427f`, 18 commits, **CI fully green — OPEN, awaiting human merge, NOT yet merged.** See "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
 | &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`). **Carried-forward requirement (from the 4a hardening audit): add an OUTBOX-SHAPED FIXTURE** to `core/tests/evals/` — nothing today encodes what the outbox payload is *allowed* to contain (no `candidate` block, no `chunks[].text`, no `summary`), so 4b would project to Neo4j with no fixture asserting that boundary | not started |
 | &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9` | not started |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
@@ -81,17 +81,32 @@ PROGRESS, split into 4 gated sub-phases** (planner pass 2026-07-12). Sub-phase *
 COMPLETE and MERGED to `main`** via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking
 gates green; corpus = 16 labelled fixtures + matched-pair dimension controls + `thresholds.toml` + a
 RED-pending-4c harness stub — see
-[activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). **4b is next**;
-4b→4c→4d follow, each on its own branch/PR with the full reviewer/security/ranking-evals gate before the
-next starts. The split mirrors Phases 0–3's
+[activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). Its
+**falsifiability hardening is also COMPLETE and gate-green**, on branch
+`fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
+(https://github.com/humanaxiom/recruiter-assistant/pull/10, off `main` @ `463cbaa`, tip `583427f`,
+18 commits) — **CI is fully green, but the PR is still OPEN; it has NOT merged.** **4b (graph
+projection) is the next sub-phase**; 4b→4c→4d follow, each on its own branch/PR with the full
+reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
 one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
 tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
 isolating them keeps each diff auditable.
 
-**4a hardening — `fix/phase-4a-corpus-falsifiability` (landed BEFORE 4b/4c, zero product code).** Three
-opus-tier gates audited the merged corpus and found it **could not fail a bad 4c engine**: every finding
-was proven by a mutation that left all 226 corpus tests green. Fixed fix-forward so 4c's first green
-build is genuinely falsifiable:
+**4a hardening — `fix/phase-4a-corpus-falsifiability`, PR #10 (landed BEFORE 4b/4c, zero product code,
+open, awaiting merge).** Three opus-tier gates audited the merged corpus and found it **could not fail a
+bad 4c engine**: every finding across nine rounds (rounds 1–2 on the original `feat/phase-4a-...` branch,
+rounds 3–9 on this branch) was proven by a mutation that left the corpus tests green. Fixed fix-forward so
+4c's first green build is genuinely falsifiable.
+
+**Final verdict, HEAD `583427f` (round 9, the last round on this branch):** reviewer **APPROVE** (31 of 32
+mutations killed across the whole branch; the one survivor is **R1**, a consciously-carried residual — see
+"ACCEPTED 4a RESIDUALS" below — not an open defect); security **PASS** (empty findings table);
+ranking-evals **PASS**. Offline gates: ruff · black · `mypy --strict` clean · **1040 unit tests @ 96.63%
+coverage** (up from 955 on `main` before this branch — zero `core/src/` changes, so the delta is entirely
+new eval-corpus tests) · **65 integration tests** vs real Postgres+Neo4j · `run_evals.py` still exits 1
+(correct pre-4c RED state). **The single most important finding for 4c:** hris's `_fuzz_substring` — the
+evidence verifier 4c is slated to port — verifies **all four** of the corpus's fabricated quotes and puts
+the keyword-stuffer bait at rank 1; it **must be REPLACED, not ported** (see the dedicated section below).
 - **precision@k pinned to its exact contract** (`k = 5`, `min_precision = 1.0`). `0.8` at k=5 tolerated
   exactly one bad entry — i.e. it PASSED an engine that ranked the r09 keyword-stuffer at rank 5 — and
   contradicted `[adversarial].must_not_surface_in_topk`. A range check let a `0.8 → 0.2` mutation stay green.
@@ -322,6 +337,50 @@ cumulative round 4 = `red|green(4a-hard-2)`, round 5 = `(4a-hard-3)`, round 6 = 
 `(4a-hard-5)`. (Before round 7 the docs numbered the same rounds 2/3/4 while the corpus files numbered them
 4/5/6, which made every cross-reference ambiguous.)
 
+**Update after round 9.** Rounds 8–9 continue the same cumulative count (still on
+`fix/phase-4a-corpus-falsifiability`) but the commit-suffix offset stops being a clean `-2`: round 8's fix
+is `test(4a-hard-8)` and round 9's is `test(4a-hard-9)`. That's because round 8 also found and rebuilt a
+mislabelled commit from the round-7 sequence — `49e85bf`, labelled `red(4a-hard-7)`, was **not actually
+red** (311 passed / 0 failed; it gated a fix round 6 had already landed) — into two honestly-labelled
+commits, `b996810` / `830965d`, `test(4a-hard-7)`, consuming suffixes between round 7 and round 8. The six
+genuinely-red commits from rounds 3–6 are untouched, original hashes. **Three commits on this branch are
+labelled `test(...)` rather than `red:`/`green:`** — the rebuilt round-7 pair plus round 9's `583427f` —
+which is a **documented deviation from CLAUDE.md's mandatory TDD order**: each of these adds a guard that
+passes against the unmutated tree and can only be shown red by *mutation*, not by an honest failing test
+committed first. This was verified by the reviewer (who confirmed each guard is real, i.e. does fail under
+its corresponding mutation) and is flagged here for the human rather than silently folded into the round-7
+numbering.
+
+**4a hardening, round 8 (same branch) — the eighth consecutive instance of the branch's signature
+defect.** The reviewer found the **eighth** case of *a claim stamped as asserted but enforced by
+nobody*: **r17's chunk `c_008` could be deleted with all 1040 tests still green.**
+`test_r17_carries_every_adr007_f1r_format_divergent_variant` enumerated **three** of the four ADR-007
+F1-R break shapes (line-broken name, reflowed phone, bare email local-part) and never checked the
+**fourth** — the intra-token break `c_008` exists for. This is the round-3 finding-E3 pattern recurring:
+stripping r12's name from `c_003` (round 3) left the suite green because the embed-boundary control
+could be silently neutered; here it was r17's fourth break shape. Fixed with a **4th assertion**: a
+chunk must carry the candidate email broken **inside the domain token**, with de-wrap reconstructing
+`candidate.email`. Also found and fixed in the same round: `texts.extend(decoded)` — the de-wrap pass's
+sibling in `_scan_texts` — was **ungated** (deleting it left the suite green); the e2e probe gained a
+**joint-break-only** phone (`555\n1212`) that only the plain decoded pass can catch. Also, housekeeping:
+commit `49e85bf`, labelled `red(4a-hard-7)`, **was not red** (311 passed / 0 failed — it gated a fix
+round 6 had already landed); the last two commits of that sequence were rebuilt as `b996810` / `830965d`
+with the honest label `test(4a-hard-7)`, leaving the six genuinely-red commits from rounds 3–6 untouched
+with their original hashes. Commits: `0edc722` (docs), `6a24c10`, `23176cf`.
+
+**4a hardening, round 9 (same branch, commit `583427f`, `test(4a-hard-9)`) — L1, the last finding.**
+Security's last finding on this branch (**L1, low, non-blocking**): `_scan_texts`'s **raw-source pass**
+(`texts = [raw]`) was the third and last of its three passes still ungated — replacing it with `[]` left
+the suite green. Its unique coverage is PII in a JSON **key** or as a **non-string scalar** (e.g. a phone
+stored as a JSON number), both invisible to `_string_values` (which recurses `node.values()` and collects
+only `str` leaves). Closed rather than deferred because the `ResumeParsed.model_validate` backstop
+**only covers résumé fixtures** — the scan is scoped by directory (round-4 B5), so it also covers
+`labels.json`, the JD, and — per this very plan's 4b/4d rows — 4b's outbox-shaped fixture and 4d's
+reverse-match JDs, **none of which are pydantic-validated**. All three `_scan_texts` passes (decoded,
+de-wrap, raw) are now independently gated, each failing on its own distinct assertion. This was the
+branch's last finding: **round 9 is the final round**, HEAD `583427f`, all three merge-blocking gates
+green (see the verdict at the top of "Current status & next step").
+
 **4c evidence-verifier requirement — the ported `_fuzz_substring` must be REPLACED, NOT PORTED.**
 *(A review obligation on the 4c PR — see M-3 above. No gate in this repo can enforce it: `run_evals.py`
 scores whatever verifier 4c ships, and a corpus cannot make a coder not-port a function.)*
@@ -353,9 +412,12 @@ rapidfuzz rather than trusting the stand-in at the boundary.
 
 ### ACCEPTED 4a RESIDUALS — the class of wrong engine this corpus still lets through
 
-Recorded at the end of 4a's hardening (round 6), **deliberately not fixed here**, so 4c/4d inherit them
-with eyes open rather than discovering them after a green `ranking-evals` run. Each was demonstrated by a
-mutation of the engine replica that the corpus **passed**.
+Recorded at round 6 and re-confirmed still outstanding at the branch's final round (round 9), **deliberately
+not fixed here**, so 4c/4d inherit them with eyes open rather than discovering them after a green
+`ranking-evals` run. Each was demonstrated by a mutation of the engine replica that the corpus **passed**.
+(For the avoidance of doubt: round 9's finding — the ungated raw-source pass in `_scan_texts` — was the
+"ninth consecutive instance" of the branch's signature defect and it was **closed**, not carried forward;
+it is not an accepted residual, it's in the round-9 writeup above.)
 
 **R1 — the corpus is blind to the *internals* of the skill sub-score.** It gates the 0.40-weighted skill
 score only through *coverage* (does the candidate claim the skill at all). Every one of these mutations
@@ -370,8 +432,11 @@ still **PASSES** the full contract:
 - starkest: **`weights.skill = 0.0` — an engine that ignores skills entirely passes.**
 
 The corpus's separation is carried by **evidence and vector**, not skill, because the weak fixtures are
-weak on *everything* at once. **4c requirement:** add matched-pair twins for the skill sub-score's
-internals (a recency twin for r10 at minimum, and a must-have-miss twin), the same way r14/r15/r16 isolate
+weak on *everything* at once. **Human decision (made at the round-9 close of this branch): R1 is
+deliberately CARRIED INTO 4c, not closed on this branch** — closing it needs skill-dimension twin
+fixtures, which churns the rank bands (the same tiling that round 4's `[adversarial]` fix already had to
+rework once). **4c requirement:** add matched-pair twins for the skill sub-score's internals (a recency
+twin for r10 at minimum, and a must-have-miss twin), the same way r14/r15/r16 isolate
 education/overqual/motivation — a `weights.skill = 0` mutation must FAIL.
 
 **R2 — the corpus gates the evidence *verifier*, never the evidence *extractor*.** Stage 3 is
