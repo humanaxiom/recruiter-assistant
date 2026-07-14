@@ -498,7 +498,23 @@ async def test_two_concurrent_drainers_each_deliver_a_disjoint_set_exactly_once(
     pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
 ) -> None:
     """R7 (MED). Without ``FOR UPDATE SKIP LOCKED`` both drainers can select
-    and project the SAME rows, double-delivering them."""
+    and project the SAME rows, double-delivering them.
+
+    S13 (round-5 security re-audit): ``outbox_drain_deadline_seconds``
+    defaults to 4.0s (a real, intentional wall-clock budget — see
+    ``project_to_graph``'s F5 docstring). Two drainers concurrently
+    projecting 3 résumés each to Neo4j can legitimately exceed that on a
+    cold/loaded host, hit the deadline, and early-exit having left a
+    locked-but-not-yet-attempted row behind — correct bounded-work
+    behaviour, not a locking bug (``FOR UPDATE SKIP LOCKED`` still holds:
+    no double-delivery, no data loss). This test exists to exercise the
+    LOCK, not the timer, so the deadline is pinned large enough that
+    neither drainer ever hits it on any reasonable host — matching the
+    dead-letter test below, which already pins
+    ``outbox_max_delivery_attempts`` for the same reason.
+    """
+    from src.worker import graph_tasks
+
     job_id = await _insert_job(pg_pool)
     resume_ids = [await _insert_resume(pg_pool, job_id) for _ in range(6)]
     for resume_id in resume_ids:
@@ -507,9 +523,11 @@ async def test_two_concurrent_drainers_each_deliver_a_disjoint_set_exactly_once(
     ctx_a = _ctx(pg_pool, neo4j_driver)
     ctx_b = _ctx(pg_pool, neo4j_driver)
 
-    delivered_a, delivered_b = await asyncio.gather(
-        project_to_graph(ctx_a, batch=3), project_to_graph(ctx_b, batch=3)
-    )
+    generous_settings = Settings(outbox_drain_deadline_seconds=120.0)
+    with patch.object(graph_tasks, "get_settings", return_value=generous_settings):
+        delivered_a, delivered_b = await asyncio.gather(
+            project_to_graph(ctx_a, batch=3), project_to_graph(ctx_b, batch=3)
+        )
 
     total_delivered = delivered_a + delivered_b
     assert total_delivered == len(resume_ids)

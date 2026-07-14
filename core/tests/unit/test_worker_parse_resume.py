@@ -2065,3 +2065,146 @@ async def test_empty_candidate_block_non_header_chunks_still_embed() -> None:
     assert result == "parsed"
     payload = enqueue.await_args.kwargs["payload"]
     assert set(payload["chunk_embs"]) == {"c_002", "c_003"}
+
+
+@pytest.mark.asyncio
+async def test_empty_candidate_block_uncommon_name_skill_is_dropped() -> None:
+    """S12 (round-5 security re-audit): `_redact_candidate_pii`'s
+    STRUCTURED pattern match has nothing to match against when
+    `CandidateInfo` is completely empty, so it falls through to
+    `_generic_contact_scrub`, which by its own docstring "cannot catch a
+    bare NAME". An uncommon full name (one the 783-entry offline
+    personal-name lexicon does not cover, so the NORMAL three-way
+    conjunction lets it through as a "skill" too) must still be dropped —
+    layer 2 fails CLOSED here exactly as S7 already does for the header
+    chunk, treating the lexicon as an unconditional hit
+    (`strict_lexicon=True`) when there is no candidate identity at all to
+    reason with."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(candidate=CandidateInfo(), summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    # "torbjorn kvistad" -- name-shaped, vocab-miss, AND a lexicon miss (an
+    # uncommon full name the offline lexicon does not cover) -- the exact
+    # shape the normal (non-strict) three-way conjunction lets through.
+    merged_skills = [ResumeSkill(name="python"), ResumeSkill(name="torbjorn kvistad")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(None, None, None, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    stored_parsed = next(
+        a
+        for a in _flat_call_args(record_parsed.await_args)
+        if isinstance(a, ResumeParsed)
+    )
+    stored_names = [s.name for s in stored_parsed.skills]
+    assert "python" in stored_names
+    assert not any(
+        "torbjorn" in n.lower() and "kvistad" in n.lower() for n in stored_names
+    ), f"an uncommon candidate name survived as a stored skill: {stored_names!r}"
+
+    payload = enqueue.await_args.kwargs["payload"]
+    outbox_skill_names = [s["name"] for s in payload["parsed"]["skills"]]
+    assert "python" in outbox_skill_names
+    assert not any(
+        "torbjorn" in n.lower() and "kvistad" in n.lower() for n in outbox_skill_names
+    ), (
+        "an uncommon candidate name survived in the outbox skill list: "
+        f"{outbox_skill_names!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_empty_candidate_block_uncommon_lexicon_missing_skill_kept() -> None:
+    """Belt-and-braces: S12's strict-mode collapse is scoped to EXACTLY the
+    empty-candidate-block case. When the candidate block is NOT empty, an
+    unrelated legitimate two-word skill missing from both the vocabulary and
+    the personal-name lexicon (`postgres db`, from the existing Decision D
+    recall-guard fixtures) must still be kept — the strict rule must never
+    leak into the normal path."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Casey Rivera"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="postgres db")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    stored_parsed = next(
+        a
+        for a in _flat_call_args(record_parsed.await_args)
+        if isinstance(a, ResumeParsed)
+    )
+    stored_names = [s.name for s in stored_parsed.skills]
+    assert "postgres db" in stored_names

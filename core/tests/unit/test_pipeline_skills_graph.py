@@ -445,6 +445,173 @@ def test_lexicon_file_missing_fails_closed_not_open(
         skills_graph._name_lexicon.cache_clear()  # type: ignore[attr-defined]
 
 
+# ── Decision C, S10-corrected (round-5 security re-audit) ──────────────────
+#
+# Round-4's own lexicon arm was itself a recall regression, one layer down:
+# `_hits_person_name_lexicon` shipped as `any(...)`, so ONE name-shaped token
+# anywhere in a multi-word candidate condemned the WHOLE name. A genuine
+# vendor/product skill built from one common-name-shaped word plus one
+# technical word (`Amazon Aurora`, `IBM Watson`, `Victoria Metrics`) was
+# dropped in EVERY casing. S11's own recall guard (below) never caught this
+# either — every round-4 KEEP fixture (`distributed systems` etc.) is a
+# lexicon-MISS on every token; none of them exercises a candidate whose
+# token actually IS a personal name.
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Amazon Aurora",
+        "IBM Watson",
+        "Apache Felix",
+        "Victoria Metrics",
+        "VictoriaMetrics",
+        "Julia",
+        "Hudson",
+    ],
+)
+def test_vendor_and_backstop_skills_are_kept_not_rejected_as_a_name(name: str) -> None:
+    """S10/S11: each of these is a real, common résumé skill that collides
+    with the personal-name lexicon on exactly one of its tokens (a vendor/
+    product word paired with a common given name/surname) or IS itself a
+    bare product name that also happens to be a common given name/surname.
+    Under the round-4 `any()` lexicon arm every one of these was
+    misclassified as `person_name_shape` and silently dropped."""
+    assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Amazon Aurora",
+        "IBM Watson",
+        "Apache Felix",
+        "Victoria Metrics",
+        "VictoriaMetrics",
+        "Julia",
+        "Hudson",
+    ],
+)
+def test_vendor_and_backstop_skills_casing_invariant(name: str) -> None:
+    """S11: recall must not depend on the LLM's arbitrary capitalisation of
+    a skill name — every casing of a KEEP fixture must agree, all landing on
+    "not rejected". Round-4's own guard never pinned this: under the OLD
+    `any()` lexicon arm, `Julia` (Title Case) was rejected while `julia`/
+    `JULIA` were kept — non-deterministic by construction."""
+    r = skills_graph.reject_reason_for_skill_name
+    outcomes = {r(name), r(name.title()), r(name.lower()), r(name.upper())}
+    assert outcomes == {None}, f"casing-dependent rejection for {name!r}: {outcomes}"
+
+
+def test_lexicon_quantifier_mutation_proof_all_not_any(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S10's mandated mutation proof. Revert `_hits_person_name_lexicon` to
+    the OLD round-4 `any()` semantics and confirm `Victoria Metrics` (whose
+    first token, "victoria", has no vendor-prefix veto to fall back on) is
+    then INCORRECTLY rejected — proving the recall-guard fixtures above are
+    actually sensitive to the any()->all() quantifier fix, not passing for
+    some unrelated reason (e.g. an accidental vocab/vendor-veto hit)."""
+
+    def _old_any_semantics(tokens: Any) -> bool:
+        lexicon = skills_graph._name_lexicon()
+        if lexicon is None:
+            return True
+        return any(tok in lexicon for tok in tokens)
+
+    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", _old_any_semantics)
+    assert (
+        skills_graph.reject_reason_for_skill_name("Victoria Metrics")
+        == "person_name_shape"
+    ), (
+        "'Victoria Metrics' should be (incorrectly) rejected once the "
+        "lexicon arm is reverted to the old any()-based rule — if this "
+        "fails, today's green recall guard is not actually pinned to the "
+        "all() quantifier fix"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Amazon Aurora",
+        "IBM Watson",
+        "Apache Felix",
+        "Microsoft Teams",
+        "Google Cloud",
+        "Oracle Database",
+        "Red Hat Enterprise",
+    ],
+)
+def test_vendor_prefix_veto_recognises_known_vendor_prefixes(name: str) -> None:
+    # Alpha-only vendor-prefixed names (no digit/technical marker), so the
+    # candidate is actually name-SHAPED in the first place — a name carrying
+    # a digit ("Amazon S3") disqualifies on shape alone and never reaches
+    # the vendor-veto arm at all (see `_decompose_name_shape`).
+    real_tokens = skills_graph._name_shape_real_tokens(name)
+    assert real_tokens, f"{name!r} unexpectedly is not name-shaped at all"
+    assert skills_graph._hits_vendor_prefix_veto(name, real_tokens)
+
+
+def test_vendor_prefix_veto_does_not_fire_on_an_unrelated_name() -> None:
+    real_tokens = skills_graph._name_shape_real_tokens("Casey Rivera")
+    assert not skills_graph._hits_vendor_prefix_veto("Casey Rivera", real_tokens)
+
+
+def test_vendor_prefix_veto_protects_even_if_the_lexicon_is_hostile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor-prefix veto is an INDEPENDENT line of defence, not merely
+    redundant with the all() quantifier fix — proven by forcing
+    `_hits_person_name_lexicon` to always report a hit (as if a future
+    lexicon update ever added a vendor word) and confirming a
+    vendor-prefixed candidate is STILL kept, because the veto short-circuits
+    before the lexicon arm is even consulted."""
+    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
+    for name in ("Amazon Aurora", "IBM Watson", "Apache Felix"):
+        assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+def test_vendor_prefix_veto_mutation_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Companion mutation proof: with the SAME hostile (always-hit) lexicon
+    as above, neutralising the veto itself must flip the outcome back to
+    rejected — proving the veto test above is pinned to the veto actually
+    running, not to some other coincidental pass."""
+    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
+    monkeypatch.setattr(
+        skills_graph, "_hits_vendor_prefix_veto", lambda name, tokens: False
+    )
+    for name in ("Amazon Aurora", "IBM Watson", "Apache Felix"):
+        assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape"
+
+
+def test_strict_lexicon_collapses_to_the_old_two_way_rule() -> None:
+    """S12: `strict_lexicon=True` must reject ANY name-shaped, vocab-miss
+    candidate regardless of the lexicon/vendor-veto exemptions — a
+    legitimate skill that the normal (non-strict) conjunction keeps
+    (`distributed systems`, `Amazon Aurora`) is rejected under strict mode,
+    since `src.worker.resume_tasks._redact_skill_names_pii` only sets this
+    when there is NO candidate identity left at all to justify the
+    exemption. A vocabulary HIT is still exempt even under strict mode —
+    the vocab arm runs before `strict_lexicon` is ever consulted."""
+    assert (
+        skills_graph.reject_reason_for_skill_name(
+            "distributed systems", strict_lexicon=True
+        )
+        == "person_name_shape"
+    )
+    assert (
+        skills_graph.reject_reason_for_skill_name("Amazon Aurora", strict_lexicon=True)
+        == "person_name_shape"
+    )
+    assert (
+        skills_graph.reject_reason_for_skill_name("Julia", strict_lexicon=True) is None
+    )
+    assert (
+        skills_graph.reject_reason_for_skill_name("Kafka", strict_lexicon=True) is None
+    )
+
+
 def test_non_latin_script_fallback_rejects_even_without_a_lexicon_hit() -> None:
     """Documented residual: the personal-name lexicon is Latin-alphabet
     only, so a non-Latin-script, name-shaped, vocab-miss candidate is
