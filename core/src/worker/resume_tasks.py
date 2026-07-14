@@ -383,6 +383,57 @@ def _whitespace_flexible_pattern(identifier: str) -> str | None:
     return r"\s+".join(tokens)
 
 
+def _redaction_available(candidate: CandidateInfo) -> bool:
+    """S7 (security re-audit round 3): the STRUCTURED scrub below
+    (``_redact_candidate_pii``'s per-candidate patterns) has something to
+    remove only when at least one candidate identifier is actually present.
+    An EMPTY ``CandidateInfo`` (every field ``None`` — the LLM's ``core``
+    call produced nothing usable) is NOT "nothing to redact"; it is
+    "redaction unavailable", and the caller (``parse_resume``) must fail
+    CLOSED on that distinction rather than embedding the raw text verbatim.
+    See ``_redact_candidate_pii``'s docstring and ``parse_resume``'s
+    header-chunk handling for the two-part fix this backs."""
+    return bool(
+        candidate.name or candidate.email or candidate.phone or candidate.location
+    )
+
+
+# S7 (security re-audit round 3): a GENERIC, structure-only email/phone scrub
+# that runs UNCONDITIONALLY — regardless of whether `CandidateInfo` carries
+# any value at all. `_redact_candidate_pii` previously returned its input
+# VERBATIM whenever `candidate` was empty (`patterns` stayed `[]`), which is
+# a fail-OPEN: "I have no candidate context" silently became "there is
+# nothing to redact", and a résumé header chunk's raw contact block sailed
+# straight into the embedder. This cannot catch a bare NAME (there is no
+# reliable shape for an arbitrary name — see `parse_resume`'s header-chunk
+# skip for how that specific, highest-risk gap is closed instead), but it
+# closes the email/phone half of the gap unconditionally, with no candidate
+# context required at all.
+_GENERIC_EMAIL_RE = re.compile(
+    r"[^\s@]+\s*(?:@|\(at\)|\[at\])\s*[^\s@]+\.[^\s@]+", re.IGNORECASE
+)
+_GENERIC_PHONE_RUN_RE = re.compile(r"[+()\-.\s\d]{7,}")
+
+
+def _generic_contact_scrub(text: str) -> str:
+    """Structure-only (candidate-free) email/phone scrub — see the module
+    comment above for why this must run even when ``CandidateInfo`` is
+    completely empty. A no-op input is returned truly verbatim (whitespace
+    is only collapsed when a redaction actually fired), matching
+    ``_redact_candidate_pii``'s existing discipline."""
+    out = _GENERIC_EMAIL_RE.sub(" ", text)
+
+    def _redact_phone_run(m: re.Match[str]) -> str:
+        run = m.group()
+        digits = sum(ch.isdigit() for ch in run)
+        return " " if digits >= 7 else run
+
+    out = _GENERIC_PHONE_RUN_RE.sub(_redact_phone_run, out)
+    if out == text:
+        return text
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
     """Strip the candidate's own name/email/phone/location out of a piece of
     text BEFORE it is embedded — embeddings are PII-equivalent (PIPEDA/FIPPA)
@@ -406,8 +457,12 @@ def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
     The scrub deliberately errs toward OVER-redaction of the embedded text
     (a common-word ``location`` substring may be removed from a larger word —
     ADR-007 §7 N2); this is not a leak and favors privacy over retrieval
-    precision. When the candidate carries no identifiers the text is returned
-    verbatim. This function only scrubs the EMBEDDER'S input — the
+    precision. When the candidate carries no STRUCTURED identifiers, a
+    generic (candidate-free) email/phone scrub still runs — see
+    ``_generic_contact_scrub`` and ``_redaction_available`` (S7, security
+    re-audit round 3): "no structured identifiers" must never silently mean
+    "nothing to redact" (that was the fail-OPEN bug an empty ``candidate``
+    block exploited). This function only scrubs the EMBEDDER'S input — the
     ``resumes.parsed`` chunk text/summary stay full/cleartext at rest
     (ADR-007 §6, system of record).
     """
@@ -432,11 +487,32 @@ def _redact_candidate_pii(text: str, candidate: CandidateInfo) -> str:
         if pattern is not None:
             patterns.append(pattern)
     if not patterns:
-        return text
+        # S7: fail CLOSED, not open — a totally EMPTY candidate block is NOT
+        # "nothing to redact"; a generic (candidate-free) email/phone scrub
+        # runs instead of returning `text` verbatim. Scoped to exactly this
+        # branch (not every call): when at least one structured identifier
+        # IS present, the existing precision contract holds unchanged — a
+        # field the candidate does NOT have (e.g. `phone=None`) stays
+        # untouched, so an unrelated reference's phone number elsewhere in
+        # the body is never swept up just because the candidate's email
+        # happened to be known.
+        return _generic_contact_scrub(text)
     redacted = text
     for pattern in patterns:
         redacted = re.sub(pattern, " ", redacted, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", redacted).strip()
+
+
+def _is_header_like_chunk(index: int, chunk: ResumeChunk) -> bool:
+    """S7 (security re-audit round 3): a résumé's very FIRST chunk is, in
+    practice, always its contact block — ``chunk_resume``
+    (``src/pipeline/parsing/chunk.py``) buckets everything before the first
+    RECOGNISED section heading under ``"other"``, so the real header text is
+    never actually labelled ``"header"`` in production; only test fixtures
+    use that literal label as a stand-in. Both signals are checked here so a
+    future chunker change that DOES start emitting an explicit ``header``
+    section is covered too, with no change needed at this call site."""
+    return index == 0 or chunk.section == "header"
 
 
 async def _embed_batched(
@@ -602,15 +678,44 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 _build_summary_text(cleaned_parsed), candidate
             )
             [summary_emb] = await embedder.embed([summary_text])
+
+            # S7 (security re-audit round 3): when there is NO structured
+            # candidate identifier to redact against, `_redact_candidate_pii`
+            # can only fall back to its generic (email/phone-shaped) scrub —
+            # it has no way to strip an arbitrary bare NAME. Refuse to embed
+            # the header-like chunk(s) entirely in that case, rather than
+            # silently handing the embedder raw contact-block text. Redaction
+            # IS available (the normal case), every chunk embeds as before.
+            if _redaction_available(candidate):
+                chunks_for_embedding = chunks
+            else:
+                chunks_for_embedding = [
+                    c for i, c in enumerate(chunks) if not _is_header_like_chunk(i, c)
+                ]
+                skipped = len(chunks) - len(chunks_for_embedding)
+                if skipped:
+                    log.warning(
+                        "parse_resume.header_chunk_embedding_skipped_"
+                        "redaction_unavailable resume_id=%s count=%d",
+                        resume_id_str,
+                        skipped,
+                    )
             chunk_embs_list = await _embed_batched(
-                embedder, [_redact_candidate_pii(c.text, candidate) for c in chunks]
+                embedder,
+                [
+                    _redact_candidate_pii(c.text, candidate)
+                    for c in chunks_for_embedding
+                ],
             )
         except LLMOutputInvalidError as exc:
             await resume_service.record_parse_failure(
                 conn, resume_id=resume_id, reason=f"embedding failed: {exc}"
             )
             return "failed"
-        chunk_embs = {chunks[i].id: chunk_embs_list[i] for i in range(len(chunks))}
+        chunk_embs = {
+            chunks_for_embedding[i].id: chunk_embs_list[i]
+            for i in range(len(chunks_for_embedding))
+        }
 
         # Encrypt PII + write back + enqueue the outbox row, all atomic.
         async with conn.transaction():

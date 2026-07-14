@@ -81,10 +81,39 @@ adds Decision A, human-locked over security's proposed strict allowlist:
   (before any canonicalisation), in addition to this module's own call
   inside ``_resolve_one`` (which still protects the JD/job-side path, where
   no canonicalisation happens before resolution).
+
+Round-3 security re-audit — the SAME ``reject_reason_for_skill_name``
+decision function, widened (S1-S6 below; see the block comment above
+``_PERSON_MIDDLE_INITIAL_RE`` for the full per-gap rationale) because the
+round-2 shape test was case-rigid and ASCII-only, so a candidate's OWN name
+in an all-caps résumé header (the single most common header style) sailed
+straight through with a PERFECT candidate block:
+
+* **S1** case-insensitive name-shape matching (scoped to avoid regressing
+  recall on an unlisted single-word acronym — see the code comment).
+* **S2** a technical marker is evidence of skill-ness, not an unconditional
+  veto over the whole name.
+* **S3** Mc/Mac-internal-caps and apostrophe-joined surnames recognised.
+* **S4** the shape check's own token ceiling raised 3 -> 5 with lowercase
+  connector particles accepted, closing a disparate-impact gap against
+  Hispanic/Portuguese/Dutch/Arabic naming conventions.
+* **S5** Unicode-aware (Cyrillic, CJK) rather than ASCII-only.
+* **S6** the email-shape regex tolerates whitespace/``(at)``/``[at]``
+  obfuscation.
+* **S7** (``src.worker.resume_tasks``) redaction fails CLOSED, not open, on
+  a completely empty ``CandidateInfo`` — see that module's docstring.
+* **S8** an ACCEPTED skill name (auto-merged/LLM-merged/created) is now
+  logged as a non-reversible reference only, never verbatim — F8 was
+  previously half-closed (rejected names were already category-only).
+* **S9** (documented residual) a candidate genuinely surnamed a well-known
+  technology (``Kafka``, ``Django``, ``Cassandra``) is kept — the
+  vocabulary arm of Decision A's conjunction always wins over the shape arm,
+  by design.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Iterable
@@ -120,20 +149,180 @@ _MAX_SKILL_NAME_CHARS = 60
 # terms trip the OLD 6-token cap, so this is pure headroom for a legitimate
 # multi-word certification name (e.g. a 7-token cert), not a regression.
 _MAX_SKILL_NAME_TOKENS = 8
-_EMAIL_SHAPE_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+# S6 (security re-audit round 3): tolerate whitespace around the separator,
+# and an "(at)"/"[at]" obfuscation of "@" — "john.smith @ corp.test" and
+# "casey.rivera (at) example.test" both carry a real email address that the
+# OLD strict, whitespace-intolerant `local@domain` pattern missed outright.
+_EMAIL_SHAPE_RE = re.compile(
+    r"[^\s@]+\s*(?:@|\(at\)|\[at\])\s*[^\s@]+\.[^\s@]+", re.IGNORECASE
+)
 # A contiguous run of digits/phone-punctuation (no letters) that carries at
 # least 7 digits — long enough to be a real phone number, short enough that
 # a legitimate skill name's occasional digit ("ISO 27001", "IPv6") never
 # trips it (those digits aren't contiguous with dashes/spaces/parens).
 _PHONE_RUN_RE = re.compile(r"[+()\-.\s\d]{7,}")
 
-# Decision A (round-2 security re-audit, F3) — person-name shape. A "word" is
-# Title Case ALPHA ONLY (`^[A-Z][a-z]+$`): this deliberately excludes
-# ALL-CAPS acronyms ("AWS", "SQL", "REST") and mixed-case technical proper
-# nouns ("PostgreSQL"), which never look like a person's name. A middle
-# initial ("M.") is its own token shape.
-_PERSON_NAME_WORD_RE = re.compile(r"^[A-Z][a-z]+$")
+# Decision A (round-2 security re-audit, F3) — person-name shape, widened
+# across a THIRD round (this file's current state) to close five further
+# gaps a case-rigid, ASCII-only, 3-token, veto-on-any-marker test left open:
+#
+# * S1 — case-INSENSITIVE. An ALL-CAPS ("CASEY RIVERA") or all-lowercase
+#   ("casey rivera") name is exactly as name-shaped as Title Case — an
+#   all-caps résumé header is the single most common header style, so a
+#   strict-Title-Case-only test let a candidate's OWN name straight through
+#   with a PERFECT candidate block. Folding is applied per whitespace/comma
+#   token, and ONLY when there is more than one such token, OR the token
+#   itself already contains a join separator ('-', '.', an apostrophe) —
+#   NEVER to a single bare plain word with no separator. That carve-out is
+#   deliberate: folding a lone uniformly-cased word always produces
+#   something that satisfies the plain Title-Case check, so if it applied to
+#   every bare acronym, any unlisted all-caps term (this repo's 220-term
+#   vocabulary does not include "REST", for one — see the vocab-recall
+#   sweep) would start being rejected as a person's name purely on shape.
+#   Every demonstrated leak is multi-token or an internally-joined compound;
+#   a compound TECHNICAL token ('.NET', 'Node.js', 'IPv6') stays
+#   disqualified after folding anyway (its own internal structure fails
+#   independently — see the tests), so widening the fold to compound single
+#   tokens costs nothing.
+# * S2 — a technical marker (digit / '+' / '#' / a non-middle-initial '.')
+#   is EVIDENCE of skill-ness, not an unconditional veto over the ENTIRE
+#   name. Only the LAST whitespace-token gets special treatment (a trailing
+#   marker is what a stray list-number or copy-paste artifact looks like):
+#   a token that is PURELY marker characters ('2', '+') is dropped outright
+#   as a stray annotation, provided at least two REAL tokens remain — so
+#   "ISO 27001" (which would otherwise collapse to the single bare token
+#   "ISO") is deliberately EXCLUDED from the drop and stays disqualified —
+#   while a token with a marker GLUED to real letters ("Rivera2",
+#   "Rivera+", "Rivera#") is stripped back to its bare letters and
+#   re-tested in place. A technical token that isn't rescued by either rule
+#   ("C++", "C#", "IPv6", the "27001" half of "ISO 27001") simply fails the
+#   per-token name-word check below and disqualifies the whole candidate —
+#   there is no separate early-exit branch for "any marker anywhere" any
+#   more.
+# * S3 — an Mc/Mac-internal-caps surname ("McDonald", "MacArthur") and an
+#   apostrophe-joined surname ("O'Brien") are recognised name-word shapes,
+#   not just plain Title Case.
+# * S4 — the token-count ceiling for THIS shape check only (distinct from
+#   `_MAX_SKILL_NAME_TOKENS`, the outer any-skill-name length cap) is raised
+#   3 -> 5, and a small set of lowercase connector particles ("del", "van",
+#   "der", "de", "bin", "da", "di") are accepted without needing to look
+#   name-shaped themselves — a strict Anglo 2-3-token ceiling structurally
+#   protected Anglo names while failing common Hispanic/Portuguese/Dutch/
+#   Arabic naming conventions ("Maria del Carmen Rivera Lopez", "Ana van
+#   der Berg"), which is a disparate-impact bug, not a cosmetic one.
+# * S5 — Unicode-aware throughout (Cyrillic "Кейси Ривера", CJK "李伟"):
+#   every check below is built on `str.isalpha()`/`.isupper()`/`.islower()`,
+#   which are Unicode-aware in the stdlib, rather than an ASCII-only
+#   `[A-Z][a-z]+` regex. A script with NO case distinction at all (CJK) is
+#   accepted on alphabetic-ness alone, since "is this Title Case" has no
+#   meaning there.
+#
+# Recall stays pinned by the SAME vocabulary conjunction as before (Decision
+# A's whole point): none of this widening matters for a name that IS a
+# known skill (`_is_known_vocab_term`) — only for one that both looks
+# name-shaped AND is nowhere in the 220-term vocabulary. See
+# `test_pipeline_skills_graph.py`'s vocab/recall-pinning tests for the
+# falsifiable check that this widening did not collaterally eat a real
+# skill.
+#
+# S9 (documented residual, security re-audit round 3): a candidate genuinely
+# SURNAMED a well-known technology ("Kafka", "Django", "Cassandra") is kept
+# by design — the vocabulary arm of the conjunction always wins over the
+# shape arm. This is the accepted Decision-A tradeoff (a strict allowlist
+# was rejected by the human as too large a silent recall loss), recorded
+# here explicitly rather than left as an unstated side effect.
 _PERSON_MIDDLE_INITIAL_RE = re.compile(r"^[A-Z]\.$")
+_MC_MAC_SURNAME_RE = re.compile(r"^(Mc|Mac)[A-Z][a-z]+$")
+_APOSTROPHE_CHARS = "'’"
+_NAME_JOIN_CHARS = "-." + _APOSTROPHE_CHARS
+_NAME_CONNECTORS = frozenset({"del", "van", "der", "de", "bin", "da", "di"})
+_MAX_NAME_SHAPE_TOKENS = 5
+_TRAILING_MARKER_RE = re.compile(r"[\d+#]+$")
+
+
+def _fold_uniform_case(tok: str) -> str:
+    """S1: fold a token that is ENTIRELY uppercase or ENTIRELY lowercase to
+    Title Case, per maximal alphabetic run (so a separator-joined token like
+    'CASEY-RIVERA' folds to 'Casey-Rivera', not the flattened 'Casey-rivera'
+    a naive whole-string ``str.capitalize()`` would produce). A token that
+    is ALREADY mixed-case ('PostgreSQL', 'McDonald', 'Node.js') is left
+    completely untouched — there is no uniform case to normalise, and
+    guessing would destroy real information (an internal cap, a genuine
+    mixed-case technical spelling)."""
+    if tok.isupper() or tok.islower():
+        return re.sub(r"[^\W\d_]+", lambda m: m.group().capitalize(), tok)
+    return tok
+
+
+def _is_name_part(tok: str) -> bool:
+    """A single decomposed name PART — plain Title Case, an Mc/Mac surname,
+    or a caseless-script word (S5) — checked in whatever casing it already
+    carries (no further folding at this level: see `_fold_uniform_case`'s
+    docstring for why 'Node.js' must not be rescued here on its lowercase
+    'js' half)."""
+    if not tok or not tok.isalpha() or len(tok) < 2:
+        return False
+    if tok[0].isupper() and tok[1:].islower():
+        return True
+    if _MC_MAC_SURNAME_RE.match(tok):
+        return True
+    # Caseless script (S5): no character in `tok` carries case at all, so
+    # "Title Case" has no meaning — alphabetic is the only signal available.
+    return not any(ch.isupper() or ch.islower() for ch in tok)
+
+
+def _dot_or_hyphen_join_parts(tok: str, sep: str) -> list[str] | None:
+    """Split `tok` on `sep` ('.' or '-') and return the parts iff EVERY part
+    is a valid `_is_name_part` — or ``None`` if the split isn't a fully
+    name-shaped decomposition (the caller then disqualifies `tok`
+    outright, matching '.NET'/'Node.js' still failing on their non-name
+    halves)."""
+    parts = tok.split(sep)
+    if len(parts) < 2 or any(not p for p in parts):
+        return None
+    if all(_is_name_part(p) for p in parts):
+        return parts
+    return None
+
+
+def _apostrophe_join_parts(tok: str) -> list[str] | None:
+    """S3: an apostrophe-joined surname ("O'Brien"). Exactly two parts are
+    expected; the FIRST may be a single uppercase letter (a common Irish/
+    French prefix shape `_is_name_part` alone rejects on length), the
+    second must be a full `_is_name_part`."""
+    sep = "'" if "'" in tok else "’"
+    parts = tok.split(sep)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    prefix, rest = parts
+    prefix_ok = _is_name_part(prefix) or (
+        len(prefix) == 1 and prefix.isalpha() and prefix.isupper()
+    )
+    if prefix_ok and _is_name_part(rest):
+        return [prefix, rest]
+    return None
+
+
+def _drop_or_strip_trailing_marker(tokens: list[str]) -> list[str]:
+    """S2: a technical marker on the LAST token only is either (a) a stray
+    standalone annotation ("Casey Rivera 2") — dropped outright, but ONLY
+    when doing so still leaves at least two other tokens, so "ISO 27001"
+    (which would otherwise collapse to the single bare token "ISO") is
+    deliberately left alone and falls through to disqualify normally — or
+    (b) glued to real letters ("Rivera2", "Rivera+", "Rivera#") — stripped
+    back to the bare letters and left in place for the normal per-token
+    check to accept or reject on its own merits."""
+    if not tokens:
+        return tokens
+    last = tokens[-1]
+    if re.fullmatch(r"[\d+#]+", last):
+        if len(tokens) >= 3:
+            return tokens[:-1]
+        return tokens
+    stripped = _TRAILING_MARKER_RE.sub("", last)
+    if stripped != last:
+        return [*tokens[:-1], stripped]
+    return tokens
 
 
 class UnresolvedSkillNameError(RuntimeError):
@@ -159,60 +348,88 @@ def _looks_like_phone(name: str) -> bool:
 
 
 def _looks_like_person_name(name: str) -> bool:
-    """Decision A (round-2 security re-audit, F3) shape test: does ``name``
-    look like a PERSON'S name (as opposed to a skill)?
-
-    Person-name-shaped = 2-3 capitalised alphabetic tokens, with no
-    technical marker (a digit anywhere, or a bare ``+``/``#`` — ``C++``,
-    ``C#``, ``IPv6``, ``ISO 27001``), allowing:
-
-    * a middle initial (``Casey M. Rivera``) — a lone capital letter + ``.``
-      is its own token shape, distinct from a technical ``.`` (``.NET``,
-      ``Node.js`` — a ``.`` ANYWHERE ELSE disqualifies the whole name);
-    * a comma-reordered form (``Rivera, Casey`` — the comma is treated as a
-      token separator);
-    * a hyphenated surname (``Casey-Rivera`` — a hyphen JOINING two Title
-      Case alphabetic parts is a name join, not a technical marker; any
-      other hyphen shape disqualifies).
+    """Decision A shape test (see the block comment above the regexes for
+    the full S1-S5 round-3 rationale): does ``name`` look like a PERSON'S
+    name, as opposed to a skill?
 
     A BARE SINGLE token is included (``Rivera`` alone must be caught), which
     is deliberately broad — the vocabulary check in
     ``reject_reason_for_skill_name`` is what keeps this from eating
-    legitimate single-word Title-Case skills (``Kafka``, ``Django``,
-    ``Kubernetes``): this function only asks "is this SHAPED like a name",
-    never "is this a skill" — that second question is the caller's vocab
-    check.
+    legitimate single-word skills (``Kafka``, ``Django``, ``Kubernetes``):
+    this function only asks "is this SHAPED like a name", never "is this a
+    skill" — that second question is the caller's vocab check.
     """
     s = name.strip()
-    if not s or any(ch.isdigit() for ch in s) or "+" in s or "#" in s:
+    if not s:
         return False
-    tokens: list[str] = []
-    for tok in s.replace(",", " ").split():
-        if _PERSON_MIDDLE_INITIAL_RE.match(tok):
-            tokens.append(tok)
-            continue
-        if "." in tok:
-            # A dot anywhere other than a recognised middle initial is a
-            # technical marker (".NET", "Node.js") — never name-shaped.
-            return False
-        parts = tok.split("-")
-        if len(parts) > 1:
-            if not all(_PERSON_NAME_WORD_RE.match(p) for p in parts):
-                return False
-            tokens.extend(parts)
-        else:
-            tokens.append(tok)
 
-    if not tokens or len(tokens) > 3:
+    raw_tokens = [t for t in s.replace(",", " ").split() if t]
+    if not raw_tokens:
         return False
-    if not all(
-        _PERSON_NAME_WORD_RE.match(t) or _PERSON_MIDDLE_INITIAL_RE.match(t)
-        for t in tokens
-    ):
+    raw_tokens = _drop_or_strip_trailing_marker(raw_tokens)
+    if not raw_tokens:
         return False
-    # At least one real (non-initial) name word — a lone "M." is never
+
+    multi_token = len(raw_tokens) > 1
+    flat: list[tuple[str, bool]] = []  # (word, counts_as_a_"real"_word)
+
+    for tok in raw_tokens:
+        should_fold = multi_token or any(ch in tok for ch in _NAME_JOIN_CHARS)
+        folded = _fold_uniform_case(tok) if should_fold else tok
+
+        if _PERSON_MIDDLE_INITIAL_RE.match(folded):
+            flat.append((folded, False))
+            continue
+        if folded.lower() in _NAME_CONNECTORS:
+            flat.append((folded, False))
+            continue
+        if any(ch in _APOSTROPHE_CHARS for ch in folded):
+            apos_parts = _apostrophe_join_parts(folded)
+            if apos_parts is None:
+                return False
+            prefix, rest = apos_parts
+            flat.append((prefix, len(prefix) > 1))
+            flat.append((rest, True))
+            continue
+        if "." in folded:
+            dot_parts = _dot_or_hyphen_join_parts(folded, ".")
+            if dot_parts is None:
+                return False
+            flat.extend((p, True) for p in dot_parts)
+            continue
+        if "-" in folded:
+            hyphen_parts = _dot_or_hyphen_join_parts(folded, "-")
+            if hyphen_parts is None:
+                return False
+            flat.extend((p, True) for p in hyphen_parts)
+            continue
+        if _is_name_part(folded):
+            flat.append((folded, True))
+            continue
+        return False
+
+    if not flat or len(flat) > _MAX_NAME_SHAPE_TOKENS:
+        return False
+    # At least one real (non-initial, non-connector, non-single-letter-
+    # prefix) name word — a lone "M." (or a lone apostrophe prefix) is never
     # sufficient on its own.
-    return any(_PERSON_NAME_WORD_RE.match(t) for t in tokens)
+    return any(is_real for _, is_real in flat)
+
+
+def _skill_log_ref(canonical: str) -> str:
+    """S8 (security re-audit round 3): an ACCEPTED skill-normalisation log
+    line (auto-merged / LLM-merged / newly created) previously logged
+    ``canonical=%s`` verbatim — exactly as much of an R3 violation as
+    logging a REJECTED name would be, since a résumé header name that slips
+    past the shape+vocab guard (S9's documented residual, or a future gap)
+    still lands in the log line-for-line the moment it's accepted. This
+    returns a short, non-reversible reference (12 hex chars of sha256) that
+    still lets two log lines about the SAME skill be correlated, without
+    ever printing the name. Not a cryptographic guarantee against a
+    small-vocabulary brute force — a mitigation, same class as the
+    category-only discipline `reject_reason_for_skill_name` already uses
+    for the rejected side."""
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
 def _is_known_vocab_term(name: str) -> bool:
@@ -469,10 +686,12 @@ async def _resolve_one(
     if near and near[0]["score"] >= settings.skill_auto_merge_threshold:
         canonical = str(near[0]["name"])
         await _alias_update(session, canonical, normalised)
-        # F8: log the CANONICAL name, never `raw` (potentially PII-shaped).
+        # S8 (round 3): NOT the canonical name either — a hash reference
+        # only (see `_skill_log_ref`'s docstring for why "canonical only"
+        # was still an R3 violation for an ACCEPTED name).
         log.debug(
-            "skill_normalize.auto_merged canonical=%s score=%s",
-            canonical,
+            "skill_normalize.auto_merged ref=%s score=%s",
+            _skill_log_ref(canonical),
             near[0]["score"],
         )
         return canonical
@@ -486,10 +705,10 @@ async def _resolve_one(
         if match is not None and match in valid_names:
             canonical = match
             await _alias_update(session, canonical, normalised)
-            # F8: canonical only, never `raw`.
+            # S8 (round 3): hash reference only, never the name itself.
             log.info(
-                "skill_normalize.llm_merged canonical=%s top_score=%s",
-                canonical,
+                "skill_normalize.llm_merged ref=%s top_score=%s",
+                _skill_log_ref(canonical),
                 near[0]["score"],
             )
             return canonical
@@ -505,8 +724,8 @@ async def _resolve_one(
         n=normalised,
         e=emb,
     )
-    # F8: canonical only, never `raw`.
-    log.info("skill_normalize.created canonical=%s", normalised)
+    # S8 (round 3): hash reference only, never the name itself.
+    log.info("skill_normalize.created ref=%s", _skill_log_ref(normalised))
     return normalised
 
 
