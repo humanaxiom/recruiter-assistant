@@ -58,8 +58,11 @@ _STATEMENTS: tuple[str, ...] = (
     "FOR (j:Job) REQUIRE j.id IS UNIQUE",
     "CREATE CONSTRAINT resume_id_unique IF NOT EXISTS "
     "FOR (r:Resume) REQUIRE r.id IS UNIQUE",
+    # ADR-008: the unique key is `canonical_key` (a vocab term, cleartext, or
+    # a salted hash for a non-vocab name) — never `canonical_name`, which
+    # would tempt someone to write a résumé-derived name into it.
     "CREATE CONSTRAINT skill_name_unique IF NOT EXISTS "
-    "FOR (s:Skill) REQUIRE s.canonical_name IS UNIQUE",
+    "FOR (s:Skill) REQUIRE s.canonical_key IS UNIQUE",
     "CREATE CONSTRAINT company_name_unique IF NOT EXISTS "
     "FOR (c:Company) REQUIRE c.canonical_name IS UNIQUE",
     "CREATE CONSTRAINT institution_name_unique IF NOT EXISTS "

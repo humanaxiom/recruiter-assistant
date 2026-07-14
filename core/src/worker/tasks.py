@@ -240,9 +240,21 @@ async def _job_projection_tx(
             # F3: shape-rejected as PII — drop this skill/edge silently.
             continue
         await skills_graph._ensure_categories(tx, canonical)
+        # ADR-008: `display_name` is written ONLY from the job/JD side, in a
+        # dedicated statement — a job description carries no candidate
+        # identity, so stamping the RAW (cleartext) skill name here is always
+        # safe, even when `canonical` is an opaque `h:<hash>` key for a
+        # non-vocab skill. Kept as its own statement (not folded into the
+        # REQUIRES MERGE below) so the edge write's own params never carry
+        # the raw name.
+        await tx.run(
+            "MATCH (s:Skill {canonical_key: $cname}) SET s.display_name = $display",
+            cname=canonical,
+            display=raw_name,
+        )
         await tx.run(
             """
-            MATCH (j:Job {id: $jid}), (s:Skill {canonical_name: $cname})
+            MATCH (j:Job {id: $jid}), (s:Skill {canonical_key: $cname})
             MERGE (j)-[r:REQUIRES]->(s)
             SET r.min_years = $miny, r.is_must_have = $must
             """,
@@ -263,8 +275,13 @@ async def _job_projection_tx(
             continue
         await skills_graph._ensure_categories(tx, canonical)
         await tx.run(
+            "MATCH (s:Skill {canonical_key: $cname}) SET s.display_name = $display",
+            cname=canonical,
+            display=raw_name,
+        )
+        await tx.run(
             """
-            MATCH (j:Job {id: $jid}), (s:Skill {canonical_name: $cname})
+            MATCH (j:Job {id: $jid}), (s:Skill {canonical_key: $cname})
             MERGE (j)-[r:NICE_TO_HAVE]->(s)
             SET r.min_years = $miny
             """,

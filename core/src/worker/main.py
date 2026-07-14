@@ -62,6 +62,16 @@ async def startup(ctx: dict[str, Any]) -> None:
             "PII_KEY is empty — refusing to start the worker; pgcrypto would "
             "encrypt candidate PII with an empty passphrase. Set PII_KEY."
         )
+    # ADR-008: same discipline as PII_KEY above — an empty salt makes every
+    # non-vocab Skill node's hash key dictionary-attackable (an attacker who
+    # can read the graph can precompute hashes of common names/phrases and
+    # confirm one is present). Fail loud before any pool/driver/store opens.
+    if not s.skill_hash_salt:
+        raise RuntimeError(
+            "SKILL_HASH_SALT is empty — refusing to start the worker; "
+            "non-vocab Skill nodes would be keyed by an unsalted (dictionary-"
+            "attackable) hash. Set SKILL_HASH_SALT."
+        )
     pool = await asyncpg.create_pool(
         dsn=s.postgres_dsn,
         min_size=s.postgres_pool_min,

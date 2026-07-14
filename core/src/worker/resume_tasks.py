@@ -236,20 +236,28 @@ def _drop_smeared_years(
     ]
 
 
-# ---------------- skill-name PII scrub (F3, security re-audit, layer 2) ----
+# ---------------- skill-name PII scrub (defence in depth, at-rest cleartext)
 #
-# `src.pipeline.skills_graph._resolve_one` (layer 1) shape-rejects a skill
-# name that LOOKS like contact information — but it has no idea what the
-# CANDIDATE'S OWN name/email/phone actually is, so a skill name that IS the
-# candidate's identity verbatim (e.g. "Casey Rivera", emitted by a small
-# model off a header-shaped chunk) sails through layer 1 unshaped: it is
-# short, has no "@", and isn't phone-digit-heavy. This function runs HERE,
-# at parse time, where `CandidateInfo` is still in scope (the outbox payload
-# has it stripped by design — decision 1/N1), and scrubs every skill name
-# with the SAME `_redact_candidate_pii` used for the embedder's input, BEFORE
+# ADR-008 moved the LOAD-BEARING privacy control to the graph-projection
+# layer (``skills_graph.resume_skill_canonical_key`` hashes a non-vocab
+# résumé skill name into an opaque, un-invertible Neo4j key — see that
+# module's docstring). This function is kept as defence in depth for a
+# DIFFERENT, narrower concern: ``resumes.parsed`` is Postgres cleartext at
+# rest (ADR-007 §6, accepted), and the outbox row carries the same skill
+# names unencrypted (N1). A skill name that IS the candidate's own identity
+# verbatim (e.g. "Casey Rivera", emitted by a small model off a header-shaped
+# chunk) sails past `skills_graph.reject_reason_for_skill_name`'s cheap
+# email/phone/length checks unshaped, so this function runs HERE, at parse
+# time, where `CandidateInfo` is still in scope (the outbox payload has it
+# stripped by design — decision 1/N1), and scrubs every skill name with the
+# SAME `_redact_candidate_pii` used for the embedder's input, BEFORE
 # `ResumeParsed.model_validate` — so the scrub lands in `resumes.parsed`
 # (Postgres, system of record) and the outbox alike, not just the embed
-# call.
+# call. This is a STRUCTURED, pattern-based scrub only — it can only remove
+# a skill name that matches one of `candidate`'s own known fields; it does
+# not (and no longer needs to) guess whether an unrelated name-shaped string
+# is a person's name at all — the projection layer's hash-keying is what
+# makes that guess unnecessary.
 
 
 def _redact_skill_names_pii(
@@ -260,41 +268,10 @@ def _redact_skill_names_pii(
     verbatim) is dropped outright rather than kept as an empty string.
 
     R3 discipline: the drop is logged as a COUNT only — never the name.
-
-    S12 (round-5 security re-audit): ``_redact_candidate_pii`` above is a
-    STRUCTURED, pattern-based scrub — it needs at least one of
-    ``candidate``'s own fields to build a pattern from. When
-    ``_redaction_available(candidate)`` is False (a completely empty
-    ``CandidateInfo`` — the ``core`` LLM call produced nothing usable), that
-    scrub has nothing to match against and falls through to
-    ``_generic_contact_scrub``, which by its own docstring cannot catch a
-    bare NAME. Left unhandled, a name-shaped "skill" the LLM copied off a
-    header block (e.g. an uncommon full name the offline personal-name
-    lexicon does not cover, so ``skills_graph``'s NORMAL three-way
-    conjunction lets it through too) would reach ``resumes.parsed``/the
-    outbox verbatim — the candidate's OWN identity, landing as a ``:Skill``
-    node in Neo4j.
-
-    Fail CLOSED here exactly as ``parse_resume``'s header-chunk skip (S7)
-    already does for the embedder: with no candidate identity at all to
-    reason about, drop ANY skill name that is name-SHAPED and misses the
-    220-term vocabulary, unconditionally — ``reject_reason_for_skill_name(
-    ..., strict_lexicon=True)`` collapses Decision C's three-way conjunction
-    back to the older, stricter two-way rule for exactly this reason (see
-    that function's docstring). Privacy wins when we have no identity
-    context to reason with; a real, uncommon-but-legitimate skill name lost
-    this way is the accepted cost, same class as S7's header-chunk skip.
     """
-    strict = not _redaction_available(candidate)
     out: list[ResumeSkill] = []
     dropped = 0
     for skill in skills:
-        if strict and (
-            skills_graph.reject_reason_for_skill_name(skill.name, strict_lexicon=True)
-            is not None
-        ):
-            dropped += 1
-            continue
         redacted_name = _redact_candidate_pii(skill.name, candidate)
         if not redacted_name:
             dropped += 1
@@ -852,15 +829,22 @@ def _build_summary_text(parsed: ResumeParsed) -> str:
 #   if `.get()`'d) write an empty string that could later be "fixed" back into
 #   a real leak. Neo4j never needs it — the reveal path reads
 #   ``resumes.parsed`` (Postgres), the system of record.
-# * Decision 3 — skill names are resolved via ``skills_graph.resolve_
-#   canonical_names`` on a plain session, BEFORE ``session.execute_write`` is
-#   ever called. The callback handed to ``execute_write`` receives the
-#   RESOLVED ``{raw_name: canonical}`` mapping only — never ``llm``/
-#   ``embedder`` — so it architecturally cannot make a model call while
-#   holding the write transaction.
+# * ADR-008 — skill-name resolution is a PURE, LOCAL computation
+#   (``skills_graph.resume_skill_canonical_key``), never a Neo4j session, an
+#   embedder, or an LLM call. A résumé-derived skill name must never be
+#   embedded (it can be the candidate's own identity, e.g. an LLM
+#   hallucinating "Casey Rivera" as a "skill" off a header chunk) — so
+#   résumé-side skill resolution can only ever be an exact vocabulary/alias
+#   match or a salted hash, neither of which needs I/O. This supersedes the
+#   OLD decision-3 architecture (resolve via ``skills_graph.
+#   resolve_canonical_names`` on a plain session before ``execute_write`` —
+#   that mechanism is now JOB-side only, see ``src.worker.tasks``).
 # * R8 (MED) — pinned label set: only ``Resume``/``ResumeChunk``/``Skill`` are
 #   ever written here. Never ``Company``/``Institution``, even though the
-#   Neo4j bootstrap already declares constraints for those labels.
+#   Neo4j bootstrap already declares constraints for those labels. The
+#   ``Skill`` nodes this module MERGEs on never get ``display_name``/
+#   ``embedding``/cleartext written from this side either — see
+#   ``_resume_projection_tx``.
 
 
 async def project_resume(
@@ -868,15 +852,15 @@ async def project_resume(
     *,
     resume_id: Any,
     payload: dict[str, Any],
-    llm: Any,
-    embedder: Any,
 ) -> None:
     """Project one ``resume.parsed`` outbox payload into Neo4j.
 
     Idempotent: the write transaction DETACH-DELETEs old chunks and drops old
     HAS_SKILL edges before re-creating them, so a re-parse never accumulates
     cruft. No Postgres dependency at all — decision 1 means this function
-    never needs to read a chunk-text preview from anywhere.
+    never needs to read a chunk-text preview from anywhere. No ``llm``/
+    ``embedder`` dependency either (ADR-008) — résumé-side skill resolution
+    is pure and local, see ``skills_graph.resume_skill_canonical_key``.
     """
     parsed = payload["parsed"]
     summary_emb = payload["summary_emb"]
@@ -886,14 +870,13 @@ async def project_resume(
     # simply skips the job_id assignment for that resume.
     job_id = payload.get("job_id")
 
-    skill_names = [s["name"] for s in parsed.get("skills", [])]
+    # ADR-008: pure, local, no I/O — see the module-section docstring above.
+    resolved_skills = {
+        s["name"]: skills_graph.resume_skill_canonical_key(s["name"])
+        for s in parsed.get("skills", [])
+    }
 
     async with driver.session() as session:
-        # Decision 3: every embed()/chat_json() round trip happens HERE, on a
-        # plain auto-commit session, before any write transaction opens.
-        resolved_skills = await skills_graph.resolve_canonical_names(
-            session, skill_names, llm=llm, embedder=embedder
-        )
         await session.execute_write(
             _resume_projection_tx,
             str(resume_id),
@@ -967,31 +950,38 @@ async def _resume_projection_tx(
             emb=emb,
         )
 
-    # Skills: use the ALREADY-RESOLVED canonical name (decision 3) — no
-    # embed()/chat_json() call happens in this transaction.
+    # Skills: use the ALREADY-RESOLVED canonical key (ADR-008, computed
+    # purely/locally by the caller) — no embed()/chat_json() call happens in
+    # this transaction, and none happened to produce `resolved_skills` either.
     for skill in parsed.get("skills", []):
         raw_name = skill["name"]
         # F6 (security re-audit): a name ABSENT from resolved_skills means
-        # resolve_canonical_names was never asked to resolve it at all — a
-        # caller bug. Falling back to the raw name (hris's
-        # ``resolved_skills.get(name, name)``) matches no Skill node in
-        # Cypher and the HAS_SKILL edge silently vanishes (R5's failure
-        # class). Fail loud instead.
+        # the caller never even attempted to resolve it — a caller bug.
+        # Falling back to the raw name (hris's ``resolved_skills.get(name,
+        # name)``) matches no Skill node in Cypher and the HAS_SKILL edge
+        # silently vanishes (R5's failure class). Fail loud instead.
         if raw_name not in resolved_skills:
             raise skills_graph.UnresolvedSkillNameError(
                 "resume skill name has no resolution entry"
             )
         canonical = resolved_skills[raw_name]
         if canonical is None:
-            # F3 (security re-audit): shape-rejected as PII at the
+            # F3 (security re-audit): shape-rejected as junk at the
             # resolution boundary — drop this skill/edge silently, never
             # project it. Not a caller bug, unlike the branch above.
             continue
+        # ADR-008: MERGE on `canonical_key` ONLY — this is the résumé side,
+        # so this statement must NEVER set `display_name`/`embedding`/any
+        # cleartext on the node it creates. A brand-new (never job-required)
+        # skill's node may not exist yet at all, so this MERGE (not a MATCH)
+        # is what actually creates it — "ON CREATE may set nothing but the
+        # key" (the MERGE pattern itself already sets `canonical_key`).
+        await tx.run("MERGE (s:Skill {canonical_key: $cn})", cn=canonical)
         await skills_graph._ensure_categories(tx, canonical)
         evidence = skill.get("evidence_chunk_ids") or []
         await tx.run(
             """
-            MATCH (r:Resume {id: $rid}), (s:Skill {canonical_name: $cn})
+            MATCH (r:Resume {id: $rid}), (s:Skill {canonical_key: $cn})
             MERGE (r)-[h:HAS_SKILL]->(s)
             SET h.years = $years,
                 h.last_used_year = $luy,

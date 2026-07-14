@@ -145,12 +145,13 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
                             embedder=embedder,
                         )
                     elif row["event_type"] == "resume.parsed":
+                        # ADR-008: résumé-side skill resolution is pure/local
+                        # (no embedder/LLM) — see
+                        # ``src.worker.resume_tasks.project_resume``.
                         await project_resume(
                             neo4j,
                             resume_id=row["aggregate_id"],
                             payload=payload,
-                            llm=llm,
-                            embedder=embedder,
                         )
                     else:
                         log.warning(

@@ -61,6 +61,16 @@ class Settings(BaseSettings):
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
     blind_review_default: bool = True  # decision 4 — redaction ON by default
+    # ADR-008 — the salt folded into every NON-VOCAB skill's canonical Skill-
+    # graph key (``h:sha256(salt + normalised_name)[:32]``). Empty by default,
+    # same discipline as ``pii_key`` above: ``src.worker.main.startup`` refuses
+    # to start on an empty salt (an UNSALTED hash of a closed-ish set of likely
+    # candidate names is dictionary-attackable — precompute hashes of common
+    # names and confirm a candidate is in the graph). Rotating this value
+    # changes every non-vocab skill's key, which requires re-projecting the
+    # whole graph (every job/résumé re-parsed) to reconnect REQUIRES/HAS_SKILL
+    # edges under the new keys.
+    skill_hash_salt: str = ""
 
     # ── Gates ────────────────────────────────────────────────────────────────
     coverage_threshold: int = 80
