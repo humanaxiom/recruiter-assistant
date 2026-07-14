@@ -358,7 +358,7 @@ async def test_job_reprojection_typed_delete_does_not_touch_a_foreign_job_skill_
     async with neo4j_driver.session() as session:
         await session.run(
             "MATCH (j:Job {id: $jid}) "
-            "MERGE (s:Skill {canonical_name: 'rust'}) "
+            "MERGE (s:Skill {canonical_key: 'rust'}) "
             "MERGE (j)-[:MENTIONS]->(s)",
             jid=str(job_id),
         )
@@ -372,7 +372,7 @@ async def test_job_reprojection_typed_delete_does_not_touch_a_foreign_job_skill_
         await _count(
             neo4j_driver,
             f"MATCH (:Job {{id: '{job_id}'}})-[:MENTIONS]->"
-            "(:Skill {canonical_name: 'rust'}) RETURN count(*) AS n",
+            "(:Skill {canonical_key: 'rust'}) RETURN count(*) AS n",
         )
         == 1
     ), "typed DELETE removed a foreign Job->Skill edge type"
@@ -422,11 +422,171 @@ async def test_python_skill_node_has_non_empty_categories(
 
     async with neo4j_driver.session() as session:
         result = await session.run(
-            "MATCH (s:Skill {canonical_name: 'python'}) RETURN s.categories AS cats"
+            "MATCH (s:Skill {canonical_key: 'python'}) RETURN s.categories AS cats"
         )
         record = await result.single()
     assert record is not None
     assert record["cats"], "python Skill node has empty .categories (R4)"
+
+
+# ── ADR-008: canonical-key hashing, display_name, and the recall round-trip
+
+
+@pytest.mark.asyncio
+async def test_job_side_skill_node_gets_a_cleartext_display_name(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """Job/JD side ONLY: `display_name` is always the raw JD text, cleartext
+    — a job description carries no candidate PII, so this is always safe."""
+    job_id = await _insert_job(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="job",
+            aggregate_id=job_id,
+            event_type="job.parsed",
+            payload={
+                "embedding": _vec(9),
+                "extracted": {
+                    "title": "Senior Backend Engineer",
+                    "required_skills": [{"name": "Python", "min_years": 4}],
+                    "nice_to_have_skills": [],
+                    "min_years_experience": 4,
+                    "education": {"min_level": "bachelors", "fields": []},
+                    "location": None,
+                    "remote_policy": None,
+                    "responsibilities": [],
+                },
+                "prompt_version": "jd_extract_v1",
+            },
+        )
+    await project_to_graph(_ctx(pg_pool, neo4j_driver), batch=10)
+
+    async with neo4j_driver.session() as session:
+        result = await session.run(
+            "MATCH (s:Skill {canonical_key: 'python'}) RETURN s.display_name AS dn"
+        )
+        record = await result.single()
+    assert record is not None
+    assert record["dn"] == "Python"
+
+
+@pytest.mark.asyncio
+async def test_resume_side_non_vocab_skill_gets_a_hash_key_no_display_name_no_embedding(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """The résumé-side privacy control, proven end to end against a REAL
+    Neo4j: a non-vocab skill name (not the special-cased vocab set) is never
+    written cleartext, never gets a `display_name`, and never gets an
+    `embedding` — the whole point of ADR-008."""
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume(pg_pool, job_id)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="resume",
+            aggregate_id=resume_id,
+            event_type="resume.parsed",
+            payload={
+                "parsed": {
+                    "total_years_experience": 6,
+                    "skills": [{"name": "distributed systems", "years": 5}],
+                    "experience": [],
+                    "education": [],
+                    "chunks": [],
+                    "cover_letter_chunks": [],
+                },
+                "summary_emb": _vec(10),
+                "chunk_embs": {},
+                "prompt_version": "resume_core_v1+resume_skills_v2",
+                "job_id": str(job_id),
+            },
+        )
+    delivered = await project_to_graph(_ctx(pg_pool, neo4j_driver), batch=10)
+    assert delivered == 1
+
+    async with neo4j_driver.session() as session:
+        result = await session.run(
+            "MATCH (:Resume)-[:HAS_SKILL]->(s:Skill) "
+            "RETURN s.canonical_key AS key, s.display_name AS dn, "
+            "s.embedding AS emb, keys(s) AS ks"
+        )
+        record = await result.single()
+    assert record is not None
+    assert record["key"].startswith("h:")
+    assert "distributed" not in record["key"]
+    assert record["dn"] is None
+    assert record["emb"] is None
+    assert "display_name" not in record["ks"]
+    assert "embedding" not in record["ks"]
+
+
+@pytest.mark.asyncio
+async def test_job_requirement_and_resume_skill_round_trip_on_a_non_vocab_skill(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """The recall-preserving invariant ADR-008 depends on: a JD requiring a
+    non-vocab skill and a résumé having the IDENTICAL skill text must land
+    on the SAME Skill node — REQUIRES and HAS_SKILL meet, so the skill
+    actually scores."""
+    job_id = await _insert_job(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="job",
+            aggregate_id=job_id,
+            event_type="job.parsed",
+            payload={
+                "embedding": _vec(11),
+                "extracted": {
+                    "title": "Senior Backend Engineer",
+                    "required_skills": [
+                        {"name": "Site Reliability Engineering", "min_years": 3}
+                    ],
+                    "nice_to_have_skills": [],
+                    "min_years_experience": 4,
+                    "education": {"min_level": "bachelors", "fields": []},
+                    "location": None,
+                    "remote_policy": None,
+                    "responsibilities": [],
+                },
+                "prompt_version": "jd_extract_v1",
+            },
+        )
+    resume_id = await _insert_resume(pg_pool, job_id)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="resume",
+            aggregate_id=resume_id,
+            event_type="resume.parsed",
+            payload={
+                "parsed": {
+                    "total_years_experience": 6,
+                    "skills": [{"name": "Site Reliability Engineering", "years": 5}],
+                    "experience": [],
+                    "education": [],
+                    "chunks": [],
+                    "cover_letter_chunks": [],
+                },
+                "summary_emb": _vec(12),
+                "chunk_embs": {},
+                "prompt_version": "resume_core_v1+resume_skills_v2",
+                "job_id": str(job_id),
+            },
+        )
+
+    delivered = await project_to_graph(_ctx(pg_pool, neo4j_driver), batch=10)
+    assert delivered == 2
+
+    assert (
+        await _count(
+            neo4j_driver,
+            "MATCH (:Job)-[:REQUIRES]->(s:Skill)<-[:HAS_SKILL]-(:Resume) "
+            "RETURN count(s) AS n",
+        )
+        == 1
+    ), "JD requirement and résumé skill did not meet at the same Skill node"
 
 
 # ── R8: pinned label set ───────────────────────────────────────────────────

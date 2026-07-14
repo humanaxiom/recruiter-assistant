@@ -22,19 +22,22 @@ not against a mocked return value. Ported behaviourally from hris
   ``KeyError``, gets swallowed by the drainer's blanket ``except Exception``,
   and the row retries forever. Pinned by feeding chunks shaped EXACTLY like
   the real outbox payload (``id``/``section``/``page`` only).
-* **Decision 3 — skill resolution happens OUTSIDE the write transaction.**
-  ``project_resume`` must resolve every skill name to a canonical Neo4j name
-  via a plain session BEFORE calling ``session.execute_write``, and the
-  callback handed to ``execute_write`` must never receive ``llm``/``embedder``
-  at all — so it CANNOT call them, architecturally, not just "doesn't
-  happen to" in this test run.
+* **ADR-008 — skill resolution is a PURE, LOCAL computation, no Neo4j
+  session, no ``llm``, no ``embedder`` at all.** ``project_resume`` computes
+  ``{raw_name: canonical_key}`` via ``skills_graph.resume_skill_canonical_key``
+  (a plain function, no I/O) BEFORE ``session.execute_write`` is ever called
+  — superseding the OLD "Decision 3" architecture (resolve via
+  ``skills_graph.resolve_canonical_names`` on a plain session), which is now
+  JOB-side only (see ``test_worker_project_job.py``). The callback handed to
+  ``execute_write`` never receives ``llm``/``embedder`` either — it never did
+  need them, and now nothing upstream of it does either.
 * **R8 (MED) — the pinned label set.** The projection writes only
   ``{Resume, ResumeChunk, Skill}`` from this module (``Job`` is the JD side)
   — never ``Company``/``Institution``, even though core's Neo4j bootstrap
-  already declares constraints for those labels (an inviting trap).
-
-``src.worker.resume_tasks.project_resume`` does not exist yet — this whole
-file fails at collection (``ImportError``). RED half of the TDD cycle.
+  already declares constraints for those labels (an inviting trap). The
+  ``Skill`` nodes this module MERGEs on never get ``display_name``/
+  ``embedding``/any cleartext written from this side either (ADR-008) — see
+  the dedicated section near the bottom of this file.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.pipeline import skills_graph
 from src.worker.resume_tasks import _resume_projection_tx, project_resume
 
 # ── fakes ─────────────────────────────────────────────────────────────────
@@ -88,13 +92,11 @@ def _acm(return_value: Any) -> MagicMock:
     return cm
 
 
-def _fake_driver_and_tx(
-    resolve_result: dict[str, str],
-) -> tuple[MagicMock, _RecordingTx, AsyncMock, list[str]]:
+def _fake_driver_and_tx() -> tuple[MagicMock, _RecordingTx, list[str]]:
     """A neo4j driver double whose ``session()`` yields an object exposing
-    ONLY ``execute_write`` (no bare ``.run`` — resolution must go through the
-    patched ``skills_graph.resolve_canonical_names``, not the projection
-    session). Returns (driver, recording_tx, resolve_mock, events)."""
+    ONLY ``execute_write`` (no bare ``.run`` — ADR-008 means résumé-side
+    resolution never touches Neo4j at all, so nothing here should ever call
+    it). Returns (driver, recording_tx, events)."""
     tx = _RecordingTx()
     events: list[str] = []
     captured_write_args: list[tuple[Any, ...]] = []
@@ -116,12 +118,7 @@ def _fake_driver_and_tx(
     driver = MagicMock(name="driver")
     driver.session = MagicMock(return_value=_acm(session))
 
-    async def _resolve(*args: Any, **kwargs: Any) -> dict[str, str]:
-        events.append("resolve")
-        return resolve_result
-
-    resolve_mock = AsyncMock(side_effect=_resolve)
-    return driver, tx, resolve_mock, events
+    return driver, tx, events
 
 
 def _outbox_chunk(
@@ -181,18 +178,11 @@ def _all_params(tx: _RecordingTx) -> list[Any]:
 
 
 async def _project(
-    payload: dict[str, Any], resolve_result: dict[str, str]
+    payload: dict[str, Any],
 ) -> tuple[_RecordingTx, MagicMock, list[str]]:
     resume_id = uuid4()
-    driver, tx, resolve_mock, events = _fake_driver_and_tx(resolve_result)
-    llm = MagicMock(chat_json=AsyncMock())
-    embedder = MagicMock(embed=AsyncMock())
-    with patch(
-        "src.worker.resume_tasks.skills_graph.resolve_canonical_names", resolve_mock
-    ):
-        await project_resume(
-            driver, resume_id=resume_id, payload=payload, llm=llm, embedder=embedder
-        )
+    driver, tx, events = _fake_driver_and_tx()
+    await project_resume(driver, resume_id=resume_id, payload=payload)
     return tx, driver, events
 
 
@@ -204,7 +194,7 @@ async def test_no_text_preview_key_is_ever_written_to_any_node() -> None:
     """R1 (CRIT). Walks EVERY captured Cypher call's params — not just the
     ResumeChunk creation call — so a preview smuggled onto a different node
     (e.g. the Resume node itself) would also be caught."""
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     for cypher, params in _all_run_calls(tx):
         assert "text_preview" not in params
         assert "preview" not in params
@@ -213,7 +203,7 @@ async def test_no_text_preview_key_is_ever_written_to_any_node() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_chunk_creation_params_never_include_a_text_key() -> None:
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     chunk_calls = [
         (cypher, params)
         for cypher, params in _all_run_calls(tx)
@@ -227,7 +217,7 @@ async def test_resume_chunk_creation_params_never_include_a_text_key() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_chunk_node_only_carries_id_section_page_and_embedding() -> None:
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     chunk_calls = [
         (cypher, params)
         for cypher, params in _all_run_calls(tx)
@@ -248,7 +238,7 @@ async def test_projection_does_not_keyerror_on_outbox_shaped_chunks() -> None:
     a real outbox payload's chunks (which never carry 'text' — ADR-007 §7).
     This must not raise at all."""
     payload = _payload(chunks=[_outbox_chunk("c_001")], chunk_embs={"c_001": [0.3] * 8})
-    tx, _driver, _events = await _project(payload, {"python": "python"})
+    tx, _driver, _events = await _project(payload)
     assert any("ResumeChunk" in cypher for cypher, _ in _all_run_calls(tx))
 
 
@@ -258,7 +248,7 @@ async def test_chunks_with_no_matching_embedding_are_skipped() -> None:
         chunks=[_outbox_chunk("c_001"), _outbox_chunk("c_002")],
         chunk_embs={"c_001": [0.3] * 8},  # c_002 has no embedding
     )
-    tx, _driver, _events = await _project(payload, {"python": "python"})
+    tx, _driver, _events = await _project(payload)
     chunk_ids_written = {
         params.get("cid")
         for cypher, params in _all_run_calls(tx)
@@ -272,7 +262,7 @@ async def test_chunks_with_no_matching_embedding_are_skipped() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_node_write_carries_no_candidate_key_anywhere() -> None:
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     for _cypher, params in _all_run_calls(tx):
         assert "candidate" not in params
         for key in ("name", "email", "phone", "location"):
@@ -285,7 +275,7 @@ async def test_resume_node_write_sets_only_total_years_experience_scalar() -> No
     Resume node — no experience/education list, ever (R8: those would need
     Company/Institution nodes this module must not create)."""
     payload = _payload(total_years_experience=9)
-    tx, _driver, _events = await _project(payload, {"python": "python"})
+    tx, _driver, _events = await _project(payload)
     resume_calls = [
         (cypher, params)
         for cypher, params in _all_run_calls(tx)
@@ -304,7 +294,7 @@ async def test_no_experience_education_company_institution_writes_anywhere() -> 
     sweep. Looks for the Cypher LABEL syntax specifically (``:Company`` /
     ``:Institution``), not a loose substring, to avoid false positives on
     unrelated words."""
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     cypher = _all_cypher(tx)
     for label in ("Company", "Institution"):
         assert f":{label}" not in cypher, f"unexpected {label} label"
@@ -312,7 +302,7 @@ async def test_no_experience_education_company_institution_writes_anywhere() -> 
 
 @pytest.mark.asyncio
 async def test_job_id_is_coalesced_with_the_existing_value() -> None:
-    tx, _driver, _events = await _project(_payload(job_id=None), {"python": "python"})
+    tx, _driver, _events = await _project(_payload(job_id=None))
     resume_cypher = next(
         cypher
         for cypher, _params in _all_run_calls(tx)
@@ -325,7 +315,7 @@ async def test_job_id_is_coalesced_with_the_existing_value() -> None:
 
 @pytest.mark.asyncio
 async def test_status_and_updated_at_are_set_on_the_resume_node() -> None:
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     resume_cypher = next(
         cypher
         for cypher, _params in _all_run_calls(tx)
@@ -335,17 +325,40 @@ async def test_status_and_updated_at_are_set_on_the_resume_node() -> None:
     assert "updated_at" in resume_cypher
 
 
-# ── HAS_SKILL uses the RESOLVED canonical name ────────────────────────────
+# ── HAS_SKILL uses the RESOLVED canonical key ─────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_has_skill_edge_uses_resolved_canonical_name_not_raw_name() -> None:
+async def test_has_skill_edge_uses_resolved_canonical_key_not_raw_name() -> None:
+    """ "Py" is an alias of the vocab term "python" (aliases.yaml) — real,
+    unmocked ``resume_skill_canonical_key`` resolution, exercised end to
+    end."""
     payload = _payload(skills=[{"name": "Py", "years": 4, "last_used_year": 2026}])
-    tx, _driver, _events = await _project(payload, {"Py": "python"})
+    tx, _driver, _events = await _project(payload)
     skill_calls = [p for c, p in _all_run_calls(tx) if "HAS_SKILL" in c]
     assert skill_calls
     assert any(p.get("cn") == "python" or "python" in p.values() for p in skill_calls)
     assert not any("Py" in p.values() for p in skill_calls)
+
+
+@pytest.mark.asyncio
+async def test_has_skill_edge_for_a_non_vocab_skill_uses_an_opaque_hash_key() -> None:
+    """ADR-008: a skill name that ISN'T in the ~220-term vocabulary (e.g. the
+    candidate's own name, extracted as a "skill" by a hallucinating small
+    model) never reaches the graph as cleartext — it lands as an opaque
+    ``h:<hash>`` key, indistinguishable at the Cypher-parameter level from
+    any other non-vocab skill."""
+    payload = _payload(skills=[{"name": "Casey Rivera", "years": 4}])
+    tx, _driver, _events = await _project(payload)
+    skill_calls = [p for c, p in _all_run_calls(tx) if "HAS_SKILL" in c]
+    assert skill_calls
+    cn = next(p["cn"] for p in skill_calls if "cn" in p)
+    assert cn.startswith(skills_graph._HASH_KEY_PREFIX)
+    assert not any(
+        "casey" in str(v).lower() or "rivera" in str(v).lower()
+        for _c, p in _all_run_calls(tx)
+        for v in p.values()
+    )
 
 
 # ── F6 (security re-audit): fail loud on a missing resolution entry ──────
@@ -353,34 +366,45 @@ async def test_has_skill_edge_uses_resolved_canonical_name_not_raw_name() -> Non
 
 @pytest.mark.asyncio
 async def test_skill_name_absent_from_resolved_mapping_raises_loudly() -> None:
-    """F6 (HIGH). A name ABSENT from the resolved mapping means
-    ``resolve_canonical_names`` was never even asked to resolve it — a
-    caller bug. hris's ``resolved_skills.get(name, name)`` silently falls
-    back to the UNRESOLVED raw name, which matches no ``Skill`` node in
-    Cypher and the HAS_SKILL edge silently vanishes (R5's exact failure
-    class, reintroduced). Must fail loud instead."""
-    from src.pipeline.skills_graph import UnresolvedSkillNameError
-
-    payload = _payload(skills=[{"name": "python", "years": 4}])
-    with pytest.raises(UnresolvedSkillNameError):
-        await _project(payload, {})  # resolved mapping has NO entry for "python"
+    """F6 (HIGH). A name ABSENT from the resolved mapping means the caller
+    never even attempted to resolve it — a caller bug (this mapping is
+    normally built exhaustively, by dict comprehension, over the same skills
+    list — so this scenario only arises via a direct, deliberately-broken
+    call to the write-tx callback, exercised here). hris's
+    ``resolved_skills.get(name, name)`` silently falls back to the
+    UNRESOLVED raw name, which matches no ``Skill`` node in Cypher and the
+    HAS_SKILL edge silently vanishes (R5's exact failure class,
+    reintroduced). Must fail loud instead."""
+    tx = _RecordingTx()
+    with pytest.raises(skills_graph.UnresolvedSkillNameError):
+        await _resume_projection_tx(
+            tx,
+            "resume-1",
+            {
+                "total_years_experience": 4,
+                "skills": [{"name": "python", "years": 4}],
+                "chunks": [],
+            },
+            [0.1] * 8,
+            {},
+            {},  # no entry at all for "python"
+            job_id=None,
+        )
 
 
 @pytest.mark.asyncio
 async def test_skill_name_resolved_to_none_is_dropped_silently_not_projected() -> None:
-    """F3 (security re-audit). A ``None`` value means the name was
-    shape-rejected as PII at the resolution boundary (layer 1) — this is a
-    legitimate outcome, not a caller bug: the skill/edge must be dropped
-    silently, and this must NOT raise ``UnresolvedSkillNameError``."""
+    """A ``None`` value means the name was shape-rejected as junk (email/
+    phone-shaped) at the resolution boundary — this is a legitimate outcome,
+    not a caller bug: the skill/edge must be dropped silently, and this must
+    NOT raise ``UnresolvedSkillNameError``."""
     payload = _payload(
         skills=[
             {"name": "python", "years": 4},
             {"name": "casey.rivera@example.test"},
         ]
     )
-    tx, _driver, _events = await _project(
-        payload, {"python": "python", "casey.rivera@example.test": None}
-    )
+    tx, _driver, _events = await _project(payload)
     # MERGE-scoped — "HAS_SKILL" alone also matches the old-edge cleanup's
     # ``DELETE h`` call, which carries no skill-identifying params at all.
     skill_calls = [
@@ -397,7 +421,7 @@ async def test_skill_name_resolved_to_none_is_dropped_silently_not_projected() -
 async def test_old_skill_edges_and_chunks_are_detached_before_recreation() -> None:
     """Idempotency at the write-tx level — a re-parse must not accumulate
     stale HAS_CHUNK/HAS_SKILL edges. Order: DELETE calls precede CREATE."""
-    tx, _driver, _events = await _project(_payload(), {"python": "python"})
+    tx, _driver, _events = await _project(_payload())
     calls = _all_run_calls(tx)
     delete_idxs = [i for i, (c, _p) in enumerate(calls) if "DELETE" in c.upper()]
     create_idxs = [
@@ -410,67 +434,41 @@ async def test_old_skill_edges_and_chunks_are_detached_before_recreation() -> No
     assert max(delete_idxs) < min(create_idxs)
 
 
-# ── Decision 3: resolution happens OUTSIDE the write transaction ─────────
+# ── ADR-008: résumé-side skill resolution is pure/local, never Neo4j/LLM ──
 
 
 @pytest.mark.asyncio
-async def test_skills_are_resolved_before_the_write_transaction_opens() -> None:
-    _tx, _driver, events = await _project(_payload(), {"python": "python"})
-    assert events[0] == "resolve"
-    assert "write_start" in events
-    assert events.index("resolve") < events.index("write_start")
+async def test_resolve_canonical_names_is_never_called_from_the_resume_side() -> None:
+    """ADR-008 supersedes the OLD Decision-3 architecture: the résumé side
+    no longer calls ``skills_graph.resolve_canonical_names`` (job-side only
+    now) at all — skill resolution is pure and local
+    (``resume_skill_canonical_key``)."""
+    with patch(
+        "src.pipeline.skills_graph.resolve_canonical_names", new_callable=AsyncMock
+    ) as resolve_mock:
+        await _project(_payload())
+    resolve_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_write_transaction_callback_never_receives_llm_or_embedder() -> None:
-    """Decision 3, architecturally: the callback handed to ``execute_write``
-    must not have ``llm``/``embedder`` in its args/kwargs at all — so it
-    CANNOT call ``chat_json``/``embed`` while the write transaction is open,
-    not merely 'doesn't happen to' in this particular test run."""
+    """The callback handed to ``execute_write`` must not have ``llm``/
+    ``embedder`` in its args/kwargs at all — so it CANNOT call
+    ``chat_json``/``embed`` while the write transaction is open, not merely
+    'doesn't happen to' in this particular test run."""
     resume_id = uuid4()
-    driver, tx, resolve_mock, _events = _fake_driver_and_tx({"python": "python"})
-    llm = MagicMock(chat_json=AsyncMock(), name="THE_LLM")
-    embedder = MagicMock(embed=AsyncMock(), name="THE_EMBEDDER")
-    with patch(
-        "src.worker.resume_tasks.skills_graph.resolve_canonical_names", resolve_mock
-    ):
-        await project_resume(
-            driver,
-            resume_id=resume_id,
-            payload=_payload(),
-            llm=llm,
-            embedder=embedder,
-        )
+    driver, _tx, _events = _fake_driver_and_tx()
+    await project_resume(driver, resume_id=resume_id, payload=_payload())
     session = driver.session.return_value.__aenter__.return_value
     for args, kwargs in zip(
         session._captured_write_args, session._captured_write_kwargs, strict=True
     ):
-        assert llm not in args and llm not in kwargs.values()
-        assert embedder not in args and embedder not in kwargs.values()
-    llm.chat_json.assert_not_awaited()
-    embedder.embed.assert_not_awaited()
+        assert "llm" not in kwargs
+        assert "embedder" not in kwargs
+        assert not any(hasattr(a, "chat_json") or hasattr(a, "embed") for a in args)
 
 
-@pytest.mark.asyncio
-async def test_resolve_canonical_names_is_called_with_the_llm_and_embedder() -> None:
-    """The resolution step (outside the write tx) is where llm/embedder
-    actually get used."""
-    resume_id = uuid4()
-    driver, _tx, resolve_mock, _events = _fake_driver_and_tx({"python": "python"})
-    llm = MagicMock(chat_json=AsyncMock())
-    embedder = MagicMock(embed=AsyncMock())
-    with patch(
-        "src.worker.resume_tasks.skills_graph.resolve_canonical_names", resolve_mock
-    ):
-        await project_resume(
-            driver, resume_id=resume_id, payload=_payload(), llm=llm, embedder=embedder
-        )
-    resolve_mock.assert_awaited_once()
-    assert resolve_mock.await_args.kwargs.get("llm") is llm
-    assert resolve_mock.await_args.kwargs.get("embedder") is embedder
-
-
-# ── Architectural: no Postgres dependency at all (Decision 1) ────────────
+# ── Architectural: no Postgres dependency, no llm/embedder (Decision 1/ADR-008)
 
 
 def test_project_resume_signature_has_no_postgres_connection_parameter() -> None:
@@ -482,9 +480,67 @@ def test_project_resume_signature_has_no_postgres_connection_parameter() -> None
     assert not params & {"conn", "pool", "pg_pool"}
 
 
+def test_project_resume_signature_has_no_llm_or_embedder_parameter() -> None:
+    """ADR-008: résumé-side skill resolution needs no model call at all any
+    more, so ``project_resume`` itself takes no ``llm``/``embedder`` either —
+    a stronger guarantee than "the write-tx callback doesn't get them"."""
+    params = set(inspect.signature(project_resume).parameters)
+    assert not params & {"llm", "embedder"}
+
+
 def test_resume_projection_tx_signature_has_no_llm_or_embedder_parameter() -> None:
-    """Architectural guarantee for decision 3: the write-tx function itself
-    cannot even be called with an llm/embedder — the parameter doesn't
-    exist."""
+    """Architectural guarantee: the write-tx function itself cannot even be
+    called with an llm/embedder — the parameter doesn't exist."""
     params = set(inspect.signature(_resume_projection_tx).parameters)
     assert not params & {"llm", "embedder"}
+
+
+# ── ADR-008: the Skill node this module MERGEs on is never display_name'd,
+# embedded, or given any other cleartext — canonical_key only. ──────────────
+
+
+@pytest.mark.asyncio
+async def test_resume_side_never_writes_display_name() -> None:
+    tx, _driver, _events = await _project(_payload(skills=[{"name": "python"}]))
+    cypher = _all_cypher(tx)
+    assert "display_name" not in cypher
+
+
+@pytest.mark.asyncio
+async def test_resume_side_never_writes_an_embedding_onto_a_skill_node() -> None:
+    """The Resume/ResumeChunk nodes DO carry an embedding (summary/chunk
+    vectors) — this pins specifically that no SKILL node write from this
+    module ever sets one."""
+    tx, _driver, _events = await _project(_payload(skills=[{"name": "python"}]))
+    skill_node_calls = [
+        (c, p)
+        for c, p in _all_run_calls(tx)
+        if re.search(r"Skill\s*\{", c) and "embedding" in c
+    ]
+    assert skill_node_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_side_merges_the_skill_node_itself_not_just_the_edge() -> None:
+    """A brand-new (never job-required) skill's node may not exist at all
+    yet — the résumé side's own MERGE is what creates it (``ON CREATE`` sets
+    nothing but the key), so the subsequent HAS_SKILL edge write never
+    silently no-ops against a nonexistent node."""
+    tx, _driver, _events = await _project(_payload(skills=[{"name": "python"}]))
+    skill_merge_calls = [
+        c
+        for c, _p in _all_run_calls(tx)
+        if re.search(r"MERGE\s*\(\s*s\s*:\s*Skill", c, re.IGNORECASE)
+    ]
+    assert skill_merge_calls, "expected the résumé side to MERGE its own Skill node"
+
+
+@pytest.mark.asyncio
+async def test_resume_side_categories_write_is_still_vocab_scoped() -> None:
+    """Categories are safe, vocab-scoped metadata (``categories_for``
+    degrades to ``[]`` for a hash-keyed non-vocab skill) — unaffected by
+    ADR-008, still exercised from the résumé side."""
+    tx, _driver, _events = await _project(_payload(skills=[{"name": "python"}]))
+    categories_calls = [(c, p) for c, p in _all_run_calls(tx) if "categories" in c]
+    assert categories_calls
+    assert any(p.get("cats") for _c, p in categories_calls)

@@ -301,6 +301,69 @@ async def test_no_company_or_institution_writes_on_the_job_side() -> None:
         assert f":{label}" not in cypher
 
 
+# ── ADR-008: display_name is written ONLY from the job/JD side ───────────
+#
+# A job description carries no candidate identity, so stamping the RAW
+# (cleartext) skill name onto the Skill node's `display_name` is always
+# safe — including when `canonical` is an opaque `h:<hash>` key for a
+# non-vocab skill (the recruiter-facing `SkillContribution.skill` field
+# still needs something readable to show).
+
+
+@pytest.mark.asyncio
+async def test_required_skill_display_name_is_set_to_the_raw_jd_text() -> None:
+    required = [{"name": "Distributed Systems", "min_years": 3}]
+    resolved = {"Distributed Systems": "h:deadbeefdeadbeefdeadbeefdeadbeef"}
+    tx, _driver, _events = await _project(
+        _payload(required=required, nice_to_have=[]), resolved
+    )
+    display_calls = [
+        (c, p) for c, p in tx.calls if "display_name" in c and "MERGE" not in c.upper()
+    ]
+    assert display_calls
+    assert any(p.get("display") == "Distributed Systems" for _c, p in display_calls)
+    assert any(
+        p.get("cname") == "h:deadbeefdeadbeefdeadbeefdeadbeef"
+        for _c, p in display_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_nice_to_have_skill_display_name_is_set_to_the_raw_jd_text() -> None:
+    nice_to_have = [{"name": "Cloud-Native", "min_years": None}]
+    resolved = {"Cloud-Native": "h:0123456789abcdef0123456789abcdef"}
+    tx, _driver, _events = await _project(
+        _payload(required=[], nice_to_have=nice_to_have), resolved
+    )
+    display_calls = [
+        (c, p) for c, p in tx.calls if "display_name" in c and "MERGE" not in c.upper()
+    ]
+    assert display_calls
+    assert any(p.get("display") == "Cloud-Native" for _c, p in display_calls)
+
+
+@pytest.mark.asyncio
+async def test_display_name_write_is_a_dedicated_statement_not_folded_into_edge() -> (
+    None
+):
+    """The edge write's own params must never carry the raw JD text — kept
+    as a separate statement so ``test_requires_edge_uses_resolved_canonical_
+    name_not_raw_name``'s "raw name never appears in the edge call" pin
+    stays meaningful even though display_name legitimately carries it
+    elsewhere."""
+    tx, _driver, _events = await _project(
+        _payload(required=[{"name": "Py", "min_years": 2}], nice_to_have=[]),
+        {"Py": "python"},
+    )
+    requires_calls = [
+        (c, p) for c, p in tx.calls if "REQUIRES" in c and "MERGE" in c.upper()
+    ]
+    assert requires_calls
+    assert not any("Py" in p.values() for _c, p in requires_calls)
+    display_calls = [(c, p) for c, p in tx.calls if "display_name" in c]
+    assert any(p.get("display") == "Py" for _c, p in display_calls)
+
+
 # ── Decision 3: resolution outside the write transaction ─────────────────
 
 

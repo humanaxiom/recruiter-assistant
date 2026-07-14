@@ -1109,15 +1109,18 @@ async def test_extract_skills_merged_is_capped_at_80() -> None:
     assert len(merged) == 80
 
 
-# ── F3b (security re-audit round 2): raw-name shape+vocab reject ─────────
+# ── ADR-008: `_extract_skills_merged` is shape-only junk filtering now ────
 #
-# `_extract_skills_merged` now shape(+vocab)-rejects each LLM skill detail's
-# RAW name (via `skills_graph.reject_reason_for_skill_name`) BEFORE it is
-# ever handed to `canonicalize_skill_names` — closing the gap where
-# canonicalisation (lowercasing + stripping "@") ran first and defeated
-# `skills_graph._resolve_one`'s downstream email/shape checks entirely.
-# These tests use the REAL `canonicalize_skill_names`/`skills_graph` (no
-# mocking of either) so they exercise the actual production decision.
+# Rounds 2-5's raw-name person-shape+vocab reject at THIS layer is gone (see
+# ``src.pipeline.skills_graph``'s module docstring) — `_extract_skills_merged`
+# still calls `skills_graph.reject_reason_for_skill_name` on each LLM detail's
+# RAW name, but that function only catches email/phone-shape and length/
+# token-cap junk now. A skill name that IS the candidate's own identity
+# (e.g. "Casey Rivera") is a DELIBERATE pass-through at this layer: the
+# load-bearing privacy control moved downstream to graph-projection hashing
+# (``skills_graph.resume_skill_canonical_key``) — see
+# ``test_graph_projection_pii_sweep.py`` for the proof that it still never
+# reaches the graph as cleartext or an embedding.
 
 
 def _skills_details_chunks() -> list[ResumeChunk]:
@@ -1126,26 +1129,55 @@ def _skills_details_chunks() -> list[ResumeChunk]:
     ]
 
 
+@pytest.mark.asyncio
+async def test_extract_skills_merged_still_drops_email_shaped_raw_names() -> None:
+    """The one row of the OLD reproduction table that survives this layer
+    unchanged: an email address is still junk-shaped and still dropped
+    before canonicalisation (canonicalisation strips "@", which would
+    otherwise defeat the email check downstream too)."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python"),
+                    ResumeSkillDetail(name="casey.rivera@example.test"),
+                ]
+            )
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+
+    names = {s.name for s in merged}
+    assert "python" in names
+    assert "casey.rivera@example.test" not in names
+
+
 @pytest.mark.parametrize(
     "raw_name",
     [
-        "Casey Rivera",  # the ORIGINAL F3 finding, verbatim
-        "casey.rivera@example.test",  # F3b: email net, dead post-canonicalisation
-        "Rivera, Casey",  # comma-reordered
-        "Casey M. Rivera",  # middle initial
-        "Casey-Rivera",  # hyphenated
-        "Rivera",  # bare surname
-        "John Smith",  # a referee, not even the candidate
+        "Casey Rivera",
+        "Rivera, Casey",
+        "Casey M. Rivera",
+        "Casey-Rivera",
+        "Rivera",
+        "John Smith",
     ],
 )
 @pytest.mark.asyncio
-async def test_extract_skills_merged_drops_every_reproduction_row_pre_canonicalisation(
+async def test_extract_skills_merged_no_longer_rejects_person_shaped_raw_names(
     raw_name: str,
 ) -> None:
-    """Security's round-2 reproduction table, run end to end through the REAL
-    production function — every row must be gone from the merged output, with
-    NO candidate context involved at all (this is layer 0, upstream of the
-    candidate-aware `_redact_skill_names_pii`)."""
+    """ADR-008: none of the OLD round-2/3 person-shape reproduction rows are
+    rejected at THIS layer any more — a documented, deliberate behaviour
+    change. The candidate's own identity surviving into
+    ``ResumeParsed.skills``/the outbox is the ACCEPTED cost of moving the
+    real privacy control to graph-projection hashing (it never survives
+    INTO the graph, which is what actually matters — see the projection
+    tests)."""
     llm = MagicMock(
         chat_json=AsyncMock(
             return_value=ResumeSkillDetails(
@@ -1164,21 +1196,23 @@ async def test_extract_skills_merged_drops_every_reproduction_row_pre_canonicali
 
     names = {s.name for s in merged}
     assert "python" in names
-    assert raw_name not in names
-    assert not any("rivera" in n.lower() for n in names)
-    assert not any("smith" in n.lower() for n in names)
+    # Survived (not silently dropped) — a second, distinct canonicalised
+    # name landed alongside "python".
+    assert len(names) == 2
 
 
 @pytest.mark.asyncio
 async def test_extract_skills_merged_pii_shaped_drop_is_logged_as_count_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The email-shaped drop (still the only row this layer rejects) is
+    still logged as a count only, never the value."""
     import logging
 
     llm = MagicMock(
         chat_json=AsyncMock(
             return_value=ResumeSkillDetails(
-                skills=[ResumeSkillDetail(name="Casey Rivera")]
+                skills=[ResumeSkillDetail(name="casey.rivera@example.test")]
             )
         )
     )
@@ -1192,8 +1226,7 @@ async def test_extract_skills_merged_pii_shaped_drop_is_logged_as_count_only(
         await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
 
     all_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "casey" not in all_text.lower()
-    assert "rivera" not in all_text.lower()
+    assert "casey.rivera@example.test" not in all_text.lower()
     assert "count=1" in all_text
 
 
@@ -1202,12 +1235,8 @@ async def test_extract_skills_merged_pii_shaped_drop_is_logged_as_count_only(
 
 @pytest.mark.parametrize("raw_name", ["Kafka", "Django", "Kubernetes"])
 @pytest.mark.asyncio
-async def test_extract_skills_merged_keeps_vocab_known_skill_despite_person_shape(
-    raw_name: str,
-) -> None:
-    """A vocab-known skill (single Title-Case token) must survive — the
-    vocabulary check is what protects recall against the new name-shape
-    reject."""
+async def test_extract_skills_merged_keeps_vocab_known_skill(raw_name: str) -> None:
+    """A vocab-known skill (single Title-Case token) must survive."""
     llm = MagicMock(
         chat_json=AsyncMock(
             return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name=raw_name)])
@@ -2068,18 +2097,20 @@ async def test_empty_candidate_block_non_header_chunks_still_embed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_candidate_block_uncommon_name_skill_is_dropped() -> None:
-    """S12 (round-5 security re-audit): `_redact_candidate_pii`'s
-    STRUCTURED pattern match has nothing to match against when
-    `CandidateInfo` is completely empty, so it falls through to
-    `_generic_contact_scrub`, which by its own docstring "cannot catch a
-    bare NAME". An uncommon full name (one the 783-entry offline
-    personal-name lexicon does not cover, so the NORMAL three-way
-    conjunction lets it through as a "skill" too) must still be dropped —
-    layer 2 fails CLOSED here exactly as S7 already does for the header
-    chunk, treating the lexicon as an unconditional hit
-    (`strict_lexicon=True`) when there is no candidate identity at all to
-    reason with."""
+async def test_empty_candidate_block_uncommon_name_skill_survives_at_parse_time() -> (
+    None
+):
+    """ADR-008 (supersedes S12): with `CandidateInfo` completely empty,
+    `_redact_candidate_pii` has no structured identifier to match against and
+    falls through to `_generic_contact_scrub`, which by its own docstring
+    "cannot catch a bare NAME" — so an uncommon full name the LLM emitted as
+    a "skill" now DELIBERATELY survives into `resumes.parsed`/the outbox at
+    parse time (ADR-007 §6 already accepts `resumes.parsed` cleartext at
+    rest; N1 already accepts it riding the outbox). This is the accepted
+    trade — the load-bearing privacy control is graph-projection hashing
+    (`skills_graph.resume_skill_canonical_key`), proven never to leak this
+    name into Neo4j by ``test_graph_projection_pii_sweep.py``, not this
+    parse-time layer any more."""
     resume_id = uuid4()
     job_id = uuid4()
     conn = _make_conn(
@@ -2093,9 +2124,6 @@ async def test_empty_candidate_block_uncommon_name_skill_is_dropped() -> None:
     ]
     embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
     ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
-    # "torbjorn kvistad" -- name-shaped, vocab-miss, AND a lexicon miss (an
-    # uncommon full name the offline lexicon does not cover) -- the exact
-    # shape the normal (non-strict) three-way conjunction lets through.
     merged_skills = [ResumeSkill(name="python"), ResumeSkill(name="torbjorn kvistad")]
 
     with (
@@ -2133,29 +2161,23 @@ async def test_empty_candidate_block_uncommon_name_skill_is_dropped() -> None:
     )
     stored_names = [s.name for s in stored_parsed.skills]
     assert "python" in stored_names
-    assert not any(
+    assert any(
         "torbjorn" in n.lower() and "kvistad" in n.lower() for n in stored_names
-    ), f"an uncommon candidate name survived as a stored skill: {stored_names!r}"
+    ), f"expected the uncommon name to survive at parse time: {stored_names!r}"
 
     payload = enqueue.await_args.kwargs["payload"]
     outbox_skill_names = [s["name"] for s in payload["parsed"]["skills"]]
     assert "python" in outbox_skill_names
-    assert not any(
+    assert any(
         "torbjorn" in n.lower() and "kvistad" in n.lower() for n in outbox_skill_names
-    ), (
-        "an uncommon candidate name survived in the outbox skill list: "
-        f"{outbox_skill_names!r}"
     )
 
 
 @pytest.mark.asyncio
-async def test_non_empty_candidate_block_uncommon_lexicon_missing_skill_kept() -> None:
-    """Belt-and-braces: S12's strict-mode collapse is scoped to EXACTLY the
-    empty-candidate-block case. When the candidate block is NOT empty, an
-    unrelated legitimate two-word skill missing from both the vocabulary and
-    the personal-name lexicon (`postgres db`, from the existing Decision D
-    recall-guard fixtures) must still be kept — the strict rule must never
-    leak into the normal path."""
+async def test_non_empty_candidate_block_uncommon_two_word_skill_kept() -> None:
+    """A legitimate two-word skill missing from the vocabulary (`postgres
+    db`) must still be kept when the candidate block is populated — never
+    swept up by the (candidate-identity-scoped) redaction."""
     resume_id = uuid4()
     job_id = uuid4()
     conn = _make_conn(

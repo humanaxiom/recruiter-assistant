@@ -29,8 +29,14 @@ THREE deliberate, human-locked deviations this file pins:
   (see ``test_settings.py``), proven READ (not just present) by
   ``test_auto_merge_threshold_is_read_from_settings_not_hardcoded`` below.
 
-``src.pipeline.skills_graph`` does not exist yet — this whole file fails at
-collection (``ModuleNotFoundError``). RED half of the TDD cycle.
+ADR-008 (architectural PII fix, phase 4b rework): the person-name-shape /
+personal-name-lexicon / vendor-prefix-veto machinery this file used to pin
+(rounds 2-5 of the security re-audit) is DELETED — see
+``src.pipeline.skills_graph``'s module docstring for the full rationale.
+``reject_reason_for_skill_name`` is now shape-ONLY junk filtering (email/
+phone-shape, length/token cap); the privacy control moved to canonical-key
+hashing (``_hash_key`` / ``_canonical_key_for_normalised`` /
+``resume_skill_canonical_key``), pinned in the dedicated sections below.
 """
 
 from __future__ import annotations
@@ -289,353 +295,14 @@ async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
     session.run.assert_awaited()
 
 
-# ── Decision A (round-2 security re-audit): name-shape + vocab reject ─────
+# ── ADR-008: reject_reason_for_skill_name is shape-only junk filtering ────
 #
-# Security's round-2 reproduction: `_resolve_one`'s email check is dead on the
-# real résumé path because `_extract_skills_merged` canonicalises every skill
-# name (stripping "@"/case) BEFORE this module ever sees it, and a name that
-# IS the candidate's own identity (any of the shapes below) sails through
-# unshaped otherwise. `reject_reason_for_skill_name` is the shared decision
-# function; these tests exercise it both directly and through
-# `resolve_canonical_names` (unchanged public surface).
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "Casey Rivera",
-        "Rivera, Casey",
-        "Casey M. Rivera",
-        "Casey-Rivera",
-        "Rivera",
-        "John Smith",
-        # ── round-3 security re-audit widening (S1-S5) ──────────────────
-        "RIVERA, CASEY",  # S1: all-caps, comma-reordered
-        "CASEY RIVERA",  # S1: all-caps
-        "casey rivera",  # S1: all-lowercase
-        "Sean McDonald",  # S3: Mc-internal-caps surname
-        "John O'Brien",  # S3: apostrophe-joined surname
-        "Maria del Carmen Rivera Lopez",  # S4: 5-token, connector particle
-        "Ana van der Berg",  # S4: 4-token, two connector particles
-        "Casey Rivera 2",  # S2: stray trailing standalone digit token
-        "Casey Rivera+",  # S2: stray trailing glued '+'
-        "Casey Rivera#",  # S2: stray trailing glued '#'
-        "Casey.Rivera",  # S2: dot-joined (not a technical '.')
-        "Кейси Ривера",  # S5: Cyrillic
-        "李伟",  # S5: CJK, caseless script
-    ],
-)
-@pytest.mark.asyncio
-async def test_person_name_shaped_skill_missing_vocab_is_rejected(name: str) -> None:
-    """Every row of security's round-2 AND round-3 reproduction tables
-    (candidate-identity shapes only — the email/phone rows are covered by
-    the existing F3/S6 tests) must be rejected outright, with NO vocab hit
-    to save it."""
-    assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape"
-
-    session = _make_session([])
-    resolved = await skills_graph.resolve_canonical_names(
-        session, [name], llm=_make_llm(), embedder=_make_embedder()
-    )
-    assert resolved == {name: None}
-    session.run.assert_not_awaited()
-
-
-@pytest.mark.parametrize("name", ["Kafka", "Django", "Kubernetes"])
-def test_vocab_known_single_title_case_word_is_not_rejected(name: str) -> None:
-    """The human-locked Decision A boundary, stated explicitly: a bare
-    'Rivera' must be caught (previous test), but a single Title-Case word
-    that IS in the 220-term vocabulary must NOT be — the vocab check is what
-    protects recall, not a blanket single-word-name ban."""
-    assert skills_graph.reject_reason_for_skill_name(name) is None
-
-
-# ── Decision C/D (round-4 recall regression fix): personal-name lexicon ───
-#
-# Round-3's recall guard (the tests above) went green for the WRONG reason:
-# every one of its fixtures (`Google Cloud Platform`, `machine learning`,
-# `ISO 27001`, the 8-token cert) is a vocabulary HIT, so it only ever
-# exercised the arm of Decision A that was never at risk. Decision A's
-# two-way conjunction (name-shape AND vocab-miss) had itself quietly become
-# the strict allowlist the human rejected in round 2: it also rejected any
-# LEGITIMATE multi-word skill missing from the 220-term vocabulary that
-# happened to be two Title-Case-able alphabetic words — indistinguishable,
-# by shape alone, from `Casey Rivera`. Decision C adds a personal-name
-# lexicon (`skill_data/person_names.txt`) as the missing third signal.
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "distributed systems",
-        "data engineering",
-        "natural language processing",
-        "event driven architecture",
-        "test driven development",
-        "postgres db",
-        "cockroach db",
-    ],
-)
-def test_non_vocab_multiword_skill_is_kept_not_rejected_as_a_name(name: str) -> None:
-    """Decision D's recall-guard fixtures: these are legitimate skill-shaped
-    phrases NOT in the 220-term vocabulary, made of two-or-more
-    Title-Case-able alphabetic tokens apiece — under the OLD round-2/3
-    two-way conjunction (name-shape AND vocab-miss, no lexicon arm) every
-    one of these was misclassified as `person_name_shape` and silently
-    dropped, deflating 4c's 0.40-weighted skill sub-score. Decision C's
-    THIRD conjunct (a personal-name lexicon hit, or a non-Latin script) is
-    what tells these apart from `Casey Rivera` — see the mutation-proof
-    test below for the falsifiable pin that this guard actually depends on
-    that arm, not merely on these fixtures happening to be vocab hits."""
-    assert skills_graph.reject_reason_for_skill_name(name) is None
-
-
-def test_lexicon_arm_mutation_proof_recall_guard_goes_red_without_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Decision D's mandated mutation proof. Neutralise Decision C's lexicon
-    arm back to an unconditional hit — i.e. REVERT to the OLD round-2/3
-    conjunction, where name-shape AND vocab-miss ALONE was sufficient to
-    reject (`_hits_person_name_lexicon` always returning True collapses the
-    three-way conjunction back to that two-way rule) — and confirm the
-    round-4 recall-guard fixtures above then INCORRECTLY get rejected. If
-    this assertion ever starts failing, the recall guard above has stopped
-    being sensitive to the lexicon arm — exactly the blind-guard defect
-    class round 3's own recall guard turned out to have."""
-    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
-    for name in (
-        "distributed systems",
-        "data engineering",
-        "natural language processing",
-        "event driven architecture",
-        "test driven development",
-    ):
-        assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape", (
-            f"{name!r} should be (incorrectly) rejected once the lexicon arm "
-            "is neutralised back to the old shape+vocab-miss-only rule — if "
-            "this fails, today's green recall guard is not actually pinned "
-            "to Decision C's lexicon arm being present"
-        )
-
-
-def test_lexicon_file_missing_fails_closed_not_open(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """S7 precedent, applied to Decision C: if `person_names.txt` cannot be
-    read at all, `_hits_person_name_lexicon` must report a hit
-    UNCONDITIONALLY (fail CLOSED — collapsing back to the stricter old
-    two-way rule), never silently report no-hit (fail OPEN, which would
-    make `person_name_shape` un-triggerable for name-shaped, vocab-miss
-    candidates on a broken deployment — reopening the original F3 leak)."""
-    skills_graph._name_lexicon.cache_clear()  # type: ignore[attr-defined]
-    monkeypatch.setattr(
-        skills_graph, "_PERSON_NAMES_PATH", tmp_path / "nonexistent-lexicon.txt"
-    )
-    try:
-        assert skills_graph._name_lexicon() is None
-        assert skills_graph._hits_person_name_lexicon(["anything", "at-all"]) is True
-        # And end-to-end: a name-shaped, vocab-miss candidate is STILL
-        # rejected even though it hits no lexicon entry, because the fail-
-        # closed sentinel makes the lexicon arm always report a hit.
-        assert (
-            skills_graph.reject_reason_for_skill_name("distributed systems")
-            == "person_name_shape"
-        )
-    finally:
-        skills_graph._name_lexicon.cache_clear()  # type: ignore[attr-defined]
-
-
-# ── Decision C, S10-corrected (round-5 security re-audit) ──────────────────
-#
-# Round-4's own lexicon arm was itself a recall regression, one layer down:
-# `_hits_person_name_lexicon` shipped as `any(...)`, so ONE name-shaped token
-# anywhere in a multi-word candidate condemned the WHOLE name. A genuine
-# vendor/product skill built from one common-name-shaped word plus one
-# technical word (`Amazon Aurora`, `IBM Watson`, `Victoria Metrics`) was
-# dropped in EVERY casing. S11's own recall guard (below) never caught this
-# either — every round-4 KEEP fixture (`distributed systems` etc.) is a
-# lexicon-MISS on every token; none of them exercises a candidate whose
-# token actually IS a personal name.
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "Amazon Aurora",
-        "IBM Watson",
-        "Apache Felix",
-        "Victoria Metrics",
-        "VictoriaMetrics",
-        "Julia",
-        "Hudson",
-    ],
-)
-def test_vendor_and_backstop_skills_are_kept_not_rejected_as_a_name(name: str) -> None:
-    """S10/S11: each of these is a real, common résumé skill that collides
-    with the personal-name lexicon on exactly one of its tokens (a vendor/
-    product word paired with a common given name/surname) or IS itself a
-    bare product name that also happens to be a common given name/surname.
-    Under the round-4 `any()` lexicon arm every one of these was
-    misclassified as `person_name_shape` and silently dropped."""
-    assert skills_graph.reject_reason_for_skill_name(name) is None
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "Amazon Aurora",
-        "IBM Watson",
-        "Apache Felix",
-        "Victoria Metrics",
-        "VictoriaMetrics",
-        "Julia",
-        "Hudson",
-    ],
-)
-def test_vendor_and_backstop_skills_casing_invariant(name: str) -> None:
-    """S11: recall must not depend on the LLM's arbitrary capitalisation of
-    a skill name — every casing of a KEEP fixture must agree, all landing on
-    "not rejected". Round-4's own guard never pinned this: under the OLD
-    `any()` lexicon arm, `Julia` (Title Case) was rejected while `julia`/
-    `JULIA` were kept — non-deterministic by construction."""
-    r = skills_graph.reject_reason_for_skill_name
-    outcomes = {r(name), r(name.title()), r(name.lower()), r(name.upper())}
-    assert outcomes == {None}, f"casing-dependent rejection for {name!r}: {outcomes}"
-
-
-def test_lexicon_quantifier_mutation_proof_all_not_any(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """S10's mandated mutation proof. Revert `_hits_person_name_lexicon` to
-    the OLD round-4 `any()` semantics and confirm `Victoria Metrics` (whose
-    first token, "victoria", has no vendor-prefix veto to fall back on) is
-    then INCORRECTLY rejected — proving the recall-guard fixtures above are
-    actually sensitive to the any()->all() quantifier fix, not passing for
-    some unrelated reason (e.g. an accidental vocab/vendor-veto hit)."""
-
-    def _old_any_semantics(tokens: Any) -> bool:
-        lexicon = skills_graph._name_lexicon()
-        if lexicon is None:
-            return True
-        return any(tok in lexicon for tok in tokens)
-
-    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", _old_any_semantics)
-    assert (
-        skills_graph.reject_reason_for_skill_name("Victoria Metrics")
-        == "person_name_shape"
-    ), (
-        "'Victoria Metrics' should be (incorrectly) rejected once the "
-        "lexicon arm is reverted to the old any()-based rule — if this "
-        "fails, today's green recall guard is not actually pinned to the "
-        "all() quantifier fix"
-    )
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "Amazon Aurora",
-        "IBM Watson",
-        "Apache Felix",
-        "Microsoft Teams",
-        "Google Cloud",
-        "Oracle Database",
-        "Red Hat Enterprise",
-    ],
-)
-def test_vendor_prefix_veto_recognises_known_vendor_prefixes(name: str) -> None:
-    # Alpha-only vendor-prefixed names (no digit/technical marker), so the
-    # candidate is actually name-SHAPED in the first place — a name carrying
-    # a digit ("Amazon S3") disqualifies on shape alone and never reaches
-    # the vendor-veto arm at all (see `_decompose_name_shape`).
-    real_tokens = skills_graph._name_shape_real_tokens(name)
-    assert real_tokens, f"{name!r} unexpectedly is not name-shaped at all"
-    assert skills_graph._hits_vendor_prefix_veto(name, real_tokens)
-
-
-def test_vendor_prefix_veto_does_not_fire_on_an_unrelated_name() -> None:
-    real_tokens = skills_graph._name_shape_real_tokens("Casey Rivera")
-    assert not skills_graph._hits_vendor_prefix_veto("Casey Rivera", real_tokens)
-
-
-def test_vendor_prefix_veto_protects_even_if_the_lexicon_is_hostile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The vendor-prefix veto is an INDEPENDENT line of defence, not merely
-    redundant with the all() quantifier fix — proven by forcing
-    `_hits_person_name_lexicon` to always report a hit (as if a future
-    lexicon update ever added a vendor word) and confirming a
-    vendor-prefixed candidate is STILL kept, because the veto short-circuits
-    before the lexicon arm is even consulted."""
-    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
-    for name in ("Amazon Aurora", "IBM Watson", "Apache Felix"):
-        assert skills_graph.reject_reason_for_skill_name(name) is None
-
-
-def test_vendor_prefix_veto_mutation_proof(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Companion mutation proof: with the SAME hostile (always-hit) lexicon
-    as above, neutralising the veto itself must flip the outcome back to
-    rejected — proving the veto test above is pinned to the veto actually
-    running, not to some other coincidental pass."""
-    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
-    monkeypatch.setattr(
-        skills_graph, "_hits_vendor_prefix_veto", lambda name, tokens: False
-    )
-    for name in ("Amazon Aurora", "IBM Watson", "Apache Felix"):
-        assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape"
-
-
-def test_strict_lexicon_collapses_to_the_old_two_way_rule() -> None:
-    """S12: `strict_lexicon=True` must reject ANY name-shaped, vocab-miss
-    candidate regardless of the lexicon/vendor-veto exemptions — a
-    legitimate skill that the normal (non-strict) conjunction keeps
-    (`distributed systems`, `Amazon Aurora`) is rejected under strict mode,
-    since `src.worker.resume_tasks._redact_skill_names_pii` only sets this
-    when there is NO candidate identity left at all to justify the
-    exemption. A vocabulary HIT is still exempt even under strict mode —
-    the vocab arm runs before `strict_lexicon` is ever consulted."""
-    assert (
-        skills_graph.reject_reason_for_skill_name(
-            "distributed systems", strict_lexicon=True
-        )
-        == "person_name_shape"
-    )
-    assert (
-        skills_graph.reject_reason_for_skill_name("Amazon Aurora", strict_lexicon=True)
-        == "person_name_shape"
-    )
-    assert (
-        skills_graph.reject_reason_for_skill_name("Julia", strict_lexicon=True) is None
-    )
-    assert (
-        skills_graph.reject_reason_for_skill_name("Kafka", strict_lexicon=True) is None
-    )
-
-
-def test_non_latin_script_fallback_rejects_even_without_a_lexicon_hit() -> None:
-    """Documented residual: the personal-name lexicon is Latin-alphabet
-    only, so a non-Latin-script, name-shaped, vocab-miss candidate is
-    rejected via the SCRIPT fallback, independent of any lexicon entry —
-    proven here with a token that certainly is not literally IN
-    `person_names.txt` (only its transliteration might be)."""
-    assert skills_graph._contains_non_latin_script("Кейси Ривера")
-    assert skills_graph._contains_non_latin_script("李伟")
-    assert not skills_graph._contains_non_latin_script("Casey Rivera")
-    assert not skills_graph._contains_non_latin_script("distributed systems")
-
-
-@pytest.mark.parametrize("name", ["C++", "C#", ".NET", "Node.js", "IPv6"])
-def test_technical_marker_shaped_names_are_never_person_name_shaped(name: str) -> None:
-    """A digit or a `+`/`#`/non-middle-initial `.` disqualifies the
-    person-name shape entirely — these must never be rejected on
-    'person_name_shape' grounds, vocab or no vocab."""
-    assert not skills_graph._looks_like_person_name(name)
-    assert skills_graph.reject_reason_for_skill_name(name) is None
-
-
-def test_iso_27001_style_name_with_digits_is_not_person_name_shaped() -> None:
-    assert not skills_graph._looks_like_person_name("ISO 27001")
-    assert skills_graph.reject_reason_for_skill_name("ISO 27001") is None
+# Rounds 2-5 tried to reject a skill name that LOOKS like a person's name —
+# deleted (see the module docstring's ADR-008 section). A name that IS the
+# candidate's own identity (e.g. "Casey Rivera") now sails straight through
+# this function: the load-bearing privacy control moved to the graph-
+# projection layer (canonical-key hashing — see the tests further down this
+# file and ``resume_skill_canonical_key``'s own tests).
 
 
 @pytest.mark.parametrize(
@@ -654,53 +321,47 @@ def test_iso_27001_style_name_with_digits_is_not_person_name_shaped() -> None:
         "John O'Brien",
         "Maria del Carmen Rivera Lopez",
         "Ana van der Berg",
-        "Casey Rivera 2",
-        "Casey Rivera+",
-        "Casey Rivera#",
-        "Casey.Rivera",
         "Кейси Ривера",
         "李伟",
     ],
 )
-def test_person_name_shape_detector_matches_every_reproduction_row(name: str) -> None:
-    assert skills_graph._looks_like_person_name(name)
-
-
-def test_all_caps_acronym_is_not_person_name_shaped() -> None:
-    """`AWS`/`SQL`/`REST`-style BARE SINGLE all-caps acronyms never look like
-    a person's name. S1 (round 3) widens case-folding to catch a MULTI-token
-    or internally-joined all-caps/all-lowercase NAME ("CASEY RIVERA"), but
-    deliberately does NOT fold a lone, separator-free single word — folding
-    every bare acronym would flag any all-caps term this repo's 220-term
-    vocabulary doesn't happen to carry (`REST` is not in it — see the vocab
-    sweep) as person-name-shaped purely on shape, with no vocab hit to save
-    it. Every round-3 leak is multi-token or a joined compound; this
-    single-bare-token carve-out is the documented boundary that keeps that
-    widening safe for recall."""
-    for acronym in ("AWS", "SQL", "REST"):
-        assert not skills_graph._looks_like_person_name(acronym)
-        assert skills_graph.reject_reason_for_skill_name(acronym) is None
-
-
-def test_mixed_case_technical_proper_noun_is_not_person_name_shaped() -> None:
-    """`PostgreSQL`-style mixed-case (not Title Case) technical proper nouns
-    never look like a person's name either."""
-    assert not skills_graph._looks_like_person_name("PostgreSQL")
-
-
-@pytest.mark.asyncio
-async def test_person_name_shape_reject_is_logged_as_a_category_never_the_value(
-    caplog: pytest.LogCaptureFixture,
+def test_person_shaped_names_are_no_longer_rejected_by_this_function(
+    name: str,
 ) -> None:
-    caplog.set_level(logging.WARNING)
-    session = _make_session([])
-    await skills_graph.resolve_canonical_names(
-        session, ["Casey Rivera"], llm=_make_llm(), embedder=_make_embedder()
-    )
-    all_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "casey" not in all_text.lower()
-    assert "rivera" not in all_text.lower()
-    assert "person_name_shape" in all_text
+    """ADR-008: none of these shapes are rejected here any more — this is
+    now a documented, deliberate behaviour change (privacy moved downstream
+    to hashing), not a regression. Pinned explicitly so a future "helpful"
+    re-add of shape heuristics here doesn't sneak back in unreviewed."""
+    assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Kafka",
+        "Django",
+        "Kubernetes",
+        "distributed systems",
+        "data engineering",
+        "natural language processing",
+        "event driven architecture",
+        "test driven development",
+        "Amazon Aurora",
+        "IBM Watson",
+        "Apache Felix",
+        "Victoria Metrics",
+        "VictoriaMetrics",
+        "Julia",
+        "Hudson",
+        "React Native",
+        "Ruby on Rails",
+        "Site Reliability Engineering",
+    ],
+)
+def test_recall_fixtures_are_never_rejected(name: str) -> None:
+    """The full recall fixture list this phase must round-trip — none of
+    these (vocab or non-vocab) are ever shape-rejected."""
+    assert skills_graph.reject_reason_for_skill_name(name) is None
 
 
 def test_unresolved_skill_name_error_is_a_runtime_error() -> None:
@@ -1058,7 +719,7 @@ async def test_ensure_categories_is_a_noop_when_uncurated(
 
 def _alias_update_cypher_from_auto_merge() -> str:
     return (
-        "MATCH (s:Skill {canonical_name: $c}) "
+        "MATCH (s:Skill {canonical_key: $c}) "
         "SET s.aliases = CASE WHEN $alias IN coalesce(s.aliases, []) "
         "THEN coalesce(s.aliases, []) "
         "ELSE coalesce(s.aliases, []) + [$alias] END"
@@ -1149,3 +810,215 @@ def test_resolve_canonical_names_with_empty_input_returns_empty_dict() -> None:
     resolved = asyncio.run(_run())
     assert resolved == {}
     session.run.assert_not_awaited()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADR-008 — canonical-key hashing: the actual privacy control.
+#
+# The Skill node's MERGE key is either the vocab canonical term (cleartext —
+# a closed ~220-term vocabulary cannot contain a person's name) or, for a
+# non-vocab name, a salted hash (``h:`` + sha256(salt + normalised)[:32]).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_vocab_term_canonical_key_is_cleartext() -> None:
+    assert skills_graph._canonical_key_for_normalised("python") == "python"
+    assert skills_graph._canonical_key_for_normalised("kafka") == "kafka"
+
+
+def test_non_vocab_term_canonical_key_is_an_opaque_hash() -> None:
+    key = skills_graph._canonical_key_for_normalised("casey rivera")
+    assert key.startswith(skills_graph._HASH_KEY_PREFIX)
+    assert "casey" not in key
+    assert "rivera" not in key
+    # sha256 hex digest, truncated — never the raw input, never reversible
+    # by inspection.
+    hex_part = key[len(skills_graph._HASH_KEY_PREFIX) :]
+    assert all(c in "0123456789abcdef" for c in hex_part)
+
+
+def test_hash_key_is_stable_for_the_same_input_and_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Salt stability: the SAME normalised string, under the SAME salt, must
+    always hash to the SAME key — otherwise a re-parse would disconnect
+    every existing REQUIRES/HAS_SKILL edge from its Skill node."""
+    from src.settings import Settings
+
+    stable = Settings(skill_hash_salt="a-stable-test-salt")
+    monkeypatch.setattr(skills_graph, "get_settings", lambda: stable)
+
+    first = skills_graph._hash_key("casey rivera")
+    second = skills_graph._hash_key("casey rivera")
+    assert first == second
+
+
+def test_hash_key_differs_across_different_salts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rotating the salt changes every non-vocab skill's key — documented in
+    ``settings.skill_hash_salt``'s docstring as requiring a full
+    re-projection of the graph. Pinned here as the flip side of the
+    stability test above."""
+    from src.settings import Settings
+
+    monkeypatch.setattr(
+        skills_graph, "get_settings", lambda: Settings(skill_hash_salt="salt-one")
+    )
+    first = skills_graph._hash_key("casey rivera")
+    monkeypatch.setattr(
+        skills_graph, "get_settings", lambda: Settings(skill_hash_salt="salt-two")
+    )
+    second = skills_graph._hash_key("casey rivera")
+    assert first != second
+
+
+def test_hash_key_empty_salt_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unsalted hash is dictionary-attackable (precompute hashes of
+    common names/phrases, confirm one is present in the graph) — this must
+    fail loud, never silently hash with an empty salt, mirroring
+    ``src.worker.main.startup``'s ``PII_KEY`` check."""
+    from src.settings import Settings
+
+    monkeypatch.setattr(
+        skills_graph, "get_settings", lambda: Settings(skill_hash_salt="")
+    )
+    with pytest.raises(RuntimeError):
+        skills_graph._hash_key("casey rivera")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADR-008 — ``resume_skill_canonical_key``: the résumé side's ENTIRE skill
+# resolution. Pure — no session, no llm, no embedder parameter exists at all.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_resume_skill_canonical_key_is_a_pure_function_no_io_parameters() -> None:
+    import inspect
+
+    params = set(inspect.signature(skills_graph.resume_skill_canonical_key).parameters)
+    assert not params & {"session", "llm", "embedder"}
+
+
+def test_resume_skill_canonical_key_vocab_hit_is_cleartext() -> None:
+    assert skills_graph.resume_skill_canonical_key("Python") == "python"
+    assert skills_graph.resume_skill_canonical_key("Kafka") == "kafka"
+
+
+# Every one of these 18+ PII shapes must produce EITHER `None` (the cheap
+# email/phone/length reject still catches the two contact-info rows) OR an
+# opaque `h:<hash>` key — NEVER the cleartext name/a recognisable fragment of
+# it, and NEVER anything that would cause an embed() call (this function
+# takes no embedder at all — see the signature test above).
+PII_SHAPES: tuple[str, ...] = (
+    "Casey Rivera",
+    "RIVERA, CASEY",
+    "Sean McDonald",
+    "Torbjorn Kvistad",
+    "Ludovica Brambilla",
+    "Anouk Vandenberghe",
+    "Siobhan O'Callaghan",
+    "John Fotheringay",
+    "Casey Zzyzx",
+    "Dr. Casey Rivera",
+    "Casey Rivera (referee)",
+    "IBM John Smith",
+    "Google Кейси Ривера",
+    "李伟",
+    "casey.rivera@example.test",
+    "555-0101",
+    "+1 (604) 555-0101",
+    "casey.rivera (at) example.test",
+)
+
+
+@pytest.mark.parametrize("name", PII_SHAPES)
+def test_resume_skill_canonical_key_never_leaks_cleartext_for_any_pii_shape(
+    name: str,
+) -> None:
+    key = skills_graph.resume_skill_canonical_key(name)
+    if key is None:
+        return  # email/phone/length shape reject — nothing projected at all
+    assert key.startswith(skills_graph._HASH_KEY_PREFIX), (
+        f"{name!r} resolved to a NON-hash canonical_key {key!r} — a PII "
+        "shape must never land on a cleartext vocab key"
+    )
+    # Every real-word fragment of the input must be absent from the key,
+    # case-insensitively — the whole point of hashing.
+    for fragment in re.split(r"[^\w]+", name.lower()):
+        if len(fragment) < 3:  # "李"/"伟" are single chars; short tokens too noisy
+            continue
+        assert fragment not in key.lower(), (
+            f"fragment {fragment!r} of {name!r} survived into canonical_key " f"{key!r}"
+        )
+
+
+@pytest.mark.parametrize("name", PII_SHAPES)
+def test_resume_skill_canonical_key_is_deterministic(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same input, same (test-session) salt -> same key every time — a
+    re-parse of the SAME résumé must not disconnect its own HAS_SKILL edges."""
+    from src.settings import Settings
+
+    stable = Settings(skill_hash_salt="a-stable-test-salt")
+    monkeypatch.setattr(skills_graph, "get_settings", lambda: stable)
+    assert skills_graph.resume_skill_canonical_key(
+        name
+    ) == skills_graph.resume_skill_canonical_key(name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADR-008 — recall round trip: a JD requiring a skill and a résumé having the
+# SAME skill (by exact normalised string) must land on the SAME canonical
+# key, whether that key is a vocab cleartext term or a hash. This is the
+# test that proves hashing didn't break matching.
+# ═══════════════════════════════════════════════════════════════════════════
+
+RECALL_FIXTURES: tuple[str, ...] = (
+    "Amazon Aurora",
+    "IBM Watson",
+    "Apache Felix",
+    "Julia",
+    "VictoriaMetrics",
+    "Hudson",
+    "distributed systems",
+    "data engineering",
+    "natural language processing",
+    "event driven architecture",
+    "test driven development",
+    "React Native",
+    "Ruby on Rails",
+    "Site Reliability Engineering",
+)
+
+
+@pytest.mark.parametrize("name", RECALL_FIXTURES)
+@pytest.mark.asyncio
+async def test_recall_fixture_round_trips_job_side_and_resume_side_to_the_same_key(
+    name: str,
+) -> None:
+    """The JD side (``resolve_canonical_names``, via a fresh/empty graph —
+    no near candidate, so it takes the create-new path) and the résumé side
+    (``resume_skill_canonical_key``, pure) must agree on the canonical key
+    for the identical skill string — proving a JD requirement and a résumé's
+    HAS_SKILL edge actually meet at the same Skill node."""
+    session = _make_session(
+        [_FakeResult([]), _FakeResult([]), _FakeResult([])]  # exact, vector, create
+    )
+    job_side = await skills_graph.resolve_canonical_names(
+        session, [name], llm=_make_llm(), embedder=_make_embedder()
+    )
+    resume_side = skills_graph.resume_skill_canonical_key(name)
+    assert job_side[name] == resume_side
+    assert job_side[name] is not None
+
+
+@pytest.mark.parametrize("name", RECALL_FIXTURES)
+def test_recall_fixture_casing_invariant_on_the_resume_side(name: str) -> None:
+    """Recall must not depend on the LLM's arbitrary capitalisation of a
+    skill name — every casing of a recall fixture must resolve to the SAME
+    canonical key on the résumé side."""
+    r = skills_graph.resume_skill_canonical_key
+    keys = {r(name), r(name.title()), r(name.lower()), r(name.upper())}
+    assert len(keys) == 1, f"casing-dependent canonical_key for {name!r}: {keys}"

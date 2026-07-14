@@ -105,6 +105,26 @@ def test_storage_and_pii_defaults() -> None:
     assert s.coverage_threshold == 80
 
 
+def test_skill_hash_salt_default_is_empty() -> None:
+    """ADR-008 — same discipline as ``pii_key``: empty by default, forcing an
+    operator to explicitly configure it (``src.worker.main.startup`` fails
+    loud on an empty salt, mirroring the existing ``PII_KEY`` check).
+
+    Checked against the FIELD's declared default (not a fresh ``Settings()``
+    instance) because the test session's own root ``conftest.py`` sets
+    ``SKILL_HASH_SALT`` in the environment for the whole run (so that every
+    OTHER test exercising real skill-name hashing doesn't have to configure
+    it individually) — a live instance in this process legitimately picks
+    that up, which is correct env-override behaviour, not a bug. See
+    ``test_env_override_skill_hash_salt`` for the override path itself."""
+    assert Settings.model_fields["skill_hash_salt"].default == ""
+
+
+def test_env_override_skill_hash_salt(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_HASH_SALT", "a-real-salt-value")
+    assert Settings().skill_hash_salt == "a-real-salt-value"
+
+
 def test_frontend_defaults() -> None:
     s = Settings()
     assert s.api_base_url == "http://api:8000"

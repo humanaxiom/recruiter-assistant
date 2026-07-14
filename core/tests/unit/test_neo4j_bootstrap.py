@@ -161,7 +161,7 @@ def test_resume_job_id_index_exists_for_per_job_scoping() -> None:
     [
         ("job_id_unique", "Job", "id"),
         ("resume_id_unique", "Resume", "id"),
-        ("skill_name_unique", "Skill", "canonical_name"),
+        ("skill_name_unique", "Skill", "canonical_key"),
         ("company_name_unique", "Company", "canonical_name"),
         ("institution_name_unique", "Institution", "canonical_name"),
     ],
