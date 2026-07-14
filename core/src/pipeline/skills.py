@@ -45,6 +45,23 @@ _ALIASES_PATH = Path(__file__).resolve().parent / "skill_data" / "aliases.yaml"
 _WHITESPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
 
+# Phase 4b spelling-recall fix (ranking-evals: 37.5% spelling recall against
+# realistic résumé wording, entirely traceable to vocabulary/normalisation —
+# ADR-008 demoted vector auto-merge out of the scoring path, so this IS the
+# whole matching surface now). Two ADDITIVE transforms, tried only as a
+# fallback AFTER the full (pre-existing) cleaned string fails to resolve —
+# see `_basic_normalise`'s docstring for why that ordering matters.
+#
+#   - `_TRAILING_VERSION_RE` strips a trailing " <version>" token so
+#     "PostgreSQL 14"/"Python 3"/"Apache Airflow 2.7" resolve to the same key
+#     as "postgresql"/"python"/"airflow".
+#   - `_PAREN_RE` strips a "(...)" qualifier so "Kubernetes (EKS)"/
+#     "Terraform (IaC)" resolve to the outer term, and "Containerization
+#     (Docker)"/"AWS MWAA (Airflow)" fall back to the PARENTHETICAL's own
+#     content when the outer phrase alone isn't a vocab hit.
+_TRAILING_VERSION_RE = re.compile(r"\s+v?\d+(?:\.\d+)*$", re.IGNORECASE)
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+
 
 @lru_cache(maxsize=1)
 def _alias_table() -> dict[str, str]:
@@ -62,14 +79,74 @@ def _alias_table() -> dict[str, str]:
     return out
 
 
+def _clean(text: str) -> str:
+    """Punctuation-strip + whitespace-collapse — the pre-existing
+    ``_basic_normalise`` body, factored out so both the full-string fallback
+    and the parenthetical-split attempt below share ONE implementation."""
+    text = _PUNCT_RE.sub("", text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _resolve_or_none(cleaned: str) -> str | None:
+    """Alias-table lookup on ``cleaned``, then (only on a miss) on
+    ``cleaned`` with a trailing version token stripped. Returns ``None``
+    (never a bare cleaned string) when neither resolves — the caller decides
+    the fallback, so this function is pure "did the vocab recognise this".
+    """
+    table = _alias_table()
+    if cleaned in table:
+        return table[cleaned]
+    stripped = _TRAILING_VERSION_RE.sub("", cleaned).strip()
+    if stripped and stripped != cleaned and stripped in table:
+        return table[stripped]
+    return None
+
+
 def _basic_normalise(raw: str) -> str:
-    """Cheap deterministic step. Lowercases, collapses whitespace,
-    strips most punctuation, then resolves via the alias map if present.
+    """Lowercases, collapses whitespace, strips most punctuation, then
+    resolves via the alias map if present — trying, in order:
+
+    1. The full cleaned string (identical to the pre-existing algorithm,
+       parentheses folded into the phrase like any other stripped
+       punctuation). Returned as-is if unresolved — an unlisted/non-vocab
+       name normalises EXACTLY as it did before this fix; nothing here
+       widens what counts as a match for a name that was never vocab in the
+       first place.
+    2. A trailing-version-token strip of that same string (``"PostgreSQL
+       14"`` -> ``"postgresql"``), tried INSIDE step 1/3 via
+       ``_resolve_or_none`` — only used if it lands on a real vocab entry.
+    3. If (1) still doesn't resolve AND the raw string has a
+       parenthetical, the OUTER phrase with the parenthetical entirely
+       removed (``"Kubernetes (EKS)"`` -> ``"kubernetes"``), then each
+       parenthetical's own content in turn (``"Containerization (Docker)"``
+       -> ``"docker"``) — again, only used on an actual vocab hit.
+
+    Invariant (security re-audit, mutation-killed): the JD side
+    (``skills_graph._basic_normalise``, duplicated not imported) and the
+    résumé side (this function) MUST apply this identical transform, so
+    ``_canonical_key_for_normalised`` — called from the SAME normalised
+    string on both sides — always agrees on one Skill node for the same
+    skill text.
     """
     s = raw.strip().lower()
-    s = _PUNCT_RE.sub("", s)
-    s = _WHITESPACE_RE.sub(" ", s).strip()
-    return _alias_table().get(s, s)
+    full_clean = _clean(s)
+
+    resolved = _resolve_or_none(full_clean)
+    if resolved is not None:
+        return resolved
+
+    inner_candidates = [m for m in _PAREN_RE.findall(s) if m.strip()]
+    if inner_candidates:
+        outer_clean = _clean(_PAREN_RE.sub(" ", s))
+        resolved = _resolve_or_none(outer_clean)
+        if resolved is not None:
+            return resolved
+        for inner in inner_candidates:
+            resolved = _resolve_or_none(_clean(inner))
+            if resolved is not None:
+                return resolved
+
+    return full_clean
 
 
 # ---------------- deterministic skill matching ----------------

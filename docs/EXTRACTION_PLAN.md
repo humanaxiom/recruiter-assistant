@@ -56,8 +56,8 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
 | &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ corpus done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **Falsifiability hardening also done** on branch `fix/phase-4a-corpus-falsifiability`: **PR #10** (https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip `583427f`, 18 commits, **CI fully green — OPEN, awaiting human merge, NOT yet merged.** See "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
-| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`). **Carried-forward requirement (from the 4a hardening audit): add an OUTBOX-SHAPED FIXTURE** to `core/tests/evals/` — nothing today encodes what the outbox payload is *allowed* to contain (no `candidate` block, no `chunks[].text`, no `summary`), so 4b would project to Neo4j with no fixture asserting that boundary | not started |
-| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9` | not started |
+| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (1339 unit @ 96.97%, 82 integration). **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below; do not start 4c without reading it** | ✅ done |
+| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **Also blocking, from 4b's ranking-evals run (see "4b → 4c BLOCKERS" below): the `missing_must` must-have-miss-penalty nullification bug, two new skill-dimension twins (must-have-miss + recency), a spelling-divergence twin, and the `canonical_name`→`canonical_key` Cypher rename.** | not started |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started |
@@ -446,6 +446,73 @@ limit — `min_completeness_in_topk` catches "no quote at all" — while a *medi
 some quotes and misses others shuffles freely inside the deliberately-wide tier bands. **4c requirement:**
 an evidence-**recall** assertion against the `gold_evidence` anchors (each gold anchor's requirement must
 come back `met` with a verified quote), not just an evidence-**precision** one.
+
+### 4b → 4c BLOCKERS — ranking-evals against a REAL Neo4j graph projection (2026-07-14)
+
+**4b (graph projection) landed** the outbox drainer + the Neo4j skill-graph half of `skill_normalize`
+(ADR-008's canonical-key-hashing rework) + `categories.yaml` (**new in 4b** — no ontology/family-credit
+data existed through 4a). Its merge-blocking `ranking-evals` gate did something the 4a corpus by itself
+could not: it projected the 4a corpus through 4b's real code into a real Neo4j and measured 4c's
+matching engine's ACTUAL cost against real data, not a hypothetical one. Recorded here, **blocking on
+the 4c PR — do not fix any of this now**: the scorer (`stages.score_skill_breakdown`) does not exist in
+this repo yet; these are requirements for whoever ports it.
+
+**1. `missing_must` must key off `ontology_weight == 0`, not `score == 0.0`.** hris's
+`stages.score_skill_breakdown` computes `missing_must = [c for c in must if c.score == 0.0]` to decide
+whether `must_have_miss_penalty` (×0.5) fires. With `categories.yaml`'s family-credit ontology now live
+(4b, absent through 4a), a **family-credited** contribution — the candidate lacks the exact skill but
+holds another skill in the same curated family — scores **0.5**, never `0.0`. That makes `missing_must`
+**structurally empty whenever a genuine miss happens to share a family with something the candidate
+has**, so the penalty **never fires** for exactly the case it exists to catch. Measured: r04 and r16
+(**who have no Airflow at all** — see `Cron scheduling` in `core/tests/evals/fixtures/resumes/
+r04_morgan_lee.json` / `r16_rowan_castillo.json`) jump **+0.1120 on `score_final`**, of which **+0.1000
+is the missing-must penalty being switched off**, landing at 83% of a perfect match on the must-have
+they don't have. The borderline→strong margin **eroded 3.3×** (0.1616 → 0.0496). **Fix for the 4c
+port:** `missing_must` must be computed from `ontology_weight == 0` (the candidate genuinely does not
+hold the skill, nor a family relative it credits from) — never from the numeric score, which conflates
+"fully missing" with "partially credited."
+
+**2. Close R1 with TWO skill-dimension twins, not one.** R1 above already records that
+`weights.skill = 0` passes today; this session sharpens what 4c must add:
+- **A must-have-miss twin**, isolating finding #1: `weights.skill = 0` must FAIL, AND
+  `must_have_miss_penalty: 0.5 → 1.0` must ALSO independently FAIL — proving the penalty is wired to the
+  right condition, not merely present.
+- **A recency twin for r10** (`decision_point: recency_decay_stale_skills` is decorative today — no
+  fixture isolates it; R1 above), so disabling recency decay FAILS too.
+
+**3. Add a spelling-divergence twin.** One fixture identical to r01 except `REST API design` →
+`REST APIs` — the Phase 4b spelling-recall fix's own headline number: a **−0.144** swing on
+`score_final`, the single largest sub-score delta measured this session, bigger than education (0.0391)
++ overqual (0.0120) + motivation (0.0900) **combined**. The corpus today cannot see a swing that size in
+its highest-weighted sub-score (skill, 0.40) at all — R2 above already records that the corpus never
+gates the skill sub-score's internals; this is the sharpest instance of that gap.
+
+**4. `canonical_name` → `canonical_key` rename — a verbatim hris port breaks loud, not silent.** hris's
+`_stage2_skill_rows` Cypher (`orchestrator.py:257`) reads `reqSkill.canonical_name AS skill`. ADR-008
+renamed that property to `canonical_key` (Phase 4b) — `canonical_name` **no longer exists** on a `Skill`
+node. A verbatim port of that Cypher returns `skill=None` for every row → `SkillContribution.skill: str`
+→ pydantic `ValidationError` at scoring time. Loud, immediate failure — not a silent mis-score — but it
+costs a debugging session if undiscovered until then, and it is exactly the class of hris-source-vs-
+current-schema drift the "read `stages.py` first, not third" lesson (4a hardening, round 5, above)
+exists to prevent. **4c must rename this Cypher alias in the port, day one.**
+
+**5. `categories.yaml` is new in 4b — record what changed, not just that it exists.** Through 4a, no
+ontology/family-credit data existed at all; `categories.yaml` (`core/src/pipeline/skill_data/
+categories.yaml`) landed with 4b specifically to back stage-2's family partial-credit. Measured effect
+on the 4a corpus once real: **+0.1120 on `score_final`** for a must-have-miss candidate (finding #1),
+of which **+0.1000** is the missing-must penalty nullification and the remainder is the family-credit
+mechanism doing its documented job (0.5 credit for a same-family skill is intended — the bug is only
+that it also silences the penalty). R1 above already calls this an "ontology junk-bucket that grants 0.5
+family credit to every missing skill" and lists it as a mutation the corpus **passes** — 4b did not
+invent this failure mode, but it made it **real** (see #6).
+
+**6. R1 (above) is now LIVE, not hypothetical.** R1 was written against an engine that did not exist in
+this repo — "the corpus is blind to the skill sub-score's internals" described a class of future risk.
+4b's `categories.yaml` + this session's real-Neo4j projection measured finding #1 as an ACTUAL,
+already-shipped mechanism — the ontology R1 warned about is the exact one now seeded in `core/src/
+pipeline/skill_data/categories.yaml`. Do not read R1 as "a mutation the corpus can't catch, in the
+abstract" any longer: it is a live scoring bug waiting for 4c's `stages.py` port to inherit, unless
+items #1–#3 above are addressed in that port's own PR.
 
 **Phase-4 decisions adopted from the planner pass** (recommended defaults; reversible):
 - **Chunk-text preview source (required deviation, Risk #1):** hris's `_resume_projection_tx` reads

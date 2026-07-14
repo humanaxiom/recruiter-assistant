@@ -74,6 +74,81 @@ def test_canonicalize_skill_names_empty_input_is_empty_output() -> None:
     assert canonicalize_skill_names([]) == []
 
 
+# ── Phase 4b spelling-recall fix ──────────────────────────────────────────
+#
+# ranking-evals measured spelling recall against realistic résumé wording at
+# 37.5% (15/40) — with ADR-008 demoting vector auto-merge out of the scoring
+# path, `_basic_normalise` + the alias table ARE the entire matching surface
+# now. Each pair below is a real spelling variant that must normalise to the
+# SAME canonical term as the plain vocab spelling. Mutation-kill: reverting
+# the trailing-version-strip / parenthetical-split logic in
+# `_basic_normalise` turns every one of these RED (each variant would
+# normalise to itself — or, for the parenthetical cases, to the OLD
+# paren-folded phrase — never `expected_canonical`).
+
+SPELLING_RECALL_FIXTURES: tuple[tuple[str, str], ...] = (
+    ("Python 3", "python"),
+    ("Python (3.11)", "python"),
+    ("PostgreSQL 14", "postgresql"),
+    ("Postgres 15", "postgresql"),
+    ("Airflow 2", "airflow"),
+    ("Apache Airflow 2.7", "airflow"),
+    ("Kubernetes (EKS)", "kubernetes"),
+    ("Terraform (IaC)", "terraform"),
+    ("AWS MWAA (Airflow)", "airflow"),
+    ("Containerization (Docker)", "docker"),
+    ("PSQL", "postgresql"),
+    ("Docker Compose", "docker"),
+    ("Kafka Streams", "kafka"),
+    ("REST APIs", "rest api design"),
+    ("RESTful APIs", "rest api design"),
+    ("REST API", "rest api design"),
+)
+
+
+@pytest.mark.parametrize("variant,expected_canonical", SPELLING_RECALL_FIXTURES)
+def test_spelling_variant_normalises_to_the_expected_canonical(
+    variant: str, expected_canonical: str
+) -> None:
+    assert canonicalize_skill_names([variant]) == [expected_canonical]
+
+
+@pytest.mark.parametrize("variant,expected_canonical", SPELLING_RECALL_FIXTURES)
+def test_spelling_variant_round_trips_jd_and_resume_side_to_the_same_key(
+    variant: str, expected_canonical: str
+) -> None:
+    """The critical invariant (security re-audit, mutation-killed on the
+    Neo4j-backed half): normalisation runs BEFORE the canonical key is
+    computed, so the JD side (a variant spelling like "PostgreSQL 14") and
+    the résumé side (the plain canonical spelling, "postgresql") MUST still
+    agree on one normalised string — proven here via the same
+    `canonicalize_skill_names` entry point both sides funnel through."""
+    jd_side = canonicalize_skill_names([variant])
+    resume_side = canonicalize_skill_names([expected_canonical])
+    assert jd_side == resume_side == [expected_canonical]
+
+
+def test_every_shipped_alias_still_resolves_to_its_own_canonical() -> None:
+    """Zero-regression guard: none of the ~220+ shipped vocabulary spellings
+    may be rejected or mis-keyed by the new version-strip/parenthetical-
+    split logic — every alias in the REAL, shipped `aliases.yaml` must still
+    normalise to its own documented canonical."""
+    import yaml
+
+    from src.pipeline.skills import _ALIASES_PATH
+
+    data = yaml.safe_load(_ALIASES_PATH.read_text(encoding="utf-8")) or []
+    checked = 0
+    for entry in data:
+        canonical = entry["canonical"].strip().lower()
+        for alias in entry.get("aliases", []):
+            assert canonicalize_skill_names([alias]) == [
+                canonical
+            ], f"alias {alias!r} no longer resolves to canonical {canonical!r}"
+            checked += 1
+    assert checked >= 150  # sanity: the vocab was not accidentally shrunk
+
+
 # ── Path-resolution regression ────────────────────────────────────────────
 
 

@@ -1169,3 +1169,103 @@ def test_recall_fixture_casing_invariant_on_the_resume_side(name: str) -> None:
     r = skills_graph.resume_skill_canonical_key
     keys = {r(name), r(name.title()), r(name.lower()), r(name.upper())}
     assert len(keys) == 1, f"casing-dependent canonical_key for {name!r}: {keys}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 4b spelling-recall fix — ranking-evals measured spelling recall
+# against realistic résumé wording at 37.5% (15/40); ADR-008 demoted vector
+# auto-merge out of the scoring path, so `_basic_normalise` + the alias
+# table ARE the entire matching surface now. Every fixture below is a real
+# spelling variant that must resolve to the SAME vocab canonical
+# (`canonical_key` is CLEARTEXT for a vocab hit — see
+# `test_vocab_term_canonical_key_is_cleartext` above) as the plain spelling.
+#
+# Mutation-kill: reverting the trailing-version-strip / parenthetical-split
+# logic in `_basic_normalise` turns every one of these RED — each variant
+# would either stay itself (an opaque hash, not the vocab canonical) or, for
+# the parenthetical cases, fold into the OLD paren-merged phrase (also not
+# in the alias table, also an opaque hash) — never the cleartext canonical
+# asserted here.
+# ═══════════════════════════════════════════════════════════════════════════
+
+SPELLING_RECALL_FIXTURES: tuple[tuple[str, str], ...] = (
+    ("Python 3", "python"),
+    ("Python (3.11)", "python"),
+    ("PostgreSQL 14", "postgresql"),
+    ("Postgres 15", "postgresql"),
+    ("Airflow 2", "airflow"),
+    ("Apache Airflow 2.7", "airflow"),
+    ("Kubernetes (EKS)", "kubernetes"),
+    ("Terraform (IaC)", "terraform"),
+    ("AWS MWAA (Airflow)", "airflow"),
+    ("Containerization (Docker)", "docker"),
+    ("PSQL", "postgresql"),
+    ("Docker Compose", "docker"),
+    ("Kafka Streams", "kafka"),
+    ("REST APIs", "rest api design"),
+    ("RESTful APIs", "rest api design"),
+    ("REST API", "rest api design"),
+)
+
+
+@pytest.mark.parametrize("variant,expected_canonical", SPELLING_RECALL_FIXTURES)
+def test_spelling_variant_resume_side_resolves_to_the_vocab_canonical(
+    variant: str, expected_canonical: str
+) -> None:
+    """The résumé side (pure, no I/O) must resolve straight to the
+    CLEARTEXT vocab canonical — not a hash — proving the variant is
+    recognised as the vocab hit it is, not treated as an unlisted skill."""
+    assert skills_graph.resume_skill_canonical_key(variant) == expected_canonical
+
+
+@pytest.mark.parametrize("variant,expected_canonical", SPELLING_RECALL_FIXTURES)
+@pytest.mark.asyncio
+async def test_spelling_variant_round_trips_job_side_and_resume_side_to_the_same_key(
+    variant: str, expected_canonical: str
+) -> None:
+    """The critical invariant (security re-audit, mutation-killed): both
+    sides call `_canonical_key_for_normalised` on the SAME normalised
+    string, so a JD requiring the variant spelling and a résumé stating the
+    plain canonical spelling still land on the same Skill node. A vocab hit
+    exists already (this fixture's own canonical, seeded by a prior JD
+    parse), so the job side takes the exact-match fast path."""
+    session = _make_session([_FakeResult([{"name": expected_canonical}])])
+    job_side = await skills_graph.resolve_canonical_names(
+        session, [variant], llm=_make_llm(), embedder=_make_embedder()
+    )
+    resume_side = skills_graph.resume_skill_canonical_key(variant)
+    assert job_side[variant] == resume_side == expected_canonical
+
+
+@pytest.mark.parametrize("variant,expected_canonical", SPELLING_RECALL_FIXTURES)
+def test_spelling_variant_and_plain_canonical_agree_on_the_resume_side(
+    variant: str, expected_canonical: str
+) -> None:
+    """A JD-side variant spelling and a résumé stating the plain canonical
+    term directly must resolve to the identical key — the round-trip the
+    human's report requires proof of, expressed purely on the résumé-side
+    function (no fakes/mocking needed)."""
+    r = skills_graph.resume_skill_canonical_key
+    assert r(variant) == r(expected_canonical) == expected_canonical
+
+
+def test_every_shipped_alias_still_resolves_on_the_graph_side() -> None:
+    """Zero-regression guard for the Neo4j-backed copy of the basic-
+    normalisation logic (duplicated, not imported, from `src.pipeline.
+    skills` — see this module's docstring): every alias in the REAL, shipped
+    `aliases.yaml` must still resolve to its own documented canonical via
+    `resume_skill_canonical_key`, and land on a CLEARTEXT key (never a
+    hash) — proving no shipped vocab term was accidentally demoted to
+    non-vocab by the new logic."""
+    import yaml
+
+    data = yaml.safe_load(skills_graph._ALIASES_PATH.read_text(encoding="utf-8")) or []
+    checked = 0
+    for entry in data:
+        canonical = entry["canonical"].strip().lower()
+        for alias in entry.get("aliases", []):
+            key = skills_graph.resume_skill_canonical_key(alias)
+            msg = f"alias {alias!r} no longer resolves to canonical {canonical!r}"
+            assert key == canonical, msg
+            checked += 1
+    assert checked >= 150  # sanity: the vocab was not accidentally shrunk

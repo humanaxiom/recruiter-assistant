@@ -127,6 +127,13 @@ _CATEGORIES_PATH = Path(__file__).resolve().parent / "skill_data" / "categories.
 _WHITESPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
 
+# Phase 4b spelling-recall fix — see `src.pipeline.skills`'s identical
+# constants/docstring (this module duplicates, not imports, the basic-
+# normalisation half; see the module docstring's "basic normalisation"
+# section below for why). Both copies MUST stay byte-identical.
+_TRAILING_VERSION_RE = re.compile(r"\s+v?\d+(?:\.\d+)*$", re.IGNORECASE)
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+
 # Vector recall breadth for the near-candidate query — matches hris's
 # `db.index.vector.queryNodes('skill_emb_idx', 5, ...)`.
 _NEAR_CANDIDATE_LIMIT = 5
@@ -322,11 +329,55 @@ def _alias_table() -> dict[str, str]:
     return out
 
 
+def _clean(text: str) -> str:
+    """Punctuation-strip + whitespace-collapse. Duplicated (not imported)
+    alongside `src.pipeline.skills._clean` — see this module's docstring on
+    why the basic-normalisation half is duplicated rather than shared."""
+    text = _PUNCT_RE.sub("", text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _resolve_or_none(cleaned: str) -> str | None:
+    """Alias-table lookup on ``cleaned``, then (only on a miss) on
+    ``cleaned`` with a trailing version token stripped. ``None`` means
+    neither resolved — mirrors `src.pipeline.skills._resolve_or_none`
+    exactly (both copies must stay byte-identical)."""
+    table = _alias_table()
+    if cleaned in table:
+        return table[cleaned]
+    stripped = _TRAILING_VERSION_RE.sub("", cleaned).strip()
+    if stripped and stripped != cleaned and stripped in table:
+        return table[stripped]
+    return None
+
+
 def _basic_normalise(raw: str) -> str:
+    """Mirrors `src.pipeline.skills._basic_normalise` exactly — see that
+    function's docstring for the full rationale (full-string fallback tried
+    first so a non-vocab name's key is unchanged from before this fix;
+    trailing-version-strip and parenthetical-split are strictly ADDITIVE,
+    only used when they land on an actual vocab hit). This copy MUST stay
+    byte-identical to the résumé side's, or `REQUIRES`/`HAS_SKILL` diverge
+    for any name whose normalisation takes one of the new branches."""
     s = raw.strip().lower()
-    s = _PUNCT_RE.sub("", s)
-    s = _WHITESPACE_RE.sub(" ", s).strip()
-    return _alias_table().get(s, s)
+    full_clean = _clean(s)
+
+    resolved = _resolve_or_none(full_clean)
+    if resolved is not None:
+        return resolved
+
+    inner_candidates = [m for m in _PAREN_RE.findall(s) if m.strip()]
+    if inner_candidates:
+        outer_clean = _clean(_PAREN_RE.sub(" ", s))
+        resolved = _resolve_or_none(outer_clean)
+        if resolved is not None:
+            return resolved
+        for inner in inner_candidates:
+            resolved = _resolve_or_none(_clean(inner))
+            if resolved is not None:
+                return resolved
+
+    return full_clean
 
 
 # ---------------- categories.yaml (curated skill families) ------------------

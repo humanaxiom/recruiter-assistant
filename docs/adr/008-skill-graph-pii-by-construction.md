@@ -173,12 +173,37 @@ ships. It is recorded here plainly, not softened.
    that never score against each other. **This is the single biggest recall cost of ADR-008.**
    Non-vocab recall now requires the JD and the résumé to use the **byte-identical normalised
    spelling**.
+   > **Correction (Phase 4b, ranking-evals, 2026-07-14):** this residual is understated as written —
+   > it does not only cost recall on "a non-vocab skill." A **vocab** skill spelled a way
+   > `_basic_normalise` doesn't (yet) fold into its canonical also loses the match entirely:
+   > `PostgreSQL 14` **is** the vocab skill `postgresql`, just spelled with a trailing version
+   > number `_basic_normalise` didn't strip pre-fix. Measured cost: one such variant alone cost a
+   > strong candidate **−0.144 on `score_final`** in the 4a corpus — more than `education` (0.0391)
+   > + `overqual` (0.0120) + `motivation` (0.0900) *combined* — enough to drop a qualified candidate
+   > out of the k=5 shortlist, and it rewarded the adversarial fixture's exact thesis (copying the
+   > JD's literal string is the only behaviour guaranteed to match). Partially addressed by the
+   > trailing-version-token / parenthetical normalisation and the small, tight alias set landed
+   > alongside this correction (see residual #8's updated counts) — not eliminated: a vocab skill
+   > spelled in a way neither normalisation nor the alias table recognises still misses, same as any
+   > non-vocab spelling.
 7. Vector auto-merge and the LLM tiebreaker **no longer affect scoring at all** — they are
    alias-list enrichment only. `react.aliases` containing `"react native"` is **advisory
    metadata**; anyone reading `s.aliases` and inferring "this resolves to react" will be wrong.
 8. **Recall is only as good as the ~220-term vocabulary.** `aliases.yaml`/`categories.yaml` are now
    the **entire** matching surface for reliable cross-spelling recall. **Growing that vocabulary is
    the only lever that improves non-vocab recall.**
+   > **Correction (Phase 4b, ranking-evals, 2026-07-14):** "~220 terms" is the **spelling** count
+   > (every alias string across both files), not the **concept** count — a reader takes "220 terms"
+   > to mean 220 distinct skills, which overstates true breadth roughly 1.5×. Both numbers, stated
+   > together: **before** this correction, `aliases.yaml` held 71 canonical concepts (146 total
+   > spellings across its aliases) plus 75 concepts that exist only in `categories.yaml` (one bare
+   > spelling each, no alias list) — **146 concepts, ~221 spellings**, ~1.5 spellings/concept.
+   > **After** this correction's tight, judgement-call additions (`psql`; `docker compose`;
+   > `kafka streams`; a new `rest api design` concept covering `rest api`/`rest apis`/
+   > `restful api`/`restful apis`) plus the trailing-version-token and parenthetical normalisation
+   > rules (which add zero vocabulary): **147 concepts, ~229 spellings.** Deliberately not the full
+   > 8-15-alias-per-concept expansion — see the Phase 4b spelling-recall fix commit for what was
+   > added and why each addition was justified.
 9. A Skill node **first created by the résumé side never gets an embedding** — the résumé MERGE is
    bare, and a later JD requiring it hits the exact-match fast path and returns before the embedding
    write. Such a node is absent from `skill_emb_idx` and can never serve as a vector-merge target.
