@@ -1,11 +1,18 @@
 # Phase 4a — Ranking-evals corpus
 
-**Status:** complete, all three merge-blocking gates green on HEAD `e8e83be`
-(reviewer APPROVE, security PASS, ranking-evals PASS). Branch
-`feat/phase-4a-ranking-evals-corpus`. **Zero product code** — this sub-phase
-builds only the labelled evaluation corpus the Phase-4c matching engine will be
-scored against, so that 4c's first `ranking-evals` run is falsifiable rather
-than a rubber stamp.
+**Status:** corpus complete and MERGED to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12,
+on HEAD `e8e83be` at merge time (reviewer APPROVE, security PASS, ranking-evals PASS). Branch
+`feat/phase-4a-ranking-evals-corpus` (deleted post-merge). **Zero product code** — this sub-phase
+builds only the labelled evaluation corpus the Phase-4c matching engine will be scored against, so
+that 4c's first `ranking-evals` run is falsifiable rather than a rubber stamp.
+
+**Falsifiability hardening (rounds 3–9, this doc's "Round 3" section onward) is also complete**, on
+branch `fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
+(https://github.com/humanaxiom/recruiter-assistant/pull/10), tip `583427f`, 18 commits. **CI is fully
+green — but the PR is OPEN, awaiting human merge, NOT yet merged.** Final gate verdicts: reviewer
+**APPROVE**, security **PASS**, ranking-evals **PASS**; **1040 unit tests @ 96.63% coverage** (up from
+955 on `main`); **65 integration tests**; zero `core/src/` changes. See "Round 9" at the end of this
+document for the full final-state writeup.
 
 ## What landed
 
@@ -96,3 +103,230 @@ coverage number is unmoved from Phase 3.
 - Pre-existing tech debt (not 4a's, not gated): `mypy src tests --strict` surfaces ~18 typing errors
   in Phase-3 test files (`test_worker_parse_resume.py` etc.) merged to `main`; `make gates` runs
   `mypy src` only. Worth a cleanup pass but out of 4a's scope.
+
+---
+
+## Round 3 — falsifiability hardening (`fix/phase-4a-corpus-falsifiability`, post-merge fix-forward)
+
+Three opus-tier gates re-audited the corpus **after** it merged (PR #8) and reached the same verdict
+from three directions: **the corpus as merged could not fail a bad Phase-4c engine.** Every finding
+below was *proven* by a mutation that left all 226 corpus tests green. Landed before 4b/4c, zero
+product code (`core/tests/evals/**`, `core/tests/unit/test_evals_corpus.py`,
+`.claude/agents/ranking-evals.md`, docs).
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| A | `min_precision = 0.8` at `k = 5` tolerates one bad entry — an engine ranking r09 **at rank 5 passes** the metric built to catch it; contradicts the file's own prose and `[adversarial].must_not_surface_in_topk`. The test only range-checked `0 < p ≤ 1` | `0.8 → 0.2` | `min_precision = 1.0`; `k` and `min_precision` **pinned to exact values** |
+| B | The bait's potency was **unasserted** — the toml promises r09 is caught "however high its keyword overlap" and labels.json claims that overlap is the corpus's highest; nothing checked it | Defang r09 to a single ungrounded `Python` (`years: 1`, `last_used_year: 2005`) | r09 asserted structurally **top-tier on every non-evidence signal**; only evidence verification may reject it |
+| C | The toml grew `[adversarial]` + `min_completeness_in_topk`; **neither consumer** (agent doc, `run_evals.py` docstring) enumerated them. The matched-pair ordering controls existed only as **prose** | — (contract drift) | Key set is a **three-way contract**, test-enforced both directions; **`[ordering_controls]`** is now a real key |
+| D | The r11/r14 education twins relaxed to *cited*-chunk equality, so the education chunk `c_005` differed — but every chunk is embedded and evidence-retrieved, so r14 could out-score r11 through the **0.3 evidence path** with `education_partial` a total no-op | — (structural confound) | `c_005` deleted from both; **full chunk-list equality** asserted, matching the other two pairs |
+| E | PII email scan was a **6-domain blocklist**; the phone scan missed `(604) 555-1212` and bare 10-digit numbers (its `(?<!555-01)` lookbehind was dead code). r12 pinned its name only in the ADR-007-N1-**permitted** bullet surface, never in the §7-F1-**scrubbed** chunk surface. `[pii].allow_structured_fields` named no surface. F1-R format-divergent leaks had zero coverage | Plant `<user>@<real-university>.ca` / `<name>@<real-employer>.com` in chunk text; strip the name from r12's `c_003` | Scanners **inverted to allowlists**; r12's name pinned in `chunks[].text`; `[pii]` **surface-qualified**; **r17** added (name-in-`summary`, line-broken name, reflowed phone, bare email local-part) |
+| F | `max_score_delta = 0.0` flakes or lies: no `seed` reaches Ollama, and the Redis embed cache makes a warm second run compare the **cache to itself** | — (vacuous pass) | Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` gets a `1e-9` epsilon; `seed` + cache-state pinned as a **4c requirement** |
+| G | Every `gold_evidence` anchor is an exact substring → verifies at 1.0 → `verification_rate_min = 1.0` is satisfiable by a verifier that **returns `True` unconditionally** | — (no negative control existed) | **`negative_evidence`**: fabricated quotes that MUST score below `fuzz_threshold`, on r09 *and* on fixtures that also carry gold anchors (so the verifier must **discriminate**) |
+| H | Nothing executed `run_evals.py`; `load_corpus()` joined `FIXTURES_DIR` with an unvalidated labels-supplied path (an absolute RHS silently replaces the LHS in pathlib) | — | `main()`'s pre-4c non-zero exit is now **gated**; fixture paths `resolve()` + confined to `FIXTURES_DIR` |
+
+Corpus is now **17 fixtures** (7 strong / 4 borderline / 5 weak / 1 adversarial).
+
+### Round 4 — B1–B6 / N1–N6 (`red(4a-hard-2)` → `green(4a-hard-2)`)
+
+> **Round numbering (round-7 finding N-3).** Rounds are counted **cumulatively** over the corpus's
+> hardening history — rounds 1–2 on `feat/phase-4a-ranking-evals-corpus`, rounds 3–7 on this branch — and
+> that is now the scheme used by `thresholds.toml`, `labels.json`, `test_evals_corpus.py`,
+> `docs/EXTRACTION_PLAN.md` and this file. The branch's **commit** names count gate iterations *on the
+> branch*, an offset of 2: round 4 = `(4a-hard-2)`, round 5 = `(4a-hard-3)`, round 6 = `(4a-hard-4)`,
+> round 7 = `(4a-hard-5)`. Until round 7 these sections were headed "Round 2/3/4 of findings-and-fix"
+> while the corpus files called the same rounds 4/5/6, so every cross-reference between them was ambiguous.
+
+The round-3 hardening had itself shipped an unasserted claim stamped as asserted — the defect class the
+branch exists to kill. Re-audited by all three merge-blocking gates; security returned **PASS**.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| B1 | **The `[adversarial]` arm was INERT.** r09 held a sub-bachelor `Diploma, General Studies` — it fails the JD's `min_level: bachelors` on its own, so a MatchWeights-faithful engine with a **no-op evidence verifier** scored it 0.788 → **rank 8**, outside `k=5`, and **passed** `must_not_surface_in_topk` *and* `precision@5 = 1.0`. Education alone is `0.10 × 0.6 = 0.06` of `score_final`, more than the **0.0485** gap to the top-5 cutoff. The potency test asserted 3 of MatchWeights' **5** structured sub-scores and omitted the two on which r09 was weak (education, vector) — while the toml, the agent doc and its own docstring all said "only the EVIDENCE verifier may reject it" | Give r09 a `BSc Computer Science` — **264 tests stay green**. Delete its education entirely — also green | r09 holds a **JD-allowed BSc** (chunk `c_006` narrates it); **all five** structured sub-scores asserted. ~~Repaired, the no-op-verifier engine ranks r09 **3rd** → `precision@5 = 0.80` → the adversarial arm correctly FAILS it~~ — **that number was wrong; see round 5, F1.** It was asserted, never measured: round 5 measured the same state at seniority 0.271 → **rank 8** → **`precision@5` = 1.00** → the arm was *still* inert. Round 4 relocated the hole onto seniority; round 5 closed it |
+| B1↩ | **Knock-on, re-derived not papered over.** A bait that is top-tier on every non-evidence signal scores `0.6·structured + 0.3·0 + 0.1·0` and *must* land **just below the strong tier** — not below every honestly-weak candidate — so its old `expected_rank_band {min: 12}` and the `weak == adversarial` shared band were **arithmetically infeasible**. This is the round-1 infeasible-band bug pointed at a different tier | — | `adversarial` gets **its own band** `[8, null]` ("below every *strong* fixture, hence outside top-k" — the invariant that survives); `borderline` gains **exactly one** slot of slack `[8, 12]` for the rank the bait displaces. Feasibility check upgraded from "bands tile 1..N" to a full **Hall's-condition** test, which *can* express an overlapping band. ~~≈0.547, measured rank 11/17, vs the 0.844 top-5 cutoff~~ — **those figures were wrong too (round-7 M-1); they were never measured.** Post-round-5 the bait scores **0.597** against a **0.785** cutoff (~0.19 of margin) and its exact rank is deliberately **not** pinned anywhere. The *argument* — the bait lands adjacent to the borderline tier, not below the weak one — is unchanged, and it is the argument the band encodes |
+| B2 | The "three-way key-set contract enforced in **both** directions" **did not exist**: only the toml ↔ a list literal *inside the test file* was checked; nothing opened the agent doc or `run_evals.py`'s docstring, and `test_every_threshold_key_is_enumerated_by_both_consumers` — named in three places — **was not in the repo** | Delete the `[ordering_controls]` block from `run_evals.py`'s docstring **and** the agent-doc row; delete `[adversarial]` + `min_completeness_in_topk` from the docstring; add a new toml key with both consumer docs left stale | That test now **exists**, asserts `AGENT_DOC_PATH.is_file()` first (a bad path would pass vacuously), and compares **set equality in both directions** against both docs. The agent-doc table is **one row per key** — merged rows were invisible to the parse |
+| B3 | `min_completeness_in_topk` was the **last unpinned numeric threshold** (range-checked only) — on the one key whose job is to stop `verification_rate_min = 1.0` passing vacuously | `1.0 → 0.2`, `1.0 → 0.01` | Pinned exactly |
+| B4 | **Real email addresses committed as prose** in 6 places while documenting the PII fixes — including in the guard's own source file, which therefore carried exactly the strings its invariant bans | — (scanner scope is JSON fixtures only) | All 6 replaced with non-resolving placeholders that preserve the narrative |
+| B5 | The fixture scanner **enumerated filenames** (`resumes/*.json` + a hardcoded JD + `labels.json`), so any *new* non-resume fixture is never PII-scanned — and 4b/4d add exactly that | Add `fixtures/jd_second_role.json` with a real email + phone — **264 tests stay green** | `FIXTURES_DIR.rglob("*.json")` — scoped by **directory**, never by filename |
+| B6 | The email scanner required `local@domain` **contiguous** — but the corpus's whole thesis (r17 / ADR-007 F1-R) is that **format-divergent** identifiers are the leak class that matters. `<user> @<domain>.ca` with one space was **not flagged**; the `\n` case was caught only by luck | Plant a spaced address in a chunk | Whitespace allowed around the `@` and stripped before the allowlist check; `_PHONE_SHAPED_RE`'s separator class grew the unicode dashes and `/`. **Both scanners are now themselves gated** by probe tests |
+
+Non-blocking, landed in the same change: the toml named the wrong fuzz measure (`fuzz.ratio` scores the
+corpus's *own gold anchors* at 0.648/0.796 — an engine implementing that word literally can never reach
+`verification_rate_min = 1.0`); the 4c scorer landmines are recorded in `EXTRACTION_PLAN.md`
+(`fuzz.WRatio` **verifies** r02's fabricated anchor at 0.855; `partial_token_set_ratio` returns 1.000 on
+2 of 4 negatives); `_best_partial_ratio`'s approximation **direction** and headroom are documented; chunk
+ids must now be a **contiguous** one-based run (format alone was checked, and this change set had just
+deleted a mid-list chunk from two fixtures); the phone separator class covers `‐‑–—―` and `/`.
+
+Accepted residuals, stated rather than closed: `FAKE_NAMES` constrains `candidate.name` only — a real
+**third party's** name in free text passes every scanner (needs NER); deliberate-evasion classes
+(homoglyph domains, `[at]`/`(dot)`, base64) are out of threat model (accidental paste, not malicious
+insider); the phone scanner is NANP-shaped; `@example.test` is matched with `endswith`, so a legitimate
+*subdomain* would be flagged (over-strict, fails safe).
+
+**Gates:** ruff · black · `mypy src --strict` clean; **993 unit tests @ 96.63% coverage** (264 corpus
+tests, up from 226). Coverage unmoved — still zero product code.
+
+**Recorded, deliberately NOT done here:** no **outbox-shaped fixture** exists — nothing encodes what
+the outbox payload is *allowed* to contain (no `candidate`, no `chunks[].text`, no `summary`). 4b
+projects to Neo4j and must add it (recorded as a 4b requirement in `docs/EXTRACTION_PLAN.md`).
+
+### Round 5 — F1 / F2 (`red(4a-hard-3)` → `green(4a-hard-3)`) — the first round that read the ENGINE
+
+Rounds 1–4 hardened the corpus against an *idealized* algorithm. Round 5 ported the one 4c actually
+extracts (hris `matching/{stages,orchestrator}.py`) and found **two of `MatchWeights`' five structured
+sub-scores do not compute what their names imply**. Both holes existed only against the real code.
+
+| # | Finding | Fix |
+|---|---|---|
+| F1 | **`seniority` (0.15) is not a years check** — it is `cosine(jd.title, most-recent role title)`, rescaled. The toml and the potency test justified **both** `experience` and `seniority` with one years claim, so the corpus asserted `experience` twice and `seniority` **never**, while r09 carried the most JD-distant title in the corpus. Measured (faithful + **no-op verifier**): seniority 0.271 → r09 rank 8 → precision@5 = 1.00 → **a bad engine passes**. Round 4 had **relocated** the bait hole from education (0.10) onto seniority (0.15), not closed it | r09's most-recent title is the **JD title verbatim** → `cosine(x,x) = 1.0` → seniority **exactly 1.0 by arithmetic, under any embedder**. That matters: `Senior Backend Engineer` measured **0.755** on one `nomic-embed-text` build and **0.581** on another, straddling the **0.638** break-even at which the trap arms |
+| F2 | **`education` (0.10) reads the degree LEVEL only**, never `jd.education.fields` — so the r14/r11 twins (differing in *field*) asserted a mechanism that **does not exist** (both `BSc` → education = 1.00), and the pair still passed an education-blind ranker through the **embedded-degree vector leak** | Twins now differ in **level**; both fields JD-allowed. Education moves `score_final` by 0.0400 and **dominates** the vector residual, which now points at the **lower** twin — so ordering the pair *requires* implementing the sub-score. (Round 7 found the residual's inputs were themselves unpinned — see R7-2) |
+| F3 | hris's shipped `_fuzz_substring` is a **character-set overlap ratio**: it **verifies all four** of the corpus's fabricated anchors (0.928/0.943/0.988/0.935) | Recorded as a hard 4c requirement: **replace it, do not port it** (rapidfuzz `partial_ratio` scores the same negatives 0.36–0.46) |
+
+### Round 6 — F5 (`red(4a-hard-4)` → `green(4a-hard-4)`)
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| F5 | **Two of the three ordering pairs did not gate their dimension.** `rank(higher) < rank(lower)` is satisfiable by a **tie-break**. `_build_summary_text` reads neither `total_years_experience` nor `cover_letter_chunks`, so the overqual and motivation twins' **embedding input is byte-identical** → a dimension-blind engine ties them **exactly** (+0.000e+00) and the stable sort decides the pair arbitrarily. A **motivation-blind engine PASSED** the motivation pair in the fixtures' natural order; the overqual pair failed only by luck (it PASSES on the reversed order) | `weights.motivation = 0` (motivation pair passes); `overqual_ratio = 99` (overqual pair passes on reversed input order) | **`[ordering_controls].min_score_gap = 1e-6`** (three-way-contract change). The assertion is now `rank(hi) < rank(lo)` **AND** `score_final(hi) − score_final(lo) ≥ min_score_gap` — no tie can pass on any input order. Correct-engine gaps +0.0397/+0.0120/+0.0900, all **arithmetic**. The twins' byte-identical embedding input is now itself asserted, so the tie cannot be "fixed" by narrating the dimension into a `summary` (that is F2 again) |
+
+Rejected alternative: copying F2's inverted-residual trick into the other two twins — it would re-introduce
+an **embedder-dependent magnitude**, and F1 is exactly the lesson that a measured quantity can straddle a
+threshold between two builds of the same model. **Pin by arithmetic, not by measurement.**
+
+Also reconciled: r09's **exact rank is no longer written anywhere** (it was "rank 9" in three files, and
+"~11" in two more). It is near-tied with r04 — 0.596994 vs 0.596711, a spread whose **sign flips between
+`nomic-embed-text` builds — and is gated by nothing. What is build-independent, and what the corpus does
+gate: r09 sits **below every strong fixture**, outside the k=5 window, with **~0.19** of margin.
+
+**Baseline battery, re-measured against the full contract** (both input orders; see
+`docs/EXTRACTION_PLAN.md` for the table): keyword-overlap **FAIL** · lexical tf-idf **FAIL** · embedding
+pure-vector (p@5 0.80, r09 rank 4) **FAIL** · faithful + no-op verifier **FAIL** · faithful + hris
+`_fuzz_substring` **FAIL** · faithful + correct verifier **PASS**. The round-3 report's "tf-idf
+pure-vector" row conflated the lexical and embedding baselines and is corrected there.
+
+**Accepted 4a residuals, recorded not fixed** (`docs/EXTRACTION_PLAN.md`, "the class of wrong engine this
+corpus still lets through"): the corpus is **blind to the skill sub-score's internals** — `weights.skill =
+0.0`, a disabled recency decay (even though r10's `decision_point` is `recency_decay_stale_skills`, it has
+no twin), a doubled `must_have_miss_penalty` and an ontology junk-bucket all still PASS — and it gates the
+evidence **verifier** but never the evidence **extractor**. Both are 4c requirements now.
+
+**Gates:** ruff · black · `mypy src --strict` clean; **1034 unit tests @ 96.63% coverage** (305 corpus
+tests); `run_evals.py` still exits 1. Zero `core/src/` changes.
+
+### Round 7 — R7-1 / R7-2 (`red(4a-hard-5)` → `green(4a-hard-5)`)
+
+`ranking-evals` **PASSED** round 6 (cold cache, freshly-pulled embedder: keyword-overlap, lexical tf-idf,
+embedding pure-vector, faithful + no-op-verifier and faithful + hris `_fuzz_substring` all FAIL the corpus;
+only a faithful engine with a correct `rapidfuzz.partial_ratio` verifier PASSES; 34 mutations RED). The
+**reviewer** returned CHANGES-REQUIRED, having gone hunting for the *fifth* instance of this branch's
+signature bug: **a claim stamped as asserted but enforced by nothing.** It found two.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| R7-1 | **`SKILL_EVIDENCE_MARKERS` claimed coverage it did not enforce.** Its comment said it "covers every `required_skill` AND `nice_to_have_skill` name used anywhere in the corpus" — and that dict is the **sole definition of "JD-relevant"** for the test the file itself calls "the core falsifiable property of this corpus", plus r10's recency guard and r17. A JD skill with no marker is filtered out *before* either arm of the fabrication trap sees it | (1) delete `"kubernetes"`; (2) delete it **and** re-ground r09's Kubernetes claim — i.e. silently defang one arm of the trap (grounding a claim whose marker is *still present* goes RED, which proves the trap's coverage **was** exactly this unpinned dict); (3) **the JD gains a nice-to-have `Redis`** that r09 *and* honest-strong r03 both claim with zero textual support — neither the "adversarial must be ungrounded" arm nor the "honest must be grounded" arm fires | Coverage is **derived from the JD fixture** (`test_skill_evidence_markers_cover_every_jd_skill`). Deleting a marker → RED; adding a JD skill without a marker → RED. This is the enumerate-instead-of-derive shape, on **exactly the surface 4b/4d touch when they add JD fixtures** |
+| R7-2 | **The education twins' `institution`/`year` were unpinned, so the F2 residual could be inverted back.** `_build_summary_text` embeds `{degree}, {institution} ({year})`; the twin test pinned skills/experience/summary/chunks/years and **none of those three**, and the embedding-input test compares only the segment *before* `"Education: "`. The twins even shipped **different** institutions. So the whole F2 defence — "the residual is 40× dominated and points at the **lower** twin" — rested on an **embedder-measured** quantity with a free second contributor | Rewrite r14's institution to `"Backend Data Engineering Institute of Python and Airflow"` → raw residual flips to **+0.0043**, the education-**blind** engine's twin separation becomes **+6.399e-04 ≥ `min_score_gap`**, and it **PASSES** the pair on **both** input orders — the exact vector confound round 5 certified as inverted, re-created | The twins now **share an institution and a year**. The twin test asserts (a) the two `education[]` dicts are equal **except `degree`/`field`**, and (b) the **embedded `Education:` segment differs only in the degree token** — the second survives a future `_build_summary_text` change. The degree *text* is now the residual's only contributor |
+
+Also fixed (all real, all the same class): **M-1** — three files stated three *different*, and false, ranks
+for one corpus state ("rank 2" / "3rd" / "~11 of 17", when the gate measured that state at **rank 8,
+p@5 = 1.00, i.e. a bad engine passing**); each stale number is now marked wrong in place, narrative kept.
+**M-2** — the ported engine helpers' "if 4c changes them, these must change in the same diff" was enforced
+by nothing; there is now a test that imports the real `src.pipeline.matching.{stages,orchestrator}` *when
+they exist* and compares over an input table (skips until 4c, including the `"ma "` landmine probe).
+**M-3** — "4c MUST run those three mutations" / "must REPLACE `_fuzz_substring`" were prose obligations
+dressed as mechanical ones; nothing can gate them (they need the engine run with *mutated* `MatchWeights`),
+so they are now stated plainly as **review obligations on the 4c PR**. **N-1** — "all three ordering gaps
+are ARITHMETIC" was false: only overqual (`0.6·0.25·0.08 = 0.0120`) is, and it is the only one the sandwich
+needs or asserts; education subtracts a *measured* residual and motivation's `0.9` is a *measured* LLM
+confidence, not a `MatchWeights` constant. **N-2** — `min_precision = 0.8` is clearable by a random ranker
+**39.5%** of the time (hypergeometric, 11 good / 6 bad, k=5), not "roughly half". **N-3** — round numbering
+diverged by 2 between the docs and the corpus files; one cumulative scheme now, with the commit-name
+mapping written down. **N-4** — the toml's reverse-direction key check walked only section tables, so a
+**top-level scalar key** would have been invisible to the three-way contract; closed.
+
+**Battery re-measured after the one fixture change** (r11 adopts r14's institution), real `nomic-embed-text`
+768-d on a **cold cache**, both input orders — **every arm's verdict, the top-5, and the rank bands are
+unchanged**:
+
+| arm | p@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | all 3 ✗ | FAIL |
+| lexical tf-idf | 1.00 | 8 | all 3 ✗ | FAIL |
+| embedding pure-vector | 0.80 | 4 | all 3 ✗ | FAIL |
+| faithful + no-op verifier | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + hris `_fuzz_substring` | 0.80 | 1 | all 3 ✓ | FAIL (adversarial) |
+| faithful + **correct** verifier | 1.00 | 8 | all 3 ✓ | **PASS** |
+
+Bands: **0 violations**, populations unchanged (7 strong / 4 borderline / 5 weak / 1 adversarial), top-5
+unchanged, 5th-place cutoff **0.785**, r09 **0.597** (~0.19 margin). The only deltas anywhere: r11's score
+0.7578 → 0.7583 (still rank 7), the education pair's correct-engine gap +0.0397 → **+0.0391**, and the
+education-blind separation **−3.30e-04 → −8.72e-04** — i.e. the inversion the F2 fix depends on got
+*stronger*, and it is now pinned rather than accidental.
+
+**Gates:** ruff · black · `mypy src --strict` clean; **1035 unit tests @ 96.63% coverage** (306 corpus
+tests, 1 skipped until 4c); `run_evals.py` still exits 1. Zero `core/src/` changes.
+
+### Round 8 — the eighth consecutive instance (commits `0edc722` docs, `6a24c10`, `23176cf`)
+
+The reviewer found the **eighth consecutive instance** of the branch's signature defect (a claim stamped
+as asserted but enforced by nobody). This is the same class as round-3 finding E3 (stripping r12's name
+from `c_003` left the suite green because the embed-boundary control could be silently neutered) —
+recurring on a different fixture.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| — | `test_r17_carries_every_adr007_f1r_format_divergent_variant` enumerated only **three** of the four ADR-007 F1-R break shapes (line-broken name, reflowed phone, bare email local-part) and never checked the fourth — the **intra-token** break r17's chunk `c_008` exists for | Delete `c_008` entirely — **all 1040 tests stay green** | Added a **4th assertion**: a chunk must carry the candidate email broken **inside the domain token**, with de-wrap reconstructing `candidate.email` |
+| — | `texts.extend(decoded)` — the de-wrap pass's sibling in `_scan_texts` — was **ungated** | Delete the line — suite stays green | The e2e probe gained a **joint-break-only** phone (`555\n1212`) that only the plain decoded pass catches |
+
+Also fixed (housekeeping, same round, not a defect in the corpus itself): commit `49e85bf`, labelled
+`red(4a-hard-7)`, **was not actually red** — 311 passed / 0 failed, because it gated a fix round 6 had
+already landed. The last two commits of that sequence were rebuilt as `b996810` / `830965d` with the
+honest label `test(4a-hard-7)`; the six genuinely-red commits from rounds 3–6 are untouched, original
+hashes preserved. See `docs/EXTRACTION_PLAN.md`'s "Update after round 9" note for the full commit-label
+reconciliation.
+
+**Gates:** ruff · black · `mypy src --strict` clean; all green; test count continues rising toward the
+final 1040 (see round 9). Zero `core/src/` changes.
+
+### Round 9 — L1, the last finding (commit `583427f`, `test(4a-hard-9)`)
+
+Security's last finding on this branch (**L1, low, non-blocking**): `_scan_texts`'s **raw-source pass**
+(`texts = [raw]`) was the third and last of its three passes still ungated.
+
+| # | Finding | Mutation that stayed green | Fix |
+|---|---|---|---|
+| L1 | `_scan_texts`'s raw-source pass (`texts = [raw]`) was ungated. Its unique coverage is PII in a JSON **key** or as a **non-string scalar** (e.g. a phone stored as a JSON number) — both invisible to `_string_values`, which recurses `node.values()` and collects only `str` leaves | Replace `[raw]` with `[]` — suite stays green | Added an assertion unique to the raw-source pass; all three `_scan_texts` passes (decoded, de-wrap, raw) are now independently gated, each failing on its own distinct assertion |
+
+Closed rather than deferred because the `ResumeParsed.model_validate` backstop **only covers résumé
+fixtures** — the scan is scoped by directory (round-4 finding B5), so it also covers `labels.json`, the
+JD, and — per `docs/EXTRACTION_PLAN.md`'s 4b/4d rows — 4b's outbox-shaped fixture and 4d's reverse-match
+JDs, **none of which are pydantic-validated**.
+
+**Round 9 is the final round on this branch.** Final state, HEAD `583427f`:
+
+- **reviewer: APPROVE** (31 of 32 mutations killed across the whole branch's history; the one survivor is
+  **R1** — the skill-sub-score-internals gap — a consciously-carried residual into 4c, not an open defect;
+  see "Accepted 4a residuals" in `docs/EXTRACTION_PLAN.md`).
+- **security: PASS** (empty findings table).
+- **ranking-evals: PASS.**
+- Offline: ruff · black · `mypy --strict` clean · **1040 unit tests @ 96.63% coverage** (up from **955** on
+  `main` before this branch — zero `core/src/` changes, so the entire delta is new eval-corpus tests) ·
+  **65 integration tests** vs real Postgres+Neo4j · `run_evals.py` still exits 1 (the correct, expected
+  pre-4c RED state).
+- **Zero `core/src/` changes** across the whole branch's 18 commits.
+
+**Baseline battery — unchanged from round 7** (re-confirmed; no fixture changes in rounds 8–9 touched
+scoring-relevant fields), measured against a real `nomic-embed-text` 768-d embedder on a cold cache and
+real `rapidfuzz`, both input orders:
+
+| arm | precision@5 | r09 rank | ordering pairs | verdict |
+|---|---|---|---|---|
+| keyword-overlap | 0.80 | 1 | 0/3 | FAIL |
+| lexical tf-idf | 1.00 | 8 | 0/3 | FAIL |
+| embedding pure-vector | 0.80 | 4 | 0/3 | FAIL |
+| faithful + **no-op** evidence verifier | 0.80 | 1 | 3/3 | FAIL (adversarial arm) |
+| faithful + **hris `_fuzz_substring`** | 0.80 | 1 | 3/3 | FAIL |
+| faithful + **correct** verifier | 1.00 | 8 | 3/3 | **PASS** |
+
+**PR:** [#10](https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip
+`583427f`, 18 commits. **CI is fully green** (branch-name · ruff/black/mypy · unit/coverage ·
+integration pg+neo4j+redis · "ALL GATES GREEN"). **Open, awaiting human merge — not yet merged.**

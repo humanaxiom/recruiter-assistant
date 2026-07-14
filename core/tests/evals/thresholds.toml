@@ -4,24 +4,58 @@
 # and (once 4c lands the orchestrator) by run_evals.py. `core/tests/unit/test_evals_corpus.py`
 # parses this file today to guard its shape/keys before any evals code exists.
 #
-# Keys are read literally by both consumers — do not rename a key without updating
-# both the gate doc and run_evals.py in the same change.
+# THE KEY SET IS A THREE-WAY CONTRACT between this file,
+# `.claude/agents/ranking-evals.md`, and `core/tests/evals/run_evals.py`. All
+# three enumerate every key below; `test_evals_corpus.py` fails if this file
+# grows or loses a key without the other two being updated in the same change.
+# (That drift is real: the file grew `[adversarial]` and
+# `[evidence].min_completeness_in_topk` and neither consumer noticed -- a 4c
+# coder wiring run_evals.py from its own docstring would have built a gate a
+# pure-vector ranker passes.) Do not rename or add a key here alone.
 
 [precision_at_k]
-# Top-k shortlist quality: >= min_precision of the top-k entries must be tagged
-# 'strong' or 'borderline' in fixtures/labels.json; none may be 'weak' or
-# 'adversarial'. With this corpus (7 strong + 4 borderline = 11 "good" resumes,
-# out of 16 total fixtures -- see fixtures/labels.json's expected_rank_band
-# comment for how the tier counts and bands are kept in sync) a correct
-# ranking should fill k=5 entirely with good tags.
+# Top-k shortlist quality: min_precision of the top-k entries must be tagged
+# 'strong' or 'borderline' in fixtures/labels.json; NONE may be 'weak' or
+# 'adversarial'. min_precision is therefore exactly 1.0 -- "none" and "0.8"
+# are not the same contract, and at k=5 a 0.8 floor tolerates exactly one bad
+# entry, i.e. it PASSES an engine that ranks r09 (the keyword-stuffer this
+# metric exists to catch) at rank 5, in direct contradiction of
+# [adversarial].must_not_surface_in_topk below. With 11 "good" fixtures
+# (7 strong + 4 borderline) out of 17, a 0.8 floor is also clearable by a
+# uniformly RANDOM ranker about 40% of the time -- hypergeometric, k = 5:
+# P(>= 4 good) = [C(11,4)*C(6,1) + C(11,5)] / C(17,5) = (1980 + 462) / 6188 =
+# 39.5%. (Round-7 finding N-2: this said "roughly half the time", which was a
+# made-up number. The point stands either way -- a threshold a coin-flip ranker
+# clears 2 times in 5 is not a quality gate -- but the corpus does not get to
+# invent figures.)
+#
+# BOTH VALUES ARE PINNED EXACTLY by test_evals_corpus.py -- changing either
+# needs a human, the same way verification_rate_min / temperature /
+# must_not_surface_in_topk are pinned. A correct ranking fills k=5 entirely
+# with 'strong' fixtures (see fixtures/labels.json's expected_rank_band
+# comment for how the tier counts and bands stay in sync).
 k = 5
-min_precision = 0.8
+min_precision = 1.0
 
 [evidence]
-# Fraction of surfaced evidence quotes that fuzzy-match (>= fuzz_threshold,
-# rapidfuzz-style ratio) their cited resume chunk. Must be 1.0 -- any
-# unverifiable/fabricated quote reaching output is a hard fail (anti-fabrication
-# invariant, docs/EXTRACTION_PLAN.md "Contract invariants").
+# Fraction of surfaced evidence quotes that fuzzy-match (>= fuzz_threshold)
+# their cited resume chunk. Must be 1.0 -- any unverifiable/fabricated quote
+# reaching output is a hard fail (anti-fabrication invariant,
+# docs/EXTRACTION_PLAN.md "Contract invariants").
+#
+# WHICH fuzz measure (round-4 finding N1 -- this used to say "rapidfuzz-style
+# ratio", which is wrong and unimplementable). The measure is
+# `rapidfuzz.fuzz.partial_ratio` (or `token_set_ratio`): the quote is a SPAN of
+# its cited chunk, not the whole chunk, so a full-string ratio is the wrong
+# shape. Measured against this corpus's own gold anchors, `fuzz.ratio` scores
+# them 0.648 / 0.796 -- BELOW 0.85 -- so an engine that implements the old
+# wording literally can never reach verification_rate_min = 1.0.
+# Two more measures this corpus already knows are broken for the job (carried
+# into the 4c requirements, docs/EXTRACTION_PLAN.md):
+#   - `fuzz.WRatio` scores r02's FABRICATED negative anchor at 0.855 >= 0.85,
+#     i.e. it VERIFIES a fabrication (the corpus correctly fails such an engine
+#     via [evidence].negative_evidence_must_fail);
+#   - `partial_token_set_ratio` returns 1.000 on 2 of the 4 negative anchors.
 verification_rate_min = 1.0
 # SINGLE SOURCE OF TRUTH NOTE: this value must always equal
 # `src.schemas.matching.MatchWeights().evidence_verify_fuzz` (currently 0.85).
@@ -37,6 +71,14 @@ fuzz_threshold = 0.85
 # blanked by the fabrication verifier and simply omitted from output, rather
 # than causing that candidate to be excluded from top-k in the first place).
 min_completeness_in_topk = 1.0
+# Anti-fabrication FALSIFIER (round-3 hardening, finding G1). Every
+# `gold_evidence` anchor in labels.json is an exact substring of its cited
+# chunk, so all of them verify at 1.0 -- which means verification_rate_min =
+# 1.0 above is satisfiable by a verifier that returns True unconditionally.
+# labels.json therefore also carries `negative_evidence`: chunk_id -> a
+# FABRICATED quote that MUST score BELOW fuzz_threshold against that chunk and
+# be blanked. 4c must run these and fail if any of them verifies.
+negative_evidence_must_fail = true
 
 [adversarial]
 # Backstop invariant (Phase-4a strengthening, 4c-required T3): an adversarial
@@ -45,27 +87,257 @@ min_completeness_in_topk = 1.0
 # top-k shortlist, however high its raw skill-keyword overlap with the JD is.
 # fixtures/labels.json flags every 'adversarial' (and 'weak') resume with
 # must_not_surface_in_topk = true; 4c enforces this against the live ranker.
+#
+# "however high its overlap" is now an ASSERTED property, not a promise:
+# test_evals_corpus.py pins r09 as structurally top-tier on EVERY NON-evidence
+# signal -- all five of MatchWeights' structured sub-scores, each stated as the
+# ENGINE COMPUTES IT (round-5 finding F1: the previous version of this comment
+# stated two of them as their NAMES suggest, which is how the bait hole kept
+# moving instead of closing):
+#   skill      (0.40) -- claims all 5 required + all 3 nice-to-have skills;
+#                        every `years` clears the JD's min_years; every
+#                        `last_used_year` is in the recency_recent bucket
+#   experience (0.25) -- `score_experience`: total_years_experience clears
+#                        min_years_experience without tripping overqual_ratio.
+#                        This is the ONLY sub-score that reads years.
+#   seniority  (0.15) -- NOT a years check. `orchestrator.py:331-340` computes
+#                        cosine(jd.title, most-recent role title), rescaled from
+#                        [seniority_floor, 1] to [0, 1]. r09's most-recent title
+#                        is the JD title VERBATIM, so cosine(x, x) = 1.0 and
+#                        seniority = 1.0 EXACTLY, under any embedder.
+#   education  (0.10) -- `score_education` reads the degree LEVEL only. r09
+#                        holds a bachelor's, meeting the JD's min_level.
+#                        (It never reads `jd.education.fields` -- see the open
+#                        decision in docs/EXTRACTION_PLAN.md.)
+#   vector     (0.10) -- every JD skill named in the embedded `summary`.
+# Only the EVIDENCE verifier may reject it.
+#
+# ROUND-4 FINDING B1 -- this arm was INERT and this comment was a falsehood.
+# r09 shipped with a sub-bachelor `Diploma, General Studies`, failing the JD's
+# education min_level outright, and the potency test asserted only skill /
+# experience / seniority -- omitting education and vector, the two sub-scores
+# on which the bait was weak.
+#
+# ROUND-5 FINDING F1 -- and the round-4 fix RELOCATED the hole rather than
+# closing it. The lines above used to justify BOTH `experience (0.25)` and
+# `seniority (0.15)` with a single claim ("clears min_years_experience without
+# tripping overqual_ratio"). That claim is `score_experience`, and SENIORITY
+# DOES NOT READ YEARS AT ALL. So the potency test asserted experience TWICE and
+# seniority NEVER -- while r09 carried `"title": "Software Professional"`, the
+# most JD-distant title of any non-weak fixture (every strong fixture is a
+# Backend/Data/Staff/Principal Engineer). Measured against the faithful engine
+# with a NO-OP evidence verifier: seniority 0.271 -> r09 rank 8 -> precision@5 =
+# 1.00 -> a BAD ENGINE PASSES. The trap fires iff seniority(r09) >= 0.638, and
+# the strong tier sits at 0.71-0.88. The hole moved from a 0.10 sub-score to a
+# 0.15 one.
+#
+# Fixed by giving the bait the JD's own title (which is also what a real
+# keyword-stuffer does), pinning seniority at 1.0 by ARITHMETIC rather than by a
+# model-dependent measurement -- re-measuring 'Senior Backend Engineer' across
+# two nomic-embed-text builds gave 0.755 and 0.581, straddling the 0.638
+# break-even, so a measured title would leave this arm's arming dependent on the
+# embedding model. MEASURED on the repaired corpus (faithful engine, real
+# embedder + real rapidfuzz):
+#   no-op evidence verifier    -> r09 rank 1, precision@5 = 0.80 -> FAILS (armed)
+#   hris's own _fuzz_substring -> r09 rank 1, precision@5 = 0.80 -> FAILS
+#   correct verifier           -> r09 OUT of the top-5, precision@5 = 1.00 -> PASSES
+#
+# WHAT IS GATED, and what is not (round-6 reconciliation). r09's exact rank under
+# the correct verifier is NOT gated and is NOT stable across builds -- it lands
+# just below the strong tier, in a near-tie with r04 (measured 0.596994 vs
+# 0.596711, a 2.8e-04 spread, so the two swap between builds; both stay in band,
+# because `adversarial` admits [8, null] and `borderline` admits [8, 12]). Do not
+# re-pin a rank here. What IS gated, and by ~0.19 of margin either way: the bait
+# is BELOW EVERY STRONG FIXTURE and therefore outside the k=5 window (score
+# ~0.597 vs the 5th-place cutoff ~0.785). See fixtures/labels.json's r09
+# `expected_rank_band_note`.
 must_not_surface_in_topk = true
+
+[ordering_controls]
+# Matched-pair dimension controls (round-3 hardening, finding C2). These are
+# the corpus's most discriminating artifact and existed only as PROSE in
+# labels.json -- there was no key here for run_evals.py to read, so nothing
+# forced 4c to implement the pairwise assertion at all.
+#
+# Each pair is identical in every scoring-relevant field EXCEPT the one named
+# dimension (see labels.json's `ordering_controls` for the per-pair rationale
+# and the twin-integrity tests that prove "identical except X"). For each pair,
+# a correct ranker MUST satisfy BOTH halves of the assertion:
+#
+#     rank(higher_id) < rank(lower_id)
+#   AND
+#     score_final(higher_id) - score_final(lower_id) >= min_score_gap
+#
+# A ranker blind to the dimension then fails on EITHER input order.
+#
+# ROUND-6 FINDING F5 -- THE RANK HALF ALONE GATED NOTHING ON TWO OF THE THREE
+# PAIRS. `rank(hi) < rank(lo)` is satisfiable by a TIE-BREAK, and that is exactly
+# how the overqual and motivation pairs were being decided. Measured against an
+# engine BLIND to each pair's own dimension (real nomic-embed-text 768d + real
+# rapidfuzz + an engine replica of the ported hris stages/orchestrator):
+#
+#   pair        blind engine             twin separation   labels order  reversed
+#   education   weights.education = 0    -3.266e-04 [1]    FAIL          FAIL
+#   overqual    overqual_ratio = 99      +0.000e+00 TIE    FAIL          PASS
+#   motivation  weights.motivation = 0   +0.000e+00 TIE    PASS          FAIL
+#
+#   [1] PRE-round-7. Round 7 (R7-2, below) unified the education twins'
+#       institution and re-measured this at -8.716e-04 -- same sign, same
+#       verdict, larger margin.
+#
+# i.e. a MOTIVATION-BLIND ENGINE PASSED the motivation pair in the fixtures'
+# natural order, and the overqual pair failed only by tie-break luck.
+#
+# Root cause, and it is the mirror image of F2: `_build_summary_text`
+# (core/src/worker/resume_tasks.py) embeds `summary` / `skills` / `experience` /
+# `education` and NOTHING ELSE -- not `total_years_experience`, not
+# `cover_letter_chunks`, which are precisely the fields those two twin pairs
+# differ in. Their embedding input is BYTE-IDENTICAL (asserted:
+# test_twins_that_share_an_embedding_input_are_the_reason_min_score_gap_exists),
+# so their vector sub-scores are equal to the last bit, there is no residual to
+# break the tie, and `stage4_combine`'s stable sort just inherits stage-1's
+# `ORDER BY vec_score DESC` -- arbitrary for identical vectors. That byte
+# identity is DESIRABLE (it keeps the dimension out of `summary_emb`); the fix is
+# the gap, not a narrated summary. The education pair is decisive on ranks alone
+# only BECAUSE it keeps a residual and F2 aimed it at the LOWER twin.
+#
+# Correct-engine gaps: +0.0391 (education) / +0.0120 (overqual) / +0.0900
+# (motivation) -- all four orders of magnitude clear of min_score_gap, and each
+# blind engine now FAILS on BOTH input orders.
+#
+# ROUND-7 FINDING N-1 -- "all three are ARITHMETIC" (what this comment used to
+# say) is FALSE. Exactly ONE of them is:
+#   overqual   +0.0120 = 0.6 * 0.25 * (1.00 - 0.92). Pure arithmetic off
+#              MatchWeights and the twins' years. It is also the SMALLEST, so it
+#              is the one that bounds min_score_gap from above -- and it is the
+#              only one the corpus asserts (test_min_score_gap_is_far_below_the_
+#              smallest_gap_a_correct_engine_produces). The sandwich needs no
+#              other.
+#   education  +0.0391 = an arithmetic 0.6 * 0.10 * (1 - education_partial * 2/3)
+#              = 0.0400, MINUS an embedder-MEASURED vector residual (~0.00087).
+#   motivation +0.0900 = 0.1 * 0.9, where 0.9 is the LLM's MEASURED confidence on
+#              r04's cover-letter evidence. It is NOT a MatchWeights constant; a
+#              different extractor moves it.
+#
+# REVIEW OBLIGATION, NOT A GATE (round-7 finding M-3). The three blind-engine
+# mutations below (weights.education = 0, overqual_ratio = 99, weights.motivation
+# = 0) are what prove the pairs gate their dimension at all -- but NOTHING here
+# runs them, and nothing can: they require running the engine with MUTATED
+# MatchWeights, which is a property of 4c's own test suite, not of a threshold
+# file. Adding a key for it would be exactly the defect this branch keeps finding
+# (a claim stamped as asserted, enforced by nobody). So it is stated plainly: the
+# 4c PR must carry these three mutations as tests, and its reviewer must check
+# that they FAIL on BOTH input orders. That is a human obligation on the 4c
+# review, not something this file gates.
+#
+# ROUND-5 FINDING F2 -- the `education` pair did not test education.
+# labels.json claimed r14/r11 were "identical EXCEPT the education[] entry" and
+# that `MatchWeights.education_partial (0.5)` would demote r11 (a bachelor's in
+# a NON-ALLOWED field). That mechanism does not exist: `stages.score_education`
+# reads the degree LEVEL and NEVER reads `jd.education.fields`. Both twins were
+# `BSc` -> `bachelors` -> education = 1.00 for BOTH, so education_partial could
+# never fire. Worse, the pair still PASSED an education-blind ranker via the
+# VECTOR path -- `_build_summary_text` embeds `education[].degree` into
+# `summary_emb`, so the degree leaked into the vector sub-score and the whole
+# r14>r11 gap was vector, not education (measured with `weights.education = 0.0`
+# the pair still passed).
+#
+# The twins now differ in degree LEVEL (bachelor's vs a sub-bachelor associate),
+# which is the only thing the ported scorer reads, and BOTH fields are
+# JD-allowed so the field cannot be a second differentiator. Measured:
+#   correct engine:          r14 rank 3, r11 rank 7 (gap +0.0391, education-driven)
+#   weights.education = 0.0: the pair FLIPS (r11 rank 3, r14 rank 4, separation
+#                            -8.716e-04) -> FAILS on BOTH input orders
+# The residual embedded-degree vector confound (-0.00087 of score_final) points at
+# r11, the LOWER twin, so the ONLY way to order this pair correctly is to
+# implement the education sub-score. (Review obligation, not a gate -- see M-3
+# above: the 4c PR must carry the `education = 0.0` mutation as a test.)
+#
+# ROUND-7 FINDING R7-2 -- THAT RESIDUAL'S SIGN IS MEASURED, AND ITS INPUTS WERE
+# FREE. `_build_summary_text` embeds the education entry as
+# `{degree}, {institution} ({year})`, and the twin test pinned NONE of the three
+# (the embedding-input test compares only the segment BEFORE "Education: "). The
+# twins even shipped DIFFERENT institutions. Measured: rewrite r14's institution
+# to "Backend Data Engineering Institute of Python and Airflow" and the residual
+# flips to +0.0043 -> the education-BLIND engine separates the twins by +6.399e-04
+# >= min_score_gap -> it PASSES the pair on both input orders -> the education arm
+# goes INERT, exactly as in F2, with every corpus test green. The twins now SHARE
+# an institution and a year; the education dicts and the embedded `Education: `
+# segment are both pinned to differ ONLY in degree/field, so the degree TEXT is
+# the residual's sole contributor ("Data Engineering" embeds closer to this JD
+# than "Computer Science" -- which is what aims it at the LOWER twin).
+enforce = true
+pairs = [
+  { dimension = "education", higher_id = "r14_devon_ashworth", lower_id = "r11_skyler_brooks" },
+  { dimension = "overqual", higher_id = "r15_cameron_whitfield", lower_id = "r13_quinn_delgado" },
+  { dimension = "motivation", higher_id = "r04_morgan_lee", lower_id = "r16_rowan_castillo" },
+]
+# The anti-tie epsilon (round-6 finding F5). PINNED EXACTLY by
+# test_evals_corpus.py, like every other numeric threshold here, and bounded on
+# BOTH sides -- both bounds are load-bearing:
+#   * strictly > 0 -- a zero gap re-admits the exact tie above, and the whole
+#     point of the key is that an exact tie can NEVER pass, under any tie-break,
+#     on any input order;
+#   * far below 0.0120, the SMALLEST gap a correct engine can produce (the
+#     overqual pair: 0.6 * 0.25 * (1.00 - 0.92), pure arithmetic off MatchWeights
+#     and the twins' years) -- otherwise the guard could fail a CORRECT engine.
+# It is a float-noise epsilon, not a separation the fixtures have to earn: do not
+# raise it to "make the pairs more decisive", and do not lower it to 0.
+min_score_gap = 1e-6
 
 [pii]
 # The embedding text and any anonymized/exported shortlist output must never
 # contain a fixture's candidate name/email/phone (see fixtures/labels.json and
 # the *@example.test / 555-01xx synthetic markers in every resume fixture).
 leak_check = true
-# ADR-007's N1 residual: free-text experience/education fields (company names,
-# institutions, bullet text) are allowed to appear -- only the CandidateInfo
-# contact fields (name/email/phone) are the leak boundary.
-# fixtures/resumes/r12_reese_dawson.json is the positive control: the
-# candidate's own name appears inside a structured experience[].bullets[].text
-# (allowed, N1 residual) as well as in candidate.name (the actual leak
-# boundary) -- see 4c-required T4.
+# ADR-007's N1 residual, SURFACE-QUALIFIED (round-3 hardening, finding E4).
+# Free-text experience/education fields (company names, institutions, bullet
+# text) are allowed to carry identity -- but ONLY on the surface ADR-007 N1
+# actually exempts, which is the outbox / at-rest payload. The unqualified
+# wording here previously said such text "is allowed to appear" without
+# saying WHERE, so a 4c implementer could exempt bullet-DERIVED text from the
+# leak scan and ride a real candidate name into a Neo4j vector
+# (PIPEDA/FIPPA-relevant). That is reachable, not theoretical: r12's chunk
+# c_003 text is byte-identical to its bullet text.
+#
+# The rule, stated per surface:
+#   - outbox / at-rest payload  -> structured fields MAY carry identity (N1).
+#   - embedding input           -> NO name/email/phone, regardless of which
+#                                  field the text originated from (ADR-007 §7-F1).
+#   - exported / anonymized out -> NO name/email/phone, same regardless.
+#
+# fixtures/resumes/r12_reese_dawson.json is the positive control for the
+# distinction: the candidate's own name appears in a structured
+# experience[].bullets[].text (N1-allowed at rest) AND in the byte-identical
+# chunks[].text (an EMBED-boundary leak that must be scrubbed) AND in
+# candidate.name. fixtures/resumes/r17_harper_nakamura.json is the
+# format-divergent (ADR-007 F1-R) control: name in `summary`, a line-broken
+# name, a reflowed phone, and a bare email local-part in chunk text.
 allow_structured_fields = true
+structured_fields_surface = "outbox_at_rest"
+embedding_input_pii_free = true
+exported_output_pii_free = true
 
 [determinism]
-# Same inputs -> same ranking order. Evals pin LLM temperature to 0 and expect
-# score_final to be byte-identical (delta 0.0) across repeated runs.
+# Same inputs -> same output. Two-part contract (round-3 hardening, F1).
+#
+# Evals pin the LLM temperature to 0.
 temperature = 0.0
-max_score_delta = 0.0
+# ZERO-TOLERANCE half: ranking-ORDER stability. No candidate may move rank
+# between two identical runs. This is the invariant .claude/agents/
+# ranking-evals.md actually names ("same inputs -> same ranking order").
+max_rank_delta = 0
+# TOLERANT half: score_final gets an epsilon rather than an exact 0.0. An
+# exact-equality float check would either flake or lie:
+#   - src/pipeline/llm/client.py passes only temperature/num_predict to Ollama
+#     (NO `seed`), and greedy decode is not bit-stable across batch/kv-cache
+#     splits; and
+#   - src/pipeline/llm/cache.py caches embeddings by text hash, so a repeat
+#     run against warm Redis returns identical vectors and the determinism
+#     check passes VACUOUSLY -- testing the cache, not the model.
+# 4c REQUIREMENT (carried forward, see docs/EXTRACTION_PLAN.md): pin `seed` on
+# the eval path, and state the cache state (cold vs warm) across the two runs.
+max_score_delta = 1e-9
 
 # [reverse_match]
 # Placeholder -- added in Phase 4d once match_resume_to_jobs / reverse_match_job
