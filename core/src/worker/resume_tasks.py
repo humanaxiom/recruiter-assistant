@@ -129,6 +129,18 @@ async def _extract_skills_merged(
     a résumé still parses with names-only when the model fails. Returns
     canonical, deduped rows capped at the ``ResumeParsed.skills`` limit;
     years/last_used_year are carried only where the LLM stated them.
+
+    F3b (security re-audit round 2): ``skills_graph.reject_reason_for_skill_name``
+    runs HERE, on each LLM detail's RAW ``d.name``, BEFORE it is ever handed to
+    ``canonicalize_skill_names`` below. ``canonicalize_skill_names`` (and its
+    ``_basic_normalise``) strips ``@`` and lowercases the string, which is
+    exactly what let an email-shaped "skill" name sail past
+    ``skills_graph._resolve_one``'s email check in round 1 — that check runs
+    downstream, in Phase 4b's graph projection, on the ALREADY-canonicalised
+    name, where the ``@`` (and the capitalisation the new person-name-shape
+    check needs) is long gone. Checking the raw name here closes that gap; the
+    deterministic scan (``det``, below) is never checked — it can only ever
+    contain a vocabulary TERM found verbatim in the text, never LLM free text.
     """
     det = match_skills_in_text("\n".join(c.text for c in chunks))
     llm_details: list[ResumeSkillDetail] = []
@@ -142,6 +154,22 @@ async def _extract_skills_merged(
         log.warning(
             "parse_resume.skills_llm_failed resume_id=%s error=%s", resume_id_str, exc
         )
+
+    kept_details: list[ResumeSkillDetail] = []
+    pii_shaped_dropped = 0
+    for d in llm_details:
+        if skills_graph.reject_reason_for_skill_name(d.name) is not None:
+            pii_shaped_dropped += 1
+            continue
+        kept_details.append(d)
+    if pii_shaped_dropped:
+        # R3 discipline: count only, never the name(s).
+        log.warning(
+            "parse_resume.skill_name_pii_shaped_rejected resume_id=%s count=%d",
+            resume_id_str,
+            pii_shaped_dropped,
+        )
+    llm_details = kept_details
 
     # Years/last_used_year keyed by CANONICAL name (the first stated value wins,
     # then fill any gap from a later duplicate) so they survive the dedupe below.

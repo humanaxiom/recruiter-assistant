@@ -55,6 +55,32 @@ Also folds in the 4b-security re-audit's F3 finding (defence layer 1 of 2):
   (``src.worker.resume_tasks``, parse time) additionally scrubs a skill name
   that IS the candidate's own identity (e.g. "Casey Rivera") using candidate
   context this shape-only layer does not have.
+
+Round-2 security re-audit (F3, still open) — ``reject_reason_for_skill_name``
+adds Decision A, human-locked over security's proposed strict allowlist:
+
+* **Name-shape reject + vocabulary check, NOT a strict allowlist.** A skill
+  name is rejected iff it *looks like a person's name* (2-3 capitalised
+  alphabetic tokens with no technical marker — no digit, no ``.``/``+``/``#``
+  used as a tech token like ``C++``/``C#``/``.NET``/``Node.js``/``ISO
+  27001``/``IPv6``; a middle initial and a comma-reordered form are still
+  name-shaped; a bare single capitalised token is checked too, so ``Rivera``
+  alone is caught) **AND** it misses the vocabulary (``aliases.yaml`` +
+  ``categories.yaml``). The vocabulary check is what protects recall:
+  anything the 220-term vocabulary already knows (``Kafka``, ``Django``,
+  ``Kubernetes``, ...) is kept regardless of shape — the strict allowlist
+  security proposed was rejected by the human specifically because it drops
+  every skill outside that vocabulary, a large silent recall loss.
+* **Must run on the RAW name, BEFORE canonicalisation (F3b).**
+  ``src.worker.resume_tasks._extract_skills_merged`` canonicalises every LLM
+  skill name via ``canonicalize_skill_names`` before this module ever sees
+  it, and ``_basic_normalise``'s punctuation strip deletes ``@`` — so by the
+  time a résumé-path name reaches ``_resolve_one`` here, an email-shaped name
+  can never trip ``_EMAIL_SHAPE_RE`` again. ``resume_tasks`` therefore calls
+  ``reject_reason_for_skill_name`` directly on each LLM detail's RAW ``name``
+  (before any canonicalisation), in addition to this module's own call
+  inside ``_resolve_one`` (which still protects the JD/job-side path, where
+  no canonicalisation happens before resolution).
 """
 
 from __future__ import annotations
@@ -90,13 +116,24 @@ _NEAR_CANDIDATE_LIMIT = 5
 # -normalised form — `_basic_normalise` strips "@", which would defeat the
 # email check below).
 _MAX_SKILL_NAME_CHARS = 60
-_MAX_SKILL_NAME_TOKENS = 6
+# Round 2 (security re-audit): widened 6 -> 8. Zero of the 220 shipped vocab
+# terms trip the OLD 6-token cap, so this is pure headroom for a legitimate
+# multi-word certification name (e.g. a 7-token cert), not a regression.
+_MAX_SKILL_NAME_TOKENS = 8
 _EMAIL_SHAPE_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 # A contiguous run of digits/phone-punctuation (no letters) that carries at
 # least 7 digits — long enough to be a real phone number, short enough that
 # a legitimate skill name's occasional digit ("ISO 27001", "IPv6") never
 # trips it (those digits aren't contiguous with dashes/spaces/parens).
 _PHONE_RUN_RE = re.compile(r"[+()\-.\s\d]{7,}")
+
+# Decision A (round-2 security re-audit, F3) — person-name shape. A "word" is
+# Title Case ALPHA ONLY (`^[A-Z][a-z]+$`): this deliberately excludes
+# ALL-CAPS acronyms ("AWS", "SQL", "REST") and mixed-case technical proper
+# nouns ("PostgreSQL"), which never look like a person's name. A middle
+# initial ("M.") is its own token shape.
+_PERSON_NAME_WORD_RE = re.compile(r"^[A-Z][a-z]+$")
+_PERSON_MIDDLE_INITIAL_RE = re.compile(r"^[A-Z]\.$")
 
 
 class UnresolvedSkillNameError(RuntimeError):
@@ -121,17 +158,103 @@ def _looks_like_phone(name: str) -> bool:
     return False
 
 
+def _looks_like_person_name(name: str) -> bool:
+    """Decision A (round-2 security re-audit, F3) shape test: does ``name``
+    look like a PERSON'S name (as opposed to a skill)?
+
+    Person-name-shaped = 2-3 capitalised alphabetic tokens, with no
+    technical marker (a digit anywhere, or a bare ``+``/``#`` — ``C++``,
+    ``C#``, ``IPv6``, ``ISO 27001``), allowing:
+
+    * a middle initial (``Casey M. Rivera``) — a lone capital letter + ``.``
+      is its own token shape, distinct from a technical ``.`` (``.NET``,
+      ``Node.js`` — a ``.`` ANYWHERE ELSE disqualifies the whole name);
+    * a comma-reordered form (``Rivera, Casey`` — the comma is treated as a
+      token separator);
+    * a hyphenated surname (``Casey-Rivera`` — a hyphen JOINING two Title
+      Case alphabetic parts is a name join, not a technical marker; any
+      other hyphen shape disqualifies).
+
+    A BARE SINGLE token is included (``Rivera`` alone must be caught), which
+    is deliberately broad — the vocabulary check in
+    ``reject_reason_for_skill_name`` is what keeps this from eating
+    legitimate single-word Title-Case skills (``Kafka``, ``Django``,
+    ``Kubernetes``): this function only asks "is this SHAPED like a name",
+    never "is this a skill" — that second question is the caller's vocab
+    check.
+    """
+    s = name.strip()
+    if not s or any(ch.isdigit() for ch in s) or "+" in s or "#" in s:
+        return False
+    tokens: list[str] = []
+    for tok in s.replace(",", " ").split():
+        if _PERSON_MIDDLE_INITIAL_RE.match(tok):
+            tokens.append(tok)
+            continue
+        if "." in tok:
+            # A dot anywhere other than a recognised middle initial is a
+            # technical marker (".NET", "Node.js") — never name-shaped.
+            return False
+        parts = tok.split("-")
+        if len(parts) > 1:
+            if not all(_PERSON_NAME_WORD_RE.match(p) for p in parts):
+                return False
+            tokens.extend(parts)
+        else:
+            tokens.append(tok)
+
+    if not tokens or len(tokens) > 3:
+        return False
+    if not all(
+        _PERSON_NAME_WORD_RE.match(t) or _PERSON_MIDDLE_INITIAL_RE.match(t)
+        for t in tokens
+    ):
+        return False
+    # At least one real (non-initial) name word — a lone "M." is never
+    # sufficient on its own.
+    return any(_PERSON_NAME_WORD_RE.match(t) for t in tokens)
+
+
+def _is_known_vocab_term(name: str) -> bool:
+    """Decision A's recall guard: anything the 220-term vocabulary
+    (``aliases.yaml`` + ``categories.yaml``) already knows is kept
+    regardless of shape. Looked up via the SAME normalisation
+    (``_basic_normalise``) the rest of this module uses, so an alias, not
+    just a canonical name, still counts as a vocab hit."""
+    normalised = _basic_normalise(name)
+    return bool(normalised) and (
+        normalised in _alias_table() or normalised in _category_table()
+    )
+
+
+def reject_reason_for_skill_name(name: str) -> str | None:
+    """The single shape(+vocab) reject decision for a skill name — shared by
+    ``_resolve_one`` (this module) AND
+    ``src.worker.resume_tasks._extract_skills_merged`` (which calls this
+    directly on the RAW LLM skill name, BEFORE canonicalisation — see the
+    module docstring's F3b note). Returns a rejection-reason CATEGORY
+    (``email_shape`` / ``phone_shape`` / ``length_or_token_cap`` /
+    ``person_name_shape``), never the value that triggered it (R3
+    discipline) — or ``None`` when the name is fine.
+    """
+    if len(name) > _MAX_SKILL_NAME_CHARS:
+        return "length_or_token_cap"
+    if len(name.split()) > _MAX_SKILL_NAME_TOKENS:
+        return "length_or_token_cap"
+    if _EMAIL_SHAPE_RE.search(name):
+        return "email_shape"
+    if _looks_like_phone(name):
+        return "phone_shape"
+    if _looks_like_person_name(name) and not _is_known_vocab_term(name):
+        return "person_name_shape"
+    return None
+
+
 def _is_pii_shaped_skill_name(name: str) -> bool:
     """Shape-only PII guard for a raw (pre-normalisation) skill name — no
     identity knowledge, just "does this look like a skill at all". See the
     module docstring's F3 note for the companion identity-aware layer."""
-    if len(name) > _MAX_SKILL_NAME_CHARS:
-        return True
-    if len(name.split()) > _MAX_SKILL_NAME_TOKENS:
-        return True
-    if _EMAIL_SHAPE_RE.search(name):
-        return True
-    return _looks_like_phone(name)
+    return reject_reason_for_skill_name(name) is not None
 
 
 # ---------------- basic normalisation (mirrors src.pipeline.skills) ---------
@@ -250,7 +373,9 @@ async def _ask_llm_tiebreaker(
     try:
         out = await llm.chat_json(messages, _LLMTiebreakerOut, max_tokens=128)
     except Exception:  # noqa: BLE001 — non-fatal by design, matches hris
-        log.warning("skill_normalize.tiebreaker_failed candidate=%s", candidate)
+        # F8 (security re-audit round 2): never log the raw candidate value
+        # (potentially PII-shaped, per F3) — count-only.
+        log.warning("skill_normalize.tiebreaker_failed")
         return None
     match: str | None = out.match
     return match
@@ -304,13 +429,8 @@ async def resolve_canonical_names(
 async def _resolve_one(
     session: Any, raw: str, *, llm: Any, embedder: Any
 ) -> str | None:
-    if _is_pii_shaped_skill_name(raw):
-        if _EMAIL_SHAPE_RE.search(raw):
-            reason = "email_shape"
-        elif _looks_like_phone(raw):
-            reason = "phone_shape"
-        else:
-            reason = "length_or_token_cap"
+    reason = reject_reason_for_skill_name(raw)
+    if reason is not None:
         # R3 discipline: category only, never the value.
         log.warning("skill_normalize.pii_shaped_name_rejected reason=%s", reason)
         return None
@@ -349,9 +469,9 @@ async def _resolve_one(
     if near and near[0]["score"] >= settings.skill_auto_merge_threshold:
         canonical = str(near[0]["name"])
         await _alias_update(session, canonical, normalised)
+        # F8: log the CANONICAL name, never `raw` (potentially PII-shaped).
         log.debug(
-            "skill_normalize.auto_merged raw=%s canonical=%s score=%s",
-            raw,
+            "skill_normalize.auto_merged canonical=%s score=%s",
             canonical,
             near[0]["score"],
         )
@@ -366,18 +486,17 @@ async def _resolve_one(
         if match is not None and match in valid_names:
             canonical = match
             await _alias_update(session, canonical, normalised)
+            # F8: canonical only, never `raw`.
             log.info(
-                "skill_normalize.llm_merged raw=%s canonical=%s top_score=%s",
-                raw,
+                "skill_normalize.llm_merged canonical=%s top_score=%s",
                 canonical,
                 near[0]["score"],
             )
             return canonical
         if match is not None and match not in valid_names:
-            log.warning(
-                "skill_normalize.tiebreaker_hallucinated raw=%s answer_rejected=true",
-                raw,
-            )
+            # F8: no value logged at all — the hallucinated match is never a
+            # real Skill name and `raw` may be PII-shaped.
+            log.warning("skill_normalize.tiebreaker_hallucinated answer_rejected=true")
 
     # 4. Create a new canonical node.
     await session.run(
@@ -386,12 +505,14 @@ async def _resolve_one(
         n=normalised,
         e=emb,
     )
-    log.info("skill_normalize.created raw=%s canonical=%s", raw, normalised)
+    # F8: canonical only, never `raw`.
+    log.info("skill_normalize.created canonical=%s", normalised)
     return normalised
 
 
 __all__ = [
     "UnresolvedSkillNameError",
     "categories_for",
+    "reject_reason_for_skill_name",
     "resolve_canonical_names",
 ]
