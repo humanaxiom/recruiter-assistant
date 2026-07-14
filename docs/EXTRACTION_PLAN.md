@@ -456,7 +456,7 @@ come back `met` with a verified quote), not just an evidence-**precision** one.
 - **Reverse-match evidence depth** `match_reverse_evidence_k > 0` — recruiter-assistant runs reverse
   match only on the async `reverse_match_job` path (no synchronous endpoint to protect), so port hris's
   worker-path default, not its sync-timeout `k=0`.
-- **`skill_category_task` (LLM category backfill cron) deferred** out of Phase 4 — `_ensure_categories`'
+- **`skill_category_task` (LLM category backfill cron) deferred** out of Phase 4 — `ensure_categories`'
   curated seed already covers stage-2 family partial-credit; revisit later if the corpus shows gaps.
 - **NICE_TO_HAVE skills** contribute to stage-3 evidence text but NOT the stage-2 structured skill
   sub-score — hris's shipped behavior, ported verbatim and recorded (not "fixed") in the 4c ADR.

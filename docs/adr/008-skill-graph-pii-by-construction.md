@@ -49,8 +49,11 @@ The `Skill` node's unique key (`canonical_key`, replacing the old `canonical_nam
 one shared function (`_canonical_key_for_normalised`), called identically from both sides:
 
 - **Vocab hit** (`aliases.yaml` / `categories.yaml`, a closed ~220-term set): the canonical term,
-  cleartext. A closed vocabulary cannot contain a person's name by definition — zero PII risk,
-  independent of shape.
+  cleartext. A vocab hit makes identity **deniable and unembedded, not absent**: the node is a
+  shared global term with no `display_name` and no embedding written from the résumé side, so a
+  `HAS_SKILL` edge to it is ambiguous — it could equally mean the candidate genuinely has that
+  skill. This is NOT "cannot contain a person's name by definition" — the vocabulary we shipped
+  demonstrably does (`julia`, `hudson`; see residual #13).
 - **Everything else**: `"h:" + sha256(settings.skill_hash_salt + normalised)[:32]` — opaque,
   un-invertible, and (critically) computed from the exact same normalised string on both sides, so a
   JD requiring a skill and a résumé having the identical skill text still land on the same node.
@@ -194,6 +197,12 @@ ships. It is recorded here plainly, not softened.
     entropy check.
 12. Categories are curated-only: a hashed non-vocab skill gets `categories = []` and contributes
     **nothing** to stage-2 ontology partial credit, by construction.
+13. A candidate whose name collides with a vocabulary term (`julia`, `hudson`, `kafka`, `django`,
+    `cassandra`) gets a **cleartext** `canonical_key`. No `display_name` and no embedding are
+    written from the résumé side, so the disclosure is ambiguous (the node is shared with everyone
+    who genuinely has that skill) — but it is cleartext, and it is not eliminated by construction.
+    Accepted: removing these terms from the vocabulary would cost real recall for real
+    technologies.
 
 ## Alternatives Considered
 

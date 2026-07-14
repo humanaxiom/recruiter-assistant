@@ -990,7 +990,7 @@ async def _resume_projection_tx(
         # is what actually creates it — "ON CREATE may set nothing but the
         # key" (the MERGE pattern itself already sets `canonical_key`).
         await tx.run("MERGE (s:Skill {canonical_key: $cn})", cn=canonical)
-        await skills_graph._ensure_categories(tx, canonical)
+        await skills_graph.ensure_categories(tx, canonical)
         evidence = skill.get("evidence_chunk_ids") or []
         await tx.run(
             """

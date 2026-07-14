@@ -3,7 +3,7 @@ skill normalisation, deferred out of Phase 3 (ADR-007 §4) and landing here.
 
 Ported behaviourally from hris ``apps/worker/src/worker/skill_normalize.py``
 (``_resolve_canonical`` / ``normalize_skill`` / ``_ask_llm_tiebreaker`` /
-``categories_for`` / ``_ensure_categories`` / ``_category_table``), with
+``categories_for`` / ``ensure_categories`` / ``_category_table``), with
 THREE deliberate, human-locked deviations this file pins:
 
 * **Decision 3 — resolution runs OUTSIDE any Neo4j write transaction.**
@@ -770,7 +770,7 @@ async def test_tiebreaker_threshold_is_read_from_settings_not_hardcoded(
     assert 0.10 in vector_kwargs.values()
 
 
-# ── categories_for / _ensure_categories ────────────────────────────────────
+# ── categories_for / ensure_categories ────────────────────────────────────
 
 
 def test_categories_for_a_seeded_skill_is_non_empty() -> None:
@@ -810,7 +810,7 @@ async def test_ensure_categories_stamps_curated_families(
     monkeypatch.setattr(skills_graph, "categories_for", lambda c: ["backend", "data"])
     tx = MagicMock(run=AsyncMock(return_value=_FakeResult([])))
 
-    await skills_graph._ensure_categories(tx, "python")
+    await skills_graph.ensure_categories(tx, "python")
 
     tx.run.assert_awaited_once()
     cypher, kwargs = tx.run.await_args.args[0], tx.run.await_args.kwargs
@@ -832,7 +832,7 @@ async def test_ensure_categories_is_a_noop_when_uncurated(
     monkeypatch.setattr(skills_graph, "categories_for", lambda c: [])
     tx = MagicMock(run=AsyncMock(return_value=_FakeResult([])))
 
-    await skills_graph._ensure_categories(tx, "some-uncurated-skill")
+    await skills_graph.ensure_categories(tx, "some-uncurated-skill")
 
     tx.run.assert_not_awaited()
 
@@ -917,8 +917,29 @@ async def test_resolution_never_calls_execute_write_or_execute_read() -> None:
     session.execute_read.assert_not_awaited()
 
 
-def test_resolve_canonical_names_accepts_any_iterable_of_names() -> None:
-    assert callable(skills_graph.resolve_canonical_names)
+@pytest.mark.asyncio
+async def test_resolve_canonical_names_accepts_any_iterable_of_names() -> None:
+    """``names`` is typed ``Iterable[str]`` (not ``list[str]``) — pin that a
+    one-shot generator and a ``set`` both actually resolve correctly, not
+    just that the function is ``callable`` (that assertion is true of any
+    object and proves nothing about the parameter type)."""
+    session = _make_session(
+        [_FakeResult([{"name": "python"}]), _FakeResult([{"name": "rust"}])]
+    )
+    generator_input = (n for n in ["python", "rust"])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, generator_input, llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {"python": "python", "rust": "rust"}
+
+    session2 = _make_session(
+        [_FakeResult([{"name": "python"}]), _FakeResult([{"name": "rust"}])]
+    )
+    set_input = {"python", "rust"}
+    resolved2 = await skills_graph.resolve_canonical_names(
+        session2, set_input, llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved2 == {"python": "python", "rust": "rust"}
 
 
 def test_resolve_canonical_names_with_empty_input_returns_empty_dict() -> None:
@@ -940,8 +961,10 @@ def test_resolve_canonical_names_with_empty_input_returns_empty_dict() -> None:
 # ADR-008 — canonical-key hashing: the actual privacy control.
 #
 # The Skill node's MERGE key is either the vocab canonical term (cleartext —
-# a closed ~220-term vocabulary cannot contain a person's name) or, for a
-# non-vocab name, a salted hash (``h:`` + sha256(salt + normalised)[:32]).
+# deniable/ambiguous, not PII-free by definition: a name colliding with a
+# vocab term like "julia"/"hudson" still lands cleartext, see ADR-008
+# residual #13) or, for a non-vocab name, a salted hash (``h:`` +
+# sha256(salt + normalised)[:32]).
 # ═══════════════════════════════════════════════════════════════════════════
 
 

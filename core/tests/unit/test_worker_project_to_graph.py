@@ -526,7 +526,7 @@ async def test_stops_dispatching_once_deadline_exceeded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_budget_and_deadline_are_read_from_settings_not_hardcoded() -> None:
+async def test_skill_budget_is_read_from_settings_not_hardcoded() -> None:
     from src.settings import Settings
 
     row1 = _row(row_id=1, payload=_skills_payload(2))
@@ -547,6 +547,60 @@ async def test_skill_budget_and_deadline_are_read_from_settings_not_hardcoded() 
 
     assert delivered == 1
     project_resume.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deadline_seconds", "expected_delivered"),
+    [
+        # Generous deadline: the pinned 0.5s of "elapsed" wall-clock time
+        # (below) is nowhere near it, so both rows are attempted.
+        (100.0, 2),
+        # Tight deadline: 0.5s has already blown past it, so row2 is left
+        # for the next drain tick.
+        (0.1, 1),
+    ],
+)
+async def test_deadline_is_read_from_settings_not_hardcoded(
+    deadline_seconds: float, expected_delivered: int
+) -> None:
+    """F5's per-drain wall-clock deadline must be genuinely READ from
+    ``settings.outbox_drain_deadline_seconds`` on every call — not baked in
+    as a literal (hris has no deadline at all; this module's own default
+    happens to be ``4.0``, which is exactly the value a lazy hard-code could
+    hide behind).
+
+    ``time.monotonic`` is pinned to two calls exactly 0.5s apart: one for
+    the initial ``deadline = time.monotonic() + settings...`` computation,
+    one for row2's over-deadline check (row1 is always attempted
+    unconditionally, so it never calls ``monotonic`` itself). A deadline
+    setting of 100s comfortably absorbs that 0.5s elapse, so both rows are
+    delivered; a deadline setting of 0.1s does not, so only row1 is.
+
+    Mutation-proof: hard-coding ``deadline = time.monotonic() + 4.0`` at
+    ``graph_tasks.py`` would absorb the 0.5s elapse in BOTH parametrised
+    cases (0.5s < 4.0 regardless of the ``deadline_seconds`` setting), so
+    the ``(0.1, 1)`` case would observe ``delivered == 2`` instead and fail.
+    """
+    from src.settings import Settings
+
+    row1 = _row(row_id=1, payload=_skills_payload(2))
+    row2 = _row(row_id=2, payload=_skills_payload(2))
+    conn = _make_conn([row1, row2])
+    ctx = _make_ctx(conn)
+    custom = Settings(outbox_drain_deadline_seconds=deadline_seconds)
+
+    with (
+        patch("src.worker.graph_tasks.get_settings", return_value=custom),
+        patch("src.worker.graph_tasks.time.monotonic", side_effect=[100.0, 100.5]),
+        patch(
+            "src.worker.graph_tasks.project_resume", new_callable=AsyncMock
+        ) as project_resume,
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == expected_delivered
+    assert project_resume.await_count == expected_delivered
 
 
 @pytest.mark.asyncio

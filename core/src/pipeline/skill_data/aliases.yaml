@@ -150,20 +150,9 @@
 - canonical: nginx
   aliases: [nginx]
 
-# --- S10 (round-5 security re-audit) backstop: real skills that also
-# collide with a personal-name-lexicon entry on a BARE single-token name
-# ("julia", "hudson") — see skills_graph.py's module docstring "Round-5"
-# section. A single-real-token candidate has no second token for the
-# any()->all() quantifier fix to disagree about (`all`/`any` agree on a
-# length-1 sequence), so the vocabulary arm of Decision A's conjunction
-# (which always wins over the person-name-shape check — S9) is the only
-# mechanism that can save these. Deliberately NOT listing the MULTI-token
-# vendor/product compounds here (`Amazon Aurora`, `IBM Watson`, `Apache
-# Felix`, `Victoria Metrics`) — those are already saved by the any()->all()
-# quantifier fix itself (their vendor-word token is never a lexicon hit),
-# so leaving them off this list keeps the recall-guard tests below
-# genuinely sensitive to that quantifier fix rather than silently passing
-# via the vocab shortcut.
+# --- real skills that are also common personal names — kept for recall;
+# see ADR-008 residual #13 on vocab/name collision. ("julia" the language,
+# "hudson" as in Hudson/Jenkins.)
 - canonical: julia
   aliases: [julia]
 - canonical: hudson

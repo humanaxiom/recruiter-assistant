@@ -24,8 +24,10 @@ asymmetry: a job description carries no candidate PII — only the résumé side
 can leak a candidate's identity into the graph.
 
 * **``canonical_key`` (the Skill node's MERGE key / unique constraint)** is
-  either the vocab canonical term, CLEARTEXT (a closed ~220-term vocabulary
-  cannot contain a person's name — zero PII risk by construction), or, for a
+  either the vocab canonical term, CLEARTEXT (a vocab hit makes identity
+  DENIABLE and unembedded, not absent — see ADR-008 residual #13: a name that
+  collides with a real vocab term like ``julia``/``hudson`` still lands as a
+  cleartext key, just an ambiguous, shared, un-embedded one), or, for a
   non-vocab name, ``h:`` + a salted sha256 hash of the normalised string (see
   ``_hash_key`` / ``settings.skill_hash_salt``). Both sides compute this key
   from the SAME normalised string via the SAME function
@@ -194,18 +196,6 @@ def _skill_log_ref(canonical: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
-def _is_known_vocab_term(name: str) -> bool:
-    """Decision A's recall guard: anything the 220-term vocabulary
-    (``aliases.yaml`` + ``categories.yaml``) already knows is kept
-    regardless of shape. Looked up via the SAME normalisation
-    (``_basic_normalise``) the rest of this module uses, so an alias, not
-    just a canonical name, still counts as a vocab hit."""
-    normalised = _basic_normalise(name)
-    return bool(normalised) and (
-        normalised in _alias_table() or normalised in _category_table()
-    )
-
-
 def reject_reason_for_skill_name(name: str) -> str | None:
     """The shape-only reject decision for a skill name — shared by
     ``_resolve_one`` (this module, job side) AND
@@ -278,10 +268,11 @@ def _hash_key(normalised: str) -> str:
 def _canonical_key_for_normalised(normalised: str) -> str:
     """The single function BOTH the job side and the résumé side call to
     turn an already-normalised skill name into a ``canonical_key`` — a vocab
-    term is kept cleartext (a closed ~220-term vocabulary cannot contain a
-    person's name), anything else is hashed. Called from the SAME normalised
-    string on both sides (``_basic_normalise``), so ``REQUIRES``/``HAS_SKILL``
-    always meet at the same Skill node for a given skill name."""
+    term is kept cleartext (deniable/ambiguous, not PII-free by definition:
+    see ADR-008 residual #13), anything else is hashed. Called from the SAME
+    normalised string on both sides (``_basic_normalise``), so
+    ``REQUIRES``/``HAS_SKILL`` always meet at the same Skill node for a given
+    skill name."""
     if normalised in _alias_table() or normalised in _category_table():
         return normalised
     return _hash_key(normalised)
@@ -366,7 +357,7 @@ def categories_for(canonical: str) -> list[str]:
     return list(_category_table().get(canonical.strip().lower(), []))
 
 
-async def _ensure_categories(tx: Any, canonical: str) -> None:
+async def ensure_categories(tx: Any, canonical: str) -> None:
     """Stamp a Skill node with its CURATED families so stage-2 ontology
     partial-credit has something to read. Curated wins; skills with no
     curated family are simply left uncategorised (no LLM backfill in v1 —
@@ -616,6 +607,7 @@ async def _resolve_one(
 __all__ = [
     "UnresolvedSkillNameError",
     "categories_for",
+    "ensure_categories",
     "reject_reason_for_skill_name",
     "resolve_canonical_names",
     "resume_skill_canonical_key",

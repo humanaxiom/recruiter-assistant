@@ -239,7 +239,7 @@ async def _job_projection_tx(
         if canonical is None:
             # F3: shape-rejected as PII — drop this skill/edge silently.
             continue
-        await skills_graph._ensure_categories(tx, canonical)
+        await skills_graph.ensure_categories(tx, canonical)
         # ADR-008: `display_name` is written ONLY from the job/JD side, in a
         # dedicated statement — a job description carries no candidate
         # identity, so stamping the RAW (cleartext) skill name here is always
@@ -273,7 +273,7 @@ async def _job_projection_tx(
         canonical = resolved_skills[raw_name]
         if canonical is None:
             continue
-        await skills_graph._ensure_categories(tx, canonical)
+        await skills_graph.ensure_categories(tx, canonical)
         await tx.run(
             "MATCH (s:Skill {canonical_key: $cname}) SET s.display_name = $display",
             cname=canonical,
