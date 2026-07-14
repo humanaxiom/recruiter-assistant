@@ -123,6 +123,67 @@ async def test_lifespan_parks_a_blob_store_on_app_state(tmp_path: Path) -> None:
     assert (tmp_path / "wire.txt").read_bytes() == b"ok"
 
 
+# ── L3 (security re-audit round 2): SKILL_HASH_SALT symmetry with the worker ──
+#
+# ``src.worker.main.startup`` already refuses to start on an empty
+# ``skill_hash_salt`` (ADR-008). The API lifespan never hashes a skill name
+# itself today, so this is currently latent — but it must fail exactly as
+# loud, for exactly the same reason (an unsalted hash of a non-vocab skill
+# name is dictionary-attackable), should a future code path reach it from
+# this process, or should the salt only be misconfigured for the API.
+
+
+@pytest.mark.asyncio
+async def test_lifespan_raises_when_skill_hash_salt_is_empty(tmp_path: Path) -> None:
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    settings = Settings(storage_dir=str(tmp_path), skill_hash_salt="")
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch(
+            "src.api.main.init_pool", AsyncMock(return_value=MagicMock())
+        ) as init_pool,
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=MagicMock()),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=MagicMock())),
+    ):
+        with pytest.raises(RuntimeError, match="SKILL_HASH_SALT"):
+            async with lifespan(fresh):
+                pass
+
+    init_pool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_raise_when_skill_hash_salt_is_configured(
+    tmp_path: Path,
+) -> None:
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    arq = MagicMock()
+    arq.close = AsyncMock()
+    driver = MagicMock()
+    driver.close = AsyncMock()
+    settings = Settings(storage_dir=str(tmp_path), skill_hash_salt="a-real-salt")
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch("src.api.main.init_pool", AsyncMock(return_value=MagicMock())),
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=driver),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=arq)),
+    ):
+        async with lifespan(fresh):
+            pass  # must not raise
+
+
 def test_get_blob_store_returns_the_store_from_app_state() -> None:
     from src.storage.blob_store import get_blob_store
 

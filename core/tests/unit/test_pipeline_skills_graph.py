@@ -254,11 +254,15 @@ async def test_widened_token_cap_does_not_reject_at_eight_tokens() -> None:
     must NOT be rejected on token-count grounds alone (a 7-8 token
     certification name is legitimate — Decision B's skill-recall guard)."""
     eight_tokens = "alpha bravo charlie delta echo foxtrot golf hotel"
+    # F1 (security re-audit round 2): the exact-match fast path now queries by
+    # the PURE `canonical_key` (never the raw/aliased name echoed back by the
+    # fake row) — a single non-empty result is enough to hit it, whatever the
+    # fake's own "name" field says.
     session = _make_session([_FakeResult([{"name": eight_tokens}])])
     resolved = await skills_graph.resolve_canonical_names(
         session, [eight_tokens], llm=_make_llm(), embedder=_make_embedder()
     )
-    assert resolved[eight_tokens] == eight_tokens
+    assert resolved[eight_tokens] is not None
 
 
 @pytest.mark.asyncio
@@ -283,7 +287,11 @@ async def test_rejection_is_logged_as_a_category_never_the_raw_value(
 @pytest.mark.asyncio
 async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
     """Non-regression: a real multi-word skill name (well under the shape
-    caps) must resolve normally, not get swept up by the PII guard."""
+    caps) must resolve normally, not get swept up by the PII guard.
+
+    "Google Cloud Platform" is a listed alias of the "gcp" vocab entry
+    (``aliases.yaml``), so its PURE canonical key (F1) is "gcp" — not the
+    literal input string, and not whatever a fake row happens to echo back."""
     session = _make_session([_FakeResult([{"name": "google cloud platform"}])])
     resolved = await skills_graph.resolve_canonical_names(
         session,
@@ -291,7 +299,7 @@ async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
         llm=_make_llm(),
         embedder=_make_embedder(),
     )
-    assert resolved["Google Cloud Platform"] == "google cloud platform"
+    assert resolved["Google Cloud Platform"] == "gcp"
     session.run.assert_awaited()
 
 
@@ -376,11 +384,22 @@ def test_unresolved_skill_name_error_is_a_runtime_error() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_merge_path_merges_without_asking_the_llm() -> None:
+    """F1 (security re-audit round 2): auto-merge is enrichment-only — it
+    still writes an alias onto the near-matched "python" node (below), but
+    the KEY RETURNED to the caller must be the PURE
+    ``_canonical_key_for_normalised("py3")`` (a hash — "py3" is not itself a
+    listed vocab alias), never "python" (the near candidate's own key). Prior
+    to this fix, this test asserted ``resolved == {"py3": "python"}`` — the
+    exact divergence bug F1 describes: a JD requiring "py3" and a résumé
+    having "py3" would have landed on DIFFERENT Skill nodes, since the résumé
+    side (``resume_skill_canonical_key``) always computes the pure key.
+    """
     session = _make_session(
         [
             _FakeResult([]),  # exact match: miss
             _FakeResult([{"name": "python", "aliases": ["py"], "score": 0.95}]),
-            _FakeResult([]),  # alias-update write
+            _FakeResult([]),  # alias-update write (enrichment onto "python")
+            _FakeResult([]),  # ensure-node write (the pure key, always last)
         ]
     )
     llm = _make_llm()
@@ -390,19 +409,28 @@ async def test_auto_merge_path_merges_without_asking_the_llm() -> None:
         session, ["py3"], llm=llm, embedder=embedder
     )
 
-    assert resolved == {"py3": "python"}
+    expected_key = skills_graph._canonical_key_for_normalised("py3")
+    assert resolved == {"py3": expected_key}
+    assert resolved["py3"] != "python", (
+        "auto-merge redirected the returned key to the near candidate's own "
+        "key instead of the pure canonical_key_for_normalised() result (F1)"
+    )
     llm.chat_json.assert_not_awaited()
     embedder.embed.assert_awaited_once()
-    assert session.run.await_count == 3
+    assert session.run.await_count == 4
 
 
 @pytest.mark.asyncio
 async def test_auto_merge_path_writes_an_alias_update_for_the_new_spelling() -> None:
+    """The enrichment side effect is still real: the near-matched node
+    ("python") gains "py3" as an alias, even though (per F1, above) that
+    match no longer decides the returned key."""
     session = _make_session(
         [
             _FakeResult([]),
             _FakeResult([{"name": "python", "aliases": [], "score": 0.99}]),
             _FakeResult([]),
+            _FakeResult([]),  # ensure-node write (the pure key)
         ]
     )
     await skills_graph.resolve_canonical_names(
@@ -411,6 +439,44 @@ async def test_auto_merge_path_writes_an_alias_update_for_the_new_spelling() -> 
     _cypher, kwargs = _run_calls(session)[2]
     assert kwargs.get("c") == "python" or "python" in kwargs.values()
     assert "py3" in kwargs.values()
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_never_redirects_the_key_even_with_a_graph_learned_alias() -> (
+    None
+):
+    """F1's own round-trip guard, at the unit level: a near-candidate scoring
+    ABOVE the auto-merge threshold, where that candidate ALSO already carries
+    a graph-learned alias (simulating a pre-fix-poisoned graph, or this
+    function's own enrichment from a previous call), must still never
+    redirect the returned key — job-side and résumé-side must agree.
+
+    Mutation-kill: reverting the auto-merge branch to
+    ``return str(near[0]["name"])`` (the pre-fix behaviour) turns this RED.
+    """
+    session = _make_session(
+        [
+            _FakeResult([]),  # exact match: miss
+            _FakeResult(
+                [
+                    {
+                        "name": "react",
+                        "aliases": ["reactjs", "react native"],
+                        "score": 0.95,
+                    }
+                ]
+            ),
+            _FakeResult([]),  # alias-update write (enrichment onto "react")
+            _FakeResult([]),  # ensure-node write (the pure key)
+        ]
+    )
+    job_side = await skills_graph.resolve_canonical_names(
+        session, ["React Native"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    resume_side = skills_graph.resume_skill_canonical_key("React Native")
+
+    assert job_side["React Native"] == resume_side
+    assert job_side["React Native"] != "react"
 
 
 # ── grey-zone LLM tiebreaker path ─────────────────────────────────────────
@@ -427,26 +493,37 @@ async def test_grey_zone_asks_the_llm_and_merges_on_a_valid_match() -> None:
     # Decision C's personal-name-lexicon arm fixed that: neither "postgres"
     # nor "db" is a personal name, so this phrase is correctly KEPT again —
     # restored to the original, more realistic placeholder.
+    # F1 (security re-audit round 2): a VALID LLM-confirmed match is still
+    # enrichment-only — "postgres db" is not itself a vocab alias, so its
+    # pure key is a hash, never "postgresql" (the confirmed match's own key).
+    # Prior to this fix, this test asserted
+    # ``resolved == {"postgres db": "postgresql"}`` — the exact divergence
+    # bug F1 describes.
     near = [{"name": "postgresql", "aliases": ["postgres"], "score": 0.90}]
     session = _make_session(
         [
             _FakeResult([]),
             _FakeResult(near),
-            _FakeResult([]),  # alias-update write
+            _FakeResult([]),  # alias-update write (enrichment onto "postgresql")
+            _FakeResult([]),  # ensure-node write (the pure key)
         ]
     )
     llm = _make_llm(match="postgresql")
     resolved = await skills_graph.resolve_canonical_names(
         session, ["postgres db"], llm=llm, embedder=_make_embedder()
     )
-    assert resolved == {"postgres db": "postgresql"}
+    expected_key = skills_graph._canonical_key_for_normalised("postgres db")
+    assert resolved == {"postgres db": expected_key}
+    assert resolved["postgres db"] != "postgresql"
     llm.chat_json.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_grey_zone_llm_receives_the_near_candidates() -> None:
     near = [{"name": "postgresql", "aliases": ["postgres"], "score": 0.90}]
-    session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
+    session = _make_session(
+        [_FakeResult([]), _FakeResult(near), _FakeResult([]), _FakeResult([])]
+    )
     llm = _make_llm(match="postgresql")
     await skills_graph.resolve_canonical_names(
         session, ["postgres db"], llm=llm, embedder=_make_embedder()
@@ -456,6 +533,26 @@ async def test_grey_zone_llm_receives_the_near_candidates() -> None:
         *llm.chat_json.await_args.kwargs.values(),
     ]
     assert any("postgresql" in str(a) for a in flat_args)
+
+
+@pytest.mark.asyncio
+async def test_llm_tiebreak_never_redirects_the_key_job_and_resume_agree() -> None:
+    """F1's round-trip guard for the LLM-tiebreak branch specifically.
+
+    Mutation-kill: reverting that branch to ``return match`` (the pre-fix
+    behaviour) turns this RED.
+    """
+    near = [{"name": "postgresql", "aliases": ["postgres"], "score": 0.90}]
+    session = _make_session(
+        [_FakeResult([]), _FakeResult(near), _FakeResult([]), _FakeResult([])]
+    )
+    llm = _make_llm(match="postgresql")
+    job_side = await skills_graph.resolve_canonical_names(
+        session, ["postgres db"], llm=llm, embedder=_make_embedder()
+    )
+    resume_side = skills_graph.resume_skill_canonical_key("postgres db")
+    assert job_side["postgres db"] == resume_side
+    assert job_side["postgres db"] != "postgresql"
 
 
 @pytest.mark.asyncio
@@ -591,7 +688,9 @@ async def test_auto_merged_skill_acceptance_is_not_logged_verbatim(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     near = [{"name": "cockroachdb", "aliases": [], "score": 0.95}]
-    session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
+    session = _make_session(
+        [_FakeResult([]), _FakeResult(near), _FakeResult([]), _FakeResult([])]
+    )
     await skills_graph.resolve_canonical_names(
         session, ["crdb"], llm=_make_llm(), embedder=_make_embedder()
     )
@@ -617,7 +716,9 @@ async def test_auto_merge_threshold_is_read_from_settings_not_hardcoded(
     monkeypatch.setattr(skills_graph, "get_settings", lambda: raised)
 
     near = [{"name": "python", "aliases": [], "score": 0.95}]
-    session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
+    session = _make_session(
+        [_FakeResult([]), _FakeResult(near), _FakeResult([]), _FakeResult([])]
+    )
     llm = _make_llm(match="python")
 
     await skills_graph.resolve_canonical_names(
@@ -739,6 +840,7 @@ async def test_alias_update_cypher_is_dedupe_safe_not_the_naive_hris_pattern() -
             _FakeResult([]),
             _FakeResult([{"name": "python", "aliases": ["py3"], "score": 0.95}]),
             _FakeResult([]),
+            _FakeResult([]),  # ensure-node write (the pure key)
         ]
     )
     await skills_graph.resolve_canonical_names(

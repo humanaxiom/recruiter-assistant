@@ -46,6 +46,7 @@ from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
 from src.models.ddl import init_schema
+from src.pipeline import skills_graph
 from src.services import outbox_service
 from src.settings import Settings, get_settings
 from src.worker.graph_tasks import project_to_graph
@@ -148,6 +149,34 @@ def _ctx(pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver) -> dict[str, Any]:
         "llm": _make_llm(),
         "embedder": _make_embedder(),
     }
+
+
+def _make_embedder_forcing_near_duplicate(text_a: str, text_b: str) -> MagicMock:
+    """F1 (security re-audit round 2): every OTHER fixture in this file uses
+    ``_make_embedder`` above, whose ``_vec``-per-crc32-seed vectors are
+    DELIBERATELY near-orthogonal across distinct skill names (see ``_vec``'s
+    own docstring) — which means the real Neo4j vector-search auto-merge
+    branch of ``skills_graph._resolve_one`` never actually fires in ANY
+    other test in this file (security's report: "the e2e `_vec` helper was
+    deliberately made near-orthogonal so the vector branch never fires").
+
+    This helper is used ONLY by the vector-auto-merge test below: it forces
+    ``text_a`` and ``text_b`` — and ONLY those two exact strings — to embed
+    to the IDENTICAL vector, so a real ``score >= skill_auto_merge_threshold``
+    hit happens against the REAL Neo4j vector index. Every other text still
+    goes through the normal crc32-seeded, near-orthogonal path, so this
+    doesn't change determinism/collision behaviour for anything else.
+    """
+    shared_seed = zlib.crc32(text_a.encode())
+
+    async def _embed(texts: Any) -> list[list[float]]:
+        out = []
+        for t in texts:
+            seed = shared_seed if t in (text_a, text_b) else zlib.crc32(t.encode())
+            out.append(_vec(seed))
+        return out
+
+    return MagicMock(embed=AsyncMock(side_effect=_embed))
 
 
 async def _insert_job(pool: asyncpg.Pool) -> uuid.UUID:
@@ -587,6 +616,112 @@ async def test_job_requirement_and_resume_skill_round_trip_on_a_non_vocab_skill(
         )
         == 1
     ), "JD requirement and résumé skill did not meet at the same Skill node"
+
+
+@pytest.mark.asyncio
+async def test_f1_vector_auto_merge_enriches_the_near_node_but_never_redirects_the_key(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """F1 (security re-audit round 2), the real-vector-index proof.
+
+    Forces a REAL cosine-similarity hit (>= ``skill_auto_merge_threshold``)
+    between a brand-new, non-vocab JD skill name ("react native") and an
+    EXISTING vocab node ("react") — the exact scenario security's report
+    describes as self-reinforcing and permanent pre-fix: once "react native"
+    auto-merged into "react", every later JD mentioning it would take the
+    poisoned exact-match branch too.
+
+    Proves the auto-merge branch fires FOR REAL against a live Neo4j vector
+    index (the "react" node gains "react native" as an alias — the only way
+    to observe the branch actually ran) while the REQUIRES edge still lands
+    on the pure ``_canonical_key_for_normalised("react native")`` hash —
+    identical to what the résumé side (``resume_skill_canonical_key``, a
+    pure function with no vector access at all) computes for the same text.
+    """
+    job_id_1 = await _insert_job(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="job",
+            aggregate_id=job_id_1,
+            event_type="job.parsed",
+            payload={
+                "embedding": _vec(30),
+                "extracted": {
+                    "title": "Frontend Engineer",
+                    "required_skills": [{"name": "react", "min_years": 3}],
+                    "nice_to_have_skills": [],
+                    "min_years_experience": 3,
+                    "education": {"min_level": "bachelors", "fields": []},
+                    "location": None,
+                    "remote_policy": None,
+                    "responsibilities": [],
+                },
+                "prompt_version": "jd_extract_v1",
+            },
+        )
+
+    ctx = _ctx(pg_pool, neo4j_driver)
+    ctx["embedder"] = _make_embedder_forcing_near_duplicate("react", "react native")
+    assert await project_to_graph(ctx, batch=10) == 1
+
+    job_id_2 = await _insert_job(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="job",
+            aggregate_id=job_id_2,
+            event_type="job.parsed",
+            payload={
+                "embedding": _vec(31),
+                "extracted": {
+                    "title": "Mobile Engineer",
+                    "required_skills": [{"name": "react native", "min_years": 2}],
+                    "nice_to_have_skills": [],
+                    "min_years_experience": 2,
+                    "education": {"min_level": "bachelors", "fields": []},
+                    "location": None,
+                    "remote_policy": None,
+                    "responsibilities": [],
+                },
+                "prompt_version": "jd_extract_v1",
+            },
+        )
+    assert await project_to_graph(ctx, batch=10) == 1
+
+    expected_key = skills_graph.resume_skill_canonical_key("React Native")
+    assert expected_key is not None
+    assert expected_key.startswith("h:")
+
+    async with neo4j_driver.session() as session:
+        result = await session.run(
+            "MATCH (:Job {id: $jid})-[:REQUIRES]->(s:Skill) "
+            "RETURN s.canonical_key AS key",
+            jid=str(job_id_2),
+        )
+        record = await result.single()
+    assert record is not None
+    assert record["key"] == expected_key, (
+        "auto-merge redirected the JD-side key to the near candidate's own "
+        "key ('react') instead of the pure canonical_key_for_normalised() "
+        "result — F1 regression"
+    )
+    assert record["key"] != "react"
+
+    # Prove the vector branch actually fired FOR REAL (not merely skipped to
+    # create-new because `near` came back empty): "react" gained "react
+    # native" in its alias list as enrichment.
+    async with neo4j_driver.session() as session:
+        result = await session.run(
+            "MATCH (s:Skill {canonical_key: 'react'}) RETURN s.aliases AS aliases"
+        )
+        record = await result.single()
+    assert record is not None
+    assert "react native" in (record["aliases"] or []), (
+        "the vector auto-merge branch never fired against the real Neo4j "
+        "vector index — the near-duplicate embedding fixture isn't forcing "
+        "a real score >= skill_auto_merge_threshold hit"
+    )
 
 
 # ── R8: pinned label set ───────────────────────────────────────────────────

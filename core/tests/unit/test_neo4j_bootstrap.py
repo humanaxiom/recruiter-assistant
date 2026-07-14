@@ -36,11 +36,18 @@ VECTOR_INDEXES: tuple[str, ...] = (
     "chunk_emb_idx",
 )
 
-# Statement order is load-bearing: the DROP must precede the replacement index.
+# Statement order is load-bearing: each DROP must precede its replacement.
+#
+# F2 (security re-audit round 2): "skill_name_unique" now appears ONLY as a
+# DROP (its CREATE counterpart is "skill_canonical_key_unique", a genuinely
+# new name) — see ``_statement_for``'s uniqueness-of-match assertion below,
+# which is exactly what would catch a regression back to reusing the old
+# name for the CREATE.
 EXPECTED_ORDER: tuple[str, ...] = (
     "job_id_unique",
     "resume_id_unique",
-    "skill_name_unique",
+    "skill_name_unique",  # DROP (F2) — the stale, wrong-property constraint
+    "skill_canonical_key_unique",
     "company_name_unique",
     "institution_name_unique",
     "chunk_id_unique",  # DROP
@@ -86,9 +93,9 @@ def _ran(session: Any) -> list[str]:
 # ── The 12 statements, in order ────────────────────────────────────────────
 
 
-def test_exactly_twelve_statements() -> None:
+def test_exactly_thirteen_statements() -> None:
     assert isinstance(_STATEMENTS, tuple)
-    assert len(_STATEMENTS) == 12
+    assert len(_STATEMENTS) == 13
 
 
 def test_statements_are_in_the_expected_order() -> None:
@@ -139,6 +146,54 @@ def test_chunk_id_unique_is_never_created() -> None:
     )
 
 
+# ── F2 (security re-audit round 2): skill_name_unique rename regression ────
+#
+# A same-named `CREATE CONSTRAINT skill_name_unique IF NOT EXISTS` with a
+# CHANGED `REQUIRE` clause is a Neo4j no-op keyed on the constraint NAME —
+# every install that ever ran the Phase-3 statement kept its OLD constraint
+# (on the abandoned `canonical_name` property) and got NO uniqueness
+# constraint on `canonical_key` at all. Fixed by DROPping the old name and
+# creating a genuinely NEW one (`skill_canonical_key_unique`), mirroring the
+# `chunk_id_unique` pattern already pinned above.
+
+
+def test_skill_name_unique_is_dropped() -> None:
+    stmt = _statement_for("skill_name_unique")
+    assert re.fullmatch(
+        r"DROP\s+CONSTRAINT\s+skill_name_unique\s+IF\s+EXISTS", stmt, re.IGNORECASE
+    )
+
+
+def test_skill_name_unique_is_never_created_as_a_constraint() -> None:
+    assert not re.search(
+        r"CREATE\s+CONSTRAINT\s+skill_name_unique\b",
+        " ".join(_STATEMENTS),
+        re.IGNORECASE,
+    )
+
+
+def test_skill_canonical_key_unique_is_a_new_name_not_a_rename_in_place() -> None:
+    """The replacement constraint must be a DIFFERENT name from the dropped
+    one — reusing `skill_name_unique` for the CREATE (even with the correct
+    REQUIRE clause) would silently no-op on every install that already has
+    the Phase-3 constraint under that name."""
+    stmt = _statement_for("skill_canonical_key_unique")
+    assert re.search(
+        r"CREATE\s+CONSTRAINT\s+skill_canonical_key_unique\s+IF\s+NOT\s+EXISTS",
+        stmt,
+        re.IGNORECASE,
+    )
+    assert "skill_name_unique" not in stmt
+
+
+def test_skill_canonical_key_unique_drop_precedes_the_create() -> None:
+    names = [
+        next(n for n in EXPECTED_ORDER if re.search(rf"\b{n}\b", s))
+        for s in _STATEMENTS
+    ]
+    assert names.index("skill_name_unique") < names.index("skill_canonical_key_unique")
+
+
 def test_chunk_lookup_uses_a_plain_composite_index() -> None:
     stmt = _statement_for("chunk_resume_id_idx")
     assert "CONSTRAINT" not in stmt.upper()
@@ -161,7 +216,7 @@ def test_resume_job_id_index_exists_for_per_job_scoping() -> None:
     [
         ("job_id_unique", "Job", "id"),
         ("resume_id_unique", "Resume", "id"),
-        ("skill_name_unique", "Skill", "canonical_key"),
+        ("skill_canonical_key_unique", "Skill", "canonical_key"),
         ("company_name_unique", "Company", "canonical_name"),
         ("institution_name_unique", "Institution", "canonical_name"),
     ],

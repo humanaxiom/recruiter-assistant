@@ -572,6 +572,82 @@ async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
     assert isinstance(payload["parsed"], dict)
 
 
+# ── L1 (security re-audit round 2): hallucinated evidence_chunk_ids scrubbed
+#
+# ``ResumeChunk``'s own docstring already promises "citations that don't
+# exist in the chunk set are scrubbed before persistence" — but
+# ``scrub_invalid_chunk_refs`` existed and was never actually called from
+# ``parse_resume``. A skill's ``evidence_chunk_ids`` citing a chunk id the
+# LLM hallucinated (never in this résumé's real chunk set) must be dropped
+# before ``ResumeParsed.model_validate`` — a broken evidence link is exactly
+# the failure mode the docstring already describes.
+
+
+@pytest.mark.asyncio
+async def test_hallucinated_evidence_chunk_ids_are_scrubbed_before_persistence() -> (
+    None
+):
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer."),
+        ResumeChunk(id="c_002", section="skills", page=0, text="Python, SQL"),
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8, [0.3] * 8]])
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    # "c_999" was never in this résumé's chunk set — a realistic hallucinated
+    # citation. "c_002" is real and must survive untouched.
+    merged_skills = [
+        ResumeSkill(name="Python", years=5, evidence_chunk_ids=["c_002", "c_999"])
+    ]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    flat = _flat_call_args(record_parsed.await_args)
+    persisted = next(a for a in flat if isinstance(a, ResumeParsed))
+    skill = next(s for s in persisted.skills if s.name == "Python")
+    assert skill.evidence_chunk_ids == ["c_002"], (
+        "hallucinated chunk id 'c_999' survived into resumes.parsed — "
+        "scrub_invalid_chunk_refs is not wired into parse_resume (L1)"
+    )
+
+
 # ── F3 (security re-audit), layer 2: skill-name identity scrub ───────────
 #
 # skills_graph's shape-reject (layer 1, Phase 4b) has no candidate context —
