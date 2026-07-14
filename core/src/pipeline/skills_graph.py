@@ -4,6 +4,27 @@ Ported behaviourally from hris ``apps/worker/src/worker/skill_normalize.py``
 (the vector-match / LLM-tiebreaker / Skill-graph half hris's ``normalize_skill``
 covers).
 
+Phase 4b defect fix (post-merge, `feat/phase-4b-graph-projection`): the
+"basic normalisation" section below (``_alias_table``/``_clean``/
+``_resolve_or_none``/``_basic_normalise``) used to be a byte-for-byte
+duplicate of ``src.pipeline.skills``'s copy, "kept in sync by convention"
+per the (now-removed) comments here and there. Nothing enforced that, the
+two copies had already textually diverged (no functional difference yet,
+but no test caught it either), and any future edit to one copy without the
+other silently breaks the invariant that
+``_canonical_key_for_normalised`` requires: the JD side and the résumé
+side MUST derive the identical normalised string, or ``REQUIRES``/
+``HAS_SKILL`` stop meeting at the same node and that skill silently scores
+zero for every candidate. This module now IMPORTS those four names from
+``src.pipeline.skills`` instead of redefining them — one function, one
+definition, no possible divergence. There is no import cycle:
+``src.pipeline.skills`` depends only on ``src.schemas.jobs``/``yaml``/
+stdlib, never on this module or on ``src.settings``. See
+``tests/unit/test_skill_normalise_parity.py`` for the regression test
+(mutation-proven: the test fails if either side's derived key is ever
+allowed to diverge from the other's, including via a future re-duplication
+of these functions).
+
 ADR-008 — architectural PII fix (supersedes rounds 2-5 of the security
 re-audit below, which is kept here ONLY as a historical record of why the
 heuristic approach was abandoned):
@@ -117,22 +138,12 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
+from src.pipeline.skills import _ALIASES_PATH, _alias_table, _basic_normalise
 from src.settings import get_settings
 
 log = logging.getLogger(__name__)
 
-_ALIASES_PATH = Path(__file__).resolve().parent / "skill_data" / "aliases.yaml"
 _CATEGORIES_PATH = Path(__file__).resolve().parent / "skill_data" / "categories.yaml"
-
-_WHITESPACE_RE = re.compile(r"\s+")
-_PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
-
-# Phase 4b spelling-recall fix — see `src.pipeline.skills`'s identical
-# constants/docstring (this module duplicates, not imports, the basic-
-# normalisation half; see the module docstring's "basic normalisation"
-# section below for why). Both copies MUST stay byte-identical.
-_TRAILING_VERSION_RE = re.compile(r"\s+v?\d+(?:\.\d+)*$", re.IGNORECASE)
-_PAREN_RE = re.compile(r"\(([^()]*)\)")
 
 # Vector recall breadth for the near-candidate query — matches hris's
 # `db.index.vector.queryNodes('skill_emb_idx', 5, ...)`.
@@ -306,78 +317,14 @@ def resume_skill_canonical_key(name: str) -> str | None:
     return _canonical_key_for_normalised(normalised)
 
 
-# ---------------- basic normalisation (mirrors src.pipeline.skills) ---------
+# ---------------- basic normalisation ---------------------------------------
 #
-# Duplicated (not imported) rather than shared: `src.pipeline.skills` is the
-# Neo4j-free slice Phase 3 already ships and must stay import-clean of this
-# module's Neo4j/LLM/embedder dependencies. The alias table lives in the SAME
-# ``aliases.yaml``, so the two never disagree on what's canonical.
-
-
-@lru_cache(maxsize=1)
-def _alias_table() -> dict[str, str]:
-    if not _ALIASES_PATH.is_file():
-        log.warning("skill_aliases.missing path=%s", _ALIASES_PATH)
-        return {}
-    data = yaml.safe_load(_ALIASES_PATH.read_text(encoding="utf-8")) or []
-    out: dict[str, str] = {}
-    for entry in data:
-        canonical = entry["canonical"].strip().lower()
-        for alias in entry.get("aliases", []):
-            out[alias.strip().lower()] = canonical
-        out[canonical] = canonical
-    return out
-
-
-def _clean(text: str) -> str:
-    """Punctuation-strip + whitespace-collapse. Duplicated (not imported)
-    alongside `src.pipeline.skills._clean` — see this module's docstring on
-    why the basic-normalisation half is duplicated rather than shared."""
-    text = _PUNCT_RE.sub("", text)
-    return _WHITESPACE_RE.sub(" ", text).strip()
-
-
-def _resolve_or_none(cleaned: str) -> str | None:
-    """Alias-table lookup on ``cleaned``, then (only on a miss) on
-    ``cleaned`` with a trailing version token stripped. ``None`` means
-    neither resolved — mirrors `src.pipeline.skills._resolve_or_none`
-    exactly (both copies must stay byte-identical)."""
-    table = _alias_table()
-    if cleaned in table:
-        return table[cleaned]
-    stripped = _TRAILING_VERSION_RE.sub("", cleaned).strip()
-    if stripped and stripped != cleaned and stripped in table:
-        return table[stripped]
-    return None
-
-
-def _basic_normalise(raw: str) -> str:
-    """Mirrors `src.pipeline.skills._basic_normalise` exactly — see that
-    function's docstring for the full rationale (full-string fallback tried
-    first so a non-vocab name's key is unchanged from before this fix;
-    trailing-version-strip and parenthetical-split are strictly ADDITIVE,
-    only used when they land on an actual vocab hit). This copy MUST stay
-    byte-identical to the résumé side's, or `REQUIRES`/`HAS_SKILL` diverge
-    for any name whose normalisation takes one of the new branches."""
-    s = raw.strip().lower()
-    full_clean = _clean(s)
-
-    resolved = _resolve_or_none(full_clean)
-    if resolved is not None:
-        return resolved
-
-    inner_candidates = [m for m in _PAREN_RE.findall(s) if m.strip()]
-    if inner_candidates:
-        outer_clean = _clean(_PAREN_RE.sub(" ", s))
-        resolved = _resolve_or_none(outer_clean)
-        if resolved is not None:
-            return resolved
-        for inner in inner_candidates:
-            resolved = _resolve_or_none(_clean(inner))
-            if resolved is not None:
-                return resolved
-
-    return full_clean
+# `_alias_table`/`_basic_normalise` are imported from `src.pipeline.skills`
+# (single source of truth — see the module docstring). Both this module's
+# `_canonical_key_for_normalised`/`resume_skill_canonical_key` and
+# `src.pipeline.skills.canonicalize_skill_names` now call the exact same
+# function object, so the JD side and the résumé side can never disagree on
+# a skill's normalised form.
 
 
 # ---------------- categories.yaml (curated skill families) ------------------
@@ -655,7 +602,13 @@ async def _resolve_one(
     return canonical_key
 
 
+# `_ALIASES_PATH` is re-exported (imported, not redefined) from
+# `src.pipeline.skills` — the single source of truth for the shipped
+# aliases.yaml location — kept accessible as `skills_graph._ALIASES_PATH` only
+# so the pre-existing test that resolves the real YAML that way keeps
+# working unmodified.
 __all__ = [
+    "_ALIASES_PATH",
     "UnresolvedSkillNameError",
     "categories_for",
     "ensure_categories",

@@ -121,12 +121,14 @@ def _basic_normalise(raw: str) -> str:
        parenthetical's own content in turn (``"Containerization (Docker)"``
        -> ``"docker"``) — again, only used on an actual vocab hit.
 
-    Invariant (security re-audit, mutation-killed): the JD side
-    (``skills_graph._basic_normalise``, duplicated not imported) and the
-    résumé side (this function) MUST apply this identical transform, so
+    Invariant (security re-audit, mutation-killed; re-affirmed by the Phase
+    4b dedup fix): the JD side (``skills_graph``, which now IMPORTS this
+    exact function rather than keeping its own copy) and the résumé side
+    (this function) MUST apply this identical transform, so
     ``_canonical_key_for_normalised`` — called from the SAME normalised
     string on both sides — always agrees on one Skill node for the same
-    skill text.
+    skill text. See ``tests/unit/test_skill_normalise_parity.py`` for the
+    regression test that pins this by identity, not just by output.
     """
     s = raw.strip().lower()
     full_clean = _clean(s)
