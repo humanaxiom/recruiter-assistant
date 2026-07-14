@@ -1485,6 +1485,14 @@ def test_redact_candidate_pii_none_fields_are_noop_for_that_field() -> None:
 
 
 def test_redact_candidate_pii_all_fields_none_returns_text_verbatim() -> None:
+    """S7 (security re-audit round 3) note: this still passes, but no longer
+    for the reason its name implies. An empty `CandidateInfo` is NOT a
+    blanket "return verbatim" case any more (that was the fail-OPEN bug) — a
+    generic email/phone scrub always runs. This specific text just happens
+    to carry no email/phone shape, so the generic scrub is a no-op and the
+    output is byte-identical to the input. See
+    `test_redact_candidate_pii_empty_candidate_still_scrubs_email_and_phone`
+    below for the case that actually exercises the fail-closed fix."""
     candidate = CandidateInfo()
     text = "Python developer with 5 years of backend experience."
 
@@ -1875,3 +1883,185 @@ async def test_outbox_payload_parsed_dict_excludes_summary_key() -> None:
     )
     assert "skills" in parsed_dict
     assert "experience" in parsed_dict
+
+
+# ── S7 (security re-audit round 3) — redaction must fail CLOSED, not open ──
+#
+# `_redact_candidate_pii` previously returned its input VERBATIM whenever
+# `CandidateInfo` was completely empty (`patterns` stayed `[]`) — "no
+# structured identifiers" silently became "nothing to redact". This is
+# exactly F3a's correlated-failure condition: an empty candidate block is
+# not a rare edge case, it is what happens whenever the `resume_core_v1` LLM
+# call under-extracts. Two-part fix: (1) a GENERIC, candidate-free email/
+# phone scrub now runs unconditionally; (2) `parse_resume` refuses to embed
+# a header-LIKE chunk at all when there is no structured candidate context
+# to check against, because no regex can reliably catch a bare NAME.
+
+
+def test_generic_contact_scrub_redacts_email_with_no_candidate_context() -> None:
+    from src.worker.resume_tasks import _generic_contact_scrub
+
+    text = "Contact casey.rivera@example.test for details."
+    result = _generic_contact_scrub(text)
+    assert "casey.rivera@example.test" not in result.lower()
+
+
+def test_generic_contact_scrub_redacts_phone_with_no_candidate_context() -> None:
+    from src.worker.resume_tasks import _generic_contact_scrub
+
+    text = "Call 555-0101 anytime."
+    result = _generic_contact_scrub(text)
+    assert "555-0101" not in result
+
+
+def test_generic_contact_scrub_leaves_benign_text_untouched() -> None:
+    from src.worker.resume_tasks import _generic_contact_scrub
+
+    text = "Python developer with 5 years of backend experience."
+    assert _generic_contact_scrub(text) == text
+
+
+def test_redact_candidate_pii_empty_candidate_still_scrubs_email_and_phone() -> None:
+    """S7: the OLD behaviour (`result == text`, always, whenever every
+    `CandidateInfo` field is `None`) is a fail-OPEN bug — the case pinned by
+    `test_redact_candidate_pii_all_fields_none_returns_text_verbatim` above
+    still holds only because that specific text carries no email/phone
+    shape at all. This test uses a text that DOES, and must come back
+    scrubbed even with a totally empty candidate block."""
+    candidate = CandidateInfo()
+    text = "Casey Rivera, casey.rivera@example.test, 555-0101"
+
+    result = _redact(text, candidate)
+
+    assert "casey.rivera@example.test" not in result.lower()
+    assert "555-0101" not in result
+    # A bare NAME cannot be caught by a structure-only scrub with no
+    # candidate context at all — this is the documented residual the
+    # header-chunk-skip end-to-end tests below close a different way.
+
+
+@pytest.mark.asyncio
+async def test_empty_candidate_block_header_chunk_never_reaches_embedder() -> None:
+    """The end-to-end S7 close: with a completely empty `CandidateInfo`
+    (F3a's exact defeat condition), the résumé's first (header-like) chunk
+    must NEVER be handed to `embedder.embed` at all — not even scrubbed."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(candidate=CandidateInfo(), summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    header_text = "Casey Rivera | casey.rivera@example.test | 555-0101 | Vancouver, BC"
+    chunks = [
+        ResumeChunk(id="c_001", section="other", page=0, text=header_text),
+        ResumeChunk(
+            id="c_002", section="skills", page=0, text="Python, SQL, Kubernetes"
+        ),
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    # Only ONE embed call for the chunk batch (the header chunk was dropped
+    # before ever reaching `_embed_batched`) plus the summary call.
+    assert embedder.embed.await_count == 2
+    chunk_call_texts = _flat_call_args(embedder.embed.await_args_list[1])[0]
+    assert len(chunk_call_texts) == 1, (
+        "expected exactly one (non-header) chunk to reach the embedder, got "
+        f"{chunk_call_texts!r}"
+    )
+    assert "casey" not in chunk_call_texts[0].lower()
+    assert "rivera" not in chunk_call_texts[0].lower()
+    assert "python" in chunk_call_texts[0].lower()
+
+    payload = enqueue.await_args.kwargs["payload"]
+    assert set(payload["chunk_embs"]) == {"c_002"}, (
+        "the header chunk must have NO entry in chunk_embs at all when "
+        "redaction is unavailable — not even a scrubbed one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_candidate_block_non_header_chunks_still_embed() -> None:
+    """Belt-and-braces: the S7 fix is "skip the header-like chunk(s)", not
+    "embed nothing" — a résumé with an empty candidate block must still get
+    every OTHER chunk embedded normally."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(candidate=CandidateInfo(), summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="other", page=0, text="Header block text"),
+        ResumeChunk(id="c_002", section="skills", page=0, text="Python, SQL"),
+        ResumeChunk(id="c_003", section="experience", page=0, text="Shipped APIs."),
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8, [0.3] * 8]])
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    payload = enqueue.await_args.kwargs["payload"]
+    assert set(payload["chunk_embs"]) == {"c_002", "c_003"}

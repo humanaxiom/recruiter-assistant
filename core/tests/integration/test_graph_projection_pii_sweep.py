@@ -101,6 +101,21 @@ MALICIOUS_RAW_SKILL_NAMES = [
     "Casey-Rivera",  # hyphenated
     "Rivera",  # bare surname
     "John Smith",  # a referee, not even the candidate
+    # ── round-3 security re-audit widening (S1-S6) ──────────────────────
+    "RIVERA, CASEY",  # S1: all-caps, comma-reordered
+    "CASEY RIVERA",  # S1: all-caps
+    "casey rivera",  # S1: all-lowercase
+    "Sean McDonald",  # S3: Mc-internal-caps surname, not even the candidate
+    "John O'Brien",  # S3: apostrophe-joined surname
+    "Maria del Carmen Rivera Lopez",  # S4: 5-token, connector particle
+    "Ana van der Berg",  # S4: 4-token, two connector particles
+    "Casey Rivera 2",  # S2: stray trailing standalone digit token
+    "Casey Rivera+",  # S2: stray trailing glued '+'
+    "Casey Rivera#",  # S2: stray trailing glued '#'
+    "Casey.Rivera",  # S2: dot-joined (not a technical '.')
+    "Кейси Ривера",  # S5: Cyrillic
+    "李伟",  # S5: CJK, caseless script
+    "casey.rivera (at) example.test",  # S6: '(at)' obfuscation + whitespace
 ]
 
 _DIM = get_settings().llm_embedding_dim
@@ -386,6 +401,18 @@ async def test_no_pii_marker_survives_anywhere_in_the_projected_graph(
     assert "casey" not in all_values_lower
     assert "rivera" not in all_values_lower
     assert "smith" not in all_values_lower
+
+    # Round-3 widening (S1-S6): token-level checks for every NEW shape added
+    # to `MALICIOUS_RAW_SKILL_NAMES` above.
+    assert "mcdonald" not in all_values_lower
+    assert "obrien" not in all_values_lower  # apostrophe stripped by _basic_normalise
+    assert "maria" not in all_values_lower
+    assert "carmen" not in all_values_lower
+    assert "lopez" not in all_values_lower
+    assert "berg" not in all_values_lower
+    assert "кейси" not in all_values_lower
+    assert "ривера" not in all_values_lower
+    assert "李伟" not in all_values_lower
 
     # Decision B recall pin, right alongside the PII assertions: the filter
     # closing F3 must not collaterally eat a LEGITIMATE skill — "python" must

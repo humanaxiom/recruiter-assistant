@@ -181,6 +181,21 @@ async def test_email_shaped_skill_name_is_rejected_before_any_io() -> None:
     llm.chat_json.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "john.smith @ corp.test",  # S6: whitespace around '@'
+        "casey.rivera (at) example.test",  # S6: '(at)' obfuscation + whitespace
+    ],
+)
+def test_whitespace_obfuscated_email_shape_is_still_rejected(name: str) -> None:
+    """S6 (security re-audit round 3): the OLD `_EMAIL_SHAPE_RE` required an
+    exact, whitespace-free `local@domain` literal — a whitespace-padded '@'
+    or an '(at)'/'[at]' obfuscation (both common copy-paste/anti-scraping
+    header renderings) sailed straight through."""
+    assert skills_graph.reject_reason_for_skill_name(name) == "email_shape"
+
+
 @pytest.mark.asyncio
 async def test_phone_shaped_skill_name_is_rejected_before_any_io() -> None:
     session = _make_session([])
@@ -294,13 +309,28 @@ async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
         "Casey-Rivera",
         "Rivera",
         "John Smith",
+        # ── round-3 security re-audit widening (S1-S5) ──────────────────
+        "RIVERA, CASEY",  # S1: all-caps, comma-reordered
+        "CASEY RIVERA",  # S1: all-caps
+        "casey rivera",  # S1: all-lowercase
+        "Sean McDonald",  # S3: Mc-internal-caps surname
+        "John O'Brien",  # S3: apostrophe-joined surname
+        "Maria del Carmen Rivera Lopez",  # S4: 5-token, connector particle
+        "Ana van der Berg",  # S4: 4-token, two connector particles
+        "Casey Rivera 2",  # S2: stray trailing standalone digit token
+        "Casey Rivera+",  # S2: stray trailing glued '+'
+        "Casey Rivera#",  # S2: stray trailing glued '#'
+        "Casey.Rivera",  # S2: dot-joined (not a technical '.')
+        "Кейси Ривера",  # S5: Cyrillic
+        "李伟",  # S5: CJK, caseless script
     ],
 )
 @pytest.mark.asyncio
 async def test_person_name_shaped_skill_missing_vocab_is_rejected(name: str) -> None:
-    """Every row of security's round-2 reproduction table (candidate-identity
-    shapes only — the email/phone rows are covered by the existing F3 tests
-    above) must be rejected outright, with NO vocab hit to save it."""
+    """Every row of security's round-2 AND round-3 reproduction tables
+    (candidate-identity shapes only — the email/phone rows are covered by
+    the existing F3/S6 tests) must be rejected outright, with NO vocab hit
+    to save it."""
     assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape"
 
     session = _make_session([])
@@ -343,6 +373,19 @@ def test_iso_27001_style_name_with_digits_is_not_person_name_shaped() -> None:
         "Casey-Rivera",
         "Rivera",
         "John Smith",
+        "RIVERA, CASEY",
+        "CASEY RIVERA",
+        "casey rivera",
+        "Sean McDonald",
+        "John O'Brien",
+        "Maria del Carmen Rivera Lopez",
+        "Ana van der Berg",
+        "Casey Rivera 2",
+        "Casey Rivera+",
+        "Casey Rivera#",
+        "Casey.Rivera",
+        "Кейси Ривера",
+        "李伟",
     ],
 )
 def test_person_name_shape_detector_matches_every_reproduction_row(name: str) -> None:
@@ -350,11 +393,19 @@ def test_person_name_shape_detector_matches_every_reproduction_row(name: str) ->
 
 
 def test_all_caps_acronym_is_not_person_name_shaped() -> None:
-    """`AWS`/`SQL`/`REST`-style all-caps acronyms never look like a person's
-    name (the shape test requires Title Case: capital + lowercase), so they
-    never depend on a vocab hit to survive."""
+    """`AWS`/`SQL`/`REST`-style BARE SINGLE all-caps acronyms never look like
+    a person's name. S1 (round 3) widens case-folding to catch a MULTI-token
+    or internally-joined all-caps/all-lowercase NAME ("CASEY RIVERA"), but
+    deliberately does NOT fold a lone, separator-free single word — folding
+    every bare acronym would flag any all-caps term this repo's 220-term
+    vocabulary doesn't happen to carry (`REST` is not in it — see the vocab
+    sweep) as person-name-shaped purely on shape, with no vocab hit to save
+    it. Every round-3 leak is multi-token or a joined compound; this
+    single-bare-token carve-out is the documented boundary that keeps that
+    widening safe for recall."""
     for acronym in ("AWS", "SQL", "REST"):
         assert not skills_graph._looks_like_person_name(acronym)
+        assert skills_graph.reject_reason_for_skill_name(acronym) is None
 
 
 def test_mixed_case_technical_proper_noun_is_not_person_name_shaped() -> None:
@@ -432,6 +483,19 @@ async def test_auto_merge_path_writes_an_alias_update_for_the_new_spelling() -> 
 
 @pytest.mark.asyncio
 async def test_grey_zone_asks_the_llm_and_merges_on_a_valid_match() -> None:
+    # NOTE (round-3 security re-audit): the raw candidate here was
+    # "postgres db" (two lowercase words) — an arbitrary, orthogonal
+    # placeholder for THIS test's actual concern (grey-zone vector-score ->
+    # LLM-tiebreaker MECHANICS), not the PII shape guard. S1's now-
+    # case-insensitive name-shape check folds any bare two-lowercase-word
+    # phrase to Title Case, and — exactly like a real "Casey Rivera" — a
+    # two-word phrase with no vocab hit is correctly shape-rejected;
+    # "postgres db" as a whole phrase isn't itself in the vocab (only bare
+    # "postgres" is), so it would now be (correctly) rejected before ever
+    # reaching the mechanics this test exists to exercise. Renamed to a
+    # single bare token, which S1 deliberately never folds (see
+    # `test_all_caps_acronym_is_not_person_name_shaped`) — no assertion
+    # below changed.
     near = [{"name": "postgresql", "aliases": ["postgres"], "score": 0.90}]
     session = _make_session(
         [
@@ -442,9 +506,9 @@ async def test_grey_zone_asks_the_llm_and_merges_on_a_valid_match() -> None:
     )
     llm = _make_llm(match="postgresql")
     resolved = await skills_graph.resolve_canonical_names(
-        session, ["postgres db"], llm=llm, embedder=_make_embedder()
+        session, ["postgresvariant"], llm=llm, embedder=_make_embedder()
     )
-    assert resolved == {"postgres db": "postgresql"}
+    assert resolved == {"postgresvariant": "postgresql"}
     llm.chat_json.assert_awaited_once()
 
 
@@ -454,7 +518,7 @@ async def test_grey_zone_llm_receives_the_near_candidates() -> None:
     session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
     llm = _make_llm(match="postgresql")
     await skills_graph.resolve_canonical_names(
-        session, ["postgres db"], llm=llm, embedder=_make_embedder()
+        session, ["postgresvariant"], llm=llm, embedder=_make_embedder()
     )
     flat_args = [
         *llm.chat_json.await_args.args,
@@ -503,7 +567,15 @@ async def test_hallucinated_tiebreaker_answer_is_rejected_not_trusted() -> None:
     skill just vanishes. Here, an answer that is NOT one of the offered
     ``near`` candidates is rejected outright and treated as 'create new' —
     the hallucinated string must never be used as a canonical_name to MATCH
-    against, only a real (offered-or-freshly-created) name may be returned."""
+    against, only a real (offered-or-freshly-created) name may be returned.
+
+    NOTE (round-3 security re-audit): the raw candidate was "cockroach db"
+    (two lowercase words) — renamed to the single bare token
+    "cockroachvariant" for the same reason documented on
+    ``test_grey_zone_asks_the_llm_and_merges_on_a_valid_match`` above: S1's
+    now-case-insensitive shape check would (correctly) reject a bare
+    two-word non-vocab phrase, which is orthogonal to what THIS test
+    actually exercises (the hallucinated-tiebreaker-answer mechanics)."""
     near = [{"name": "postgresql", "aliases": [], "score": 0.90}]
     session = _make_session(
         [
@@ -515,10 +587,10 @@ async def test_hallucinated_tiebreaker_answer_is_rejected_not_trusted() -> None:
     llm = _make_llm(match="not-a-real-skill-node")
 
     resolved = await skills_graph.resolve_canonical_names(
-        session, ["cockroach db"], llm=llm, embedder=_make_embedder()
+        session, ["cockroachvariant"], llm=llm, embedder=_make_embedder()
     )
 
-    canonical = resolved["cockroach db"]
+    canonical = resolved["cockroachvariant"]
     assert canonical != "not-a-real-skill-node"
     # The hallucinated string must never appear as a Cypher parameter value —
     # proof it was never used to MATCH an existing (nonexistent) node.
@@ -553,6 +625,46 @@ async def test_create_new_path_when_no_near_candidates_exist() -> None:
     create_cypher, _ = _run_calls(session)[-1]
     assert re.search(r"MERGE.*Skill", create_cypher, re.IGNORECASE | re.DOTALL)
     assert "ON CREATE" in create_cypher.upper()
+
+
+# ── S8 (security re-audit round 3): ACCEPTED names must never be logged ───
+# verbatim either -- F8 was previously only half-closed (rejected names were
+# category-only, but an accepted auto-merge/LLM-merge/create-new line still
+# printed `canonical=%s` in full).
+
+
+@pytest.mark.asyncio
+async def test_created_skill_acceptance_is_not_logged_verbatim(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`cockroachdb` is a bare single lowercase token (never folded — see
+    S1's single-bare-token carve-out) and not in the 220-term vocabulary, so
+    it is neither shape-rejected nor vocab-known: it sails through to the
+    create-new path, exercising the ACCEPTED-name log line."""
+    caplog.set_level(logging.DEBUG)
+    assert skills_graph.reject_reason_for_skill_name("cockroachdb") is None
+    session = _make_session([_FakeResult([]), _FakeResult([]), _FakeResult([])])
+    await skills_graph.resolve_canonical_names(
+        session, ["cockroachdb"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "cockroachdb" not in all_text.lower()
+    assert "created" in all_text
+
+
+@pytest.mark.asyncio
+async def test_auto_merged_skill_acceptance_is_not_logged_verbatim(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    near = [{"name": "cockroachdb", "aliases": [], "score": 0.95}]
+    session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
+    await skills_graph.resolve_canonical_names(
+        session, ["crdb"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "cockroachdb" not in all_text.lower()
+    assert "auto_merged" in all_text
 
 
 # ── thresholds are settings, not hard-coded literals ──────────────────────
