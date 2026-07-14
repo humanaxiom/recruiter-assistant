@@ -1109,6 +1109,182 @@ async def test_extract_skills_merged_is_capped_at_80() -> None:
     assert len(merged) == 80
 
 
+# ── F3b (security re-audit round 2): raw-name shape+vocab reject ─────────
+#
+# `_extract_skills_merged` now shape(+vocab)-rejects each LLM skill detail's
+# RAW name (via `skills_graph.reject_reason_for_skill_name`) BEFORE it is
+# ever handed to `canonicalize_skill_names` — closing the gap where
+# canonicalisation (lowercasing + stripping "@") ran first and defeated
+# `skills_graph._resolve_one`'s downstream email/shape checks entirely.
+# These tests use the REAL `canonicalize_skill_names`/`skills_graph` (no
+# mocking of either) so they exercise the actual production decision.
+
+
+def _skills_details_chunks() -> list[ResumeChunk]:
+    return [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw_name",
+    [
+        "Casey Rivera",  # the ORIGINAL F3 finding, verbatim
+        "casey.rivera@example.test",  # F3b: email net, dead post-canonicalisation
+        "Rivera, Casey",  # comma-reordered
+        "Casey M. Rivera",  # middle initial
+        "Casey-Rivera",  # hyphenated
+        "Rivera",  # bare surname
+        "John Smith",  # a referee, not even the candidate
+    ],
+)
+@pytest.mark.asyncio
+async def test_extract_skills_merged_drops_every_reproduction_row_pre_canonicalisation(
+    raw_name: str,
+) -> None:
+    """Security's round-2 reproduction table, run end to end through the REAL
+    production function — every row must be gone from the merged output, with
+    NO candidate context involved at all (this is layer 0, upstream of the
+    candidate-aware `_redact_skill_names_pii`)."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python"),
+                    ResumeSkillDetail(name=raw_name),
+                ]
+            )
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+
+    names = {s.name for s in merged}
+    assert "python" in names
+    assert raw_name not in names
+    assert not any("rivera" in n.lower() for n in names)
+    assert not any("smith" in n.lower() for n in names)
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_pii_shaped_drop_is_logged_as_count_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="Casey Rivera")]
+            )
+        )
+    )
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "casey" not in all_text.lower()
+    assert "rivera" not in all_text.lower()
+    assert "count=1" in all_text
+
+
+# ── Decision B: the shape+vocab reject must not eat legitimate skills ─────
+
+
+@pytest.mark.parametrize("raw_name", ["Kafka", "Django", "Kubernetes"])
+@pytest.mark.asyncio
+async def test_extract_skills_merged_keeps_vocab_known_skill_despite_person_shape(
+    raw_name: str,
+) -> None:
+    """A vocab-known skill (single Title-Case token) must survive — the
+    vocabulary check is what protects recall against the new name-shape
+    reject."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name=raw_name)])
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+    assert raw_name.lower() in {s.name for s in merged}
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_keeps_multi_token_proper_noun_vocab_skill() -> (
+    None
+):
+    """A multi-token proper-noun skill that IS in the vocabulary (an alias
+    of 'gcp') must survive despite being person-name-shaped (3 Title-Case
+    tokens)."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="Google Cloud Platform")]
+            )
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+    assert "gcp" in {s.name for s in merged}
+
+
+@pytest.mark.parametrize("raw_name", ["C++", ".NET", "IPv6", "ISO 27001"])
+@pytest.mark.asyncio
+async def test_extract_skills_merged_keeps_technical_marker_shaped_skill(
+    raw_name: str,
+) -> None:
+    """A digit/`+`/`#`/leading-`.` technical marker is never person-name
+    shaped, so it survives regardless of vocab membership."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name=raw_name)])
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+    names = {s.name for s in merged}
+    assert any(raw_name.lower() in n or n in raw_name.lower() for n in names), names
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_keeps_seven_token_certification_name() -> None:
+    """Decision B / widened token cap (6 -> 8): a legitimate 7-token
+    certification name must survive — the OLD cap of 6 would have dropped
+    it."""
+    cert_name = "cisco certified network associate security specialist exam"
+    assert len(cert_name.split()) == 7
+    assert len(cert_name) <= 60
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name=cert_name)])
+        )
+    )
+    with patch(
+        "src.worker.resume_tasks.load_prompt",
+        return_value=_fake_prompt("resume_skills_v2"),
+    ):
+        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+    assert cert_name in {s.name for s in merged}
+
+
 # ── _parse_cover_letter ──────────────────────────────────────────────────
 
 

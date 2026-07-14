@@ -101,6 +101,16 @@ def test_match_skills_resolves_real_aliases_yaml_regardless_of_cwd(
 def test_missing_aliases_yaml_degrades_to_empty_table_not_an_exception(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """A ``finally`` re-clears the (module-level, process-wide) ``lru_cache``
+    after the test — without it, the cache stays poisoned with the
+    "missing file" empty table/scanner for the REST of the test session
+    (``monkeypatch.setattr`` restores ``_ALIASES_PATH`` on teardown, but does
+    nothing about the cached function results computed against the
+    tmp-path-missing state), silently breaking every later test that expects
+    a real alias to resolve (a genuine, order-dependent test-isolation bug
+    this file's own `test_categories_for_missing_yaml_file_degrades_to_empty_
+    not_a_crash` counterpart in ``test_pipeline_skills_graph.py`` already
+    guards against with the same pattern)."""
     import src.pipeline.skills as skills_mod
 
     missing = tmp_path / "does-not-exist.yaml"
@@ -110,9 +120,16 @@ def test_missing_aliases_yaml_degrades_to_empty_table_not_an_exception(
         if cached is not None and hasattr(cached, "cache_clear"):
             cached.cache_clear()
 
-    result = skills_mod.match_skills_in_text("Python, Kubernetes, and SQL experience.")
-
-    assert result == []
+    try:
+        result = skills_mod.match_skills_in_text(
+            "Python, Kubernetes, and SQL experience."
+        )
+        assert result == []
+    finally:
+        for cached_name in ("_alias_table", "_skill_scanner"):
+            cached = getattr(skills_mod, cached_name, None)
+            if cached is not None and hasattr(cached, "cache_clear"):
+                cached.cache_clear()
 
 
 # ── build_summary_text ────────────────────────────────────────────────────

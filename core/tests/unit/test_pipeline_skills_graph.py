@@ -214,13 +214,30 @@ async def test_implausibly_long_skill_name_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_too_many_tokens_skill_name_is_rejected() -> None:
-    many_tokens = "one two three four five six seven"  # 7 tokens
+    """Round 2 (security re-audit): the token cap was widened 6 -> 8 (zero of
+    the 220 shipped vocab terms trip 6, so this is headroom for a legitimate
+    multi-word certification name, not a regression) — this must exceed the
+    NEW cap, not the old one."""
+    many_tokens = "one two three four five six seven eight nine"  # 9 tokens
     session = _make_session([])
     resolved = await skills_graph.resolve_canonical_names(
         session, [many_tokens], llm=_make_llm(), embedder=_make_embedder()
     )
     assert resolved == {many_tokens: None}
     session.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_widened_token_cap_does_not_reject_at_eight_tokens() -> None:
+    """Non-regression for the widened cap: exactly 8 tokens (the new limit)
+    must NOT be rejected on token-count grounds alone (a 7-8 token
+    certification name is legitimate — Decision B's skill-recall guard)."""
+    eight_tokens = "alpha bravo charlie delta echo foxtrot golf hotel"
+    session = _make_session([_FakeResult([{"name": eight_tokens}])])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, [eight_tokens], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved[eight_tokens] == eight_tokens
 
 
 @pytest.mark.asyncio
@@ -255,6 +272,110 @@ async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
     )
     assert resolved["Google Cloud Platform"] == "google cloud platform"
     session.run.assert_awaited()
+
+
+# ── Decision A (round-2 security re-audit): name-shape + vocab reject ─────
+#
+# Security's round-2 reproduction: `_resolve_one`'s email check is dead on the
+# real résumé path because `_extract_skills_merged` canonicalises every skill
+# name (stripping "@"/case) BEFORE this module ever sees it, and a name that
+# IS the candidate's own identity (any of the shapes below) sails through
+# unshaped otherwise. `reject_reason_for_skill_name` is the shared decision
+# function; these tests exercise it both directly and through
+# `resolve_canonical_names` (unchanged public surface).
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Casey Rivera",
+        "Rivera, Casey",
+        "Casey M. Rivera",
+        "Casey-Rivera",
+        "Rivera",
+        "John Smith",
+    ],
+)
+@pytest.mark.asyncio
+async def test_person_name_shaped_skill_missing_vocab_is_rejected(name: str) -> None:
+    """Every row of security's round-2 reproduction table (candidate-identity
+    shapes only — the email/phone rows are covered by the existing F3 tests
+    above) must be rejected outright, with NO vocab hit to save it."""
+    assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape"
+
+    session = _make_session([])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, [name], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {name: None}
+    session.run.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name", ["Kafka", "Django", "Kubernetes"])
+def test_vocab_known_single_title_case_word_is_not_rejected(name: str) -> None:
+    """The human-locked Decision A boundary, stated explicitly: a bare
+    'Rivera' must be caught (previous test), but a single Title-Case word
+    that IS in the 220-term vocabulary must NOT be — the vocab check is what
+    protects recall, not a blanket single-word-name ban."""
+    assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+@pytest.mark.parametrize("name", ["C++", "C#", ".NET", "Node.js", "IPv6"])
+def test_technical_marker_shaped_names_are_never_person_name_shaped(name: str) -> None:
+    """A digit or a `+`/`#`/non-middle-initial `.` disqualifies the
+    person-name shape entirely — these must never be rejected on
+    'person_name_shape' grounds, vocab or no vocab."""
+    assert not skills_graph._looks_like_person_name(name)
+    assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+def test_iso_27001_style_name_with_digits_is_not_person_name_shaped() -> None:
+    assert not skills_graph._looks_like_person_name("ISO 27001")
+    assert skills_graph.reject_reason_for_skill_name("ISO 27001") is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Casey Rivera",
+        "Rivera, Casey",
+        "Casey M. Rivera",
+        "Casey-Rivera",
+        "Rivera",
+        "John Smith",
+    ],
+)
+def test_person_name_shape_detector_matches_every_reproduction_row(name: str) -> None:
+    assert skills_graph._looks_like_person_name(name)
+
+
+def test_all_caps_acronym_is_not_person_name_shaped() -> None:
+    """`AWS`/`SQL`/`REST`-style all-caps acronyms never look like a person's
+    name (the shape test requires Title Case: capital + lowercase), so they
+    never depend on a vocab hit to survive."""
+    for acronym in ("AWS", "SQL", "REST"):
+        assert not skills_graph._looks_like_person_name(acronym)
+
+
+def test_mixed_case_technical_proper_noun_is_not_person_name_shaped() -> None:
+    """`PostgreSQL`-style mixed-case (not Title Case) technical proper nouns
+    never look like a person's name either."""
+    assert not skills_graph._looks_like_person_name("PostgreSQL")
+
+
+@pytest.mark.asyncio
+async def test_person_name_shape_reject_is_logged_as_a_category_never_the_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    session = _make_session([])
+    await skills_graph.resolve_canonical_names(
+        session, ["Casey Rivera"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "casey" not in all_text.lower()
+    assert "rivera" not in all_text.lower()
+    assert "person_name_shape" in all_text
 
 
 def test_unresolved_skill_name_error_is_a_runtime_error() -> None:

@@ -36,9 +36,16 @@ Real Postgres + real Neo4j via testcontainers. LLM/embedder are mocked (no
 Ollama in gates — see CLAUDE.md); the embedder returns deterministic 768-d
 vectors so the real ``vector.dimensions`` Neo4j contract is respected.
 
-None of ``src.worker.graph_tasks`` / ``src.worker.resume_tasks.project_resume``
-/ ``src.pipeline.skills_graph`` exist yet — this file fails at collection
-(``ImportError``). RED half of the TDD cycle.
+F3c (security re-audit round 2) — the sweep previously built ``skills[]`` as
+a raw, already-canonicalised-shaped dict, bypassing
+``src.worker.resume_tasks._extract_skills_merged`` entirely; that is exactly
+why round 1's F3 fix (a shape reject inside ``skills_graph._resolve_one``)
+stayed green after it was defeated on the real production path (F3b) — the
+fixture never exercised the function the defeat lives in.
+``_skills_via_real_extraction`` below routes every skill name through the
+REAL ``_extract_skills_merged``, and the two candidate-block states
+(``candidate_empty`` parametrization) reproduce F3a's exact defeat condition
+alongside it.
 """
 
 from __future__ import annotations
@@ -57,12 +64,17 @@ from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
 from src.models.ddl import init_schema
-from src.schemas.resumes import ResumeParsed
+from src.schemas.resumes import (
+    ResumeChunk,
+    ResumeParsed,
+    ResumeSkillDetail,
+    ResumeSkillDetails,
+)
 from src.services import outbox_service
 from src.settings import get_settings
 from src.worker.graph_tasks import project_to_graph
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
-from src.worker.resume_tasks import _OUTBOX_PARSED_EXCLUDE
+from src.worker.resume_tasks import _OUTBOX_PARSED_EXCLUDE, _extract_skills_merged
 
 CANDIDATE_NAME = "Casey Rivera"
 CANDIDATE_EMAIL = "casey.rivera@example.test"
@@ -70,6 +82,26 @@ CANDIDATE_PHONE = "555-0101"
 HEADER_CHUNK_TEXT = (
     f"{CANDIDATE_NAME}\n{CANDIDATE_EMAIL} | {CANDIDATE_PHONE}\nVancouver, BC"
 )
+
+# F3c (security re-audit round 2) — security's exact round-2 reproduction
+# table: every one of these RAW LLM-hallucinated "skill" names must be
+# rejected by `_extract_skills_merged` (F3b's fix) BEFORE it is ever
+# canonicalised, embedded, or written to Neo4j — with NO candidate context
+# involved (this whole list is run through the real production function
+# below, not hand-authored as a pre-canonicalised dict — see
+# `_skills_via_real_extraction`, which is F3c's actual fix: the OLD fixture
+# built `skills[]` as a raw dict, bypassing `_extract_skills_merged`
+# entirely, which is exactly why the sweep stayed green after round 1's fix
+# was defeated).
+MALICIOUS_RAW_SKILL_NAMES = [
+    CANDIDATE_NAME,  # the ORIGINAL F3 finding, verbatim
+    CANDIDATE_EMAIL,  # F3b: email net, dead post-canonicalisation
+    "Rivera, Casey",  # comma-reordered
+    "Casey M. Rivera",  # middle initial
+    "Casey-Rivera",  # hyphenated
+    "Rivera",  # bare surname
+    "John Smith",  # a referee, not even the candidate
+]
 
 _DIM = get_settings().llm_embedding_dim
 
@@ -138,31 +170,64 @@ async def _insert_job(pool: asyncpg.Pool) -> uuid.UUID:
     return job_id
 
 
+async def _skills_via_real_extraction() -> list[dict[str, Any]]:
+    """F3c fix: builds ``skills[]`` through the REAL
+    ``src.worker.resume_tasks._extract_skills_merged`` — never a hand-rolled
+    dict. The OLD fixture built ``skills[]`` directly as
+    ``[{"name": "python", ...}, {"name": CANDIDATE_EMAIL}]``, which handed
+    ``skills_graph._resolve_one`` the email name RAW (with its "@" intact) —
+    a shape production never emits, because the real pipeline always
+    canonicalises a skill name (via ``canonicalize_skill_names``, which
+    strips "@") before it ever reaches that module. Routing every name in
+    ``MALICIOUS_RAW_SKILL_NAMES`` through the real ``_extract_skills_merged``
+    exercises F3b's actual fix (the raw-name shape+vocab reject that runs
+    BEFORE canonicalisation) and proves none of them survive into the
+    persisted/outbox skill list — with "python" included so the sweep also
+    pins that a LEGITIMATE skill is not collaterally dropped (Decision B).
+    """
+    chunks = [ResumeChunk(id="c_001", section="header", page=1, text=HEADER_CHUNK_TEXT)]
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python"),
+                    *[ResumeSkillDetail(name=n) for n in MALICIOUS_RAW_SKILL_NAMES],
+                ]
+            )
+        )
+    )
+    merged = await _extract_skills_merged(llm, chunks, "sweep-resume")
+    return [s.model_dump() for s in merged]
+
+
 async def _insert_resume_with_pii_header_chunk(
-    pool: asyncpg.Pool, job_id: uuid.UUID
+    pool: asyncpg.Pool, job_id: uuid.UUID, *, candidate_empty: bool = False
 ) -> tuple[uuid.UUID, ResumeParsed]:
+    """``candidate_empty=True`` reproduces F3a's exact defeat condition: layer
+    2 (``_redact_skill_names_pii``, candidate-context-aware) has NOTHING to
+    redact against when the parsed ``candidate`` block is empty — the F3b
+    shape+vocab reject (layer 0, upstream of any candidate context) must
+    catch every row of ``MALICIOUS_RAW_SKILL_NAMES`` regardless."""
+    candidate_block = (
+        {}
+        if candidate_empty
+        else {
+            "name": CANDIDATE_NAME,
+            "email": CANDIDATE_EMAIL,
+            "phone": CANDIDATE_PHONE,
+            "location": "Vancouver, BC",
+        }
+    )
+    skills = await _skills_via_real_extraction()
     parsed = ResumeParsed.model_validate(
         {
-            "candidate": {
-                "name": CANDIDATE_NAME,
-                "email": CANDIDATE_EMAIL,
-                "phone": CANDIDATE_PHONE,
-                "location": "Vancouver, BC",
-            },
+            "candidate": candidate_block,
             "summary": (
                 f"Backend engineer {CANDIDATE_NAME} with 6 years of "
                 "Python experience."
             ),
             "total_years_experience": 6,
-            "skills": [
-                {"name": "python", "years": 6, "last_used_year": 2026},
-                # F3/F1: an LLM-hallucinated "skill" carrying the candidate's
-                # own email verbatim — realistic off a header-shaped chunk.
-                # Pins F3's shape-reject layer permanently: if it's ever
-                # weakened, this name gets embedded + written to a Skill
-                # node and the sweep below catches it.
-                {"name": CANDIDATE_EMAIL},
-            ],
+            "skills": skills,
             "experience": [
                 {
                     # F1: an N1 field — permitted on the outbox ONLY because
@@ -265,11 +330,19 @@ async def _walk_every_property_value(driver: AsyncDriver) -> list[str]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_empty", [False, True], ids=["perfect", "empty"])
 async def test_no_pii_marker_survives_anywhere_in_the_projected_graph(
-    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver, candidate_empty: bool
 ) -> None:
+    """F3c: parametrized over BOTH candidate-block states security's
+    reproduction covers. ``candidate_empty=True`` is F3a's exact defeat
+    condition — layer 2 (candidate-context-aware) has nothing to redact
+    against, so this direction proves the F3b shape+vocab reject (layer 0)
+    alone is sufficient, with NO help from candidate context."""
     job_id = await _insert_job(pg_pool)
-    resume_id, parsed = await _insert_resume_with_pii_header_chunk(pg_pool, job_id)
+    resume_id, parsed = await _insert_resume_with_pii_header_chunk(
+        pg_pool, job_id, candidate_empty=candidate_empty
+    )
     await _enqueue_real_outbox_payload(
         pg_pool, resume_id=resume_id, job_id=job_id, parsed=parsed
     )
@@ -304,6 +377,20 @@ async def test_no_pii_marker_survives_anywhere_in_the_projected_graph(
     # Belt-and-braces: the header chunk's RAW text must not survive either,
     # even a truncated preview of it (decision 1 — no chunk text, ever).
     assert HEADER_CHUNK_TEXT.lower() not in all_values_lower
+
+    # F3c: TOKEN-level checks, not just the exact "casey rivera" phrase —
+    # every comma-reordered / hyphenated / middle-initialled / bare-surname
+    # variant in `MALICIOUS_RAW_SKILL_NAMES` still carries these two bare
+    # tokens, so this catches a regression in ANY of those shapes, not only
+    # the original verbatim-phrase finding.
+    assert "casey" not in all_values_lower
+    assert "rivera" not in all_values_lower
+    assert "smith" not in all_values_lower
+
+    # Decision B recall pin, right alongside the PII assertions: the filter
+    # closing F3 must not collaterally eat a LEGITIMATE skill — "python" must
+    # have made it all the way to a real Skill node.
+    assert "python" in all_values_lower
 
 
 @pytest.mark.asyncio

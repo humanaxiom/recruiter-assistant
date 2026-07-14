@@ -198,6 +198,105 @@ def test_resume_fixture_every_chunk_id_is_a_valid_resumechunk_id_shape() -> None
         ResumeChunk.model_validate({**chunk, "text": "placeholder"})
 
 
+# ── Decision B (security re-audit round 2): skill-recall guard ───────────
+#
+# The 4a corpus is blind to skill-score degradation (its own recorded R1
+# residual — `weights.skill = 0.0` passes it). A PII filter that silently
+# eats a legitimate skill would be just as invisible there, so this guard
+# rides the SAME outbox fixture the corpus-integrity tests above already
+# pin (no new résumé twins) and asserts every skill name it declares
+# survives Decision A's shape+vocab reject all the way through
+# `resolve_canonical_names` — covering the four cases Decision B names
+# explicitly: a vocab-known skill, a multi-token proper-noun skill, a
+# 7-token certification, and a C++-style technical marker.
+#
+# NOTE on what this specific guard does/doesn't prove: this fixture's
+# `skills[]` names are already-CANONICALISED (lowercase) — the shape a real
+# outbox payload actually carries at this stage of the pipeline (downstream
+# of `_extract_skills_merged`'s own `canonicalize_skill_names` call). The
+# person-name-shape test requires Title Case, so it never fires on an
+# already-lowercase name; what THIS layer actually pins is the widened
+# token cap (the 7-token certification) and that a technical-marker/
+# multi-token vocab alias survives `resolve_canonical_names` unchanged. The
+# person-name-shape-vs-vocab INTERACTION itself (Decision A's core
+# trade-off — "Kafka"/"Django"/"Kubernetes"/"Google Cloud Platform" kept,
+# "Rivera" rejected) is proven upstream, against the RAW (Title-Case) LLM
+# name `_extract_skills_merged` actually sees, in
+# `tests/unit/test_worker_parse_resume.py`
+# (`test_extract_skills_merged_keeps_vocab_known_skill_despite_person_shape`
+# and its neighbours) — verified to go RED under a vocab-check mutation
+# there, not here.
+
+
+def test_outbox_fixture_declares_all_four_decision_b_recall_cases() -> None:
+    """Guards the guard: if this fixture ever lost one of the four
+    categories Decision B names, the tests below would pass VACUOUSLY."""
+    names = {s["name"] for s in _load_json(RESUME_FIXTURE_PATH)["parsed"]["skills"]}
+    assert "python" in names, "expected a vocab-known single-word skill"
+    assert "apache airflow" in names, "expected a multi-token proper-noun skill"
+    assert any(
+        len(n.split()) == 7 for n in names
+    ), "expected a 7-token certification name"
+    assert "c++" in names, "expected a C++/.NET-style technical-marker skill"
+
+
+def test_every_fixture_declared_skill_name_survives_the_shape_vocab_reject() -> None:
+    """Decision A's `reject_reason_for_skill_name` must return ``None`` (not
+    rejected) for every skill this fixture declares — a mutation that
+    over-widens the shape/vocab reject (e.g. dropping the vocab check, or
+    over-tightening the token cap back down) goes RED here."""
+    from src.pipeline import skills_graph
+
+    names = [s["name"] for s in _load_json(RESUME_FIXTURE_PATH)["parsed"]["skills"]]
+    assert names, "fixture must declare at least one skill to be a meaningful guard"
+    for name in names:
+        reason = skills_graph.reject_reason_for_skill_name(name)
+        assert reason is None, (
+            f"legitimate fixture-declared skill {name!r} was rejected "
+            f"(reason={reason!r}) — Decision B's recall guard failed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_every_fixture_declared_skill_name_resolves_to_a_non_none_canonical() -> (
+    None
+):
+    """End to end through the REAL ``resolve_canonical_names`` (a fake Neo4j
+    session standing in for the driver — no testcontainers needed here):
+    proves the recall guard holds through the WHOLE resolution path, not
+    just the shape+vocab function in isolation. A filter regression that
+    resolves any of these to ``None`` (the "drop this skill/edge" signal)
+    goes RED here, not three phases later in 4c's scoring."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.pipeline import skills_graph
+
+    names = [s["name"] for s in _load_json(RESUME_FIXTURE_PATH)["parsed"]["skills"]]
+
+    class _EmptyResult:
+        async def single(self) -> dict[str, Any] | None:
+            return None
+
+        def __aiter__(self) -> _EmptyResult:
+            return self
+
+        async def __anext__(self) -> dict[str, Any]:
+            raise StopAsyncIteration
+
+    session = MagicMock(run=AsyncMock(return_value=_EmptyResult()))
+    llm = MagicMock(chat_json=AsyncMock())
+    embedder = MagicMock(embed=AsyncMock(return_value=[[0.1] * EXPECTED_EMBEDDING_DIM]))
+
+    resolved = await skills_graph.resolve_canonical_names(
+        session, names, llm=llm, embedder=embedder
+    )
+    for name in names:
+        assert resolved[name] is not None, (
+            f"legitimate fixture-declared skill {name!r} resolved to None "
+            f"(dropped) — Decision B's recall guard failed"
+        )
+
+
 # ── job_parsed.json — top-level shape ────────────────────────────────────
 
 
