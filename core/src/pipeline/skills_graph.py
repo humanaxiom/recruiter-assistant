@@ -38,6 +38,23 @@ Also folds in two hris hardening findings:
   ``SET s.aliases = coalesce(s.aliases, []) + [$alias]`` never de-dupes, so a
   re-parse appends the same alias forever. The Cypher here guards with a
   ``CASE WHEN $alias IN coalesce(s.aliases, [])`` check.
+
+Also folds in the 4b-security re-audit's F3 finding (defence layer 1 of 2):
+
+* **A skill name is free text, not a vocabulary allowlist.**
+  ``canonicalize_skill_names`` is a passthrough normaliser and
+  ``ResumeSkill.name`` is a 200-char-capped free string — an LLM can emit
+  contact information (or the candidate's own identity) as a "skill" off a
+  header-shaped chunk. This module is the ONLY place a skill name is ever
+  handed to the embedder before landing in Neo4j cleartext, so
+  ``_resolve_one`` shape-rejects a name that looks like an email address, a
+  phone number, or is implausibly long/verbose for a skill, BEFORE any
+  ``embed()``/Cypher call ever touches it. A rejected name resolves to
+  ``None`` (never a canonical name) and the rejection is logged as a COUNT/
+  category only — never the value (R3 discipline). Layer 2
+  (``src.worker.resume_tasks``, parse time) additionally scrubs a skill name
+  that IS the candidate's own identity (e.g. "Casey Rivera") using candidate
+  context this shape-only layer does not have.
 """
 
 from __future__ import annotations
@@ -65,6 +82,56 @@ _PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
 # Vector recall breadth for the near-candidate query — matches hris's
 # `db.index.vector.queryNodes('skill_emb_idx', 5, ...)`.
 _NEAR_CANDIDATE_LIMIT = 5
+
+# F3 (security, layer 1) — a legitimate skill name is short. 200 chars of
+# free text, or a dozen tokens, is not a skill; it is exactly the shape a
+# looping/hallucinating small model produces when it copies a header block
+# into a "skill". Checked against the RAW input (never the alias/punctuation
+# -normalised form — `_basic_normalise` strips "@", which would defeat the
+# email check below).
+_MAX_SKILL_NAME_CHARS = 60
+_MAX_SKILL_NAME_TOKENS = 6
+_EMAIL_SHAPE_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+# A contiguous run of digits/phone-punctuation (no letters) that carries at
+# least 7 digits — long enough to be a real phone number, short enough that
+# a legitimate skill name's occasional digit ("ISO 27001", "IPv6") never
+# trips it (those digits aren't contiguous with dashes/spaces/parens).
+_PHONE_RUN_RE = re.compile(r"[+()\-.\s\d]{7,}")
+
+
+class UnresolvedSkillNameError(RuntimeError):
+    """Raised by a projection write-tx callback when it looks up a skill
+    name that ``resolve_canonical_names`` was never asked to resolve at all
+    — a programming error (a name missing from the resolved mapping is NOT
+    the same outcome as a legitimate no-near-candidate or PII-shape-rejected
+    resolution, both of which DO have an entry). F6 (security re-audit):
+    hris's ``resolved_skills.get(name, name)`` silently falls back to the
+    UNRESOLVED raw name, which matches no ``Skill`` node in Cypher and the
+    HAS_SKILL/REQUIRES edge silently vanishes (R5's exact failure class,
+    reintroduced). Fail loud instead — never include the skill name itself
+    in the message (it may be PII; see F3)."""
+
+
+def _looks_like_phone(name: str) -> bool:
+    for m in _PHONE_RUN_RE.finditer(name):
+        run = m.group()
+        digits = sum(ch.isdigit() for ch in run)
+        if digits >= 7:
+            return True
+    return False
+
+
+def _is_pii_shaped_skill_name(name: str) -> bool:
+    """Shape-only PII guard for a raw (pre-normalisation) skill name — no
+    identity knowledge, just "does this look like a skill at all". See the
+    module docstring's F3 note for the companion identity-aware layer."""
+    if len(name) > _MAX_SKILL_NAME_CHARS:
+        return True
+    if len(name.split()) > _MAX_SKILL_NAME_TOKENS:
+        return True
+    if _EMAIL_SHAPE_RE.search(name):
+        return True
+    return _looks_like_phone(name)
 
 
 # ---------------- basic normalisation (mirrors src.pipeline.skills) ---------
@@ -212,7 +279,7 @@ async def resolve_canonical_names(
     *,
     llm: Any,
     embedder: Any,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     """Resolve every name in ``names`` to a canonical Neo4j Skill name.
 
     Runs entirely via auto-commit ``session.run`` (Decision 3) — never
@@ -220,14 +287,34 @@ async def resolve_canonical_names(
     BEFORE a caller opens its own write transaction. Returns a mapping keyed
     by the exact INPUT string (not a re-normalised form) so callers can look
     up ``resolved[skill["name"]]`` with the raw name they already hold.
+
+    A value of ``None`` means ``raw`` was shape-rejected as PII (F3, security
+    re-audit) — the caller must skip projecting that skill/edge entirely, NOT
+    fall back to the raw name (see ``UnresolvedSkillNameError``/F6). Every
+    name in ``names`` gets an entry, rejected or not, so a caller can tell
+    "rejected" (key present, value ``None``) apart from "never resolved at
+    all" (key absent — a caller bug).
     """
-    resolved: dict[str, str] = {}
+    resolved: dict[str, str | None] = {}
     for raw in names:
         resolved[raw] = await _resolve_one(session, raw, llm=llm, embedder=embedder)
     return resolved
 
 
-async def _resolve_one(session: Any, raw: str, *, llm: Any, embedder: Any) -> str:
+async def _resolve_one(
+    session: Any, raw: str, *, llm: Any, embedder: Any
+) -> str | None:
+    if _is_pii_shaped_skill_name(raw):
+        if _EMAIL_SHAPE_RE.search(raw):
+            reason = "email_shape"
+        elif _looks_like_phone(raw):
+            reason = "phone_shape"
+        else:
+            reason = "length_or_token_cap"
+        # R3 discipline: category only, never the value.
+        log.warning("skill_normalize.pii_shaped_name_rejected reason=%s", reason)
+        return None
+
     settings = get_settings()
     normalised = _basic_normalise(raw)
 
@@ -245,14 +332,15 @@ async def _resolve_one(session: Any, raw: str, *, llm: Any, embedder: Any) -> st
     # 2. Vector match.
     [emb] = await embedder.embed([normalised])
     near_cursor = await session.run(
-        f"""
-        CALL db.index.vector.queryNodes('skill_emb_idx', {_NEAR_CANDIDATE_LIMIT}, $e)
+        """
+        CALL db.index.vector.queryNodes('skill_emb_idx', $k, $e)
         YIELD node, score WHERE score > $low_threshold
         RETURN node.canonical_name AS name,
                coalesce(node.aliases, []) AS aliases,
                score
         ORDER BY score DESC
         """,
+        k=_NEAR_CANDIDATE_LIMIT,
         e=emb,
         low_threshold=settings.skill_tiebreaker_threshold,
     )
@@ -303,6 +391,7 @@ async def _resolve_one(session: Any, raw: str, *, llm: Any, embedder: Any) -> st
 
 
 __all__ = [
+    "UnresolvedSkillNameError",
     "categories_for",
     "resolve_canonical_names",
 ]

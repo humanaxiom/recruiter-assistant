@@ -197,7 +197,7 @@ async def _job_projection_tx(
     job_id: str,
     extracted: dict[str, Any],
     embedding: list[float],
-    resolved_skills: dict[str, str],
+    resolved_skills: dict[str, str | None],
 ) -> None:
     """The write-transaction callback. Architecturally cannot call an LLM or
     embedder — neither parameter exists on this signature."""
@@ -214,20 +214,31 @@ async def _job_projection_tx(
         emb=embedding,
     )
 
-    # Drop old skill edges so re-parses don't accumulate cruft. This module
-    # only ever creates REQUIRES/NICE_TO_HAVE edges FROM a Job TO a Skill, so
-    # dropping every outgoing Job->Skill edge is equivalent to (and simpler
-    # than) naming both relationship types — and, unlike naming them, the
-    # Cypher text here never spells out "REQUIRES", so it can never be
-    # mistaken for a requires-edge CREATE/MERGE call by anything scanning
-    # captured Cypher for that relationship type.
+    # Drop old skill edges so re-parses don't accumulate cruft. F4 (security
+    # re-audit): this MUST be a typed delete — the earlier untyped
+    # ``-[r]->(:Skill) DELETE r`` deletes EVERY outgoing Job->Skill edge type,
+    # which silently destroys any future Job->Skill edge type (e.g. a 4c/4d
+    # addition) the moment one gets introduced. This module only ever CREATES
+    # REQUIRES/NICE_TO_HAVE, so naming exactly those two here is not a
+    # regression risk, and IS what stops the silent-data-loss class.
     await tx.run(
-        "MATCH (:Job {id: $jid})-[r]->(:Skill) DELETE r",
+        "MATCH (:Job {id: $jid})-[r:REQUIRES|NICE_TO_HAVE]->(:Skill) DELETE r",
         jid=job_id,
     )
 
     for skill in extracted.get("required_skills", []):
-        canonical = resolved_skills.get(skill["name"], skill["name"])
+        raw_name = skill["name"]
+        # F6 (security re-audit): fail loud on a name resolve_canonical_names
+        # was never asked to resolve — see the resume-side comment in
+        # resume_tasks.py::_resume_projection_tx for the full rationale.
+        if raw_name not in resolved_skills:
+            raise skills_graph.UnresolvedSkillNameError(
+                "job required-skill name has no resolution entry"
+            )
+        canonical = resolved_skills[raw_name]
+        if canonical is None:
+            # F3: shape-rejected as PII — drop this skill/edge silently.
+            continue
         await skills_graph._ensure_categories(tx, canonical)
         await tx.run(
             """
@@ -242,7 +253,14 @@ async def _job_projection_tx(
         )
 
     for skill in extracted.get("nice_to_have_skills", []):
-        canonical = resolved_skills.get(skill["name"], skill["name"])
+        raw_name = skill["name"]
+        if raw_name not in resolved_skills:
+            raise skills_graph.UnresolvedSkillNameError(
+                "job nice-to-have-skill name has no resolution entry"
+            )
+        canonical = resolved_skills[raw_name]
+        if canonical is None:
+            continue
         await skills_graph._ensure_categories(tx, canonical)
         await tx.run(
             """

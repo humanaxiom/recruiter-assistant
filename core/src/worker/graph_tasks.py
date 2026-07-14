@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from src.settings import get_settings
@@ -58,6 +59,27 @@ _MARK_FAILED_SQL = (
 )
 
 
+def _skill_name_count(event_type: str, payload: dict[str, Any]) -> int:
+    """How many skill-name resolution round trips (worst case) this row's
+    projection will attempt — used by the F5 per-drain skill budget below.
+    Deliberately tolerant of a malformed/poison payload (returns 0 rather
+    than raising): the actual KeyError for a poison row surfaces from the
+    real projection call inside the try/except, not from this estimate."""
+    if event_type == "job.parsed":
+        extracted = payload.get("extracted") or {}
+        if not isinstance(extracted, dict):
+            return 0
+        required = extracted.get("required_skills") or []
+        nice = extracted.get("nice_to_have_skills") or []
+        return len(required) + len(nice)
+    if event_type == "resume.parsed":
+        parsed = payload.get("parsed") or {}
+        if not isinstance(parsed, dict):
+            return 0
+        return len(parsed.get("skills") or [])
+    return 0
+
+
 async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int:
     """Drain up to ``batch`` (or ``settings.outbox_drain_batch_size``)
     undelivered, non-dead-lettered outbox rows; project each into Neo4j.
@@ -65,6 +87,18 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
     Returns the number of rows successfully delivered. A row whose projection
     raises does NOT block its batch-mates: ``delivery_attempts`` increments
     and the row is retried on the next drain, up to the dead-letter cap.
+
+    F5 (security re-audit): the whole batch runs under ONE Postgres
+    transaction with no deadline in hris — a handful of skill-heavy rows can
+    hold that transaction (and its row locks) open indefinitely past the arq
+    cron tick that invoked the drain. Here, a wall-clock deadline
+    (``settings.outbox_drain_deadline_seconds``) AND a cap on total skill-name
+    resolution round trips (``settings.outbox_max_skill_resolutions_per_drain``)
+    both bound how much work one drain call takes on. Untouched rows are left
+    exactly as they were (no attempt increment, no dead-lettering) for the
+    next drain tick to pick up. At least one row is ALWAYS attempted, even if
+    it alone busts both budgets — a single oversized row must not starve
+    itself out of ever being processed.
     """
     pool = ctx["pg_pool"]
     neo4j = ctx["neo4j"]
@@ -74,8 +108,13 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
     settings = get_settings()
     limit = batch if batch is not None else settings.outbox_drain_batch_size
     cap = settings.outbox_max_delivery_attempts
+    deadline = time.monotonic() + settings.outbox_drain_deadline_seconds
+    skill_budget = settings.outbox_max_skill_resolutions_per_drain
 
     delivered = 0
+    skills_attempted = 0
+    attempted_any = False
+    rows_attempted = 0
     rows: list[Any] = []
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -87,6 +126,15 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
                     if isinstance(raw_payload, str)
                     else raw_payload
                 )
+                needed = _skill_name_count(row["event_type"], payload)
+                if attempted_any and (
+                    time.monotonic() > deadline
+                    or skills_attempted + needed > skill_budget
+                ):
+                    break
+                attempted_any = True
+                rows_attempted += 1
+                skills_attempted += needed
                 try:
                     if row["event_type"] == "job.parsed":
                         await _project_job(
@@ -126,7 +174,7 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
                     await conn.execute(_MARK_FAILED_SQL, row["id"], type(exc).__name__)
 
     if delivered:
-        log.info("outbox.drained delivered=%d attempted=%d", delivered, len(rows))
+        log.info("outbox.drained delivered=%d attempted=%d", delivered, rows_attempted)
     return delivered
 
 

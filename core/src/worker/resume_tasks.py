@@ -208,6 +208,51 @@ def _drop_smeared_years(
     ]
 
 
+# ---------------- skill-name PII scrub (F3, security re-audit, layer 2) ----
+#
+# `src.pipeline.skills_graph._resolve_one` (layer 1) shape-rejects a skill
+# name that LOOKS like contact information — but it has no idea what the
+# CANDIDATE'S OWN name/email/phone actually is, so a skill name that IS the
+# candidate's identity verbatim (e.g. "Casey Rivera", emitted by a small
+# model off a header-shaped chunk) sails through layer 1 unshaped: it is
+# short, has no "@", and isn't phone-digit-heavy. This function runs HERE,
+# at parse time, where `CandidateInfo` is still in scope (the outbox payload
+# has it stripped by design — decision 1/N1), and scrubs every skill name
+# with the SAME `_redact_candidate_pii` used for the embedder's input, BEFORE
+# `ResumeParsed.model_validate` — so the scrub lands in `resumes.parsed`
+# (Postgres, system of record) and the outbox alike, not just the embed
+# call.
+
+
+def _redact_skill_names_pii(
+    skills: list[ResumeSkill], candidate: CandidateInfo, resume_id_str: str
+) -> list[ResumeSkill]:
+    """Scrub the candidate's own identity out of every skill NAME. A name
+    that reduces to blank after scrubbing (i.e. WAS the candidate's identity,
+    verbatim) is dropped outright rather than kept as an empty string.
+
+    R3 discipline: the drop is logged as a COUNT only — never the name.
+    """
+    out: list[ResumeSkill] = []
+    dropped = 0
+    for skill in skills:
+        redacted_name = _redact_candidate_pii(skill.name, candidate)
+        if not redacted_name:
+            dropped += 1
+            continue
+        if redacted_name != skill.name:
+            out.append(skill.model_copy(update={"name": redacted_name}))
+        else:
+            out.append(skill)
+    if dropped:
+        log.warning(
+            "parse_resume.skill_name_pii_dropped resume_id=%s count=%d",
+            resume_id_str,
+            dropped,
+        )
+    return out
+
+
 # ---------------- cover letter ----------------
 
 _COVER_MIME_BY_EXT = {
@@ -461,6 +506,12 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
             return "failed"
 
         merged = await _extract_skills_merged(llm, chunks, resume_id_str)
+        # F3 (security re-audit), layer 2: scrub the candidate's own identity
+        # out of any skill NAME the LLM emitted, before it enters
+        # `resumes.parsed`/the outbox. Must run before `cleaned_parsed` is
+        # built below — layer 1 (skills_graph, Phase 4b projection) cannot
+        # catch this, it has no candidate context.
+        merged = _redact_skill_names_pii(merged, core.candidate, resume_id_str)
 
         # Non-fatal. Its chunks ride in the parsed jsonb (cl_NNN id space); the
         # LLM extraction goes to the cover_letter_parsed column.
@@ -696,7 +747,7 @@ async def _resume_projection_tx(
     parsed: dict[str, Any],
     summary_emb: list[float],
     chunk_embs: dict[str, list[float]],
-    resolved_skills: dict[str, str],
+    resolved_skills: dict[str, str | None],
     *,
     job_id: str | None,
 ) -> None:
@@ -756,7 +807,22 @@ async def _resume_projection_tx(
     # embed()/chat_json() call happens in this transaction.
     for skill in parsed.get("skills", []):
         raw_name = skill["name"]
-        canonical = resolved_skills.get(raw_name, raw_name)
+        # F6 (security re-audit): a name ABSENT from resolved_skills means
+        # resolve_canonical_names was never asked to resolve it at all — a
+        # caller bug. Falling back to the raw name (hris's
+        # ``resolved_skills.get(name, name)``) matches no Skill node in
+        # Cypher and the HAS_SKILL edge silently vanishes (R5's failure
+        # class). Fail loud instead.
+        if raw_name not in resolved_skills:
+            raise skills_graph.UnresolvedSkillNameError(
+                "resume skill name has no resolution entry"
+            )
+        canonical = resolved_skills[raw_name]
+        if canonical is None:
+            # F3 (security re-audit): shape-rejected as PII at the
+            # resolution boundary — drop this skill/edge silently, never
+            # project it. Not a caller bug, unlike the branch above.
+            continue
         await skills_graph._ensure_categories(tx, canonical)
         evidence = skill.get("evidence_chunk_ids") or []
         await tx.run(
