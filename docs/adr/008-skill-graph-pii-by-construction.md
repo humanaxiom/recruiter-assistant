@@ -228,6 +228,34 @@ ships. It is recorded here plainly, not softened.
     who genuinely has that skill) — but it is cleartext, and it is not eliminated by construction.
     Accepted: removing these terms from the vocabulary would cost real recall for real
     technologies.
+    > **Widened (post-4b security re-audit).** As written above this residual describes only the
+    > *exact bare name* case (a candidate literally named "Julia" or "Hudson"). The Phase 4b
+    > spelling-recall normalisation (trailing-version-strip, parenthetical-split) routes a WIDER
+    > input set to the same collision node: `"Julia 3"`, `"Hudson v2"` (version-strip), and
+    > `"X (Julia)"` / `"X (Hudson)"` for any outer phrase `X` that is itself vocab-adjacent, e.g.
+    > `"Data Pipeline (Julia)"` (paren-split — see residual #14 for the gate that now bounds which
+    > outer phrases can reach this at all). Same deniable/unembedded property as the bare-name case
+    > — nothing here lands *new* identifying value in the graph — but the set of spellings that
+    > collide with the shared node is wider than "exact bare name" suggested, and the node itself is
+    > correspondingly more ambiguous about who it actually describes.
+14. **Parenthetical-split skill inflation — closed.** The parenthetical-CONTENT fallback (residual
+    #6/#8's normalisation fix) could, unguarded, extract a real vocab skill out of a name-bearing
+    string — `"Casey Rivera (Python)"` → `python`, `"Rivera (psql)"` → `postgresql`, `"Casey (Kafka
+    Streams)"` → `kafka`. The `canonical_key` produced carries no name either way (not a new PII
+    residual — the hash/cleartext-vocab split already covers it), but a mis-extracted name silently
+    minting a spurious `HAS_SKILL` edge is a **scoring-integrity** hazard the 4a evals corpus cannot
+    see. Closed by `_outer_phrase_is_vocab_adjacent` (`src/pipeline/skills.py`): the parenthetical's
+    own content is only used as a fallback when the outer phrase (parens stripped) is empty or
+    itself shares a vocab-table token (`"aws"` inside `"AWS MWAA"`) — a name-bearing outer phrase
+    (`"Casey Rivera"`, `"Rivera"`, `"Ada Lovelace"`, `"Casey"`) shares none, so the fallback never
+    runs and the string falls through to the unresolved (eventually hashed) full-cleaned form
+    instead. `"Containerization (Docker)"` is preserved without needing the gate at all by
+    registering `containerization` itself as a `docker` alias, so it resolves at the earlier,
+    unconditional outer-full-resolve step. Honest caveat: this gate is a **token-overlap** check, not
+    a semantic one — an adversarial outer phrase that happens to embed a genuine vocab word
+    incidentally (e.g. a made-up qualifier phrase containing "aws" as a substring token) could still
+    unlock its parenthetical; the gate closes the concrete inflation cases identified, not every
+    theoretically constructible one.
 
 ## Alternatives Considered
 

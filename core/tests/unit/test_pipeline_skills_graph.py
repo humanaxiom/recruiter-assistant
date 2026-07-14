@@ -1249,6 +1249,70 @@ def test_spelling_variant_and_plain_canonical_agree_on_the_resume_side(
     assert r(variant) == r(expected_canonical) == expected_canonical
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Security fix (post-4b re-audit, LOW #2) — paren-split skill inflation.
+# `_basic_normalise` is shared (imported) between this module and
+# `src.pipeline.skills`, so the gate lives there — these tests confirm it
+# holds on THIS side (`resume_skill_canonical_key`) too, and that the
+# JD/résumé parity invariant is unbroken by the fix.
+# ═══════════════════════════════════════════════════════════════════════════
+
+PAREN_SPLIT_INFLATION_FIXTURES: tuple[str, ...] = (
+    "Casey Rivera (Python)",
+    "Rivera (psql)",
+    "Ada Lovelace (Julia)",
+    "Casey (Kafka Streams)",
+)
+
+_INFLATION_TARGET_KEYS = ("python", "postgresql", "julia", "kafka")
+
+
+@pytest.mark.parametrize("name", PAREN_SPLIT_INFLATION_FIXTURES)
+def test_resume_skill_canonical_key_does_not_inflate_via_parenthetical(
+    name: str,
+) -> None:
+    """A name-bearing outer phrase must never resolve to the real skill
+    named in its own parenthetical — the key must be `None` (shape-
+    rejected) or an opaque hash, never one of the cleartext vocab keys the
+    parenthetical would otherwise leak into scoring."""
+    key = skills_graph.resume_skill_canonical_key(name)
+    if key is None:
+        return
+    assert key not in _INFLATION_TARGET_KEYS
+    assert key.startswith(skills_graph._HASH_KEY_PREFIX)
+
+
+PAREN_SPLIT_LEGITIMATE_FIXTURES: tuple[tuple[str, str], ...] = (
+    ("Kubernetes (EKS)", "kubernetes"),
+    ("Terraform (IaC)", "terraform"),
+    ("Python (3.11)", "python"),
+    ("AWS MWAA (Airflow)", "airflow"),
+    ("Containerization (Docker)", "docker"),
+)
+
+
+@pytest.mark.parametrize("variant,expected_canonical", PAREN_SPLIT_LEGITIMATE_FIXTURES)
+def test_legitimate_parenthetical_still_resolves_on_the_resume_side(
+    variant: str, expected_canonical: str
+) -> None:
+    assert skills_graph.resume_skill_canonical_key(variant) == expected_canonical
+
+
+@pytest.mark.parametrize("variant,expected_canonical", PAREN_SPLIT_LEGITIMATE_FIXTURES)
+@pytest.mark.asyncio
+async def test_legitimate_parenthetical_round_trips_job_side_and_resume_side(
+    variant: str, expected_canonical: str
+) -> None:
+    """JD/résumé parity confirmation: the gate must not break the round trip
+    for any of the still-legitimate parenthetical spellings."""
+    session = _make_session([_FakeResult([{"name": expected_canonical}])])
+    job_side = await skills_graph.resolve_canonical_names(
+        session, [variant], llm=_make_llm(), embedder=_make_embedder()
+    )
+    resume_side = skills_graph.resume_skill_canonical_key(variant)
+    assert job_side[variant] == resume_side == expected_canonical
+
+
 def test_every_shipped_alias_still_resolves_on_the_graph_side() -> None:
     """Zero-regression guard for the Neo4j-backed copy of the basic-
     normalisation logic (duplicated, not imported, from `src.pipeline.

@@ -56,9 +56,11 @@ _PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
 #     "PostgreSQL 14"/"Python 3"/"Apache Airflow 2.7" resolve to the same key
 #     as "postgresql"/"python"/"airflow".
 #   - `_PAREN_RE` strips a "(...)" qualifier so "Kubernetes (EKS)"/
-#     "Terraform (IaC)" resolve to the outer term, and "Containerization
-#     (Docker)"/"AWS MWAA (Airflow)" fall back to the PARENTHETICAL's own
-#     content when the outer phrase alone isn't a vocab hit.
+#     "Terraform (IaC)" resolve to the outer term, and "AWS MWAA (Airflow)"
+#     falls back to the PARENTHETICAL's own content when the outer phrase
+#     alone isn't a vocab hit BUT is still vocab-adjacent (see
+#     `_outer_phrase_is_vocab_adjacent` — a security gate closing a
+#     scoring-integrity finding: post-4b re-audit, LOW #2).
 _TRAILING_VERSION_RE = re.compile(r"\s+v?\d+(?:\.\d+)*$", re.IGNORECASE)
 _PAREN_RE = re.compile(r"\(([^()]*)\)")
 
@@ -102,6 +104,38 @@ def _resolve_or_none(cleaned: str) -> str | None:
     return None
 
 
+def _outer_phrase_is_vocab_adjacent(outer_clean: str) -> bool:
+    """Security gate (post-4b re-audit, LOW #2 — parenthetical-split skill
+    inflation): decides whether the parenthetical-CONTENT fallback in
+    ``_basic_normalise`` is even allowed to run.
+
+    Without this gate, a name-bearing string like ``"Casey Rivera (Python)"``
+    or ``"Rivera (psql)"`` would fall through to the parenthetical's own
+    content and resolve to a REAL vocab skill (``python``/``postgresql``) —
+    an outer phrase that is free text about a *person*, not a qualifier on a
+    skill, has no business unlocking that skill via its parenthetical. That
+    would mint a spurious ``HAS_SKILL`` edge (a scoring-integrity problem,
+    not a PII leak — the key never carries the name either way).
+
+    Returns ``True`` (fallback allowed) when the outer phrase is empty, or
+    when at least one of its whitespace-separated tokens is ITSELF a
+    recognised vocab term on its own — the signal that distinguishes a
+    technical qualifier phrase (``"AWS MWAA"`` — ``"aws"`` is vocab) from
+    name-bearing free text (``"Casey Rivera"``, ``"Rivera"``, ``"Casey"`` —
+    no token is vocab). Legitimate outer phrases that are neither a vocab hit
+    nor share a vocab token (``"Containerization (Docker)"``) are handled by
+    registering the outer phrase itself as a vocab alias (see
+    ``skill_data/aliases.yaml``) so they resolve at the earlier, unconditional
+    outer-full-resolve step and never need this gate at all — deliberately:
+    growing the vocabulary is the only lever ADR-008 sanctions for recall,
+    never a shape/name heuristic.
+    """
+    if not outer_clean:
+        return True
+    table = _alias_table()
+    return any(tok in table for tok in outer_clean.split())
+
+
 def _basic_normalise(raw: str) -> str:
     """Lowercases, collapses whitespace, strips most punctuation, then
     resolves via the alias map if present — trying, in order:
@@ -117,9 +151,17 @@ def _basic_normalise(raw: str) -> str:
        ``_resolve_or_none`` — only used if it lands on a real vocab entry.
     3. If (1) still doesn't resolve AND the raw string has a
        parenthetical, the OUTER phrase with the parenthetical entirely
-       removed (``"Kubernetes (EKS)"`` -> ``"kubernetes"``), then each
-       parenthetical's own content in turn (``"Containerization (Docker)"``
-       -> ``"docker"``) — again, only used on an actual vocab hit.
+       removed (``"Kubernetes (EKS)"`` -> ``"kubernetes"``) — again, only
+       used on an actual vocab hit. If that ALSO misses, each
+       parenthetical's own content in turn (``"AWS MWAA (Airflow)"`` ->
+       ``"airflow"``) — but ONLY when the outer phrase is empty or itself
+       vocab-adjacent (``_outer_phrase_is_vocab_adjacent``): a name-bearing
+       outer phrase (``"Casey Rivera (Python)"``, ``"Rivera (psql)"``,
+       ``"Casey (Kafka Streams)"``) is NOT allowed to reach into its own
+       parenthetical for a real skill term — that would inflate the
+       candidate's skill match on what is, most likely, a mis-extracted
+       name (security finding, post-4b re-audit LOW #2). Such a string
+       falls through to (1)'s unresolved return instead.
 
     Invariant (security re-audit, mutation-killed; re-affirmed by the Phase
     4b dedup fix): the JD side (``skills_graph``, which now IMPORTS this
@@ -143,10 +185,11 @@ def _basic_normalise(raw: str) -> str:
         resolved = _resolve_or_none(outer_clean)
         if resolved is not None:
             return resolved
-        for inner in inner_candidates:
-            resolved = _resolve_or_none(_clean(inner))
-            if resolved is not None:
-                return resolved
+        if _outer_phrase_is_vocab_adjacent(outer_clean):
+            for inner in inner_candidates:
+                resolved = _resolve_or_none(_clean(inner))
+                if resolved is not None:
+                    return resolved
 
     return full_clean
 

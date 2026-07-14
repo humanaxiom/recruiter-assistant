@@ -39,8 +39,13 @@
   # "docker compose" added (Phase 4b spelling-recall fix): the multi-
   # container orchestration tool shipped BY Docker, commonly listed as a
   # single résumé/JD line for what is, for skill-matching purposes, the same
-  # underlying containerization skill.
-  aliases: [docker, "docker compose"]
+  # underlying containerization skill. "containerization" added (post-4b
+  # security fix — paren-split skill inflation gate): the bare word is
+  # itself a legitimate, common résumé/JD spelling for the same skill (see
+  # "Containerization (Docker)" in SPELLING_RECALL_FIXTURES) — registering
+  # it as a vocab alias lets it resolve at the ordinary outer-full-resolve
+  # step instead of needing the (now-gated) parenthetical-content fallback.
+  aliases: [docker, "docker compose", containerization]
 - canonical: terraform
   aliases: [terraform, tf]
 - canonical: aws

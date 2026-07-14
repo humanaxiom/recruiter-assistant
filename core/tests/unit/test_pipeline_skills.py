@@ -30,6 +30,7 @@ match — it is not a behavioural assumption, just a naming one.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,84 @@ def test_every_shipped_alias_still_resolves_to_its_own_canonical() -> None:
             ], f"alias {alias!r} no longer resolves to canonical {canonical!r}"
             checked += 1
     assert checked >= 150  # sanity: the vocab was not accidentally shrunk
+
+
+# ── Security fix (post-4b re-audit, LOW #2): paren-split skill inflation ──
+#
+# The parenthetical-split fallback added above extracts a real skill term
+# out of a NAME-BEARING string: "Casey Rivera (Python)" -> "python",
+# "Rivera (psql)" -> "postgresql", "Casey (Kafka Streams)" -> "kafka". The
+# key itself carries no name (not a PII leak — see ADR-008), but a
+# mis-extracted name that ends up with a spurious HAS_SKILL edge INFLATES
+# that candidate's skill score on garbage the 4a evals corpus is blind to.
+#
+# Fix: the parenthetical-CONTENT fallback only runs when the outer phrase
+# (parens stripped) is empty or itself vocab-adjacent — a technical
+# qualifier phrase like "AWS MWAA" shares a vocab token ("aws") with the
+# table; name-bearing free text ("Casey Rivera", "Rivera", "Ada Lovelace",
+# "Casey") shares none. "Containerization (Docker)" is preserved by
+# registering "containerization" itself as a docker alias (resolves at the
+# earlier, unconditional outer-full-resolve step, never needs the gate).
+
+# MUST-NOT-EXTRACT: a name-bearing outer phrase must never pull the real
+# skill out of its own parenthetical.
+PAREN_SPLIT_INFLATION_FIXTURES: tuple[str, ...] = (
+    "Casey Rivera (Python)",
+    "Rivera (psql)",
+    "Ada Lovelace (Julia)",
+    "Casey (Kafka Streams)",
+)
+
+
+_INFLATION_TARGET_SKILLS = ("python", "postgresql", "julia", "kafka")
+
+
+@pytest.mark.parametrize("name", PAREN_SPLIT_INFLATION_FIXTURES)
+def test_name_bearing_parenthetical_does_not_inflate_a_skill(name: str) -> None:
+    """None of these may resolve to the parenthetical's own skill term —
+    the candidate/name-shaped outer phrase must not unlock it. It must fall
+    through to the (unresolved) full-cleaned string instead — hashed
+    downstream by the résumé-side projection, never a bare vocab hit."""
+    result = canonicalize_skill_names([name])
+    assert result not in ([s] for s in _INFLATION_TARGET_SKILLS)
+    expected_unresolved = re.sub(r"[^\w.+#\- ]+", "", name.lower())
+    expected_unresolved = re.sub(r"\s+", " ", expected_unresolved).strip()
+    assert result == [expected_unresolved]
+
+
+# MUST-KEEP: every Phase-4b recovered spelling must still round-trip.
+PAREN_SPLIT_LEGITIMATE_FIXTURES: tuple[tuple[str, str], ...] = (
+    ("Kubernetes (EKS)", "kubernetes"),
+    ("Terraform (IaC)", "terraform"),
+    ("Python (3.11)", "python"),
+    ("AWS MWAA (Airflow)", "airflow"),
+    ("Containerization (Docker)", "docker"),
+)
+
+
+@pytest.mark.parametrize("variant,expected_canonical", PAREN_SPLIT_LEGITIMATE_FIXTURES)
+def test_legitimate_parenthetical_still_resolves(
+    variant: str, expected_canonical: str
+) -> None:
+    assert canonicalize_skill_names([variant]) == [expected_canonical]
+
+
+def test_outer_phrase_vocab_adjacency_gate_mutation_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation-proof: reverting the gate (always allowing the
+    parenthetical-content fallback, as the pre-fix code did) must turn the
+    inflation cases RED — proving this test suite actually depends on the
+    gate rather than passing by some other coincidence."""
+    import src.pipeline.skills as skills_mod
+
+    monkeypatch.setattr(
+        skills_mod, "_outer_phrase_is_vocab_adjacent", lambda outer_clean: True
+    )
+    assert skills_mod.canonicalize_skill_names(["Casey Rivera (Python)"]) == ["python"]
+    assert skills_mod.canonicalize_skill_names(["Rivera (psql)"]) == ["postgresql"]
+    assert skills_mod.canonicalize_skill_names(["Ada Lovelace (Julia)"]) == ["julia"]
+    assert skills_mod.canonicalize_skill_names(["Casey (Kafka Streams)"]) == ["kafka"]
 
 
 # ── Path-resolution regression ────────────────────────────────────────────
