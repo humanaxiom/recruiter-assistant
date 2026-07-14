@@ -350,6 +350,113 @@ def test_vocab_known_single_title_case_word_is_not_rejected(name: str) -> None:
     assert skills_graph.reject_reason_for_skill_name(name) is None
 
 
+# ── Decision C/D (round-4 recall regression fix): personal-name lexicon ───
+#
+# Round-3's recall guard (the tests above) went green for the WRONG reason:
+# every one of its fixtures (`Google Cloud Platform`, `machine learning`,
+# `ISO 27001`, the 8-token cert) is a vocabulary HIT, so it only ever
+# exercised the arm of Decision A that was never at risk. Decision A's
+# two-way conjunction (name-shape AND vocab-miss) had itself quietly become
+# the strict allowlist the human rejected in round 2: it also rejected any
+# LEGITIMATE multi-word skill missing from the 220-term vocabulary that
+# happened to be two Title-Case-able alphabetic words — indistinguishable,
+# by shape alone, from `Casey Rivera`. Decision C adds a personal-name
+# lexicon (`skill_data/person_names.txt`) as the missing third signal.
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "distributed systems",
+        "data engineering",
+        "natural language processing",
+        "event driven architecture",
+        "test driven development",
+        "postgres db",
+        "cockroach db",
+    ],
+)
+def test_non_vocab_multiword_skill_is_kept_not_rejected_as_a_name(name: str) -> None:
+    """Decision D's recall-guard fixtures: these are legitimate skill-shaped
+    phrases NOT in the 220-term vocabulary, made of two-or-more
+    Title-Case-able alphabetic tokens apiece — under the OLD round-2/3
+    two-way conjunction (name-shape AND vocab-miss, no lexicon arm) every
+    one of these was misclassified as `person_name_shape` and silently
+    dropped, deflating 4c's 0.40-weighted skill sub-score. Decision C's
+    THIRD conjunct (a personal-name lexicon hit, or a non-Latin script) is
+    what tells these apart from `Casey Rivera` — see the mutation-proof
+    test below for the falsifiable pin that this guard actually depends on
+    that arm, not merely on these fixtures happening to be vocab hits."""
+    assert skills_graph.reject_reason_for_skill_name(name) is None
+
+
+def test_lexicon_arm_mutation_proof_recall_guard_goes_red_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decision D's mandated mutation proof. Neutralise Decision C's lexicon
+    arm back to an unconditional hit — i.e. REVERT to the OLD round-2/3
+    conjunction, where name-shape AND vocab-miss ALONE was sufficient to
+    reject (`_hits_person_name_lexicon` always returning True collapses the
+    three-way conjunction back to that two-way rule) — and confirm the
+    round-4 recall-guard fixtures above then INCORRECTLY get rejected. If
+    this assertion ever starts failing, the recall guard above has stopped
+    being sensitive to the lexicon arm — exactly the blind-guard defect
+    class round 3's own recall guard turned out to have."""
+    monkeypatch.setattr(skills_graph, "_hits_person_name_lexicon", lambda tokens: True)
+    for name in (
+        "distributed systems",
+        "data engineering",
+        "natural language processing",
+        "event driven architecture",
+        "test driven development",
+    ):
+        assert skills_graph.reject_reason_for_skill_name(name) == "person_name_shape", (
+            f"{name!r} should be (incorrectly) rejected once the lexicon arm "
+            "is neutralised back to the old shape+vocab-miss-only rule — if "
+            "this fails, today's green recall guard is not actually pinned "
+            "to Decision C's lexicon arm being present"
+        )
+
+
+def test_lexicon_file_missing_fails_closed_not_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """S7 precedent, applied to Decision C: if `person_names.txt` cannot be
+    read at all, `_hits_person_name_lexicon` must report a hit
+    UNCONDITIONALLY (fail CLOSED — collapsing back to the stricter old
+    two-way rule), never silently report no-hit (fail OPEN, which would
+    make `person_name_shape` un-triggerable for name-shaped, vocab-miss
+    candidates on a broken deployment — reopening the original F3 leak)."""
+    skills_graph._name_lexicon.cache_clear()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        skills_graph, "_PERSON_NAMES_PATH", tmp_path / "nonexistent-lexicon.txt"
+    )
+    try:
+        assert skills_graph._name_lexicon() is None
+        assert skills_graph._hits_person_name_lexicon(["anything", "at-all"]) is True
+        # And end-to-end: a name-shaped, vocab-miss candidate is STILL
+        # rejected even though it hits no lexicon entry, because the fail-
+        # closed sentinel makes the lexicon arm always report a hit.
+        assert (
+            skills_graph.reject_reason_for_skill_name("distributed systems")
+            == "person_name_shape"
+        )
+    finally:
+        skills_graph._name_lexicon.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_non_latin_script_fallback_rejects_even_without_a_lexicon_hit() -> None:
+    """Documented residual: the personal-name lexicon is Latin-alphabet
+    only, so a non-Latin-script, name-shaped, vocab-miss candidate is
+    rejected via the SCRIPT fallback, independent of any lexicon entry —
+    proven here with a token that certainly is not literally IN
+    `person_names.txt` (only its transliteration might be)."""
+    assert skills_graph._contains_non_latin_script("Кейси Ривера")
+    assert skills_graph._contains_non_latin_script("李伟")
+    assert not skills_graph._contains_non_latin_script("Casey Rivera")
+    assert not skills_graph._contains_non_latin_script("distributed systems")
+
+
 @pytest.mark.parametrize("name", ["C++", "C#", ".NET", "Node.js", "IPv6"])
 def test_technical_marker_shaped_names_are_never_person_name_shaped(name: str) -> None:
     """A digit or a `+`/`#`/non-middle-initial `.` disqualifies the
@@ -483,19 +590,15 @@ async def test_auto_merge_path_writes_an_alias_update_for_the_new_spelling() -> 
 
 @pytest.mark.asyncio
 async def test_grey_zone_asks_the_llm_and_merges_on_a_valid_match() -> None:
-    # NOTE (round-3 security re-audit): the raw candidate here was
-    # "postgres db" (two lowercase words) — an arbitrary, orthogonal
-    # placeholder for THIS test's actual concern (grey-zone vector-score ->
-    # LLM-tiebreaker MECHANICS), not the PII shape guard. S1's now-
-    # case-insensitive name-shape check folds any bare two-lowercase-word
-    # phrase to Title Case, and — exactly like a real "Casey Rivera" — a
-    # two-word phrase with no vocab hit is correctly shape-rejected;
-    # "postgres db" as a whole phrase isn't itself in the vocab (only bare
-    # "postgres" is), so it would now be (correctly) rejected before ever
-    # reaching the mechanics this test exists to exercise. Renamed to a
-    # single bare token, which S1 deliberately never folds (see
-    # `test_all_caps_acronym_is_not_person_name_shaped`) — no assertion
-    # below changed.
+    # NOTE (round-4 recall regression fix): this was briefly renamed to the
+    # single bare token "postgresvariant" during round 3, when the (buggy)
+    # two-way name-shape+vocab-miss conjunction would have incorrectly
+    # shape-rejected the two-lowercase-word phrase "postgres db" before ever
+    # reaching the mechanics this test exists to exercise (grey-zone
+    # vector-score -> LLM-tiebreaker MECHANICS, not the PII shape guard).
+    # Decision C's personal-name-lexicon arm fixed that: neither "postgres"
+    # nor "db" is a personal name, so this phrase is correctly KEPT again —
+    # restored to the original, more realistic placeholder.
     near = [{"name": "postgresql", "aliases": ["postgres"], "score": 0.90}]
     session = _make_session(
         [
@@ -506,9 +609,9 @@ async def test_grey_zone_asks_the_llm_and_merges_on_a_valid_match() -> None:
     )
     llm = _make_llm(match="postgresql")
     resolved = await skills_graph.resolve_canonical_names(
-        session, ["postgresvariant"], llm=llm, embedder=_make_embedder()
+        session, ["postgres db"], llm=llm, embedder=_make_embedder()
     )
-    assert resolved == {"postgresvariant": "postgresql"}
+    assert resolved == {"postgres db": "postgresql"}
     llm.chat_json.assert_awaited_once()
 
 
@@ -518,7 +621,7 @@ async def test_grey_zone_llm_receives_the_near_candidates() -> None:
     session = _make_session([_FakeResult([]), _FakeResult(near), _FakeResult([])])
     llm = _make_llm(match="postgresql")
     await skills_graph.resolve_canonical_names(
-        session, ["postgresvariant"], llm=llm, embedder=_make_embedder()
+        session, ["postgres db"], llm=llm, embedder=_make_embedder()
     )
     flat_args = [
         *llm.chat_json.await_args.args,
@@ -569,13 +672,15 @@ async def test_hallucinated_tiebreaker_answer_is_rejected_not_trusted() -> None:
     the hallucinated string must never be used as a canonical_name to MATCH
     against, only a real (offered-or-freshly-created) name may be returned.
 
-    NOTE (round-3 security re-audit): the raw candidate was "cockroach db"
-    (two lowercase words) — renamed to the single bare token
-    "cockroachvariant" for the same reason documented on
-    ``test_grey_zone_asks_the_llm_and_merges_on_a_valid_match`` above: S1's
-    now-case-insensitive shape check would (correctly) reject a bare
-    two-word non-vocab phrase, which is orthogonal to what THIS test
-    actually exercises (the hallucinated-tiebreaker-answer mechanics)."""
+    NOTE (round-4 recall regression fix): this was briefly renamed to the
+    single bare token "cockroachvariant" during round 3, when the (buggy)
+    two-way name-shape+vocab-miss conjunction would have incorrectly
+    shape-rejected the two-lowercase-word phrase "cockroach db" before ever
+    reaching the mechanics this test exists to exercise (the
+    hallucinated-tiebreaker-answer mechanics). Decision C's personal-name-
+    lexicon arm fixed that: neither "cockroach" nor "db" is a personal
+    name, so this phrase is correctly KEPT again — restored to the
+    original, more realistic placeholder."""
     near = [{"name": "postgresql", "aliases": [], "score": 0.90}]
     session = _make_session(
         [
@@ -587,10 +692,10 @@ async def test_hallucinated_tiebreaker_answer_is_rejected_not_trusted() -> None:
     llm = _make_llm(match="not-a-real-skill-node")
 
     resolved = await skills_graph.resolve_canonical_names(
-        session, ["cockroachvariant"], llm=llm, embedder=_make_embedder()
+        session, ["cockroach db"], llm=llm, embedder=_make_embedder()
     )
 
-    canonical = resolved["cockroachvariant"]
+    canonical = resolved["cockroach db"]
     assert canonical != "not-a-real-skill-node"
     # The hallucinated string must never appear as a Cypher parameter value —
     # proof it was never used to MATCH an existing (nonexistent) node.

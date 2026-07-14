@@ -109,6 +109,55 @@ straight through with a PERFECT candidate block:
   technology (``Kafka``, ``Django``, ``Cassandra``) is kept — the
   vocabulary arm of Decision A's conjunction always wins over the shape arm,
   by design.
+
+Round-4 (recall regression fix) — Decision A's two-way conjunction
+(name-shape AND vocab-miss) had itself quietly become the strict allowlist
+the human rejected in round 2: ANY multi-word skill missing from the
+220-term vocabulary that also happened to be two Title-Case-able alphabetic
+words (``distributed systems``, ``data engineering``, ``natural language
+processing``, ``event driven architecture``, ``test driven development``)
+was indistinguishable, by SHAPE alone, from ``Casey Rivera`` — and was
+silently dropped, deflating 4c's 0.40-weighted skill sub-score. The
+round-2/3 recall guard never caught this because every one of ITS fixtures
+(``Google Cloud Platform``, ``machine learning``, ``ISO 27001``, the
+7-token cert) was a vocabulary HIT — it only ever exercised the arm that
+was never at risk.
+
+**Decision C** makes the reject a THREE-way conjunction: name-shaped AND
+vocab-miss AND (at least one real token hits an offline personal-name
+lexicon, OR the name contains a non-Latin script). The lexicon
+(``skill_data/person_names.txt``, beside ``aliases.yaml``/
+``categories.yaml`` — see that file's header for provenance/licence) is
+the missing signal that tells ``distributed systems`` (no token is a
+personal name) apart from ``Casey Rivera`` (both tokens are). See
+``_hits_person_name_lexicon``/``_contains_non_latin_script`` below.
+
+* A name-shaped, vocab-miss candidate whose tokens hit NEITHER the lexicon
+  NOR the non-Latin-script fallback is KEPT (``distributed systems`` etc.)
+  — Decision D's recall-guard fixtures pin this, mutation-proved: neutralise
+  the lexicon arm back to the old two-way rule and the guard goes RED (see
+  ``test_lexicon_arm_mutation_proof_recall_guard_goes_red_without_it`` in
+  ``test_pipeline_skills_graph.py``).
+* **Fail CLOSED, not open, if the lexicon file cannot be loaded** (``S7``
+  precedent): a missing/unreadable ``person_names.txt`` makes
+  ``_hits_person_name_lexicon`` report a hit UNCONDITIONALLY, collapsing
+  back to the OLD, stricter two-way conjunction rather than silently never
+  rejecting a PII-shaped name again on a broken deployment. This trades
+  recall for safety exactly the way a working lexicon does not have to.
+* **Documented residual — non-Latin-script asymmetry.** A lexicon of Latin
+  given names/surnames cannot cover ``Кейси Ривера``/``李伟``; the
+  script-based fallback (round-3's S5 Unicode handling) still rejects any
+  name-shaped, vocab-miss candidate containing Cyrillic/CJK/other non-Latin
+  script characters, REGARDLESS of a lexicon hit. This means a genuine
+  non-Latin-script SKILL name (not a person's name) that is also missing
+  from the vocabulary would be misclassified as PII and dropped — the same
+  false-positive class as S9, just on the opposite arm, accepted as a
+  residual for the same reason: the alternative (never rejecting a
+  non-Latin-script name at all) is a bigger, unacceptable privacy leak.
+* **S9 still applies unchanged** — the vocabulary arm always wins over
+  BOTH the shape arm and the (now three-part) lexicon/script arm, so a
+  candidate genuinely surnamed ``Kafka``/``Django``/``Cassandra`` is still
+  kept.
 """
 
 from __future__ import annotations
@@ -116,6 +165,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import unicodedata
 from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
@@ -130,6 +180,7 @@ log = logging.getLogger(__name__)
 
 _ALIASES_PATH = Path(__file__).resolve().parent / "skill_data" / "aliases.yaml"
 _CATEGORIES_PATH = Path(__file__).resolve().parent / "skill_data" / "categories.yaml"
+_PERSON_NAMES_PATH = Path(__file__).resolve().parent / "skill_data" / "person_names.txt"
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w.+#\- ]+")
@@ -347,28 +398,35 @@ def _looks_like_phone(name: str) -> bool:
     return False
 
 
-def _looks_like_person_name(name: str) -> bool:
+def _decompose_name_shape(name: str) -> list[tuple[str, bool]] | None:
     """Decision A shape test (see the block comment above the regexes for
-    the full S1-S5 round-3 rationale): does ``name`` look like a PERSON'S
-    name, as opposed to a skill?
+    the full S1-S5 round-3 rationale), returning the decomposed token list
+    (``(word, counts_as_a_"real"_word)``) when ``name`` looks like a
+    PERSON's name shape, or ``None`` when it does not.
 
     A BARE SINGLE token is included (``Rivera`` alone must be caught), which
-    is deliberately broad — the vocabulary check in
-    ``reject_reason_for_skill_name`` is what keeps this from eating
-    legitimate single-word skills (``Kafka``, ``Django``, ``Kubernetes``):
-    this function only asks "is this SHAPED like a name", never "is this a
-    skill" — that second question is the caller's vocab check.
+    is deliberately broad — the vocabulary check AND (round 4, Decision C)
+    the personal-name lexicon check in ``reject_reason_for_skill_name`` are
+    what keep this from eating legitimate single/multi-word skills
+    (``Kafka``, ``distributed systems``): this function only asks "is this
+    SHAPED like a name", never "is this a skill" — those further questions
+    are the caller's job.
+
+    Returning the token list (not just a bool) lets
+    ``_name_shape_real_tokens`` reuse the SAME decomposition for the
+    lexicon lookup, rather than re-deriving it and risking the two getting
+    out of sync.
     """
     s = name.strip()
     if not s:
-        return False
+        return None
 
     raw_tokens = [t for t in s.replace(",", " ").split() if t]
     if not raw_tokens:
-        return False
+        return None
     raw_tokens = _drop_or_strip_trailing_marker(raw_tokens)
     if not raw_tokens:
-        return False
+        return None
 
     multi_token = len(raw_tokens) > 1
     flat: list[tuple[str, bool]] = []  # (word, counts_as_a_"real"_word)
@@ -386,7 +444,7 @@ def _looks_like_person_name(name: str) -> bool:
         if any(ch in _APOSTROPHE_CHARS for ch in folded):
             apos_parts = _apostrophe_join_parts(folded)
             if apos_parts is None:
-                return False
+                return None
             prefix, rest = apos_parts
             flat.append((prefix, len(prefix) > 1))
             flat.append((rest, True))
@@ -394,26 +452,121 @@ def _looks_like_person_name(name: str) -> bool:
         if "." in folded:
             dot_parts = _dot_or_hyphen_join_parts(folded, ".")
             if dot_parts is None:
-                return False
+                return None
             flat.extend((p, True) for p in dot_parts)
             continue
         if "-" in folded:
             hyphen_parts = _dot_or_hyphen_join_parts(folded, "-")
             if hyphen_parts is None:
-                return False
+                return None
             flat.extend((p, True) for p in hyphen_parts)
             continue
         if _is_name_part(folded):
             flat.append((folded, True))
             continue
-        return False
+        return None
 
     if not flat or len(flat) > _MAX_NAME_SHAPE_TOKENS:
-        return False
+        return None
     # At least one real (non-initial, non-connector, non-single-letter-
     # prefix) name word — a lone "M." (or a lone apostrophe prefix) is never
     # sufficient on its own.
-    return any(is_real for _, is_real in flat)
+    if not any(is_real for _, is_real in flat):
+        return None
+    return flat
+
+
+def _looks_like_person_name(name: str) -> bool:
+    """Does ``name`` look like a PERSON's name shape? See
+    ``_decompose_name_shape`` for the full rationale — this is a thin bool
+    wrapper kept for the existing shape-only call sites/tests."""
+    return _decompose_name_shape(name) is not None
+
+
+def _name_shape_real_tokens(name: str) -> list[str]:
+    """Decision C (round-4 recall regression): the REAL (non-connector,
+    non-middle-initial, non-single-letter-prefix) name-part tokens of a
+    name-SHAPED candidate, lower-cased for the personal-name lexicon lookup
+    below — or ``[]`` if ``name`` is not name-shaped at all. (It cannot be
+    name-shaped with zero real tokens: ``_decompose_name_shape`` already
+    requires at least one.)"""
+    flat = _decompose_name_shape(name)
+    if flat is None:
+        return []
+    return [tok.lower() for tok, is_real in flat if is_real]
+
+
+# Decision C (round-4 recall regression fix) — see the module docstring's
+# "Round-4" section for the full rationale. Unicode script names containing
+# any of these substrings identify a NON-Latin script character — used as
+# the accepted-residual fallback signal for a name-shaped, vocab-miss
+# candidate a Latin-alphabet personal-name lexicon structurally cannot
+# cover (Cyrillic "Кейси Ривера", CJK "李伟", ...).
+_NON_LATIN_SCRIPT_MARKERS = (
+    "CJK",
+    "CYRILLIC",
+    "HIRAGANA",
+    "KATAKANA",
+    "HANGUL",
+    "ARABIC",
+    "HEBREW",
+    "DEVANAGARI",
+    "THAI",
+    "GREEK",
+)
+
+
+def _contains_non_latin_script(name: str) -> bool:
+    """S5 (round 3)/Decision C (round 4): does ``name`` contain at least one
+    alphabetic character from a non-Latin script? Used as the script-based
+    fallback arm of Decision C's three-way conjunction, independent of the
+    (necessarily Latin-alphabet) personal-name lexicon."""
+    for ch in name:
+        if not ch.isalpha():
+            continue
+        try:
+            uname = unicodedata.name(ch)
+        except ValueError:
+            continue
+        if any(marker in uname for marker in _NON_LATIN_SCRIPT_MARKERS):
+            return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def _name_lexicon() -> frozenset[str] | None:
+    """Decision C's offline personal-name lexicon
+    (``skill_data/person_names.txt`` — see that file's header for
+    provenance/licence). Returns ``None`` (a distinct sentinel from "loaded
+    but empty") when the file cannot be read at all, so
+    ``_hits_person_name_lexicon`` can fail CLOSED rather than open."""
+    if not _PERSON_NAMES_PATH.is_file():
+        log.error("skill_name_lexicon.missing path=%s", _PERSON_NAMES_PATH)
+        return None
+    names: set[str] = set()
+    for line in _PERSON_NAMES_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        names.add(stripped.lower())
+    return frozenset(names)
+
+
+def _hits_person_name_lexicon(tokens: Iterable[str]) -> bool:
+    """Decision C: does at least one of ``tokens`` (already lower-cased real
+    name-shape tokens — see ``_name_shape_real_tokens``) hit the offline
+    personal-name lexicon?
+
+    Fails CLOSED (S7 precedent), not open, if the lexicon could not be
+    loaded at all — collapsing back to the OLDER, stricter two-way
+    conjunction (name-shape AND vocab-miss) rather than silently widening
+    recall (and reopening the F3 PII leak) on a broken deployment where the
+    bundled data file went missing.
+    """
+    lexicon = _name_lexicon()
+    if lexicon is None:
+        return True
+    return any(tok in lexicon for tok in tokens)
 
 
 def _skill_log_ref(canonical: str) -> str:
@@ -445,14 +598,23 @@ def _is_known_vocab_term(name: str) -> bool:
 
 
 def reject_reason_for_skill_name(name: str) -> str | None:
-    """The single shape(+vocab) reject decision for a skill name — shared by
-    ``_resolve_one`` (this module) AND
+    """The single shape(+vocab+lexicon) reject decision for a skill name —
+    shared by ``_resolve_one`` (this module) AND
     ``src.worker.resume_tasks._extract_skills_merged`` (which calls this
     directly on the RAW LLM skill name, BEFORE canonicalisation — see the
     module docstring's F3b note). Returns a rejection-reason CATEGORY
     (``email_shape`` / ``phone_shape`` / ``length_or_token_cap`` /
     ``person_name_shape``), never the value that triggered it (R3
     discipline) — or ``None`` when the name is fine.
+
+    Decision C (round-4 recall regression fix, see the module docstring's
+    "Round-4" section): ``person_name_shape`` is now a THREE-way
+    conjunction — name-SHAPED, AND a vocabulary miss, AND (at least one real
+    token hits the offline personal-name lexicon OR the name contains a
+    non-Latin script). Shape and vocab-miss alone (the old two-way rule)
+    cannot tell ``distributed systems`` apart from ``Casey Rivera`` — both
+    are two Title-Case-able alphabetic tokens outside the 220-term
+    vocabulary; the lexicon/script check supplies the missing signal.
     """
     if len(name) > _MAX_SKILL_NAME_CHARS:
         return "length_or_token_cap"
@@ -462,8 +624,10 @@ def reject_reason_for_skill_name(name: str) -> str | None:
         return "email_shape"
     if _looks_like_phone(name):
         return "phone_shape"
-    if _looks_like_person_name(name) and not _is_known_vocab_term(name):
-        return "person_name_shape"
+    real_tokens = _name_shape_real_tokens(name)
+    if real_tokens and not _is_known_vocab_term(name):
+        if _hits_person_name_lexicon(real_tokens) or _contains_non_latin_script(name):
+            return "person_name_shape"
     return None
 
 
