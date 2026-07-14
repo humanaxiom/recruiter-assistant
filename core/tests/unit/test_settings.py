@@ -6,6 +6,27 @@ Guards the two invariants that the rest of the port hangs off:
   Neo4j vector indexes must agree with — see ``test_neo4j_bootstrap.py``),
 * the **offline invariant** (``llm_base_url`` must never point at a cloud
   inference endpoint).
+
+── Phase 4b additions ──────────────────────────────────────────────────────
+
+Four new knobs the graph-projection drainer and the Neo4j-half of skill
+normalisation must read from settings, never hard-code (the deliverable's own
+words: "no hard-coded 0.92 / 0.88 / 50 / 200"):
+
+* ``outbox_drain_batch_size`` (50)              — ``project_to_graph``'s
+  per-call row limit.
+* ``outbox_max_delivery_attempts`` (200)        — decision 2's poison-row
+  dead-letter cap.
+* ``skill_auto_merge_threshold`` (0.92)         — hris's ``AUTO_MERGE_THRESHOLD``.
+* ``skill_tiebreaker_threshold`` (0.88)         — hris's ``TIEBREAKER_THRESHOLD``.
+
+Each is asserted to exist with the stated default AND to be READ (not just
+present as an unused field) — the "actually read" half lives in
+``test_pipeline_skills_graph.py`` (thresholds) and
+``test_worker_project_to_graph.py`` (batch size / dead-letter cap), which
+patch ``get_settings`` and prove the returned value changes behaviour. This
+file only pins the field itself existing with the right type/default/env
+override, matching the existing style for every other setting in this file.
 """
 
 from __future__ import annotations
@@ -140,3 +161,79 @@ def test_env_override_pii_key(monkeypatch: MonkeyPatch) -> None:
 def test_env_override_postgres_dsn(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://u:p@localhost:5433/other")
     assert Settings().postgres_dsn == "postgresql://u:p@localhost:5433/other"
+
+
+# ── Phase 4b: outbox drainer knobs ──────────────────────────────────────────
+
+
+def test_outbox_drain_batch_size_default() -> None:
+    """The ``project_to_graph`` drainer's per-call row limit. hris hard-coded
+    this as a Python default parameter (``batch: int = 50``); it must instead
+    be read from settings so an operator can tune it without a code change."""
+    assert Settings().outbox_drain_batch_size == 50
+
+
+def test_outbox_max_delivery_attempts_default() -> None:
+    """Decision 2 — poison rows are capped, not retried forever (hris retries
+    forever). Past this many failed delivery attempts a row is dead-lettered
+    and skipped by the drainer."""
+    assert Settings().outbox_max_delivery_attempts == 200
+
+
+def test_outbox_drain_batch_size_is_a_positive_int() -> None:
+    assert isinstance(Settings().outbox_drain_batch_size, int)
+    assert Settings().outbox_drain_batch_size > 0
+
+
+def test_outbox_max_delivery_attempts_is_a_positive_int() -> None:
+    assert isinstance(Settings().outbox_max_delivery_attempts, int)
+    assert Settings().outbox_max_delivery_attempts > 0
+
+
+def test_env_override_outbox_drain_batch_size(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("OUTBOX_DRAIN_BATCH_SIZE", "10")
+    assert Settings().outbox_drain_batch_size == 10
+
+
+def test_env_override_outbox_max_delivery_attempts(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("OUTBOX_MAX_DELIVERY_ATTEMPTS", "3")
+    assert Settings().outbox_max_delivery_attempts == 3
+
+
+# ── Phase 4b: skill-normalisation thresholds ────────────────────────────────
+
+
+def test_skill_auto_merge_threshold_default() -> None:
+    """hris's ``AUTO_MERGE_THRESHOLD`` module constant (0.92), now a setting."""
+    assert Settings().skill_auto_merge_threshold == pytest.approx(0.92)
+
+
+def test_skill_tiebreaker_threshold_default() -> None:
+    """hris's ``TIEBREAKER_THRESHOLD`` module constant (0.88), now a setting."""
+    assert Settings().skill_tiebreaker_threshold == pytest.approx(0.88)
+
+
+def test_skill_auto_merge_threshold_is_above_the_tiebreaker_threshold() -> None:
+    """The two define a [tiebreaker, auto_merge) grey zone — inverted
+    thresholds would make every vector match either an auto-merge or a
+    guaranteed miss, silently deleting the LLM-tiebreaker path entirely."""
+    s = Settings()
+    assert s.skill_auto_merge_threshold > s.skill_tiebreaker_threshold
+
+
+@pytest.mark.parametrize(
+    "name", ["skill_auto_merge_threshold", "skill_tiebreaker_threshold"]
+)
+def test_skill_thresholds_are_valid_cosine_similarity_bounds(name: str) -> None:
+    value = getattr(Settings(), name)
+    assert 0.0 < value < 1.0
+
+
+def test_env_override_skill_auto_merge_threshold(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_AUTO_MERGE_THRESHOLD", "0.95")
+    assert Settings().skill_auto_merge_threshold == pytest.approx(0.95)
+
+
+def test_env_override_skill_tiebreaker_threshold(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_TIEBREAKER_THRESHOLD", "0.80")
+    assert Settings().skill_tiebreaker_threshold == pytest.approx(0.80)
