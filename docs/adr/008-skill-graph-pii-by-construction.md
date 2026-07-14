@@ -56,6 +56,20 @@ one shared function (`_canonical_key_for_normalised`), called identically from b
   JD requiring a skill and a résumé having the identical skill text still land on the same node.
   `REQUIRES`/`HAS_SKILL` still meet; no requirement silently vanishes.
 
+> **Correction (F1, security re-audit round 2, 2026-07-14):** the paragraph above describes the
+> INTENDED invariant, which the first cut of `skills_graph._resolve_one` did not actually hold. Three
+> of its four branches (exact/graph-learned-alias match, vector auto-merge, LLM tiebreak) returned an
+> EXISTING node's own key instead of calling `_canonical_key_for_normalised` — only the create-new
+> branch did. Whenever the job side took one of those three branches, `REQUIRES` pointed at a
+> different node than the résumé side's `HAS_SKILL` (which always calls the pure function), silently
+> zeroing that skill's score. Worse, the auto-merge/LLM branches then PERSISTED the divergence via an
+> alias write, so once (e.g.) "react native" auto-merged into the "react" node, every later JD
+> mentioning it took the now-poisoned exact-match branch too — permanent, self-reinforcing drift. Fixed
+> by making `_resolve_one` return `_canonical_key_for_normalised(normalised)` on **every** branch,
+> unconditionally; vector auto-merge and the LLM tiebreak are kept but demoted to alias-list enrichment
+> of the near-matched node only — they may add a synonym for humans/analytics to read, but they never
+> again choose the key. The "Consequences" section below is corrected to match.
+
 ### 2. `display_name` (cleartext, human-readable) is written ONLY by the job/JD side
 
 `src/worker/tasks.py::_job_projection_tx` stamps the Skill node's `display_name` with the raw JD
@@ -96,12 +110,16 @@ precompute `sha256(common_name)` for a list of common names/phrases and confirm 
 
 ## Consequences
 
-- **A non-vocab skill loses vector auto-merge / synonym resolution at its terminal "nothing matched,
-  mint a new key" step.** Two different spellings of the same unlisted skill hash to two different
-  keys and never connect, unless one of them is a literal alias of a vocab term. This is an accepted
-  cost, not a silent one: vocab skills keep the full canonicalisation path (exact/alias match, then
-  vector-match/LLM-tiebreak against other *existing* canonical nodes — unchanged from before this
-  ADR); only a genuinely novel non-vocab name is affected.
+- **No skill — vocab or non-vocab — ever gets its `canonical_key` redirected by vector auto-merge or
+  the LLM tiebreak (post-F1).** Both are job-side-only mechanisms that still run, but only to enrich
+  the near-matched node's alias list (and, for the job side, its `display_name`) — never to choose
+  what this function returns. A non-vocab skill therefore loses vector auto-merge / synonym resolution
+  entirely (not just at its terminal "nothing matched, mint a new key" step, as originally documented
+  here): two different spellings of the same unlisted skill hash to two different keys and never
+  connect, unless one of them is a literal alias of a vocab term (resolved deterministically, before
+  any graph query, by `_basic_normalise`'s alias table). This is an accepted cost, not a silent one —
+  and it is strictly better than the pre-F1 alternative (letting the job side alone redirect the key),
+  which reopened exactly the divergence this ADR's `REQUIRES`/`HAS_SKILL`-meet guarantee depends on.
 - **The disparate-impact problem (the round-3 shape widening's own S1/S4/S5 fixes) disappears
   entirely** — there is no shape heuristic left to be biased against any naming convention, because
   there is no shape heuristic left, full stop.

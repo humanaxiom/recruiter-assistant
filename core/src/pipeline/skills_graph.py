@@ -485,6 +485,31 @@ async def resolve_canonical_names(
 async def _resolve_one(
     session: Any, raw: str, *, llm: Any, embedder: Any
 ) -> str | None:
+    """F1 (security re-audit round 2, post-ADR-008): ``canonical_key`` is a
+    PURE function of ``normalised`` (``_canonical_key_for_normalised``) and
+    this function returns EXACTLY that value on every non-rejected branch —
+    never a graph query result. The résumé side
+    (``resume_skill_canonical_key``) computes the SAME key with no graph
+    access at all, so this is the only way ``REQUIRES``/``HAS_SKILL`` are
+    guaranteed to meet at the same node for every branch, not just
+    create-new.
+
+    Pre-fix, three of the four branches below returned an EXISTING node's
+    own key (the exact/alias match's row, the auto-merge near-candidate's
+    name, the LLM tiebreaker's confirmed match) instead of this pure key —
+    a job requirement resolved through any of those branches diverged from
+    the résumé side's hash, silently zeroing that skill's score for every
+    candidate who genuinely has it. Worse, the auto-merge/LLM branches then
+    PERSISTED the divergence via ``_alias_update``, so once (e.g.) "react
+    native" auto-merged into the "react" node, every future JD mentioning it
+    took the now-poisoned exact-match branch too — permanent, self
+    -reinforcing drift.
+
+    Vector auto-merge and the LLM tiebreaker are KEPT (still useful,
+    job-side only, since a JD carries no candidate PII) but DEMOTED to
+    alias/display-name enrichment of the near-matched node only — they may
+    never change what this function returns.
+    """
     reason = reject_reason_for_skill_name(raw)
     if reason is not None:
         # R3 discipline: category only, never the value.
@@ -493,23 +518,32 @@ async def _resolve_one(
 
     settings = get_settings()
     normalised = _basic_normalise(raw)
+    if not normalised:
+        return None
 
-    # 1. Direct alias/exact resolution may already point at a node we know
-    # exists in the graph.
+    # The pure key, computed FIRST and returned on every branch below.
+    canonical_key = _canonical_key_for_normalised(normalised)
+
+    # 1. Fast path: a node already exists at this EXACT key (a vocab node, or
+    # a hash node a previous call already created) — nothing left to decide,
+    # and no embed()/vector/LLM round trip needed. L2 (security re-audit):
+    # a single indexed lookup on `canonical_key` — no `OR $n IN s.aliases`
+    # (that clause is exactly the mechanism that let an alias-learned node
+    # redirect the key pre-fix, and it also defeated the index).
     exact = await session.run(
-        "MATCH (s:Skill) WHERE s.canonical_key = $n OR $n IN s.aliases "
-        "RETURN s.canonical_key AS name LIMIT 1",
-        n=normalised,
+        "MATCH (s:Skill {canonical_key: $n}) RETURN s.canonical_key AS name LIMIT 1",
+        n=canonical_key,
     )
     row = await exact.single()
     if row:
-        return str(row["name"])
+        return canonical_key
 
-    # 2. Vector match. Safe on the job side regardless of vocab status (a JD
-    # carries no candidate PII) — but only ever finds an EXISTING node with
-    # an embedding, which (post-ADR-008) is only ever a vocab node or another
-    # job-created node, never a résumé-derived hash node (the résumé side
-    # never writes an embedding — see ``resume_skill_canonical_key``).
+    # 2. Vector match — ENRICHMENT ONLY. Safe on the job side regardless of
+    # vocab status (a JD carries no candidate PII). A high-scoring near
+    # candidate gets `normalised` added to ITS alias list (so the graph still
+    # records the synonym relationship for humans/analytics), but the key
+    # this function returns is always `canonical_key` above — never the near
+    # candidate's own key.
     [emb] = await embedder.embed([normalised])
     near_cursor = await session.run(
         """
@@ -527,45 +561,45 @@ async def _resolve_one(
     near = [dict(r) async for r in near_cursor]
 
     if near and near[0]["score"] >= settings.skill_auto_merge_threshold:
-        canonical = str(near[0]["name"])
-        await _alias_update(session, canonical, normalised)
+        enrich_target = str(near[0]["name"])
+        await _alias_update(session, enrich_target, normalised)
         # S8 (round 3): NOT the canonical name either — a hash reference
         # only (see `_skill_log_ref`'s docstring for why "canonical only"
         # was still an R3 violation for an ACCEPTED name).
         log.debug(
             "skill_normalize.auto_merged ref=%s score=%s",
-            _skill_log_ref(canonical),
+            _skill_log_ref(enrich_target),
             near[0]["score"],
         )
-        return canonical
-
-    # 3. Grey zone -> LLM tiebreaker. Decision 4: the answer must be one of
-    # the OFFERED near candidates, or it is treated as no match — a
-    # hallucinated name is never used to MATCH an existing node.
-    if near:
+    elif near:
+        # 3. Grey zone -> LLM tiebreaker — ENRICHMENT ONLY, same discipline as
+        # the auto-merge branch above. Decision 4: the answer must be one of
+        # the OFFERED near candidates, or it is treated as no match — a
+        # hallucinated name is never used to MATCH an existing node, and (per
+        # F1) even a VALID match is never used to redirect the returned key.
         valid_names = {str(n["name"]) for n in near}
         match = await _ask_llm_tiebreaker(llm, normalised, near)
         if match is not None and match in valid_names:
-            canonical = match
-            await _alias_update(session, canonical, normalised)
+            await _alias_update(session, match, normalised)
             # S8 (round 3): hash reference only, never the name itself.
             log.info(
                 "skill_normalize.llm_merged ref=%s top_score=%s",
-                _skill_log_ref(canonical),
+                _skill_log_ref(match),
                 near[0]["score"],
             )
-            return canonical
-        if match is not None and match not in valid_names:
+        elif match is not None:
             # F8: no value logged at all — the hallucinated match is never a
             # real Skill name and `raw` may be PII-shaped.
             log.warning("skill_normalize.tiebreaker_hallucinated answer_rejected=true")
 
-    # 4. Create a new canonical node. ADR-008: the KEY is the vocab canonical
-    # term (cleartext) if `raw` is a vocab hit, else a salted hash — computed
-    # via the SAME `_canonical_key_for_normalised` the résumé side uses, so a
-    # brand-new non-vocab skill's key agrees on both sides. The embedding is
-    # still written unconditionally here (job side is always safe to embed).
-    canonical_key = _canonical_key_for_normalised(normalised)
+    # 4. Ensure a node exists at the pure key itself — a vocab node that may
+    # already have been created under a different raw spelling, or a brand
+    # new hash node for a genuinely novel non-vocab name. ADR-008: the KEY is
+    # the vocab canonical term (cleartext) if `raw` is a vocab hit, else a
+    # salted hash — computed via the SAME `_canonical_key_for_normalised` the
+    # résumé side uses, so a brand-new non-vocab skill's key agrees on both
+    # sides. The embedding is still written unconditionally here (job side
+    # is always safe to embed).
     await session.run(
         "MERGE (s:Skill {canonical_key: $n}) "
         "ON CREATE SET s.aliases = [$alias], s.embedding = $e",

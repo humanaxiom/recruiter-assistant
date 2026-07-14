@@ -26,6 +26,19 @@ from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     s = get_settings()
+    # L3 (security re-audit round 2): symmetry with ``src.worker.main.startup``'s
+    # ADR-008 check. The API never hashes a skill name itself today (only the
+    # worker's `skills_graph` resolution does), so this is currently latent —
+    # but a future API-side skill-resolution code path (or the salt being
+    # misconfigured only for THIS process) must fail loud here too, not start
+    # up with a passphrase that would make any hash it later computes
+    # dictionary-attackable.
+    if not s.skill_hash_salt:
+        raise RuntimeError(
+            "SKILL_HASH_SALT is empty — refusing to start the API; "
+            "non-vocab Skill nodes would be keyed by an unsalted (dictionary-"
+            "attackable) hash. Set SKILL_HASH_SALT."
+        )
     pool = await init_pool(app, s)
     # The schema comes up with the app — every statement is idempotent.
     await init_schema(pool)

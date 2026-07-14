@@ -61,6 +61,7 @@ from src.pipeline.parsing import (
     UnsupportedMimeError,
     chunk_resume,
     extract_text,
+    scrub_invalid_chunk_refs,
 )
 from src.pipeline.skills import canonicalize_skill_names, match_skills_in_text
 from src.prompts import load_prompt
@@ -636,6 +637,18 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
             "+cover_letter_v1" if cl_chunks else ""
         )
 
+        # L1 (security re-audit round 2): the LLM sometimes hallucinates a
+        # chunk id (``evidence_chunk_ids``) that was never in this résumé's
+        # actual chunk set — scrub those refs BEFORE persistence, at the
+        # citation boundary, exactly like ``ResumeChunk``'s own docstring
+        # already promises ("citations that don't exist in the chunk set are
+        # scrubbed before persistence"). Mutates a plain dict list, not the
+        # ``ResumeSkill`` models directly — ``scrub_invalid_chunk_refs``'s
+        # contract (``chunk.py``) is dict-shaped, matching
+        # ``ResumeParsed.model_validate``'s own dict-first input below.
+        skill_dicts = [s.model_dump() for s in merged]
+        scrub_invalid_chunk_refs(skill_dicts, {c.id for c in chunks})
+
         # Build from dicts so ResumeParsed's lossy row-dropping validator runs.
         # The lossy validator only drops bad LIST ROWS — a violated LIST CAP
         # (e.g. >200 chunks) or a bad scalar still raises. Uncaught, that
@@ -648,7 +661,7 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                     "candidate": core.candidate.model_dump(),
                     "summary": core.summary,
                     "total_years_experience": core.total_years_experience,
-                    "skills": [s.model_dump() for s in merged],
+                    "skills": skill_dicts,
                     "experience": [e.model_dump() for e in core.experience],
                     "education": [e.model_dump() for e in core.education],
                     "chunks": [c.model_dump() for c in chunks],
