@@ -549,6 +549,7 @@ async def _resolve_one(
         """
         CALL db.index.vector.queryNodes('skill_emb_idx', $k, $e)
         YIELD node, score WHERE score > $low_threshold
+          AND node.canonical_key IS NOT NULL
         RETURN node.canonical_key AS name,
                coalesce(node.aliases, []) AS aliases,
                score

@@ -135,6 +135,66 @@ precompute `sha256(common_name)` for a list of common names/phrases and confirm 
   candidate-identity-aware structured scrub) is kept as defence in depth for that Postgres/outbox
   surface, but is no longer the control this ADR depends on.
 
+## Security Sign-off — Accepted Residuals (verbatim)
+
+Security reviewed the Phase 4b ADR-008 rearchitecture, mutation-killed all four `_resolve_one`
+branches, verified the constraint migration against a real Neo4j with the old constraint
+pre-created, and confirmed the corrected tests were strengthened, not weakened. The review passed.
+What follows is the exhaustive residuals list from that sign-off — what this design knowingly
+ships. It is recorded here plainly, not softened.
+
+**Identity that can still reach Neo4j:**
+
+1. A candidate's name mis-extracted as a skill still becomes a **salted-hash node key**
+   (`h:eea6e36e…`), with no `display_name`, no embedding, no categories, plus a `HAS_SKILL` edge.
+   Unreadable and un-invertible — but **its existence is observable**: anyone with graph read
+   access **plus the salt** can confirm a guessed name is present by recomputing the hash. **The
+   graph is not a zero-knowledge store.**
+2. The hash is only as strong as the **salt's secrecy**. Salt disclosure retroactively makes every
+   non-vocab key confirmable against a name list. Treat `SKILL_HASH_SALT` at exactly `PII_KEY`'s
+   handling bar.
+3. `h.evidence_chunk_id` on `HAS_SKILL` carries an opaque chunk id (`c_001`) — not text, but a
+   **pointer back to a résumé region**.
+4. **JD-side cleartext is unconditional and intentional.** Every `display_name`, skill embedding and
+   alias string in the graph comes from a job description. Safe **only** while the JD-authoring
+   surface is trusted — **if a recruiter pastes résumé text into a JD field, it lands in the graph
+   as cleartext and nothing in this design stops it.**
+
+**Legitimate skills that can still be dropped or fail to match:**
+
+5. Shape-rejected skills are **dropped entirely** — no node, no edge, silently: >60 chars, >8
+   tokens, or email/phone-shaped. A genuine 9-token certification is lost. This is junk filtering,
+   not privacy, and it is lossy.
+6. **A non-vocab skill loses synonym auto-merge permanently.** `py3` will **never** match `python`;
+   `React Native` never matches `react`. Two spellings of one unlisted skill are two unrelated nodes
+   that never score against each other. **This is the single biggest recall cost of ADR-008.**
+   Non-vocab recall now requires the JD and the résumé to use the **byte-identical normalised
+   spelling**.
+7. Vector auto-merge and the LLM tiebreaker **no longer affect scoring at all** — they are
+   alias-list enrichment only. `react.aliases` containing `"react native"` is **advisory
+   metadata**; anyone reading `s.aliases` and inferring "this resolves to react" will be wrong.
+8. **Recall is only as good as the ~220-term vocabulary.** `aliases.yaml`/`categories.yaml` are now
+   the **entire** matching surface for reliable cross-spelling recall. **Growing that vocabulary is
+   the only lever that improves non-vocab recall.**
+9. A Skill node **first created by the résumé side never gets an embedding** — the résumé MERGE is
+   bare, and a later JD requiring it hits the exact-match fast path and returns before the embedding
+   write. Such a node is absent from `skill_emb_idx` and can never serve as a vector-merge target.
+
+**Salt rotation:**
+
+10. **Rotating `SKILL_HASH_SALT` silently orphans the entire non-vocab half of the graph.** Same
+    name + new salt = a different key. Existing `REQUIRES`/`HAS_SKILL` edges keep pointing at the
+    old key while new projections write the new one. **Nothing detects this; scores just quietly
+    degrade. Rotation requires a full re-projection of every job and résumé.** There is no tooling
+    and no guard — say so.
+
+**Operational:**
+
+11. An empty salt is fail-loud in three places, but a **weak** salt is accepted silently — no
+    entropy check.
+12. Categories are curated-only: a hashed non-vocab skill gets `categories = []` and contributes
+    **nothing** to stage-2 ontology partial credit, by construction.
+
 ## Alternatives Considered
 
 - **A stricter allowlist** (only the ~220-term vocabulary is ever projected) — rejected in the

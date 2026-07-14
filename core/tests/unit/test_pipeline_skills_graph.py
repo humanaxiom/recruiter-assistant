@@ -143,6 +143,26 @@ async def test_exact_match_short_circuits_before_any_vector_or_llm_call() -> Non
 
 
 @pytest.mark.asyncio
+async def test_exact_match_cypher_never_queries_by_aliases() -> None:
+    """L2 (security re-audit): a direct structural guard on the exact-match
+    branch's own Cypher text, independent of any auto-merge/alias fixture —
+    the previous coverage of this property (no `OR $n IN s.aliases`) was
+    purely incidental, via the GCP-alias non-regression test happening to
+    take this branch. Pre-fix, this branch's `MATCH` also matched
+    `$n IN s.aliases`, which let a graph-learned alias redirect the
+    returned key (see F1's docstring on `_resolve_one`) and defeated the
+    `canonical_key` index. The fast path must stay a single indexed lookup
+    on `canonical_key` alone, forever."""
+    session = _make_session([_FakeResult([{"name": "python"}])])
+    await skills_graph.resolve_canonical_names(
+        session, ["Python"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    exact_match_cypher = _run_calls(session)[0][0]
+    assert "aliases" not in exact_match_cypher
+    assert "canonical_key: $n" in exact_match_cypher
+
+
+@pytest.mark.asyncio
 async def test_resolve_canonical_names_keys_the_result_by_the_input_name() -> None:
     """Callers (``project_resume``/``_project_job``) look up
     ``resolved[skill["name"]]`` using the RAW name they already hold — the
@@ -262,7 +282,9 @@ async def test_widened_token_cap_does_not_reject_at_eight_tokens() -> None:
     resolved = await skills_graph.resolve_canonical_names(
         session, [eight_tokens], llm=_make_llm(), embedder=_make_embedder()
     )
-    assert resolved[eight_tokens] is not None
+    assert resolved[eight_tokens] == skills_graph._canonical_key_for_normalised(
+        skills_graph._basic_normalise(eight_tokens)
+    )
 
 
 @pytest.mark.asyncio
