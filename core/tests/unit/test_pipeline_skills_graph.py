@@ -35,6 +35,7 @@ collection (``ModuleNotFoundError``). RED half of the TDD cycle.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -151,6 +152,116 @@ async def test_resolve_canonical_names_keys_the_result_by_the_input_name() -> No
         embedder=_make_embedder(),
     )
     assert set(resolved.keys()) == {"  Python  ", "PostgreSQL"}
+
+
+# ── F3 (security re-audit): PII-shaped skill names are rejected outright ──
+#
+# Layer 1 of the defence-in-depth fix — an LLM-authored skill name is free
+# text (`ResumeSkill.name` is a 200-char-capped string, not a vocabulary
+# allowlist), and this module is the ONLY place a skill name is ever handed
+# to the embedder before landing in Neo4j cleartext. A name that is SHAPED
+# like contact info, or implausibly long/verbose, must never reach
+# `embed()`/any Cypher call, and must resolve to `None` (never a canonical
+# name a caller could write an edge against).
+
+
+@pytest.mark.asyncio
+async def test_email_shaped_skill_name_is_rejected_before_any_io() -> None:
+    session = _make_session([])
+    llm = _make_llm()
+    embedder = _make_embedder()
+
+    resolved = await skills_graph.resolve_canonical_names(
+        session, ["casey.rivera@example.test"], llm=llm, embedder=embedder
+    )
+
+    assert resolved == {"casey.rivera@example.test": None}
+    session.run.assert_not_awaited()
+    embedder.embed.assert_not_awaited()
+    llm.chat_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_phone_shaped_skill_name_is_rejected_before_any_io() -> None:
+    session = _make_session([])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, ["555-0101"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {"555-0101": None}
+    session.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_phone_shaped_skill_name_with_punctuation_is_rejected() -> None:
+    session = _make_session([])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, ["+1 (604) 555-0101"], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {"+1 (604) 555-0101": None}
+    session.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_implausibly_long_skill_name_is_rejected() -> None:
+    long_name = "a" * 61  # over _MAX_SKILL_NAME_CHARS
+    session = _make_session([])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, [long_name], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {long_name: None}
+    session.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_too_many_tokens_skill_name_is_rejected() -> None:
+    many_tokens = "one two three four five six seven"  # 7 tokens
+    session = _make_session([])
+    resolved = await skills_graph.resolve_canonical_names(
+        session, [many_tokens], llm=_make_llm(), embedder=_make_embedder()
+    )
+    assert resolved == {many_tokens: None}
+    session.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejection_is_logged_as_a_category_never_the_raw_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R3 discipline — the rejection log line must carry a CATEGORY
+    (email/phone/length), never the value that triggered it."""
+    caplog.set_level(logging.WARNING)
+    session = _make_session([])
+    await skills_graph.resolve_canonical_names(
+        session,
+        ["casey.rivera@example.test"],
+        llm=_make_llm(),
+        embedder=_make_embedder(),
+    )
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "casey.rivera@example.test" not in all_text
+    assert "rejected" in all_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_legitimate_short_multiword_skill_name_is_not_rejected() -> None:
+    """Non-regression: a real multi-word skill name (well under the shape
+    caps) must resolve normally, not get swept up by the PII guard."""
+    session = _make_session([_FakeResult([{"name": "google cloud platform"}])])
+    resolved = await skills_graph.resolve_canonical_names(
+        session,
+        ["Google Cloud Platform"],
+        llm=_make_llm(),
+        embedder=_make_embedder(),
+    )
+    assert resolved["Google Cloud Platform"] == "google cloud platform"
+    session.run.assert_awaited()
+
+
+def test_unresolved_skill_name_error_is_a_runtime_error() -> None:
+    """F6 — the exception projection callbacks raise for a name that was
+    never resolved at all (a caller bug, distinct from a legitimate
+    None-valued PII rejection)."""
+    assert issubclass(skills_graph.UnresolvedSkillNameError, RuntimeError)
 
 
 # ── auto-merge path (score >= AUTO_MERGE_THRESHOLD) ───────────────────────

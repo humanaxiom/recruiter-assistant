@@ -348,6 +348,51 @@ async def test_has_skill_edge_uses_resolved_canonical_name_not_raw_name() -> Non
     assert not any("Py" in p.values() for p in skill_calls)
 
 
+# ── F6 (security re-audit): fail loud on a missing resolution entry ──────
+
+
+@pytest.mark.asyncio
+async def test_skill_name_absent_from_resolved_mapping_raises_loudly() -> None:
+    """F6 (HIGH). A name ABSENT from the resolved mapping means
+    ``resolve_canonical_names`` was never even asked to resolve it — a
+    caller bug. hris's ``resolved_skills.get(name, name)`` silently falls
+    back to the UNRESOLVED raw name, which matches no ``Skill`` node in
+    Cypher and the HAS_SKILL edge silently vanishes (R5's exact failure
+    class, reintroduced). Must fail loud instead."""
+    from src.pipeline.skills_graph import UnresolvedSkillNameError
+
+    payload = _payload(skills=[{"name": "python", "years": 4}])
+    with pytest.raises(UnresolvedSkillNameError):
+        await _project(payload, {})  # resolved mapping has NO entry for "python"
+
+
+@pytest.mark.asyncio
+async def test_skill_name_resolved_to_none_is_dropped_silently_not_projected() -> None:
+    """F3 (security re-audit). A ``None`` value means the name was
+    shape-rejected as PII at the resolution boundary (layer 1) — this is a
+    legitimate outcome, not a caller bug: the skill/edge must be dropped
+    silently, and this must NOT raise ``UnresolvedSkillNameError``."""
+    payload = _payload(
+        skills=[
+            {"name": "python", "years": 4},
+            {"name": "casey.rivera@example.test"},
+        ]
+    )
+    tx, _driver, _events = await _project(
+        payload, {"python": "python", "casey.rivera@example.test": None}
+    )
+    # MERGE-scoped — "HAS_SKILL" alone also matches the old-edge cleanup's
+    # ``DELETE h`` call, which carries no skill-identifying params at all.
+    skill_calls = [
+        p for c, p in _all_run_calls(tx) if "HAS_SKILL" in c and "MERGE" in c.upper()
+    ]
+    assert len(skill_calls) == 1
+    assert any(p.get("cn") == "python" or "python" in p.values() for p in skill_calls)
+    assert not any(
+        "casey.rivera@example.test" in p.values() for _c, p in _all_run_calls(tx)
+    )
+
+
 @pytest.mark.asyncio
 async def test_old_skill_edges_and_chunks_are_detached_before_recreation() -> None:
     """Idempotency at the write-tx level — a re-parse must not accumulate

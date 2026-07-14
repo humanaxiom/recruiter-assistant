@@ -572,6 +572,147 @@ async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
     assert isinstance(payload["parsed"], dict)
 
 
+# ── F3 (security re-audit), layer 2: skill-name identity scrub ───────────
+#
+# skills_graph's shape-reject (layer 1, Phase 4b) has no candidate context —
+# it cannot tell that a skill named "Casey Rivera" IS the résumé's own
+# candidate. This module has that context (`core.candidate`), so a skill
+# name that matches it must be scrubbed BEFORE it enters `resumes.parsed`
+# (Postgres, system of record) and the outbox — not just the embedder's
+# input, unlike `_redact_candidate_pii`'s other two call sites.
+
+
+@pytest.mark.asyncio
+async def test_skill_name_matching_candidate_identity_is_dropped_before_storage_and_outbox() -> (  # noqa: E501
+    None
+):
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Casey Rivera"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    # A small model hallucinating the header block as a "skill" — the exact
+    # security-report reproducer.
+    merged_skills = [
+        ResumeSkill(name="python", years=5),
+        ResumeSkill(name="Casey Rivera"),
+    ]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+
+    stored_parsed = next(
+        a
+        for a in _flat_call_args(record_parsed.await_args)
+        if isinstance(a, ResumeParsed)
+    )
+    stored_names = [s.name for s in stored_parsed.skills]
+    assert "python" in stored_names
+    assert not any(
+        "casey" in n.lower() and "rivera" in n.lower() for n in stored_names
+    ), f"candidate identity survived as a stored skill name: {stored_names!r}"
+
+    payload = enqueue.await_args.kwargs["payload"]
+    outbox_skill_names = [s["name"] for s in payload["parsed"]["skills"]]
+    assert "python" in outbox_skill_names
+    assert not any(
+        "casey" in n.lower() and "rivera" in n.lower() for n in outbox_skill_names
+    ), f"candidate identity survived in the outbox skill list: {outbox_skill_names!r}"
+
+
+@pytest.mark.asyncio
+async def test_skill_name_pii_drop_is_logged_as_a_count_never_the_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R3 discipline applied to the layer-2 drop too."""
+    import logging
+
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Casey Rivera"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="Casey Rivera")]
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=merged_skills,
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(None, None, None, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await parse_resume(ctx, str(resume_id))
+
+    all_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Casey Rivera" not in all_text
+    assert "casey" not in all_text.lower()
+
+
 @pytest.mark.asyncio
 async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row() -> (
     None

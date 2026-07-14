@@ -145,7 +145,15 @@ async def test_required_skill_gets_a_requires_edge_with_is_must_have_true() -> N
         _payload(required=[{"name": "python", "min_years": 4}], nice_to_have=[]),
         {"python": "python"},
     )
-    requires_calls = [(c, p) for c, p in tx.calls if "REQUIRES" in c]
+    # F4 (security re-audit): classify by MERGE, not a bare "REQUIRES"
+    # substring — the old-edge cleanup's DELETE is a typed
+    # ``-[r:REQUIRES|NICE_TO_HAVE]->`` (F4's own fix), so its Cypher text
+    # ALSO contains "REQUIRES"; a naive substring filter would pick up the
+    # DELETE call (whose params are just `jid`) instead of the actual MERGE
+    # call, and the assertions below would fail against the wrong call.
+    requires_calls = [
+        (c, p) for c, p in tx.calls if "REQUIRES" in c and "MERGE" in c.upper()
+    ]
     assert requires_calls
     _cypher, params = requires_calls[0]
     assert True in params.values()
@@ -159,8 +167,17 @@ async def test_nice_to_have_skill_gets_a_nice_to_have_edge_not_requires() -> Non
         _payload(required=[], nice_to_have=[{"name": "kubernetes"}]),
         {"kubernetes": "kubernetes"},
     )
-    nice_calls = [(c, p) for c, p in tx.calls if "NICE_TO_HAVE" in c]
-    requires_calls = [(c, p) for c, p in tx.calls if re.search(r"\bREQUIRES\b", c)]
+    # F4: same MERGE-scoped classification — the typed cleanup DELETE
+    # legitimately mentions REQUIRES (it targets both edge types) even when
+    # there are zero required skills this call.
+    nice_calls = [
+        (c, p) for c, p in tx.calls if "NICE_TO_HAVE" in c and "MERGE" in c.upper()
+    ]
+    requires_calls = [
+        (c, p)
+        for c, p in tx.calls
+        if re.search(r"\bREQUIRES\b", c) and "MERGE" in c.upper()
+    ]
     assert nice_calls
     assert not requires_calls
 
@@ -171,7 +188,10 @@ async def test_requires_edge_uses_resolved_canonical_name_not_raw_name() -> None
         _payload(required=[{"name": "Py", "min_years": 2}], nice_to_have=[]),
         {"Py": "python"},
     )
-    requires_calls = [(c, p) for c, p in tx.calls if "REQUIRES" in c]
+    # F4: MERGE-scoped (see the sibling test above for why).
+    requires_calls = [
+        (c, p) for c, p in tx.calls if "REQUIRES" in c and "MERGE" in c.upper()
+    ]
     assert any("python" in p.values() for _c, p in requires_calls)
     assert not any("Py" in p.values() for _c, p in requires_calls)
 
@@ -190,6 +210,84 @@ async def test_old_requires_and_nice_to_have_edges_are_dropped_before_recreation
     assert delete_idxs
     assert requires_idxs
     assert max(delete_idxs) < min(requires_idxs)
+
+
+@pytest.mark.asyncio
+async def test_old_edge_cleanup_delete_is_typed_not_a_blanket_wildcard() -> None:
+    """F4 (security re-audit, MEDIUM). The old-edge cleanup DELETE must name
+    exactly REQUIRES/NICE_TO_HAVE. A wildcard ``-[r]->(:Skill) DELETE r``
+    silently destroys ANY OTHER Job->Skill edge type a future phase (4c/4d)
+    might introduce, the moment such an edge exists — the earlier production
+    code widened to the wildcard purely to dodge this file's naive
+    substring-matching tests (now fixed above), which is backwards: tests
+    must never drive production into a less-safe shape. Proven at the
+    Cypher-text level here; ``test_graph_projection_e2e.py`` proves it
+    behaviourally against a real Neo4j graph carrying a foreign edge type."""
+    tx, _driver, _events = await _project(_payload(), _RESOLVED)
+    delete_calls = [c for c, _p in tx.calls if "DELETE" in c.upper()]
+    assert delete_calls
+    for cypher in delete_calls:
+        assert re.search(r"REQUIRES\s*\|\s*NICE_TO_HAVE", cypher), (
+            "the cleanup DELETE is not typed to REQUIRES|NICE_TO_HAVE — it "
+            "will delete every Job->Skill edge type, including ones this "
+            "module never created (silent data loss)"
+        )
+
+
+# ── F6 (security re-audit): fail loud on a missing resolution entry ──────
+
+
+@pytest.mark.asyncio
+async def test_required_skill_name_absent_from_resolved_mapping_raises_loudly() -> None:
+    from src.pipeline.skills_graph import UnresolvedSkillNameError
+
+    with pytest.raises(UnresolvedSkillNameError):
+        await _project(
+            _payload(required=[{"name": "python", "min_years": 4}], nice_to_have=[]),
+            {},  # no entry at all for "python"
+        )
+
+
+@pytest.mark.asyncio
+async def test_nice_to_have_skill_name_absent_from_resolved_mapping_raises_loudly() -> (
+    None
+):
+    from src.pipeline.skills_graph import UnresolvedSkillNameError
+
+    with pytest.raises(UnresolvedSkillNameError):
+        await _project(_payload(required=[], nice_to_have=[{"name": "kubernetes"}]), {})
+
+
+@pytest.mark.asyncio
+async def test_pii_shape_rejected_skill_is_dropped_silently_not_projected() -> None:
+    """F3 — a ``None`` resolution (shape-rejected as PII) is a legitimate
+    outcome, not a caller bug, and must not raise."""
+    tx, _driver, _events = await _project(
+        _payload(
+            required=[{"name": "casey.rivera@example.test", "min_years": None}],
+            nice_to_have=[],
+        ),
+        {"casey.rivera@example.test": None},
+    )
+    assert not any("casey.rivera@example.test" in p.values() for _c, p in tx.calls)
+    merge_calls = [
+        (c, p) for c, p in tx.calls if "REQUIRES" in c and "MERGE" in c.upper()
+    ]
+    assert not merge_calls
+
+
+@pytest.mark.asyncio
+async def test_pii_shape_rejected_nice_to_have_skill_is_dropped_silently() -> None:
+    """Same as above, for the nice-to-have loop's independent None branch."""
+    tx, _driver, _events = await _project(
+        _payload(required=[], nice_to_have=[{"name": "casey.rivera@example.test"}]),
+        {"casey.rivera@example.test": None},
+    )
+    assert not any("casey.rivera@example.test" in p.values() for _c, p in tx.calls)
+    merge_calls = [
+        (c, p) for c, p in tx.calls if "NICE_TO_HAVE" in c and "MERGE" in c.upper()
+    ]
+    assert not merge_calls
 
 
 # ── R8: pinned label set (no Company/Institution) ─────────────────────────

@@ -406,6 +406,149 @@ async def test_whole_batch_is_processed_under_one_transaction() -> None:
     assert conn.transaction.call_count == 1
 
 
+# ── F5 (security re-audit): per-drain deadline + skill-resolution budget ──
+
+
+def _skills_payload(n: int) -> dict[str, Any]:
+    return {
+        "parsed": {
+            "skills": [{"name": f"skill-{i}"} for i in range(n)],
+            "experience": [],
+            "education": [],
+            "chunks": [],
+            "cover_letter_chunks": [],
+        },
+        "summary_emb": [0.1],
+        "chunk_embs": {},
+        "job_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_skill_budget_estimate_tolerates_malformed_job_payload() -> None:
+    """A poison ``job.parsed`` row whose ``extracted`` is not a dict (or is
+    missing) must not crash the BUDGET ESTIMATE — the real error for a
+    poison row surfaces from the projection call itself, inside the
+    try/except, not from this pre-dispatch estimate."""
+    row = _row(
+        row_id=1,
+        event_type="job.parsed",
+        payload={"extracted": "not-a-dict"},
+    )
+    conn = _make_conn([row])
+    ctx = _make_ctx(conn)
+    with patch("src.worker.graph_tasks._project_job", new_callable=AsyncMock):
+        delivered = await project_to_graph(ctx)
+    assert delivered == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_budget_estimate_tolerates_malformed_resume_payload() -> None:
+    row = _row(
+        row_id=1,
+        event_type="resume.parsed",
+        payload={"parsed": "not-a-dict"},
+    )
+    conn = _make_conn([row])
+    ctx = _make_ctx(conn)
+    with patch("src.worker.graph_tasks.project_resume", new_callable=AsyncMock):
+        delivered = await project_to_graph(ctx)
+    assert delivered == 1
+
+
+@pytest.mark.asyncio
+async def test_stops_dispatching_once_skill_budget_exhausted() -> None:
+    """F5. A row whose skills would push the running total over
+    ``settings.outbox_max_skill_resolutions_per_drain`` is left for the next
+    drain tick — not attempted, not marked delivered, no attempts increment."""
+    from src.settings import Settings
+
+    row1 = _row(row_id=1, payload=_skills_payload(5))
+    row2 = _row(row_id=2, payload=_skills_payload(5))
+    conn = _make_conn([row1, row2])
+    ctx = _make_ctx(conn)
+    custom = Settings(outbox_max_skill_resolutions_per_drain=5)
+
+    with (
+        patch("src.worker.graph_tasks.get_settings", return_value=custom),
+        patch("src.worker.graph_tasks.project_resume", new_callable=AsyncMock),
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 1
+    calls = _execute_calls(conn)
+    assert any("delivered_at" in c[0] and row1["id"] in c for c in calls)
+    assert not any(row2["id"] in c for c in calls)  # untouched entirely
+
+
+@pytest.mark.asyncio
+async def test_always_attempts_at_least_one_row_even_over_skill_budget() -> None:
+    """A single oversized row must not starve itself out of ever being
+    processed — the budget only stops DISPATCHING FURTHER rows."""
+    from src.settings import Settings
+
+    row1 = _row(row_id=1, payload=_skills_payload(50))
+    conn = _make_conn([row1])
+    ctx = _make_ctx(conn)
+    custom = Settings(outbox_max_skill_resolutions_per_drain=1)
+
+    with (
+        patch("src.worker.graph_tasks.get_settings", return_value=custom),
+        patch(
+            "src.worker.graph_tasks.project_resume", new_callable=AsyncMock
+        ) as project_resume,
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 1
+    project_resume.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stops_dispatching_once_deadline_exceeded() -> None:
+    """F5. The second row is left untouched once the per-drain wall-clock
+    deadline has passed."""
+    row1 = _row(row_id=1, payload={})
+    row2 = _row(row_id=2, payload={})
+    conn = _make_conn([row1, row2])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.graph_tasks.time.monotonic", side_effect=[100.0, 999.0]),
+        patch("src.worker.graph_tasks.project_resume", new_callable=AsyncMock),
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 1
+    calls = _execute_calls(conn)
+    assert any("delivered_at" in c[0] and row1["id"] in c for c in calls)
+    assert not any(row2["id"] in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_skill_budget_and_deadline_are_read_from_settings_not_hardcoded() -> None:
+    from src.settings import Settings
+
+    row1 = _row(row_id=1, payload=_skills_payload(2))
+    row2 = _row(row_id=2, payload=_skills_payload(2))
+    conn = _make_conn([row1, row2])
+    ctx = _make_ctx(conn)
+    # A generous default would let both rows through; a tight setting must
+    # actually change the observed behaviour.
+    custom = Settings(outbox_max_skill_resolutions_per_drain=2)
+
+    with (
+        patch("src.worker.graph_tasks.get_settings", return_value=custom),
+        patch(
+            "src.worker.graph_tasks.project_resume", new_callable=AsyncMock
+        ) as project_resume,
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 1
+    project_resume.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_no_rows_returns_zero_without_touching_neo4j() -> None:
     conn = _make_conn([])

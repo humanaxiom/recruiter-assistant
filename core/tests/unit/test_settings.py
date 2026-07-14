@@ -200,6 +200,40 @@ def test_env_override_outbox_max_delivery_attempts(monkeypatch: MonkeyPatch) -> 
     assert Settings().outbox_max_delivery_attempts == 3
 
 
+def test_outbox_drain_deadline_seconds_default() -> None:
+    """F5 (security re-audit) — a per-drain wall-clock budget so a batch of
+    slow (skill-heavy) rows can't hold the single Postgres transaction open
+    indefinitely past the arq cron tick that invoked the drain."""
+    assert Settings().outbox_drain_deadline_seconds == pytest.approx(4.0)
+
+
+def test_outbox_max_skill_resolutions_per_drain_default() -> None:
+    """F5 — bounds the total number of skill-name resolution round trips
+    (embed()/chat_json() calls) attempted across an entire drain call."""
+    assert Settings().outbox_max_skill_resolutions_per_drain == 200
+
+
+def test_outbox_drain_deadline_seconds_is_positive() -> None:
+    assert Settings().outbox_drain_deadline_seconds > 0
+
+
+def test_outbox_max_skill_resolutions_per_drain_is_a_positive_int() -> None:
+    assert isinstance(Settings().outbox_max_skill_resolutions_per_drain, int)
+    assert Settings().outbox_max_skill_resolutions_per_drain > 0
+
+
+def test_env_override_outbox_drain_deadline_seconds(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("OUTBOX_DRAIN_DEADLINE_SECONDS", "1.5")
+    assert Settings().outbox_drain_deadline_seconds == pytest.approx(1.5)
+
+
+def test_env_override_outbox_max_skill_resolutions_per_drain(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUTBOX_MAX_SKILL_RESOLUTIONS_PER_DRAIN", "5")
+    assert Settings().outbox_max_skill_resolutions_per_drain == 5
+
+
 # ── Phase 4b: skill-normalisation thresholds ────────────────────────────────
 
 

@@ -225,8 +225,30 @@ async def _enqueue_resume_parsed(
                     "evidence_chunk_ids": ["c_002"],
                 },
             ],
-            "experience": [],
-            "education": [],
+            # F2 (security re-audit): non-empty on purpose. R8's whole claim
+            # is "this module never writes Company/Institution" — an EMPTY
+            # experience/education list makes that assertion vacuously true
+            # (there is nothing TO write either way). Real data here means
+            # `test_pinned_label_set_after_both_projections` actually
+            # exercises the guard: a verbatim-hris-style regression that
+            # started writing a Company/Institution node from this data
+            # would now fail it.
+            "experience": [
+                {
+                    "company": "Nimbus Analytics Inc",
+                    "title": "Senior Backend Engineer",
+                    "start": "2022-01",
+                    "is_current": True,
+                    "bullets": [{"text": "Shipped REST APIs.", "chunk_id": "c_001"}],
+                }
+            ],
+            "education": [
+                {
+                    "degree": "BSc Computer Science",
+                    "institution": "State University",
+                    "year": 2016,
+                }
+            ],
             "chunks": [
                 {"id": "c_001", "section": "experience", "page": 1},
                 {"id": "c_002", "section": "experience", "page": 1},
@@ -316,6 +338,44 @@ async def test_job_parsed_projects_job_node_and_requires_edges(
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_job_reprojection_typed_delete_does_not_touch_a_foreign_job_skill_edge(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """F4 (security re-audit, MEDIUM), behavioural proof. A future phase
+    (4c/4d) may introduce another Job->Skill edge type; the old-edge cleanup
+    in ``_job_projection_tx`` must never delete it on a re-parse. The
+    pre-fix wildcard ``-[r]->(:Skill) DELETE r`` destroys this edge on the
+    very next ``job.parsed`` projection for the SAME job — this test would
+    have gone RED against that code."""
+    job_id = await _insert_job(pg_pool)
+    await _enqueue_job_parsed(pg_pool, job_id)
+    await project_to_graph(_ctx(pg_pool, neo4j_driver), batch=10)
+
+    # Seed a FOREIGN Job->Skill edge type this module never creates itself.
+    async with neo4j_driver.session() as session:
+        await session.run(
+            "MATCH (j:Job {id: $jid}) "
+            "MERGE (s:Skill {canonical_name: 'rust'}) "
+            "MERGE (j)-[:MENTIONS]->(s)",
+            jid=str(job_id),
+        )
+
+    # Re-project (simulates a JD re-parse) — must not touch the foreign edge.
+    await _enqueue_job_parsed(pg_pool, job_id)
+    delivered = await project_to_graph(_ctx(pg_pool, neo4j_driver), batch=10)
+    assert delivered == 1
+
+    assert (
+        await _count(
+            neo4j_driver,
+            f"MATCH (:Job {{id: '{job_id}'}})-[:MENTIONS]->"
+            "(:Skill {canonical_name: 'rust'}) RETURN count(*) AS n",
+        )
+        == 1
+    ), "typed DELETE removed a foreign Job->Skill edge type"
 
 
 # ── resume.parsed projection ───────────────────────────────────────────────

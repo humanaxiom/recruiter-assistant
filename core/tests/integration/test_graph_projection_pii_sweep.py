@@ -17,6 +17,21 @@ contain the email?") is not good enough — R1's whole point is that
 guard has to be structurally blind to WHICH property, walking the graph the
 same way a real PIPEDA/FIPPA audit would.
 
+F1 (security re-audit, HIGH) — the sweep only hunts the identity triple in
+whatever the fixture happens to carry, and previously the fixture's
+``experience[].bullets[].text``/``experience[].company``/
+``education[].institution`` were marker-free strings ("Shipped REST APIs.",
+"Nimbus Analytics Inc") — an N1 field (ADR-007 permits these on the outbox
+ONLY because the projection never writes them to the graph) that would sail
+through the sweep even if a future regression started projecting them,
+simply because the fixture text carried no PII substring to trip on. Every
+one of those fields (PLUS ``skills[].name`` — see F3) now carries a marker.
+The email/phone/name assertions are also now CASE-INSENSITIVE:
+``_basic_normalise`` (``src/pipeline/skills.py``) unconditionally lowercases
+every skill/canonical name, so a real leak via ``Skill.canonical_name`` lands
+as ``'casey rivera'`` — the ORIGINAL case-sensitive ``CANDIDATE_NAME not in
+all_values`` check would never see it.
+
 Real Postgres + real Neo4j via testcontainers. LLM/embedder are mocked (no
 Ollama in gates — see CLAUDE.md); the embedder returns deterministic 768-d
 vectors so the real ``vector.dimensions`` Neo4j contract is respected.
@@ -139,17 +154,46 @@ async def _insert_resume_with_pii_header_chunk(
                 "Python experience."
             ),
             "total_years_experience": 6,
-            "skills": [{"name": "python", "years": 6, "last_used_year": 2026}],
+            "skills": [
+                {"name": "python", "years": 6, "last_used_year": 2026},
+                # F3/F1: an LLM-hallucinated "skill" carrying the candidate's
+                # own email verbatim — realistic off a header-shaped chunk.
+                # Pins F3's shape-reject layer permanently: if it's ever
+                # weakened, this name gets embedded + written to a Skill
+                # node and the sweep below catches it.
+                {"name": CANDIDATE_EMAIL},
+            ],
             "experience": [
                 {
-                    "company": "Nimbus Analytics Inc",
+                    # F1: an N1 field — permitted on the outbox ONLY because
+                    # this module never writes it to the graph (R8). Carries
+                    # a marker so a future regression that starts writing it
+                    # gets caught here instead of sailing through on
+                    # marker-free fixture text.
+                    "company": f"{CANDIDATE_NAME} Consulting",
                     "title": "Senior Backend Engineer",
                     "start": "2022-01",
                     "is_current": True,
-                    "bullets": [{"text": "Shipped REST APIs.", "chunk_id": "c_001"}],
+                    "bullets": [
+                        {"text": "Shipped REST APIs.", "chunk_id": "c_001"},
+                        {
+                            "text": (
+                                f"Reach {CANDIDATE_NAME} at {CANDIDATE_EMAIL} "
+                                f"or {CANDIDATE_PHONE}."
+                            ),
+                            "chunk_id": "c_001",
+                        },
+                    ],
                 }
             ],
-            "education": [],
+            "education": [
+                {
+                    "degree": "BSc Computer Science",
+                    # F1: same N1-field rationale as `company` above.
+                    "institution": f"University of {CANDIDATE_NAME}",
+                    "year": 2016,
+                }
+            ],
             "chunks": [
                 {
                     "id": "c_001",
@@ -239,21 +283,27 @@ async def test_no_pii_marker_survives_anywhere_in_the_projected_graph(
     delivered = await project_to_graph(ctx, batch=10)
     assert delivered == 1
 
-    all_values = " \n ".join(await _walk_every_property_value(neo4j_driver))
+    # F1: case-insensitive. `_basic_normalise` (src/pipeline/skills.py)
+    # unconditionally lowercases every skill/canonical name, so a real leak
+    # via `Skill.canonical_name` lands as 'casey rivera' — a case-SENSITIVE
+    # check here would never see it (this is exactly what let F3 through).
+    all_values_lower = " \n ".join(
+        await _walk_every_property_value(neo4j_driver)
+    ).lower()
 
-    assert CANDIDATE_EMAIL not in all_values, (
+    assert CANDIDATE_EMAIL.lower() not in all_values_lower, (
         "candidate email survived somewhere in the projected graph (R1 — the "
         "PII sweep is structurally blind to which node/property carried it)"
     )
     assert (
-        CANDIDATE_PHONE not in all_values
+        CANDIDATE_PHONE.lower() not in all_values_lower
     ), "candidate phone survived somewhere in the projected graph (R1)"
     assert (
-        CANDIDATE_NAME not in all_values
+        CANDIDATE_NAME.lower() not in all_values_lower
     ), "candidate name survived somewhere in the projected graph (R1)"
     # Belt-and-braces: the header chunk's RAW text must not survive either,
     # even a truncated preview of it (decision 1 — no chunk text, ever).
-    assert HEADER_CHUNK_TEXT not in all_values
+    assert HEADER_CHUNK_TEXT.lower() not in all_values_lower
 
 
 @pytest.mark.asyncio
