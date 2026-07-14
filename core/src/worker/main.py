@@ -15,9 +15,16 @@ per-process singletons the parse tasks resolve off ``ctx``:
 ``embedder``         ``src.pipeline.llm.CachedEmbedder``
 ===================  =========================================================
 
-Phase 3 registers the two parse tasks. The graph-projection drainer
-(``project_to_graph``) is Phase 4 — until it lands, the outbox rows these tasks
-write sit undelivered, which is the outbox pattern working as intended.
+Phase 3 registers the two parse tasks (``WorkerSettings.functions``). Phase 4b
+adds the graph-projection drainer (``src.worker.graph_tasks.project_to_graph``)
+as a ``WorkerSettings.cron_jobs`` entry rather than a ``functions`` entry: it
+is never enqueued by name (nothing calls ``arq.enqueue_job("project_to_graph")``
+— it runs strictly on its own schedule), and arq dispatches cron jobs
+independently of the ``functions`` registry. Keeping it out of ``functions``
+also means ``WorkerSettings.functions == [parse_job, parse_resume]`` stays a
+correct, stable assertion across phases (see ``test_worker_wiring.py``, a
+Phase-3 test this phase does not need to — and per CLAUDE.md's "never modify a
+test to make implementation pass" must not — touch).
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from typing import Any
 
 import asyncpg
 import redis.asyncio as aioredis
+from arq import cron
 from arq.connections import RedisSettings
 from neo4j import AsyncGraphDatabase
 
@@ -34,6 +42,7 @@ from src.models.ddl import init_schema
 from src.pipeline.llm import CachedEmbedder, LLMClient
 from src.settings import get_settings
 from src.storage.blob_store import BlobStore
+from src.worker.graph_tasks import project_to_graph
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 from src.worker.resume_tasks import parse_resume
 from src.worker.tasks import parse_job
@@ -121,8 +130,12 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 
 class WorkerSettings:
-    # Phase 3: parse only. The Phase-4 drainer (project_to_graph) joins here.
+    # Phase 3: parse tasks, enqueued by id (parse_job(ctx, job_id_str) etc).
     functions: list[Any] = [parse_job, parse_resume]
+    # Phase 4b: the graph-projection drainer runs on its own schedule, not by
+    # enqueue — every ~5s, matching decision 3's rationale (skill resolution
+    # must be cheap enough to finish well inside one cron tick).
+    cron_jobs = [cron(project_to_graph, second=set(range(0, 60, 5)))]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

@@ -41,8 +41,10 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Record
+from neo4j import AsyncDriver
 from pydantic import ValidationError
 
+from src.pipeline import skills_graph
 from src.pipeline.llm import (
     CachedEmbedder,
     LLMClient,
@@ -94,6 +96,22 @@ _RESUME_META_SQL = (
 # A résumé is parseable only from these two states; anything else means another
 # worker (or a delete) got there first.
 _PARSEABLE_STATUSES = ("uploaded", "parsing")
+
+# ADR-007 §7 / decision 1 (EXTRACTION_PLAN 4b row): the outbox NEVER carries
+# candidate identity or raw chunk text — Neo4j gets no chunk text, ever, not
+# even a 200-char preview (a résumé header chunk's first 200 chars ARE the
+# candidate's name/email/phone). `summary` is dropped too (F2, round 3): a
+# small model sometimes opens it with the candidate's own name. A single
+# named constant so `parse_resume`'s enqueue call and every test/fixture that
+# needs to know "what does the outbox actually carry" share ONE source of
+# truth instead of hand-duplicating the exclude clause (the drift class the
+# 4a corpus's audit rounds kept finding).
+_OUTBOX_PARSED_EXCLUDE: dict[str, Any] = {
+    "candidate": True,
+    "summary": True,
+    "chunks": {"__all__": {"text"}},
+    "cover_letter_chunks": {"__all__": {"text"}},
+}
 
 
 # ---------------- skills ----------------
@@ -556,18 +574,7 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                     # keys embeddings by chunk id and reads any chunk-text preview
                     # from `resumes.parsed`, the system of record, which KEEPS the
                     # full text).
-                    "parsed": cleaned_parsed.model_dump(
-                        exclude={
-                            "candidate": True,
-                            # `summary` is cleartext and a small model sometimes
-                            # opens it with the candidate's own name — drop it
-                            # from the (unencrypted) outbox. Phase 4 reads the
-                            # summary from `resumes.parsed` (system of record).
-                            "summary": True,
-                            "chunks": {"__all__": {"text"}},
-                            "cover_letter_chunks": {"__all__": {"text"}},
-                        }
-                    ),
+                    "parsed": cleaned_parsed.model_dump(exclude=_OUTBOX_PARSED_EXCLUDE),
                     "summary_emb": summary_emb,
                     "chunk_embs": chunk_embs,
                     "prompt_version": prompt_version,
@@ -616,3 +623,157 @@ def _build_summary_text(parsed: ResumeParsed) -> str:
     # keys on sha256(f"{model}\n{text}"), so every contentless résumé would
     # collide on one vector).
     return ". ".join(parts) or "candidate"
+
+
+# ---------------- resume.parsed graph projection (Phase 4b) ----------------
+#
+# Ported behaviourally from hris ``apps/worker/src/worker/resume_tasks.py::
+# project_resume`` / ``_resume_projection_tx``, with the human-locked
+# deviations from ``docs/EXTRACTION_PLAN.md`` (4b row):
+#
+# * Decision 1 (CRIT) — NO chunk text, ever, not even a preview. hris writes
+#   ``preview=chunk["text"][:200]``; the outbox payload has no ``text`` key at
+#   all (ADR-007 §7 / R2), so a verbatim port would either KeyError or (worse,
+#   if `.get()`'d) write an empty string that could later be "fixed" back into
+#   a real leak. Neo4j never needs it — the reveal path reads
+#   ``resumes.parsed`` (Postgres), the system of record.
+# * Decision 3 — skill names are resolved via ``skills_graph.resolve_
+#   canonical_names`` on a plain session, BEFORE ``session.execute_write`` is
+#   ever called. The callback handed to ``execute_write`` receives the
+#   RESOLVED ``{raw_name: canonical}`` mapping only — never ``llm``/
+#   ``embedder`` — so it architecturally cannot make a model call while
+#   holding the write transaction.
+# * R8 (MED) — pinned label set: only ``Resume``/``ResumeChunk``/``Skill`` are
+#   ever written here. Never ``Company``/``Institution``, even though the
+#   Neo4j bootstrap already declares constraints for those labels.
+
+
+async def project_resume(
+    driver: AsyncDriver,
+    *,
+    resume_id: Any,
+    payload: dict[str, Any],
+    llm: Any,
+    embedder: Any,
+) -> None:
+    """Project one ``resume.parsed`` outbox payload into Neo4j.
+
+    Idempotent: the write transaction DETACH-DELETEs old chunks and drops old
+    HAS_SKILL edges before re-creating them, so a re-parse never accumulates
+    cruft. No Postgres dependency at all — decision 1 means this function
+    never needs to read a chunk-text preview from anywhere.
+    """
+    parsed = payload["parsed"]
+    summary_emb = payload["summary_emb"]
+    chunk_embs = payload["chunk_embs"]
+    # job_id is required for per-job shortlist scoping; tolerate its absence
+    # (older/malformed payloads) by passing None through — the projection
+    # simply skips the job_id assignment for that resume.
+    job_id = payload.get("job_id")
+
+    skill_names = [s["name"] for s in parsed.get("skills", [])]
+
+    async with driver.session() as session:
+        # Decision 3: every embed()/chat_json() round trip happens HERE, on a
+        # plain auto-commit session, before any write transaction opens.
+        resolved_skills = await skills_graph.resolve_canonical_names(
+            session, skill_names, llm=llm, embedder=embedder
+        )
+        await session.execute_write(
+            _resume_projection_tx,
+            str(resume_id),
+            parsed,
+            summary_emb,
+            chunk_embs,
+            resolved_skills,
+            job_id=job_id,
+        )
+
+
+async def _resume_projection_tx(
+    tx: Any,
+    resume_id: str,
+    parsed: dict[str, Any],
+    summary_emb: list[float],
+    chunk_embs: dict[str, list[float]],
+    resolved_skills: dict[str, str],
+    *,
+    job_id: str | None,
+) -> None:
+    """The write-transaction callback. Architecturally cannot call an LLM or
+    embedder — neither parameter exists on this signature (see
+    ``test_resume_projection_tx_signature_has_no_llm_or_embedder_parameter``).
+    """
+    # Resume node + summary embedding + job_id (used by stage-1 scoping so
+    # each job's shortlist only considers its own resume pool).
+    await tx.run(
+        """
+        MERGE (r:Resume {id: $rid})
+        SET r.total_years_experience = $tye,
+            r.summary_embedding = $emb,
+            r.status = 'parsed',
+            r.updated_at = datetime(),
+            r.job_id = coalesce($jid, r.job_id)
+        """,
+        rid=resume_id,
+        tye=parsed.get("total_years_experience", 0),
+        emb=summary_emb,
+        jid=job_id,
+    )
+
+    # Drop old chunks + skill edges BEFORE recreating them — a re-parse must
+    # not accumulate stale HAS_CHUNK/HAS_SKILL edges.
+    await tx.run(
+        "MATCH (:Resume {id: $rid})-[:HAS_CHUNK]->(c:ResumeChunk) DETACH DELETE c",
+        rid=resume_id,
+    )
+    await tx.run("MATCH (:Resume {id: $rid})-[h:HAS_SKILL]->() DELETE h", rid=resume_id)
+
+    # Chunks: Decision 1 — id/section/page/embedding ONLY. The outbox payload
+    # never carries a `text` key (ADR-007 §7 / R2); even if it did, no text or
+    # preview is ever written to this node.
+    for chunk in parsed.get("chunks", []):
+        emb = chunk_embs.get(chunk["id"])
+        if emb is None:
+            continue
+        await tx.run(
+            """
+            MATCH (r:Resume {id: $rid})
+            CREATE (c:ResumeChunk {
+                id: $cid, resume_id: $rid, section: $section, page: $page,
+                embedding: $emb
+            })
+            CREATE (r)-[:HAS_CHUNK]->(c)
+            """,
+            rid=resume_id,
+            cid=chunk["id"],
+            section=chunk.get("section", "other"),
+            page=chunk.get("page", 0),
+            emb=emb,
+        )
+
+    # Skills: use the ALREADY-RESOLVED canonical name (decision 3) — no
+    # embed()/chat_json() call happens in this transaction.
+    for skill in parsed.get("skills", []):
+        raw_name = skill["name"]
+        canonical = resolved_skills.get(raw_name, raw_name)
+        await skills_graph._ensure_categories(tx, canonical)
+        evidence = skill.get("evidence_chunk_ids") or []
+        await tx.run(
+            """
+            MATCH (r:Resume {id: $rid}), (s:Skill {canonical_name: $cn})
+            MERGE (r)-[h:HAS_SKILL]->(s)
+            SET h.years = $years,
+                h.last_used_year = $luy,
+                h.evidence_chunk_id = $first_ev
+            """,
+            rid=resume_id,
+            cn=canonical,
+            years=skill.get("years"),
+            luy=skill.get("last_used_year"),
+            first_ev=evidence[0] if evidence else None,
+        )
+
+    # R8: no Company/Institution/experience/education writes from this
+    # module — the matching pipeline that would consume them is out of scope
+    # for Phase 4b.

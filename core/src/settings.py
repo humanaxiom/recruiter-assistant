@@ -65,6 +65,21 @@ class Settings(BaseSettings):
     # ── Gates ────────────────────────────────────────────────────────────────
     coverage_threshold: int = 80
 
+    # ── Phase 4b: graph-projection outbox drainer ─────────────────────────────
+    # hris hard-codes both as Python default parameters / module constants;
+    # CLAUDE.md forbids hard-coded tunables, so they live here instead.
+    outbox_drain_batch_size: int = 50
+    # Decision 2 — poison rows are capped, not retried forever (hris retries
+    # forever). The drainer's SELECT excludes rows at/past this many failed
+    # delivery attempts — dead-lettered, not deleted, not retried.
+    outbox_max_delivery_attempts: int = 200
+
+    # ── Phase 4b: skill-normalisation (Neo4j half) thresholds ─────────────────
+    # hris's AUTO_MERGE_THRESHOLD / TIEBREAKER_THRESHOLD module constants.
+    # [tiebreaker, auto_merge) is the LLM-tiebreaker grey zone.
+    skill_auto_merge_threshold: float = 0.92
+    skill_tiebreaker_threshold: float = 0.88
+
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"
