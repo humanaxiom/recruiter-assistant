@@ -32,7 +32,6 @@ import asyncio
 import datetime as dt
 import json
 import logging
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -105,6 +104,10 @@ class MatchingContext:
     non_matchable_families: tuple[str, ...] = _NON_MATCHABLE_FAMILIES
     llm_concurrency: int = _LLM_CONCURRENCY
     evidence_max_tokens: int = _EVIDENCE_MAX_TOKENS
+    # Build provenance (reviewer finding, Phase 4c): sourced from
+    # ``settings.git_sha`` (never ``os.environ`` directly — see settings.py's
+    # docstring invariant) and threaded into PipelineMeta.git_sha.
+    git_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -602,7 +605,7 @@ def _shortlist_meta(
         model_emb=ctx.model_emb,
         prompt_versions={"shortlist_evidence": _PROMPT_VERSION_EVIDENCE},
         weights=weights,
-        git_sha=os.environ.get("GIT_SHA"),
+        git_sha=ctx.git_sha,
         generated_at=started,
         timings_ms=timings,
     )
@@ -665,7 +668,7 @@ async def match_resume_to_jobs(
             model_emb=ctx.model_emb,
             prompt_versions={"shortlist_evidence": _PROMPT_VERSION_EVIDENCE},
             weights=weights,
-            git_sha=os.environ.get("GIT_SHA"),
+            git_sha=ctx.git_sha,
             generated_at=started,
             timings_ms=timings,
         )

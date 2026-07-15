@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"
 
+    # ── Build provenance (Phase 4c) ───────────────────────────────────────────
+    # Optional build-provenance metadata threaded into PipelineMeta.git_sha via
+    # MatchingContext. pydantic-settings maps this to the `GIT_SHA` env var
+    # (no env_prefix is configured above, so the field name is used verbatim).
+    # None when unset — matches the prior (pre-Settings) `os.environ.get`
+    # behaviour exactly.
+    git_sha: str | None = None
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
