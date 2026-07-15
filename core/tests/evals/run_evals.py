@@ -56,6 +56,18 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    r02's fabricated anchor at 0.855 >= 0.85, and
                                    partial_token_set_ratio returns 1.000 on 2 of
                                    the 4 negatives.
+    gold_recall_min = 1.0       -- (round-8 addition, R2 closure) fraction of
+                                   labels.json's `gold_evidence` anchors that
+                                   must come back `status="met"` with a
+                                   SURVIVING verified quote from the FULL
+                                   extract-then-verify pipeline. Every other
+                                   key in this section gates the VERIFY half
+                                   only (an extractor that never finds real
+                                   evidence in the first place passes all of
+                                   them vacuously, short of the
+                                   min_completeness_in_topk floor). Gates the
+                                   extractor's RECALL, not just the verifier's
+                                   precision.
   [adversarial]
     must_not_surface_in_topk    -- r09 (the keyword-stuffer) must never appear
                                    in the top-k. Same for every fixture flagged
@@ -82,7 +94,10 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    score_final(lower) >= min_score_gap. Each pair
                                    is identical in every scoring-relevant field
                                    except one dimension (education / overqual /
-                                   motivation), so a ranker blind to that
+                                   motivation / skill_missing_must / recency --
+                                   the last two added round 8, see
+                                   fixtures/labels.json and thresholds.toml for
+                                   their rationale), so a ranker blind to that
                                    dimension fails -- but ONLY IF THE GAP IS
                                    CHECKED TOO (round-6 finding F5): the overqual
                                    and motivation twins have BYTE-IDENTICAL
@@ -95,18 +110,35 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    is an anti-tie epsilon: > 0 (else the tie
                                    passes) and far below the smallest correct-
                                    engine gap (0.0120 -- the overqual pair's, and
-                                   the ONLY one of the three that is arithmetic
-                                   rather than measured; see thresholds.toml).
-                                   REVIEW OBLIGATION, NOT A GATE (round-7 M-3):
-                                   the three blind-engine mutations (education =
-                                   0, overqual_ratio = 99, motivation = 0) are
-                                   what prove these pairs gate their dimension at
-                                   all, and each must FAIL on BOTH input orders --
-                                   but nothing in this file or thresholds.toml can
-                                   run them, because they need the engine with
-                                   MUTATED MatchWeights. They belong in 4c's own
-                                   test suite, and 4c's reviewer must check for
-                                   them. Do not read this key as enforcing them.
+                                   the ONLY one of the three original pairs that
+                                   is arithmetic rather than measured -- the two
+                                   round-8 pairs' gaps (0.144 each) are larger
+                                   still; see thresholds.toml).
+                                   REVIEW OBLIGATION, NOT A GATE (round-7 M-3,
+                                   extended round 8): the three original
+                                   blind-engine mutations (education = 0,
+                                   overqual_ratio = 99, motivation = 0) plus
+                                   weights.skill = 0 and a recency-decay-disabled
+                                   mutation are what prove these pairs gate their
+                                   dimension at all, and each must FAIL on BOTH
+                                   input orders -- but nothing in this file or
+                                   thresholds.toml can run them, because they
+                                   need the engine with MUTATED MatchWeights.
+                                   They belong in 4c's own test suite, and 4c's
+                                   reviewer must check for them. Do not read this
+                                   key as enforcing them. A SIXTH mutation,
+                                   must_have_miss_penalty: 0.5 -> 1.0, is a
+                                   review obligation of a DIFFERENT shape (round
+                                   8): it cannot be expressed as a pairwise
+                                   rank+gap check at all (removing the penalty
+                                   only shrinks, never reverses, the
+                                   skill_missing_must pair's gap -- an algebraic
+                                   property of the mean+multiplicative-penalty
+                                   formula, not a fixture gap). It must be
+                                   verified numerically on r18 in isolation
+                                   instead; see fixtures/labels.json's
+                                   skill_missing_must rationale and
+                                   core/tests/evals/README_4c_twins.md.
   [pii]
     leak_check = true           -- no fixture's candidate name/email/phone may
                                    appear in embedding input or exported output.
