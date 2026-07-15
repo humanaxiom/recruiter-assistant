@@ -16,10 +16,12 @@ The ``messages`` shape is what LLMClient.chat / chat_json take directly.
 
 Ported near-verbatim from hris
 ``packages/prompts/src/prompts/__init__.py`` (see
-``phase3-source-dossier.md`` §9). Phase 3 ships exactly four prompt
-pairs: ``jd_extract_v1``, ``resume_core_v1``, ``resume_skills_v2``,
-``cover_letter_v1``. ``shortlist_evidence_v1`` is Phase 4 and is
-deliberately NOT present under ``templates/``.
+``phase3-source-dossier.md`` §9). Phase 3 shipped four prompt pairs:
+``jd_extract_v1``, ``resume_core_v1``, ``resume_skills_v2``,
+``cover_letter_v1``. Phase 4c adds the shortlist-evidence pair
+``shortlist_evidence_v1`` (and ``shortlist_evidence_v2``, the cover-letter
+variant), copied verbatim from hris — the matching orchestrator's stage-3
+per-requirement evidence prompt.
 """
 
 from __future__ import annotations

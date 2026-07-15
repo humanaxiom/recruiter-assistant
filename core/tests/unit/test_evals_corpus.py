@@ -924,6 +924,7 @@ _THRESHOLD_KEYS: list[tuple[str, str]] = [
     ("evidence", "fuzz_threshold"),
     ("evidence", "min_completeness_in_topk"),
     ("evidence", "negative_evidence_must_fail"),
+    ("evidence", "gold_recall_min"),
     ("adversarial", "must_not_surface_in_topk"),
     ("ordering_controls", "enforce"),
     ("ordering_controls", "pairs"),
@@ -2494,8 +2495,8 @@ def test_only_r04_carries_a_non_empty_cover_letter(resume_id: str) -> None:
 # inside the borderline/weak region and pushes whatever it outranks down by
 # one. The tiers otherwise keep their round-2 meaning.
 _TAG_POPULATIONS_AT_AUTHORING_TIME = {
-    "strong": 7,
-    "borderline": 4,
+    "strong": 9,  # round 8: was 7 (added r18, r20)
+    "borderline": 5,  # round 8: was 4 (added r19)
     # 5 since the round-3 hardening added r17, the ADR-007 F1-R
     # format-divergent PII positive control (an honestly-weak candidate).
     "weak": 5,
@@ -2865,7 +2866,13 @@ def test_negative_evidence_quote_cannot_verify_against_its_cited_chunk(
 
 # ── Round-2 GAP 2: matched-pair ordering_controls ─────────────────────────
 
-_EXPECTED_ORDERING_CONTROL_DIMENSIONS = {"education", "overqual", "motivation"}
+_EXPECTED_ORDERING_CONTROL_DIMENSIONS = {
+    "education",
+    "overqual",
+    "motivation",
+    "skill_missing_must",
+    "recency",
+}
 
 
 def test_labels_manifest_has_ordering_controls_for_each_gated_dimension() -> None:
@@ -3394,20 +3401,22 @@ def test_r17_claims_no_jd_relevant_skill_so_it_perturbs_no_ranking_signal() -> N
 # ── Falsifiability hardening H: run_evals.py is executed, not just read ──
 
 
-def test_run_evals_main_returns_nonzero_until_4c_lands() -> None:
-    """Finding H1. No test executed ``run_evals.py``, so its "cannot go green
-    before 4c" honesty was structural, not gated: a stray `return 0`, or an
-    accidentally-importable stub orchestrator, would have made the
-    merge-blocking ranking-evals gate pass on an engine that does not exist.
-
-    When 4c lands ``src.pipeline.matching.orchestrator``, this test must be
-    replaced by a real assertion on the computed metrics -- do NOT delete it
-    to make a green run possible."""
+def test_run_evals_main_returns_zero_now_that_4c_landed() -> None:
+    """Finding H1 (author-sanctioned 4c replacement). Before 4c this asserted
+    ``main() != 0`` because ``src.pipeline.matching.orchestrator`` did not
+    exist; the test's own docstring instructed that when 4c lands the
+    orchestrator this must be REPLACED by a real assertion on the computed
+    metrics (not deleted). 4c has landed it, so ``run_evals.main()`` now runs
+    the live 4-stage engine against the corpus and must exit 0 (every
+    thresholds.toml gate — precision@k, evidence verify + gold recall, the
+    adversarial backstop, the ordering-control pairs, the r18 penalty
+    obligation, the PII leak-check and determinism — passes). A NON-zero exit
+    here means the ranking engine regressed against the corpus."""
     module = _import_run_evals()
-    assert module.main() != 0, (
-        "run_evals.main() must fail while src.pipeline.matching.orchestrator "
-        "does not exist (Phase 4c). A zero exit here means the ranking-evals "
-        "gate would PASS with no ranking engine at all."
+    assert module.main() == 0, (
+        "run_evals.main() must exit 0 now that the 4c orchestrator is wired: a "
+        "non-zero exit means the live engine violates a thresholds.toml gate "
+        "(precision@k / evidence / adversarial / ordering / pii / determinism)."
     )
 
 

@@ -1,0 +1,427 @@
+"""Pure-function helpers for the 4-stage matching pipeline.
+
+These are the parts that can be unit-tested without a DB or LLM —
+sub-score arithmetic + the ``verify_evidence`` anti-fabrication check +
+the final combine. The DB-heavy stage1/stage2_per_candidate /
+LLM-heavy stage3 live in ``orchestrator.py`` (they need ctx).
+
+Ported from hris ``packages/pipeline/src/pipeline/matching/stages.py`` with
+two corrected behaviours pinned by the Phase 4c RED tests:
+
+* **blocker #1** — ``score_skill_breakdown``'s must-have-miss detection keys
+  off a row's ``ontology_weight == 0`` (equivalently ``reason == "missing"``),
+  NOT the built ``SkillContribution.score == 0.0``. A present-but-insufficient
+  -tenure or family-credited row can score ``0.0`` yet is NOT a genuine miss;
+  and family credit makes a genuine miss score ``0.0`` under the built
+  contribution's default ``ontology_weight=None`` (``None == 0`` is ``False``),
+  so the original ``score == 0.0`` check silently mis-fired.
+* **blocker #6** — ``verify_evidence`` uses ``rapidfuzz.fuzz.partial_ratio``
+  at the ``evidence_verify_fuzz`` bar. hris's hand-rolled ``_fuzz_substring``
+  (a char-SET overlap ratio) verified all four fabricated corpus quotes;
+  ``fuzz.WRatio`` leaks r02's fabrication at 0.855 and ``fuzz.ratio`` rejects
+  the gold anchors at 0.648/0.796 — ``partial_ratio`` clears both traps.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
+
+from rapidfuzz import fuzz
+
+from src.schemas.matching import (
+    DEFAULT_WEIGHTS,
+    EvidenceObject,
+    MatchWeights,
+    ScoreBreakdown,
+    SkillContribution,
+)
+
+_LEVEL_ORDER: Mapping[str, int] = {
+    "high_school": 1,
+    "associate": 2,
+    "bachelors": 3,
+    "masters": 4,
+    "phd": 5,
+}
+
+
+@dataclass(frozen=True)
+class _SkillRowFromCypher:
+    """Shape of one row from the score_skill cypher query."""
+
+    skill: str
+    req_years: int | None
+    is_must_have: bool
+    years: int | None
+    last_used_year: int | None
+    ontology_weight: float  # 1.0 if direct, < 1.0 if via ontology, 0 if missing
+
+
+# ---------------- per-skill scoring ----------------
+
+
+def is_senior_candidate(
+    total_years: int | None,
+    jd_min_years: int | None,
+    *,
+    weights: MatchWeights = DEFAULT_WEIGHTS,
+) -> bool:
+    """Deterministic seniority gate for the implied-experience relief (ADR 0027).
+
+    True only when the JD states a years bar AND the candidate comfortably
+    exceeds it (>= ``weights.implied_seniority_factor`` x the minimum). No bar
+    or no candidate years → False: we won't grant relief we can't justify from
+    the JD's own stated requirement.
+
+    NOTE: this is a YEARS-based boolean gate, NOT the cosine-title ``seniority``
+    sub-score (which orchestrator.py computes separately with a live embedder).
+    """
+    if not jd_min_years or not total_years:
+        return False
+    return total_years >= jd_min_years * weights.implied_seniority_factor
+
+
+def score_skill_breakdown(
+    rows: Iterable[_SkillRowFromCypher],
+    *,
+    weights: MatchWeights,
+    senior: bool = False,
+    today_year: int | None = None,
+) -> tuple[float, list[SkillContribution]]:
+    """Compute the skill sub-score from already-fetched cypher rows.
+
+    Each row encodes (a) the JD requirement and (b) the candidate's matching
+    skill (direct or via ontology) — or null if missing. Returns
+    ``(overall, contributions)``.
+
+    ``senior`` (from :func:`is_senior_candidate`) enables the
+    implied-experience relief: when a senior candidate matches most of the
+    must-have skills but is missing one, the must-have-miss multiplier is
+    softened and the missing must-have contribution is flagged
+    ``reason="implied-experience"`` instead of ``"missing"``.
+    """
+    year = today_year or dt.datetime.now(dt.UTC).year
+    contributions: list[SkillContribution] = []
+    for row in rows:
+        # Only ontology_weight == 0 means the candidate genuinely lacks this
+        # required skill (it's missing). A skill the candidate HAS must NOT be
+        # scored as missing just because its per-skill year count is unknown —
+        # résumé extraction frequently omits years, so almost every HAS_SKILL
+        # edge has years=None. When years is unknown we give full credit on the
+        # years axis; the skill still earns its recency x ontology weight.
+        if row.ontology_weight == 0:
+            contributions.append(
+                SkillContribution(
+                    skill=row.skill,
+                    score=0.0,
+                    is_must_have=row.is_must_have,
+                    reason="missing",
+                )
+            )
+            continue
+        years: int | None
+        if row.years is None:
+            years = None
+            years_score = 1.0
+        else:
+            years = max(0, row.years)
+            req_y = max(1, row.req_years or 1)
+            years_score = min(1.0, years / req_y)
+        last = row.last_used_year or year
+        delta = year - last
+        if delta <= weights.recency_recent_years:
+            recency = weights.recency_recent
+        elif delta <= weights.recency_mid_years:
+            recency = weights.recency_mid
+        else:
+            recency = weights.recency_old
+        score = max(0.0, min(1.0, years_score * recency * row.ontology_weight))
+        contributions.append(
+            SkillContribution(
+                skill=row.skill,
+                score=score,
+                years=years,
+                recency=recency,
+                ontology_weight=row.ontology_weight,
+                is_must_have=row.is_must_have,
+                reason=None if row.ontology_weight == 1.0 else "ontology-fallback",
+            )
+        )
+
+    if not contributions:
+        return 0.0, contributions
+
+    overall = sum(c.score for c in contributions) / len(contributions)
+
+    # Must-have miss penalty (ADR 0008), with implied-experience relief
+    # (ADR 0027). BLOCKER #1: key the miss off ``reason == "missing"`` (set only
+    # when the ROW's ontology_weight == 0), NEVER the built contribution's
+    # ``score == 0.0`` — a present-but-zero-scored row (family credit + years=0,
+    # or a genuine miss whose ontology_weight defaults to None on the built
+    # object) must not be mis-classified.
+    must = [c for c in contributions if c.is_must_have]
+    missing_must = [c for c in must if c.reason == "missing"]
+    if must and missing_must:
+        matched_coverage = 1.0 - len(missing_must) / len(must)
+        if senior and matched_coverage >= weights.implied_min_coverage:
+            for c in missing_must:
+                c.reason = "implied-experience"
+            overall *= weights.implied_experience_relief
+        else:
+            overall *= weights.must_have_miss_penalty
+
+    return overall, contributions
+
+
+# ---------------- experience / education ----------------
+
+
+def score_experience(
+    total_years: int | None,
+    jd_min_years: int | None,
+    *,
+    weights: MatchWeights = DEFAULT_WEIGHTS,
+) -> float:
+    """Over-qualified does NOT increase past 1.0 and beyond ``overqual_ratio``x
+    mildly drops."""
+    if not jd_min_years:
+        return 1.0
+    total = total_years or 0
+    raw = total / jd_min_years
+    if raw <= 1.0:
+        return raw
+    if raw <= weights.overqual_ratio:
+        return 1.0
+    return max(
+        weights.overqual_floor,
+        1.0 - (raw - weights.overqual_ratio) * weights.overqual_slope,
+    )
+
+
+def score_education(
+    candidate_levels: Iterable[str | None],
+    jd_min_level: str | None,
+    *,
+    weights: MatchWeights = DEFAULT_WEIGHTS,
+) -> float:
+    if not jd_min_level:
+        return 1.0
+    req = _LEVEL_ORDER.get(jd_min_level, 0)
+    cand = [_LEVEL_ORDER.get(lvl, 0) for lvl in candidate_levels if lvl]
+    if not cand:
+        return 0.0
+    best = max(cand)
+    if best >= req:
+        return 1.0
+    # Partial credit.
+    return weights.education_partial * (best / req) if req else 0.0
+
+
+# ---------------- vector normalisation ----------------
+
+
+def normalise_vector_scores(scores: list[float]) -> list[float]:
+    """Min-max scale a stage-1 vec_score pool to [0, 1].
+
+    With a degenerate pool (all identical), returns 1.0 for every entry rather
+    than dividing by zero.
+    """
+    if not scores:
+        return []
+    lo, hi = min(scores), max(scores)
+    if hi - lo < 1e-9:
+        return [1.0] * len(scores)
+    return [(s - lo) / (hi - lo) for s in scores]
+
+
+# ---------------- evidence verification ----------------
+
+
+def _fuzz_ratio(needle: str, haystack: str) -> float:
+    """Fuzzy substring score in [0, 1] via ``rapidfuzz.fuzz.partial_ratio``.
+
+    ``partial_ratio`` scores the best-matching WINDOW of ``haystack`` against
+    the whole ``needle`` — the right shape for "is this quote a span of the
+    cited chunk". BLOCKER #6: it rejects every fabricated corpus quote while
+    accepting the gold anchors, unlike ``fuzz.WRatio`` (leaks r02's fabrication
+    at 0.855) or ``fuzz.ratio`` (rejects gold anchors at 0.648/0.796).
+    """
+    if not needle:
+        return 0.0
+    return float(fuzz.partial_ratio(needle, haystack)) / 100.0
+
+
+def verify_evidence(
+    evidence: EvidenceObject,
+    chunks_by_id: Mapping[str, str],
+    *,
+    weights: MatchWeights = DEFAULT_WEIGHTS,
+) -> EvidenceObject:
+    """Strip hallucinated chunk_ids; downgrade requirements whose ``evidence``
+    quote doesn't actually appear in any cited chunk (fuzzy-match threshold
+    ``weights.evidence_verify_fuzz``).
+
+    Returns a new EvidenceObject — never mutates input.
+    """
+    quote_threshold = weights.evidence_verify_fuzz
+    cleaned: list[Any] = []
+    for req in evidence.requirements:
+        good_ids = [cid for cid in req.evidence_chunk_ids if cid in chunks_by_id]
+        new_req = req.model_copy(update={"evidence_chunk_ids": good_ids})
+        if new_req.evidence and good_ids:
+            quoted = new_req.evidence.lower().strip()
+            if not any(
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                for cid in good_ids
+            ):
+                # Quote not found in any cited chunk — fabrication likely.
+                new_req = new_req.model_copy(
+                    update={
+                        "evidence": "",
+                        "status": (
+                            "missing" if new_req.status == "met" else new_req.status
+                        ),
+                        "confidence": min(new_req.confidence, 0.3),
+                    }
+                )
+        elif new_req.evidence and not good_ids:
+            # Has a quote but no valid citation — downgrade.
+            new_req = new_req.model_copy(
+                update={"confidence": min(new_req.confidence, 0.3)}
+            )
+        cleaned.append(new_req)
+
+    # Same anti-fabrication scrub for cover-letter evidence (Feature 1): a theme
+    # citing a fabricated cl_ id (or quoting text not in any cited cl_ chunk) is
+    # stripped/downgraded, so the deterministic motivation score only ever
+    # counts VERIFIED, cited themes.
+    cleaned_cover: list[Any] = []
+    for cle in evidence.cover_letter_evidence:
+        good_ids = [cid for cid in cle.evidence_chunk_ids if cid in chunks_by_id]
+        new_cle = cle.model_copy(update={"evidence_chunk_ids": good_ids})
+        if new_cle.evidence and good_ids:
+            quoted = new_cle.evidence.lower().strip()
+            if not any(
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                for cid in good_ids
+            ):
+                new_cle = new_cle.model_copy(
+                    update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
+                )
+        elif new_cle.evidence and not good_ids:
+            new_cle = new_cle.model_copy(
+                update={"confidence": min(new_cle.confidence, 0.3)}
+            )
+        cleaned_cover.append(new_cle)
+
+    return evidence.model_copy(
+        update={"requirements": cleaned, "cover_letter_evidence": cleaned_cover}
+    )
+
+
+# ---------------- stage 4: combine ----------------
+
+
+@dataclass(frozen=True)
+class _CombineInput:
+    resume_id: UUID
+    structured: float
+    breakdown: ScoreBreakdown
+    evidence: EvidenceObject | None
+
+
+@dataclass(frozen=True)
+class _CombineEntry:
+    resume_id: UUID
+    rank: int
+    score_final: float
+    score_structured: float
+    score_evidence: float
+    breakdown: ScoreBreakdown
+    evidence: EvidenceObject | None
+
+
+def stage4_combine(
+    candidates: Iterable[_CombineInput], weights: MatchWeights
+) -> list[_CombineEntry]:
+    """Combine structured + evidence into a final score and rank descending."""
+    entries: list[_CombineEntry] = []
+    for c in candidates:
+        evidence_completeness = _evidence_completeness(c.evidence, weights=weights)
+        motivation = _motivation_score(c.evidence, weights=weights)
+        final = (
+            weights.structured * c.structured
+            + weights.evidence * evidence_completeness
+            + weights.motivation * motivation
+        )
+        # Surface the deterministic motivation sub-score in the breakdown so the
+        # cover-letter contribution is auditable (0.0 when no cover letter /
+        # weight off — leaves the rank unchanged).
+        breakdown = c.breakdown.model_copy(update={"motivation": motivation})
+        entries.append(
+            _CombineEntry(
+                resume_id=c.resume_id,
+                rank=0,  # filled below
+                score_final=final,
+                score_structured=c.structured,
+                score_evidence=evidence_completeness,
+                breakdown=breakdown,
+                evidence=c.evidence,
+            )
+        )
+
+    entries.sort(key=lambda e: e.score_final, reverse=True)
+    return [
+        _CombineEntry(
+            resume_id=e.resume_id,
+            rank=i + 1,
+            score_final=e.score_final,
+            score_structured=e.score_structured,
+            score_evidence=e.score_evidence,
+            breakdown=e.breakdown,
+            evidence=e.evidence,
+        )
+        for i, e in enumerate(entries)
+    ]
+
+
+def _evidence_completeness(
+    evidence: EvidenceObject | None, *, weights: MatchWeights = DEFAULT_WEIGHTS
+) -> float:
+    if evidence is None or not evidence.requirements:
+        return 0.0
+    met = sum(
+        1
+        for r in evidence.requirements
+        if r.status == "met" and r.confidence >= weights.evidence_met_confidence
+    )
+    partial = sum(1 for r in evidence.requirements if r.status == "partial")
+    return (met + weights.evidence_partial_weight * partial) / len(
+        evidence.requirements
+    )
+
+
+def _motivation_score(
+    evidence: EvidenceObject | None, *, weights: MatchWeights = DEFAULT_WEIGHTS
+) -> float:
+    """Deterministic cover-letter motivation in [0, 1] (Feature 1).
+
+    The mean confidence of the VERIFIED cover-letter themes (confidence ≥
+    ``motivation_min_confidence`` AND at least one surviving ``cl_`` citation),
+    normalised by the number of themes the LLM emitted — so unverified/uncited
+    themes drag the score down. 0.0 when there's no cover-letter evidence.
+    """
+    if evidence is None or not evidence.cover_letter_evidence:
+        return 0.0
+    verified = [
+        e
+        for e in evidence.cover_letter_evidence
+        if e.confidence >= weights.motivation_min_confidence and e.evidence_chunk_ids
+    ]
+    if not verified:
+        return 0.0
+    return sum(e.confidence for e in verified) / len(evidence.cover_letter_evidence)

@@ -15,6 +15,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings
 
+from src.schemas.matching import MatchWeights
+
 
 class Settings(BaseSettings):
     # ── Postgres (transactional store; raw asyncpg DSN, not a SQLAlchemy URL) ─
@@ -100,6 +102,53 @@ class Settings(BaseSettings):
     skill_auto_merge_threshold: float = 0.92
     skill_tiebreaker_threshold: float = 0.88
 
+    # ── Phase 4c: matching / ranking tunables (ADR 0021 port) ─────────────────
+    # Every default below is copied verbatim from hris
+    # ``packages/pipeline/src/pipeline/config.py`` lines 99-159 and mirrors
+    # ``src.schemas.matching.MatchWeights``' defaults. CLAUDE.md forbids
+    # hard-coded tunables, so the orchestrator sources these via
+    # ``weights_from_settings`` below rather than the in-code MatchWeights
+    # defaults. Top-level blend + the five structured sub-weights each sum to
+    # ~1.0 (the MatchWeights validator enforces it on build).
+    match_structured: float = 0.6
+    match_evidence: float = 0.3
+    match_motivation: float = 0.1
+    match_skill: float = 0.40
+    match_experience: float = 0.25
+    match_education: float = 0.10
+    match_seniority: float = 0.15
+    match_vector: float = 0.10
+    match_must_have_miss_penalty: float = 0.5
+    match_implied_experience_relief: float = 0.75
+    match_recency_recent_years: int = 2
+    match_recency_mid_years: int = 5
+    match_recency_recent: float = 1.0
+    match_recency_mid: float = 0.7
+    match_recency_old: float = 0.4
+    match_overqual_ratio: float = 2.0
+    match_overqual_slope: float = 0.1
+    match_overqual_floor: float = 0.8
+    match_education_partial: float = 0.5
+    match_seniority_floor: float = 0.5
+    match_implied_seniority_factor: float = 1.5
+    match_implied_min_coverage: float = 0.5
+    match_evidence_met_confidence: float = 0.7
+    match_evidence_partial_weight: float = 0.5
+    match_evidence_verify_fuzz: float = 0.85
+    match_motivation_min_confidence: float = 0.7
+    # Semantic skill matching (ADR 0020) + latency caps (ADR 0021).
+    match_family_weight: float = 0.5
+    match_non_matchable_families: str = "other,domain"
+    match_coarse_k: int = 50
+    match_evidence_k: int = 15
+    # Blocker #10: recruiter-assistant has NO synchronous reverse-match endpoint
+    # (nothing on a proxied request path to protect from LLM fan-out), so it
+    # inherits hris's CURRENT worker-path default (> 0), never the pre-ADR-0023
+    # synchronous-endpoint value of 0.
+    match_reverse_evidence_k: int = 10
+    match_llm_concurrency: int = 4
+    match_evidence_max_tokens: int = 2048
+
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"
@@ -110,3 +159,53 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def weights_from_settings(settings: Settings) -> MatchWeights:
+    """Build a validated ``MatchWeights`` from flat settings (ADR 0021 port).
+
+    Kept IN ``src/settings.py`` (not a sibling ``matching/config.py`` the way
+    hris splits it) per CLAUDE.md's "config only via src/settings.py". The
+    ``MatchWeights`` validator enforces that ``structured+evidence+motivation``
+    and the five sub-weights each sum to ~1.0, so a misconfigured ``.env`` fails
+    fast (ValueError) at the start of a matching run rather than silently
+    skewing ranks.
+    """
+    return MatchWeights(
+        structured=settings.match_structured,
+        evidence=settings.match_evidence,
+        motivation=settings.match_motivation,
+        skill=settings.match_skill,
+        experience=settings.match_experience,
+        education=settings.match_education,
+        seniority=settings.match_seniority,
+        vector=settings.match_vector,
+        must_have_miss_penalty=settings.match_must_have_miss_penalty,
+        implied_experience_relief=settings.match_implied_experience_relief,
+        recency_recent_years=settings.match_recency_recent_years,
+        recency_mid_years=settings.match_recency_mid_years,
+        recency_recent=settings.match_recency_recent,
+        recency_mid=settings.match_recency_mid,
+        recency_old=settings.match_recency_old,
+        overqual_ratio=settings.match_overqual_ratio,
+        overqual_slope=settings.match_overqual_slope,
+        overqual_floor=settings.match_overqual_floor,
+        education_partial=settings.match_education_partial,
+        seniority_floor=settings.match_seniority_floor,
+        implied_seniority_factor=settings.match_implied_seniority_factor,
+        implied_min_coverage=settings.match_implied_min_coverage,
+        evidence_met_confidence=settings.match_evidence_met_confidence,
+        evidence_partial_weight=settings.match_evidence_partial_weight,
+        evidence_verify_fuzz=settings.match_evidence_verify_fuzz,
+        motivation_min_confidence=settings.match_motivation_min_confidence,
+    )
+
+
+def non_matchable_families_from_settings(settings: Settings) -> tuple[str, ...]:
+    """Parse the comma-separated non-matchable-families setting into a tuple of
+    lower-cased family names (empty entries dropped)."""
+    return tuple(
+        part.strip().lower()
+        for part in settings.match_non_matchable_families.split(",")
+        if part.strip()
+    )

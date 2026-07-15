@@ -12,6 +12,8 @@ tenacity>=9.0.0
 python-dotenv>=1.0.0
 jinja2>=3.1.0           # prompt templates (src/prompts)
 pyyaml>=6.0.0           # skill alias table (src/pipeline/skill_data/aliases.yaml)
+rapidfuzz==3.10.1       # stage-3 anti-fabrication verifier (pinned == for gate
+                        # reproducibility; partial_ratio is the load-bearing metric)
 
 # ── Document extraction ──────────────────────────────────────────────────────
 PyMuPDF>=1.24.0         # import fitz

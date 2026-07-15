@@ -348,6 +348,15 @@ async def test_stage2_skill_rows_reads_canonical_key_not_canonical_name(
     port returns ``skill=None`` for every row. This test kills it."""
     job_id = await _insert_job(pg_pool)
     resume_id = await _insert_resume(pg_pool, job_id)
+    # NOTE (Phase 4c GREEN): a Neo4j Job node must exist first -- `_seed_requires`
+    # does `MATCH (j:Job {id})` then `MERGE (j)-[:REQUIRES]->(s)`, so without the
+    # node the MATCH yields no rows and NO edge is created (verified empirically:
+    # 0 REQUIRES edges, one orphan Skill). The other REQUIRES-seeding tests
+    # (`_seed_job_node` in reverse_match / generate_shortlist) already do this;
+    # this one omitted it, so it asserted 1 row from an edge that never existed.
+    # Adding the missing setup does not touch the behavioral assertion below
+    # (skill == canonical_key, not canonical_name).
+    await _seed_job_node(neo4j_driver, job_id, summary_emb=_vec(1))
     await _seed_requires(neo4j_driver, job_id, "python", min_years=3, is_must_have=True)
     async with neo4j_driver.session() as session:
         await session.run("MERGE (:Resume {id: $rid})", rid=str(resume_id))
