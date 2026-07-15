@@ -55,8 +55,8 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **2 · Schemas** | Port `resumes`, `matching` (minus review), `jobs` | ✅ done |
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
-| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ corpus done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **Falsifiability hardening also done** on branch `fix/phase-4a-corpus-falsifiability`: **PR #10** (https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip `583427f`, 18 commits, **CI fully green — OPEN, awaiting human merge, NOT yet merged.** See "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
-| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (1339 unit @ 96.97%, 82 integration). **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below; do not start 4c without reading it** | ✅ done |
+| &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ corpus done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **Falsifiability hardening also done** on branch `fix/phase-4a-corpus-falsifiability`, **merged to `main` via PR #10** (merge `464a479`), CI green, tip `583427f`, 18 commits. See "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
+| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (**1739 unit @ 97.04%**, 82 integration) on branch `feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`. **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below; do not start 4c without reading it.** [activity](activity/phase-4b-graph-projection.md) | ✅ done — **PR #11** open, CI green, awaiting merge |
 | &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **Also blocking, from 4b's ranking-evals run (see "4b → 4c BLOCKERS" below): the `missing_must` must-have-miss-penalty nullification bug, two new skill-dimension twins (must-have-miss + recency), a spelling-divergence twin, and the `canonical_name`→`canonical_key` Cypher rename.** | not started |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
@@ -82,18 +82,20 @@ COMPLETE and MERGED to `main`** via PR #8 (merge `875eac2`), CI green, 2026-07-1
 gates green; corpus = 16 labelled fixtures + matched-pair dimension controls + `thresholds.toml` + a
 RED-pending-4c harness stub — see
 [activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). Its
-**falsifiability hardening is also COMPLETE and gate-green**, on branch
-`fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
-(https://github.com/humanaxiom/recruiter-assistant/pull/10, off `main` @ `463cbaa`, tip `583427f`,
-18 commits) — **CI is fully green, but the PR is still OPEN; it has NOT merged.** **4b (graph
-projection) is the next sub-phase**; 4b→4c→4d follow, each on its own branch/PR with the full
-reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
-one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
-tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
-isolating them keeps each diff auditable.
+**falsifiability hardening is also COMPLETE and MERGED**, via **PR #10** (merge `464a479`), CI green,
+tip `583427f`, 18 commits. **Sub-phase 4b (graph projection) is COMPLETE and gate-green, sitting in
+PR #11** (https://github.com/humanaxiom/recruiter-assistant/pull/11), branch
+`feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479` — **CI is fully
+green, but the PR is OPEN, awaiting human merge; it has NOT merged.** See
+[activity/phase-4b-graph-projection.md](activity/phase-4b-graph-projection.md) and "4b → 4c BLOCKERS"
+below. **4c (matching engine) is the next sub-phase to build**, once #11 merges; 4c→4d follow, each on
+its own branch/PR with the full reviewer/security/ranking-evals gate before the next starts. The split
+mirrors Phases 0–3's one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit
+rounds even scoped tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness
+surface, so isolating them keeps each diff auditable.
 
-**4a hardening — `fix/phase-4a-corpus-falsifiability`, PR #10 (landed BEFORE 4b/4c, zero product code,
-open, awaiting merge).** Three opus-tier gates audited the merged corpus and found it **could not fail a
+**4a hardening — `fix/phase-4a-corpus-falsifiability`, merged to `main` via PR #10 (merge `464a479`),
+zero product code.** Three opus-tier gates audited the merged corpus and found it **could not fail a
 bad 4c engine**: every finding across nine rounds (rounds 1–2 on the original `feat/phase-4a-...` branch,
 rounds 3–9 on this branch) was proven by a mutation that left the corpus tests green. Fixed fix-forward so
 4c's first green build is genuinely falsifiable.

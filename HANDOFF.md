@@ -19,9 +19,9 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12. Its **falsifiability hardening is done and gate-green on branch `fix/phase-4a-corpus-falsifiability`, opened as PR #10** (https://github.com/humanaxiom/recruiter-assistant/pull/10, tip `583427f`, 18 commits) — **CI fully green, but the PR is still OPEN, awaiting human merge — it has NOT merged.** **4b (graph projection) is the next sub-phase to build.** See "Phase 4a status" and "Phase 4 resume" below.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) is COMPLETE and gate-green, sitting in PR #11** (https://github.com/humanaxiom/recruiter-assistant/pull/11, branch `feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`) — **CI fully green, but the PR is OPEN, awaiting human merge — it has NOT merged.** **4c (matching engine) is the next sub-phase to build**, once #11 merges. See "Phase 4a status", "Phase 4b status", and "Phase 4 resume" below.
 
-### Phase 4a status — corpus MERGED, hardening in PR #10 OPEN (read this before starting 4b)
+### Phase 4a status — corpus + hardening both MERGED (read this before starting 4c)
 
 **Corpus.** `core/tests/evals/` (JD fixture + labelled synthetic résumés + `labels.json` + `thresholds.toml`
 + RED-pending-4c harness stub `run_evals.py`) is **MERGED to `main` via PR #8** (merge `875eac2`), CI
@@ -29,7 +29,7 @@ green, 2026-07-12. Zero product code.
 
 **Falsifiability hardening.** Branch `fix/phase-4a-corpus-falsifiability`, opened as **PR #10**
 (https://github.com/humanaxiom/recruiter-assistant/pull/10), off `main` @ `463cbaa`, tip `583427f`, 18
-commits. **CI is fully green — but the PR is OPEN, awaiting human merge; it has NOT merged.** Why this
+commits. **MERGED to `main` via merge commit `464a479`, CI green.** Why this
 branch exists: the three merge-blocking gates audited the *merged* corpus and proved by mutation that it
 **could not fail a bad Phase-4c engine** — the artifact whose whole purpose is to make 4c's first green
 build falsifiable. Nine cumulative rounds of findings-and-fix closed every hole found (rounds 1–2 pre-merge
@@ -199,38 +199,100 @@ Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); 
 Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). Phase 4
 (Ranking engine) is split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
 table). **Sub-phase 4a (evals corpus) is COMPLETE and MERGED** (PR #8), and its **falsifiability
-hardening is also COMPLETE and gate-green**, sitting in **PR #10, currently OPEN and awaiting human
-merge** (see "Phase 4a status" above for the full detail — gate verdicts, the six-arm battery, the 4c
-warnings, and the accepted residuals). **4b (graph projection) is the next sub-phase to build.**
+hardening is also COMPLETE and MERGED via PR #10** (merge `464a479`). **Sub-phase 4b (graph
+projection) is COMPLETE and gate-green, sitting in PR #11, currently OPEN and awaiting human merge**
+(https://github.com/humanaxiom/recruiter-assistant/pull/11, tip `429adc7`) — see "Phase 4b status"
+below for the full detail (the PII architectural pivot, the ranking-cost measurement, final gate
+numbers). **4c (matching engine) is the next sub-phase to build**, once #11 merges — see "4c (Matching
+engine) is the next sub-phase" below for the four blockers 4b's ranking-evals run surfaced.
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
 `thresholds.toml`, harness stub `run_evals.py`) and is now gate-hardened by 9 cumulative rounds of
 findings-and-fix (1040 unit tests, 65 integration tests, reviewer/security/ranking-evals all green on
-PR #10's tip `583427f`). **Do not start 4b's own PR without first reading the 4c warnings in "Phase 4a
-status" above** — several of them (the `_fuzz_substring` replacement, reading `stages.py` first, the
-skill-sub-score residual R1) apply to how 4b's own graph-projection code should be reviewed even though
-4b itself doesn't touch the matching engine.
+PR #10's tip `583427f`, since merged). **Do not start 4c without first reading the 4c warnings in
+"Phase 4a status" above** — several of them (the `_fuzz_substring` replacement, reading `stages.py`
+first, the skill-sub-score residual R1) are exactly the surface 4c itself lands on.
 
-### 4b (Graph projection) is the next sub-phase
-Run the per-phase subagent loop on a fresh `feat/phase-4b-...` branch: planner → tester (+ evals fixture)
-→ `data-pipeline` coder (override UP to **opus** — 4b/4c are the Neo4j scoring / 4-stage algorithm /
-evidence verifier diffs the model policy escalates) → reviewer + security + ranking-evals (all
-merge-blocking) → docs. `make gates` green, then PR to `main` and let CI go green. 4b builds the outbox
-drainer `project_to_graph` + the Neo4j skill-graph half of `skill_normalize` (see the plan's 4b row and
-the Phase-4 decisions block, esp. the **required chunk-text-preview deviation**: read chunk text from
-`resumes.parsed`, NOT the ADR-007-stripped outbox). **4b must also add an outbox-shaped fixture to
-`core/tests/evals/`** (carried-forward requirement from the 4a hardening audit) — nothing today encodes
-what the outbox payload is *allowed* to contain (no `candidate` block, no `chunks[].text`, no `summary`),
-so without it 4b could project to Neo4j with no fixture asserting that boundary.
+### 4b status — DONE, gate-green, in PR #11 (open) — read this before starting 4c
 
-**Carried into Phase 4** (from Phase 3 gate findings — don't lose these):
-- The **outbox drainer** (`project_to_graph`) lands in Phase 4 — it consumes the `job.parsed`/`resume.parsed` rows Phase 3 enqueues. It **must not** project `parsed.candidate` into Neo4j and **must not** log the payload. hris's `_resume_projection_tx` only sets `total_years_experience` on the `Resume` node — keep it that way.
-- `ResumeSkill.evidence_chunk_ids` is always `[]` after a Phase 3 parse (matches hris) — Phase 4's evidence verifier sources citations from the `shortlist_evidence_v1` prompt against `parsed.chunks`, and `scrub_invalid_chunk_refs` (ported-but-uncalled) wires in at that citation boundary.
-- ~~`core/tests/evals/` does not exist yet~~ **DONE in 4a** — the corpus + `thresholds.toml` + harness stub exist and are gate-green; 4c wires the live orchestrator into `run_evals.py::_run_corpus` to turn the harness green and activate the pairwise twin-ordering assertions.
-- Chunk-cap coupling nit: `chunk.py`'s `{"c":200,"cl":100}` and `ResumeParsed.chunks`/`cover_letter_chunks` `max_length` are two magic numbers coupled only by a comment — consider a single source.
-- **N1 (round-4 accepted residual, ADR-007 §7):** structured `experience[].bullets[].text`/skills/education fields ride the outbox unscrubbed for Phase 4's graph projection — non-contact, but a candidate could self-dox in achievement text. Accepted, symmetric with the §6/§7 at-rest cleartext decision; no code change, just context for Phase 4's projection code and Phase 5's redaction scope.
-- **N2 (round-4 accepted residual, ADR-007 §7):** the embed-boundary PII scrub errs toward over-redaction (e.g. a common-word `location` substring inside a larger word). Not chased — favors privacy over retrieval precision. Relevant context if Phase 4 retrieval quality ever looks degraded near a location term.
+`core/src/worker/graph_tasks.py` (the outbox drainer) + the job/résumé Neo4j projection
+(`worker/{tasks,resume_tasks}.py`) + the Neo4j skill-graph half of `skill_normalize`
+(`pipeline/skills_graph.py`, `skill_data/categories.yaml`) are built and gate-green on branch
+`feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`, opened as
+**PR #11** (https://github.com/humanaxiom/recruiter-assistant/pull/11) — **CI fully green, PR OPEN,
+awaiting human merge, NOT yet merged.** Full write-up:
+[docs/activity/phase-4b-graph-projection.md](docs/activity/phase-4b-graph-projection.md); PII
+architecture rationale: [docs/adr/008-skill-graph-pii-by-construction.md](docs/adr/008-skill-graph-pii-by-construction.md).
+
+**The headline.** `ResumeSkill.name` is untrusted free text; a small model that fumbles a résumé
+header into `skills[]` can put a candidate's name into a Neo4j `Skill` node and its embedding.
+**Five rounds of heuristic pattern-matching (shape rejection → offline name lexicon → quantifier
+tuning → vendor veto) each closed one hole and opened another, hitting CLAUDE.md's 5-iteration cap
+with a critical still open.** The human then chose an architectural fix that eliminates the class by
+construction (**ADR-008**), on the insight that a job description carries no candidate PII:
+`Skill.canonical_key` is either a closed-vocab cleartext term or a salted hash — never free text; the
+résumé side never embeds, vector-searches, or writes cleartext; every name-detection heuristic was
+**deleted outright**, not tuned again. Security PASSED after mutation-killing all four
+`_resolve_one` branches and verifying the canonical-key constraint on a real Neo4j.
+
+**Ranking-evals then did something the 4a hardening rounds, working against an idealized engine
+replica, couldn't:** it projected the 4a corpus through 4b's real code into a real Neo4j and measured
+the actual cost. Spelling-recall was **37.5%** — one variant (`REST APIs` vs `REST API design`) cost a
+strong candidate **−0.144 on `score_final`**, more than education + overqual + motivation *combined*,
+enough to drop them out of the shortlist. Fixed in-branch (`_basic_normalise` trailing-version/
+parenthetical stripping, symmetric both sides): recall on the measured divergence class went
+**40% → 100%**. A follow-up commit deduped `_basic_normalise` (it had drifted between two "byte-
+identical by convention" copies) and gated the new parenthetical-split against skill inflation
+(`Casey Rivera (Python)` must not extract `python`).
+
+**Final gate state, HEAD `429adc7`:** ruff/black/`mypy --strict` clean; **1739 unit tests @ 97.04%
+coverage** (up from 1040 pre-branch); **82 integration tests** vs real Postgres+Neo4j (up from 65);
+`run_evals.py` still exits 1 (correct pre-4c RED). **All three merge-blocking gates green:** security
+PASS, reviewer APPROVE, ranking-evals PASS.
+
+**Read ADR-008's residuals before building on the graph** — 14 accepted residuals, not restated here.
+The two that matter most going forward: **the vocabulary (147 concepts / ~229 spellings) is now the
+single ranking bottleneck** — growing it is the only lever that improves non-vocab recall, since
+auto-merge no longer affects scoring at all; and a candidate whose name collides with a vocab term
+(`julia`, `hudson`, `kafka`, …) still gets a deniable-but-cleartext `canonical_key`.
+
+### 4c (Matching engine) is the next sub-phase — READ THE FOUR BLOCKERS BELOW FIRST
+
+Once PR #11 merges, run the per-phase subagent loop on a fresh `feat/phase-4c-...` branch: planner →
+tester (+ evals fixture) → `data-pipeline` coder (override UP to **opus** — this is squarely the
+4-stage algorithm / evidence verifier surface the model policy escalates for) → reviewer + security +
+ranking-evals (all merge-blocking) → docs. `make gates` green, then PR to `main`, let CI go green. 4c
+ports `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring
+(`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts, and wires the live orchestrator into
+`run_evals.py::_run_corpus` — the corpus's first real, non-hypothetical gate run.
+
+**Four blockers carried from 4b's real-Neo4j ranking-evals run** (full detail:
+`docs/EXTRACTION_PLAN.md`, "4b → 4c BLOCKERS" — do not start 4c without reading it):
+1. **`missing_must` must key off `ontology_weight == 0`, not `score == 0.0`.** With
+   `categories.yaml`'s family-credit ontology now live, a family-credited miss scores 0.5 (never
+   0.0), so the must-have-miss penalty never fires for the case it exists to catch — measured
+   **+0.1120 on `score_final`** for a candidate with no Airflow at all.
+2. **Phase 4a's R1 residual (the corpus is blind to the skill sub-score's internals) is now LIVE,
+   not hypothetical.** Add a must-have-miss twin AND a recency twin for r10 — both must independently
+   make `weights.skill = 0`, `must_have_miss_penalty 0.5→1.0`, and disabled recency decay FAIL.
+3. **Add a spelling-divergence twin** — one fixture identical to r01 except `REST API design` →
+   `REST APIs`, isolating the −0.144 swing the corpus currently cannot see in its highest-weighted
+   (0.40) sub-score.
+4. **`canonical_name` → `canonical_key` Cypher rename.** hris's `_stage2_skill_rows` reads
+   `reqSkill.canonical_name`; ADR-008 renamed that property. A verbatim port fails loud
+   (`ValidationError`, not a silent mis-score) — rename it on day one of the port, per the "read
+   `stages.py` first, not third" lesson below.
+
+**Also carried forward from Phase 4a, unchanged and still binding** (see "Phase 4a status" above for
+full detail on each): **read `stages.py` FIRST, not third** — the corpus was wrong three times
+because it assumed what a sub-score *should* mean instead of reading the code; **`_fuzz_substring`
+must be REPLACED, not ported** (use rapidfuzz `partial_ratio`/`token_set_ratio` — hris's version
+verifies all four of the corpus's fabricated quotes); **pin `seed`** and specify the embed-cache
+state across the two determinism runs; **R2** (the corpus gates the evidence verifier, never the
+extractor — add an evidence-recall assertion against `gold_evidence`); and the still-open
+`jd.education.fields` decision for a human (extend `score_education` or drop `fields` from the
+contract).
 
 ## Historical: original Phase 3 plan (for reference)
 
@@ -265,7 +327,8 @@ Resume the recruiter-assistant build. Working dir C:\repos\recruiter-assistant
 docs/EXTRACTION_PLAN.md first — they are the source of truth for state,
 decisions, environment quirks, and the hris source-file map (Appendix A).
 Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md,
-Phase 2 in docs/adr/006-*.md, Phase 3 in docs/adr/007-*.md.
+Phase 2 in docs/adr/006-*.md, Phase 3 in docs/adr/007-*.md, the Phase 4b PII
+rearchitecture in docs/adr/008-skill-graph-pii-by-construction.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
@@ -274,68 +337,88 @@ ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
 (storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3, Phase 3 (ingest +
 parse) PR #6 (merge 49196d7). Phase 4 (Ranking engine) is split into 4 gated
 sub-phases: 4a (evals corpus) is MERGED (PR #8, merge 875eac2), and its
-falsifiability hardening is done and gate-green in PR #10
-(https://github.com/humanaxiom/recruiter-assistant/pull/10, tip 583427f, 18
-commits) — CI is fully green there, but PR #10 is still OPEN, awaiting human
-merge, NOT yet merged. main today has 955 unit tests; PR #10 (once merged) brings
-that to 1040 unit tests @ 96.63% coverage + 65 integration tests, all in
-core/tests/evals — zero core/src changes on that branch.
+falsifiability hardening is ALSO MERGED via PR #10 (merge 464a479). Sub-phase 4b
+(graph projection) is COMPLETE and gate-green, sitting in PR #11
+(https://github.com/humanaxiom/recruiter-assistant/pull/11, branch
+feat/phase-4b-graph-projection, tip 429adc7, 20 commits, off main @ 464a479) — CI
+is fully green there, but PR #11 is still OPEN, awaiting human merge, NOT yet
+merged. main today has 1040 unit tests; PR #11 (once merged) brings that to 1739
+unit tests @ 97.04% coverage + 82 integration tests.
 
-**The corpus is now a REAL gate** — nine rounds of adversarial hardening proved by
-mutation that the pre-hardening corpus could not fail a bad matching engine, and
-closed every hole found. Read the "Phase 4a status" section in HANDOFF.md in full
-before touching 4b or 4c — it has the final gate verdicts, the six-arm baseline
-battery, and several requirements that apply beyond just 4c.
+**4b shipped a PII-safe-by-construction skill graph (ADR-008) — the vocabulary is
+now the ranking bottleneck.** Five rounds of heuristic PII pattern-matching on
+skill names (shape detector → name lexicon → quantifier fix → vendor veto) each
+closed one hole and opened another, hitting CLAUDE.md's 5-iteration cap with a
+critical still open. The fix was architectural, not another heuristic round:
+Skill.canonical_key is either a closed-vocab cleartext term or a salted hash,
+never free text; the résumé side never embeds/vector-searches/writes cleartext.
+Ranking-evals then ran the 4a corpus through 4b's real code into a real Neo4j and
+found a 37.5% spelling-recall rate — one spelling variant cost a strong candidate
+−0.144 on score_final. Fixed in-branch (normalisation), recall on that class went
+40%→100%, but the vocabulary (147 concepts / ~229 spellings) is now the single
+biggest lever on ranking recall going forward. Read HANDOFF.md's "Phase 4b status"
+section and docs/activity/phase-4b-graph-projection.md before touching 4c — this
+is not optional context, it changes what a "correct" 4c skill score looks like.
 
-**Your next action is Phase 4b (graph projection)** — NOT the evals corpus (done)
-and NOT 4c yet. Confirm PR #10's merge status with the human first (check
-`gh pr view 10` or ask) since 4b should build on top of it. Then run the
-per-phase subagent loop (planner → tester → data-pipeline coder → reviewer +
-security + ranking-evals → docs) on a feat/phase-4b-... branch. 4b builds the
-outbox drainer project_to_graph + the Neo4j skill-graph half of
-skill_normalize, and MUST add an outbox-shaped fixture to core/tests/evals/ (no
-fixture today encodes what the outbox payload is allowed to contain — no
-candidate block, no chunks[].text, no summary).
+**Your next action is Phase 4c (Matching engine)** — NOT the evals corpus (done)
+and NOT graph projection (done). Confirm PR #11's merge status with the human
+first (check `gh pr view 11` or ask) since 4c should build on top of it. Then run
+the per-phase subagent loop (planner → tester → data-pipeline coder → reviewer +
+security + ranking-evals → docs) on a feat/phase-4c-... branch. 4c ports `stages`
+(pure scoring fns) + `orchestrator` (stage 1–4) + MatchWeights settings wiring +
+shortlist_evidence_v1/_v2 prompts, and wires the live orchestrator into
+run_evals.py::_run_corpus.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 (data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
-data-pipeline UP to opus for the 4-stage ranking algorithm / evidence verifier /
-PII crypto / Neo4j scoring diffs (4b's Neo4j scoring half and all of 4c are
-squarely this). Defaults live in .claude/agents/*.md frontmatter.
+data-pipeline UP to opus for 4c — it is squarely the 4-stage algorithm / evidence
+verifier / Neo4j scoring surface the model policy escalates for. Defaults live in
+.claude/agents/*.md frontmatter.
 
-Phase 4 carries forward from Phase 3's gate findings: the outbox drainer
-(project_to_graph) must not project parsed.candidate or log the payload; read
-chunk text from resumes.parsed, NOT the ADR-007-stripped outbox; a chunk-cap
-coupling nit; and the N1/N2 accepted residuals from ADR-007 §7 (structured
-fields ride the outbox unscrubbed — non-contact; the embed scrub errs toward
-over-redaction). Further out: Phase 5 redaction MUST mask
-candidate.*/candidate_name/cover_letter_text before building ResumeOut (schema
-can't enforce it, ADR-006 §4); Phase 6 must set JobOut.blind_review explicitly
-(the DTO defaults it False, fail-open).
+**Four blockers from 4b's real-Neo4j ranking-evals run — read
+docs/EXTRACTION_PLAN.md's "4b → 4c BLOCKERS" section for full detail, do not start
+4c without it:**
+1. missing_must must key off ontology_weight == 0, not score == 0.0 — with the
+   family-credit ontology (categories.yaml) now live, a family-credited miss
+   scores 0.5 (never 0.0), so the must-have-miss penalty never fires for the case
+   it exists to catch (measured +0.1120 on score_final for a candidate with no
+   Airflow at all).
+2. Phase 4a's R1 residual (corpus blind to the skill sub-score's internals) is
+   now LIVE, not hypothetical — add a must-have-miss twin AND a recency twin for
+   r10; both must independently make weights.skill=0,
+   must_have_miss_penalty 0.5→1.0, and disabled recency decay FAIL.
+3. Add a spelling-divergence twin (REST API design → REST APIs) isolating the
+   −0.144 swing the corpus currently cannot see in its highest-weighted (0.40)
+   sub-score.
+4. canonical_name → canonical_key Cypher rename — hris's _stage2_skill_rows reads
+   reqSkill.canonical_name; ADR-008 renamed that property. A verbatim port fails
+   loud (ValidationError), not silently — rename it on day one of the port.
 
-When you get to Phase 4c, carry these warnings (all detailed in HANDOFF.md /
-docs/EXTRACTION_PLAN.md, do not re-derive from scratch):
+Also carry forward from Phase 4a, unchanged and still binding (all detailed in
+HANDOFF.md / docs/EXTRACTION_PLAN.md, do not re-derive from scratch):
 - **hris's `_fuzz_substring` must be REPLACED, not ported** — it's a character-set
   overlap ratio and verifies all four of the corpus's fabricated evidence quotes.
   Use rapidfuzz partial_ratio or token_set_ratio instead.
-- **Read stages.py FIRST, not third** — the corpus was wrong three times because
-  it assumed what a sub-score should mean instead of reading what the code does
-  (seniority is a title-cosine, not a years check; score_education ignores
-  jd.education.fields).
+- **Read stages.py FIRST, not third — and this applies doubly now.** The 4a corpus
+  was wrong three times because it assumed what a sub-score should mean instead of
+  reading what the code does (seniority is a title-cosine, not a years check;
+  score_education ignores jd.education.fields). 4b's own missing_must bug (blocker
+  #1 above) is the SAME lesson recurring at the graph layer — hris's
+  score==0.0 check silently stopped meaning "fully missing" once family credit
+  shipped. Read the actual current-repo source for every function you port before
+  trusting what the plan or a prior phase's docs say it does; the plan is a map,
+  not the territory.
 - `test_ported_engine_helpers_agree_with_the_real_ones` is currently SKIPPED and
   wakes up once src.pipeline.matching.{stages,orchestrator} exist — if it fails,
   re-derive the corpus claims that depend on the ports, don't relax the test.
-- **R1 (accepted residual, deliberately carried into 4c):** the corpus is blind to
-  the skill sub-score's internals (weights.skill = 0 passes today) — 4c must add
-  skill-dimension twin fixtures (a recency twin for r10, a must-have-miss twin).
 - **R2 (accepted residual):** the corpus gates the evidence verifier, never the
   extractor — 4c should add an evidence-recall assertion against gold_evidence.
 - **Open decision needing a human:** score_education ignores jd.education.fields
   — either extend the scorer or drop fields from the JD contract.
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening any Phase 4b PR.
+HANDOFF.md. Check in with me before opening any Phase 4c PR.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.
