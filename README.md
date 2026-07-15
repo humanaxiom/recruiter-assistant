@@ -163,31 +163,34 @@ The DTOs are aligned to the Phase 0 DDL at three points, and the redaction bound
 
 ## Ranking algorithm
 
-Four stages (ported near-verbatim; live from Phase 4):
+Four stages, implemented in `core/src/pipeline/matching/{stages,orchestrator}.py` (Phase 4c):
 
 1. **Coarse recall** — Neo4j `resume_summary_idx` vector query, scoped to the job, 3× oversample → k = 50.
-2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty.
-3. **Evidence** — LLM per-requirement evidence, then anti-fabrication verify (quotes fuzzy-matched ≥ 0.85 against the cited chunk or blanked).
-4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → `shortlist_entries` (Postgres) + `SHORTLISTED` edges (Neo4j).
+2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty (keyed off the candidate's actual ontology match, not a raw zero score — see [ADR-009](docs/adr/009-matching-engine-port.md)).
+3. **Evidence** — LLM per-requirement evidence, then anti-fabrication verify: every quote fuzzy-matched (`rapidfuzz.fuzz.partial_ratio` ≥ 0.85) against its cited résumé chunk, or blanked.
+4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → ranked entries. Reverse-match (résumé → jobs) reuses stages 2–4 against an inverted stage-1 query. Persistence to `shortlist_entries`/`reverse_match_entries` (Postgres) + `SHORTLISTED` edges (Neo4j) is Phase 4d.
 
-Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text`, cosine — matching the Neo4j indexes.
+Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text`, cosine — matching the Neo4j indexes. `MatchWeights` is sourced from `Settings` via `weights_from_settings` (no hard-coded tunables); wiring the real worker call sites to use it is a Phase 4d requirement.
 
 ---
 
 ## Status & roadmap
 
-**Phases 0–2 are merged to `main`. Phase 3 is built, green, and fully re-audited on branch `feat/phase-3-ingest-parse`** (not yet merged — gated behind a human check-in before the PR is opened; see [HANDOFF.md](HANDOFF.md)). What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the `BlobStore` root is created on app/worker startup, and the API serves `/health`. The `BlobStore` primitive and the pydantic schema layer are implemented but have **no HTTP surface** — there are **no ranking or upload routes yet**. Routes land in Phase 6.
+**Phases 0–3 are merged to `main`, CI green.** Phase 4 (Ranking engine) is split into four gated sub-phases: **4a (evals corpus)** and **4b (graph projection)** are merged to `main`; **4c (matching engine)** is complete and gate-green on branch `feat/phase-4c-matching-engine` (tip `ed4a142`) but not yet opened as a PR; **4d (shortlist/reverse-match write path)** is next. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline and the Neo4j skill graph are wired, and the API serves `/health`. **There are still no ranking, upload, or shortlist HTTP routes** — those land in Phase 6; the matching engine itself has no persistence or API surface yet (Phase 4d/6).
 
 | Phase | Deliverable | State |
 |---|---|---|
 | **0 · Seed & infra** | Compose, settings (768-d contract), asyncpg startup DDL, Neo4j bootstrap | **done** |
 | **1 · Storage** | Filesystem `BlobStore` (put/get/delete/exists/list_keys, path-safe, `0o600`/`0o700`) + app/worker wiring | **done** |
 | **2 · Schemas** | `jobs`, `resumes`, `matching` pydantic schemas (review workflow cut; `MatchWeights` ranking contract) | **done** |
-| **3 · Ingest + parse** | extract/chunk, LLM client+cache, PII encryption on parse, `parse_job`/`parse_resume` | **done on branch, not yet merged** |
-| 4 · Ranking engine | orchestrator + 4-stage hybrid, reverse-match | pending |
-| 5 · Persist + anonymize + export | shortlist service, redaction, csv/json export with `reveal` | pending |
+| **3 · Ingest + parse** | extract/chunk, LLM client+cache, PII encryption on parse, `parse_job`/`parse_resume` | **done, merged** |
+| **4a · Evals corpus** | Labelled resumes-vs-JD fixture corpus + `thresholds.toml` | **done, merged** |
+| **4b · Graph projection** | Outbox drainer + Neo4j skill graph (`skill_normalize`, ADR-008 PII-safe-by-construction) | **done, merged** |
+| **4c · Matching engine** | `stages`/`orchestrator` (4-stage hybrid), reverse-match, `weights_from_settings` | **done, gate-green, not yet merged** |
+| 4d · Shortlist + reverse-match write path | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match` | pending |
+| 5 · Persist + anonymize + export | list/get/export, redaction, csv/json export with `reveal` | pending |
 | 6 · API | job/resume/shortlist/reverse-match routes, minimal auth | pending |
-| 7 · Evals + viewer | precision@k / evidence-verification fixtures, Flask viewer | pending |
+| 7 · Evals + viewer | precision@k / evidence-verification fixtures (live, wired in 4c), Flask viewer | partially done (harness) |
 
 Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
