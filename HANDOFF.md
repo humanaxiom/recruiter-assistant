@@ -19,7 +19,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** this session (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is COMPLETE and gate-green on branch `feat/phase-4c-matching-engine`** (tip `ed4a142`, 6 commits, off `main` @ `68fe821`) — **all three merge-blocking gates green, but NOT yet PR'd / NOT merged — a PR opens after a human check-in.** **4d (shortlist + reverse-match write path) is the next sub-phase to build.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", and "Phase 4 resume" below.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** this session (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is COMPLETE, gate-green, and opened as PR #12** (https://github.com/humanaxiom/recruiter-assistant/pull/12, branch `feat/phase-4c-matching-engine`, off `main` @ `68fe821`) — **all three merge-blocking gates green AND CI (`gates-all`) fully green; PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human merge — NOT yet merged.** **4d (shortlist + reverse-match write path) is the next sub-phase to build, once PR #12 merges.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", and "Phase 4 resume" below.
 
 ### Phase 4a status — corpus + hardening both MERGED (read this before starting 4c)
 
@@ -203,11 +203,12 @@ hardening is also COMPLETE and MERGED via PR #10** (merge `464a479`). **Sub-phas
 projection) is COMPLETE and MERGED via PR #11 on 2026-07-15** (merge `68fe821`) — see "Phase 4b status"
 below for the full detail (the PII architectural pivot, the ranking-cost measurement, final gate
 numbers). **Sub-phase 4c (matching engine) is COMPLETE and gate-green on branch
-`feat/phase-4c-matching-engine`** (tip `ed4a142`, 6 commits, off `main` @ `68fe821`) — all three
-merge-blocking gates green, **NOT yet PR'd / NOT merged**, awaiting a human check-in before a PR
-opens; see "4c status" below for the closed blockers and final gate numbers. **4d (shortlist +
-reverse-match write path) is the next sub-phase to build**, once 4c is reviewed and merged — see "4d
-(Shortlist + reverse-match write path) is the next sub-phase" below.
+`feat/phase-4c-matching-engine`** (off `main` @ `68fe821`) — all three merge-blocking gates green
+AND CI fully green, **opened as PR #12 (https://github.com/humanaxiom/recruiter-assistant/pull/12),
+OPEN / MERGEABLE / CLEAN, awaiting human merge — NOT yet merged**; see "4c status" below for the
+closed blockers and final gate numbers. **4d (shortlist + reverse-match write path) is the next
+sub-phase to build**, once PR #12 is reviewed and merged — see "4d (Shortlist + reverse-match write
+path) is the next sub-phase" below.
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -260,14 +261,15 @@ single ranking bottleneck** — growing it is the only lever that improves non-v
 auto-merge no longer affects scoring at all; and a candidate whose name collides with a vocab term
 (`julia`, `hudson`, `kafka`, …) still gets a deniable-but-cleartext `canonical_key`.
 
-### 4c status — DONE, gate-green, NOT yet PR'd — read this before starting 4d
+### 4c status — DONE, gate-green + CI green, in PR #12 (OPEN, awaiting merge) — read this before starting 4d
 
 `core/src/pipeline/matching/{stages,orchestrator}.py` (the 4-stage ranking engine) + `MatchWeights`
 settings wiring (`src/settings.py::weights_from_settings`) + the live orchestrator wired into
-`run_evals.py::main()` are built and gate-green on branch `feat/phase-4c-matching-engine`, tip
-`ed4a142`, 6 commits, off `main` @ `68fe821` (PR #11's merge). **All three merge-blocking gates are
-green (security PASS, reviewer APPROVE, ranking-evals PASS) — but this branch is NOT yet opened as a
-PR and NOT merged; a PR opens after a human check-in.** Full write-up:
+`run_evals.py::main()` are built and gate-green on branch `feat/phase-4c-matching-engine`, off `main`
+@ `68fe821` (PR #11's merge), opened as **PR #12**
+(https://github.com/humanaxiom/recruiter-assistant/pull/12) on 2026-07-15. **All three merge-blocking
+gates are green (security PASS, reviewer APPROVE, ranking-evals PASS) AND CI (`gates-all`) is fully
+green — PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human merge; NOT yet merged.** Full write-up:
 [docs/activity/phase-4c-matching-engine.md](docs/activity/phase-4c-matching-engine.md); decisions +
 residuals: [docs/adr/009-matching-engine-port.md](docs/adr/009-matching-engine-port.md).
 
@@ -378,11 +380,12 @@ parse) PR #6 (merge 49196d7). Phase 4 (Ranking engine) is split into 4 gated
 sub-phases: 4a (evals corpus) is MERGED (PR #8, merge 875eac2), and its
 falsifiability hardening is ALSO MERGED via PR #10 (merge 464a479). Sub-phase 4b
 (graph projection) MERGED via PR #11 on 2026-07-15 (merge 68fe821). Sub-phase
-4c (matching engine) is COMPLETE and gate-green on branch
-feat/phase-4c-matching-engine (tip ed4a142, 6 commits, off main @ 68fe821) — all
-three merge-blocking gates green (security PASS, reviewer APPROVE, ranking-evals
-PASS), but NOT yet opened as a PR and NOT merged — a PR opens after a human
-check-in. main today has 1739 unit tests (post-4b); the 4c branch (once merged)
+4c (matching engine) is COMPLETE, gate-green, and CI-green in PR #12
+(https://github.com/humanaxiom/recruiter-assistant/pull/12, branch
+feat/phase-4c-matching-engine, off main @ 68fe821) — all three merge-blocking
+gates green (security PASS, reviewer APPROVE, ranking-evals PASS) AND CI fully
+green; PR #12 is OPEN / MERGEABLE / CLEAN, awaiting human merge — NOT yet merged.
+main today has 1739 unit tests (post-4b); the 4c branch (once merged)
 brings that to 1916 unit tests @ 90.71% coverage + 87 integration tests, and
 run_evals.py now exits 0 (the corpus's first real live-engine run).
 
@@ -406,8 +409,10 @@ wired" means for the worker path 4d builds.
 
 **Your next action is Phase 4d (shortlist + reverse-match write path)** — NOT the
 evals corpus (done), NOT graph projection (done), and NOT the matching engine
-(done). Confirm 4c's review/merge status with the human first (it is not yet a
-PR) since 4d should build on top of it once merged. Then run the per-phase
+(done). Confirm 4c's merge status with the human first: 4c is in PR #12
+(https://github.com/humanaxiom/recruiter-assistant/pull/12), OPEN / MERGEABLE /
+CLEAN with CI green — check whether it has merged (gh pr view 12) since 4d should
+build on top of it once merged. Then run the per-phase
 subagent loop (planner → tester → data-pipeline coder → reviewer + security +
 ranking-evals → docs) on a feat/phase-4d-... branch. Per the plan-of-record, 4d
 ships shortlist_job/reverse_match_job arq tasks + write-only
@@ -433,7 +438,7 @@ escalates for); mechanical arq/plumbing work can stay on sonnet. Defaults live i
    contract. Do not resolve this silently while wiring the write path.
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening any Phase 4c or Phase 4d PR.
+HANDOFF.md. Check in with me before opening any Phase 4d PR.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

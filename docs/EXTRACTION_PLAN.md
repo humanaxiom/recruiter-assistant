@@ -87,13 +87,14 @@ tip `583427f`, 18 commits. **Sub-phase 4b (graph projection) is COMPLETE and MER
 (https://github.com/humanaxiom/recruiter-assistant/pull/11), branch `feat/phase-4b-graph-projection`,
 tip `429adc7`, 20 commits, off `main` @ `464a479` — **merge `68fe821`, CI green, merged 2026-07-15.**
 See [activity/phase-4b-graph-projection.md](activity/phase-4b-graph-projection.md) and "4b → 4c
-BLOCKERS" below (now CLOSED). **Sub-phase 4c (matching engine) is COMPLETE and gate-green on branch
-`feat/phase-4c-matching-engine`**, tip `ed4a142`, 6 commits, off `main` @ `68fe821` — **all three
-merge-blocking gates green (security PASS, reviewer APPROVE, ranking-evals PASS), but NOT yet opened
-as a PR and NOT merged** — a PR opens after a human check-in. See
+BLOCKERS" below (now CLOSED). **Sub-phase 4c (matching engine) is COMPLETE, gate-green, and in PR #12** on branch
+`feat/phase-4c-matching-engine` (https://github.com/humanaxiom/recruiter-assistant/pull/12), off
+`main` @ `68fe821` — **all three merge-blocking gates green (security PASS, reviewer APPROVE,
+ranking-evals PASS) AND CI (`gates-all`) fully green; PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human
+merge — NOT yet merged.** See
 [activity/phase-4c-matching-engine.md](activity/phase-4c-matching-engine.md) and
 [ADR-009](adr/009-matching-engine-port.md). **4d (shortlist + reverse-match write path) is the next
-sub-phase to build**, once 4c is reviewed and merged; each sub-phase runs on its own branch/PR with
+sub-phase to build**, once PR #12 is reviewed and merged; each sub-phase runs on its own branch/PR with
 the full reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
 one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
 tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
