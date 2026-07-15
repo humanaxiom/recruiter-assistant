@@ -15,6 +15,13 @@ tests do — no live services. ``get_settings`` is patched so the store roots at
   as ``""``, and ``pgp_sym_encrypt(plaintext, '')`` silently succeeds with an
   empty passphrase (weak-key ciphertext) instead of failing. A misconfigured
   deploy must crash at startup, not ship empty-passphrase ciphertext.
+
+── ADR-008 additions ────────────────────────────────────────────────────────
+* An empty ``settings.skill_hash_salt`` must ALSO fail ``startup`` loud,
+  BEFORE any pool/driver is opened — same discipline as ``PII_KEY`` above: an
+  unsalted hash of a non-vocab skill name is dictionary-attackable (an
+  attacker who can read the graph could precompute hashes of common
+  names/phrases and confirm one is present).
 """
 
 from __future__ import annotations
@@ -47,7 +54,11 @@ def test_startup_is_a_coroutine() -> None:
 async def test_startup_parks_a_blob_store_on_ctx(tmp_path: Path) -> None:
     ctx: dict[str, Any] = {}
     # Round 3 F3: startup now fails loud on an empty pii_key, so supply one.
-    settings = Settings(storage_dir=str(tmp_path), pii_key="a-real-secret-key")
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        pii_key="a-real-secret-key",
+        skill_hash_salt="a-real-salt",
+    )
     with (
         patch("src.worker.main.get_settings", return_value=settings),
         patch(
@@ -71,7 +82,11 @@ async def test_startup_parks_a_blob_store_on_ctx(tmp_path: Path) -> None:
 async def test_startup_blob_store_is_rooted_at_storage_dir(tmp_path: Path) -> None:
     ctx: dict[str, Any] = {}
     # Round 3 F3: startup now fails loud on an empty pii_key, so supply one.
-    settings = Settings(storage_dir=str(tmp_path), pii_key="a-real-secret-key")
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        pii_key="a-real-secret-key",
+        skill_hash_salt="a-real-salt",
+    )
     with (
         patch("src.worker.main.get_settings", return_value=settings),
         patch(
@@ -144,7 +159,73 @@ async def test_startup_does_not_raise_when_pii_key_is_configured(
     tmp_path: Path,
 ) -> None:
     ctx: dict[str, Any] = {}
-    settings = Settings(storage_dir=str(tmp_path), pii_key="a-real-secret-key")
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        pii_key="a-real-secret-key",
+        skill_hash_salt="a-real-salt",
+    )
+    with (
+        patch("src.worker.main.get_settings", return_value=settings),
+        patch(
+            "src.worker.main.asyncpg.create_pool",
+            AsyncMock(return_value=MagicMock()),
+        ),
+        patch("src.worker.main.init_schema", AsyncMock()),
+        patch(
+            "src.worker.main.AsyncGraphDatabase.driver",
+            return_value=_fake_driver(),
+        ),
+        patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+    ):
+        await startup(ctx)  # must not raise
+
+    assert "pg_pool" in ctx
+
+
+# ── ADR-008 — empty SKILL_HASH_SALT must fail startup loud ─────────────────
+#
+# Same discipline as the PII_KEY check above: an unsalted hash of a non-vocab
+# skill name is dictionary-attackable, so ``startup()`` must assert
+# ``settings.skill_hash_salt`` is non-empty and fail loud BEFORE opening any
+# pool/driver/store.
+
+
+@pytest.mark.asyncio
+async def test_startup_raises_when_skill_hash_salt_is_empty(tmp_path: Path) -> None:
+    ctx: dict[str, Any] = {}
+    settings = Settings(
+        storage_dir=str(tmp_path), pii_key="a-real-secret-key", skill_hash_salt=""
+    )
+    with (
+        patch("src.worker.main.get_settings", return_value=settings),
+        patch(
+            "src.worker.main.asyncpg.create_pool",
+            AsyncMock(return_value=MagicMock()),
+        ) as create_pool,
+        patch("src.worker.main.init_schema", AsyncMock()),
+        patch(
+            "src.worker.main.AsyncGraphDatabase.driver",
+            return_value=_fake_driver(),
+        ),
+        patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+    ):
+        with pytest.raises(RuntimeError):
+            await startup(ctx)
+
+    create_pool.assert_not_called()
+    assert "pg_pool" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_raise_when_skill_hash_salt_is_configured(
+    tmp_path: Path,
+) -> None:
+    ctx: dict[str, Any] = {}
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        pii_key="a-real-secret-key",
+        skill_hash_salt="a-real-salt",
+    )
     with (
         patch("src.worker.main.get_settings", return_value=settings),
         patch(

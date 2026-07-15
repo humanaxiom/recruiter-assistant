@@ -28,7 +28,7 @@ EXPECTED_CONSTRAINTS: frozenset[str] = frozenset(
     {
         "job_id_unique",
         "resume_id_unique",
-        "skill_name_unique",
+        "skill_canonical_key_unique",
         "company_name_unique",
         "institution_name_unique",
     }
@@ -163,3 +163,50 @@ async def test_colliding_chunk_ids_from_two_resumes_both_persist(
 
     assert record is not None
     assert record["n"] == 2
+
+
+# ── F2 (security re-audit round 2): the skill_name_unique rename regression,
+# proven against a REAL Neo4j, not a statement-string regex ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_drops_a_pre_existing_stale_skill_name_unique_constraint(
+    driver: AsyncDriver,
+) -> None:
+    """Simulates a pre-fix install that still carries the OLD
+    ``skill_name_unique`` constraint (Phase 3's name, enforcing uniqueness on
+    the long-abandoned ``canonical_name`` property) — pre-created here BEFORE
+    the bootstrap-under-test runs, exactly as it would already exist on any
+    environment that ran the code before this fix landed.
+
+    A same-named ``CREATE CONSTRAINT skill_name_unique IF NOT EXISTS`` with a
+    DIFFERENT ``REQUIRE`` clause (``canonical_key`` instead of
+    ``canonical_name``) is a silent Neo4j no-op — proven here against a REAL
+    ``neo4j:5-community`` container via ``SHOW CONSTRAINTS``, not a regex
+    match on the Cypher string. Re-running ``bootstrap_neo4j_schema`` must
+    DROP the stale constraint and leave ONLY ``skill_canonical_key_unique``
+    (on ``canonical_key``) behind.
+    """
+    async with driver.session() as session:
+        await session.run(
+            "CREATE CONSTRAINT skill_name_unique IF NOT EXISTS "
+            "FOR (s:Skill) REQUIRE s.canonical_name IS UNIQUE"
+        )
+
+    seeded = {c["name"] for c in await _show(driver, "CONSTRAINTS")}
+    assert (
+        "skill_name_unique" in seeded
+    ), "setup failed: could not seed the pre-existing stale constraint"
+
+    await bootstrap_neo4j_schema(driver)
+
+    by_name = {c["name"]: c for c in await _show(driver, "CONSTRAINTS")}
+    assert "skill_name_unique" not in by_name, (
+        "the stale skill_name_unique constraint (on canonical_name) survived "
+        "a bootstrap re-run — F2 regression: reusing a constraint NAME while "
+        "changing its REQUIRE clause silently no-ops on a real Neo4j"
+    )
+    assert "skill_canonical_key_unique" in by_name
+    new_constraint = by_name["skill_canonical_key_unique"]
+    assert new_constraint["labelsOrTypes"] == ["Skill"]
+    assert new_constraint["properties"] == ["canonical_key"]

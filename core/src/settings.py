@@ -61,9 +61,44 @@ class Settings(BaseSettings):
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
     blind_review_default: bool = True  # decision 4 — redaction ON by default
+    # ADR-008 — the salt folded into every NON-VOCAB skill's canonical Skill-
+    # graph key (``h:sha256(salt + normalised_name)[:32]``). Empty by default,
+    # same discipline as ``pii_key`` above: ``src.worker.main.startup`` refuses
+    # to start on an empty salt (an UNSALTED hash of a closed-ish set of likely
+    # candidate names is dictionary-attackable — precompute hashes of common
+    # names and confirm a candidate is in the graph). Rotating this value
+    # changes every non-vocab skill's key, which requires re-projecting the
+    # whole graph (every job/résumé re-parsed) to reconnect REQUIRES/HAS_SKILL
+    # edges under the new keys.
+    skill_hash_salt: str = ""
 
     # ── Gates ────────────────────────────────────────────────────────────────
     coverage_threshold: int = 80
+
+    # ── Phase 4b: graph-projection outbox drainer ─────────────────────────────
+    # hris hard-codes both as Python default parameters / module constants;
+    # CLAUDE.md forbids hard-coded tunables, so they live here instead.
+    outbox_drain_batch_size: int = 50
+    # Decision 2 — poison rows are capped, not retried forever (hris retries
+    # forever). The drainer's SELECT excludes rows at/past this many failed
+    # delivery attempts — dead-lettered, not deleted, not retried.
+    outbox_max_delivery_attempts: int = 200
+    # F5 (security re-audit) — the whole batch (SELECT + every row's model
+    # round trips) runs under ONE Postgres transaction with no deadline; a
+    # handful of skill-heavy rows can hold that transaction open well past
+    # the arq cron tick that invoked the drain. `project_to_graph` always
+    # attempts at least one row (forward progress guaranteed even if that one
+    # row alone busts the budget), then stops dispatching further rows once
+    # either bound is hit — the untouched rows are simply left for the next
+    # drain tick (no attempt increment, no dead-lettering).
+    outbox_drain_deadline_seconds: float = 4.0
+    outbox_max_skill_resolutions_per_drain: int = 200
+
+    # ── Phase 4b: skill-normalisation (Neo4j half) thresholds ─────────────────
+    # hris's AUTO_MERGE_THRESHOLD / TIEBREAKER_THRESHOLD module constants.
+    # [tiebreaker, auto_merge) is the LLM-tiebreaker grey zone.
+    skill_auto_merge_threshold: float = 0.92
+    skill_tiebreaker_threshold: float = 0.88
 
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"

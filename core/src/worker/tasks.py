@@ -1,7 +1,8 @@
 """arq task implementations — the JD half of the parse pipeline.
 
 Ported from hris ``apps/worker/src/worker/tasks.py`` (see
-``phase3-source-dossier.md`` §8), trimmed to ``parse_job``.
+``phase3-source-dossier.md`` §8), trimmed to ``parse_job`` in Phase 3; Phase 4b
+adds ``_project_job``/``_job_projection_tx``, the JD half of graph projection.
 
 Tasks resolve their dependencies from ``ctx``, which ``src/worker/main.py::
 startup`` builds:
@@ -12,10 +13,9 @@ startup`` builds:
   - ``ctx["blob_store"]`` src.storage.blob_store.BlobStore
   - ``ctx["neo4j"]``    neo4j.AsyncDriver
 
-Phase 3 stops at: parse -> write Postgres -> enqueue an ``outbox`` row. The
-graph projection (``project_to_graph`` / ``_project_job`` / ``normalize_skill``)
-is Phase 4, so the outbox rows written here sit undelivered until that drainer
-lands — the outbox pattern working as intended, not a dropped requirement.
+Phase 3 stops at: parse -> write Postgres -> enqueue an ``outbox`` row. Phase
+4b's drainer (``src.worker.graph_tasks.project_to_graph``) consumes those rows
+and calls ``_project_job`` below for every ``job.parsed`` event.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from neo4j import AsyncDriver
+
+from src.pipeline import skills_graph
 from src.pipeline.llm import CachedEmbedder, LLMClient, LLMOutputInvalidError
 from src.pipeline.skills import build_summary_text
 from src.prompts import load_prompt
@@ -146,3 +149,145 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
         len(extracted.nice_to_have_skills),
     )
     return "parsed"
+
+
+# ---------------- job.parsed graph projection (Phase 4b) -------------------
+#
+# Ported behaviourally from hris ``apps/worker/src/worker/tasks.py::
+# _project_job`` / ``_job_projection_tx``, with the same Decision-3 (resolve
+# skill names OUTSIDE the write transaction) and R8 (pinned label set — no
+# Company/Institution) pins as the résumé side
+# (``src.worker.resume_tasks.project_resume``).
+
+
+async def _project_job(
+    driver: AsyncDriver,
+    job_id: Any,
+    payload: dict[str, Any],
+    *,
+    llm: Any,
+    embedder: Any,
+) -> None:
+    """Project one ``job.parsed`` outbox payload into Neo4j: the Job node +
+    its REQUIRES/NICE_TO_HAVE skill edges."""
+    extracted = payload["extracted"]
+    embedding = payload["embedding"]
+
+    skill_names = [s["name"] for s in extracted.get("required_skills", [])] + [
+        s["name"] for s in extracted.get("nice_to_have_skills", [])
+    ]
+
+    async with driver.session() as session:
+        # Decision 3: every embed()/chat_json() round trip happens HERE, on a
+        # plain auto-commit session, before any write transaction opens.
+        resolved_skills = await skills_graph.resolve_canonical_names(
+            session, skill_names, llm=llm, embedder=embedder
+        )
+        await session.execute_write(
+            _job_projection_tx,
+            str(job_id),
+            extracted,
+            embedding,
+            resolved_skills,
+        )
+
+
+async def _job_projection_tx(
+    tx: Any,
+    job_id: str,
+    extracted: dict[str, Any],
+    embedding: list[float],
+    resolved_skills: dict[str, str | None],
+) -> None:
+    """The write-transaction callback. Architecturally cannot call an LLM or
+    embedder — neither parameter exists on this signature."""
+    # Upsert the Job node + summary embedding.
+    await tx.run(
+        """
+        MERGE (j:Job {id: $jid})
+        SET j.title = $title,
+            j.summary_embedding = $emb,
+            j.updated_at = datetime()
+        """,
+        jid=job_id,
+        title=extracted["title"],
+        emb=embedding,
+    )
+
+    # Drop old skill edges so re-parses don't accumulate cruft. F4 (security
+    # re-audit): this MUST be a typed delete — the earlier untyped
+    # ``-[r]->(:Skill) DELETE r`` deletes EVERY outgoing Job->Skill edge type,
+    # which silently destroys any future Job->Skill edge type (e.g. a 4c/4d
+    # addition) the moment one gets introduced. This module only ever CREATES
+    # REQUIRES/NICE_TO_HAVE, so naming exactly those two here is not a
+    # regression risk, and IS what stops the silent-data-loss class.
+    await tx.run(
+        "MATCH (:Job {id: $jid})-[r:REQUIRES|NICE_TO_HAVE]->(:Skill) DELETE r",
+        jid=job_id,
+    )
+
+    for skill in extracted.get("required_skills", []):
+        raw_name = skill["name"]
+        # F6 (security re-audit): fail loud on a name resolve_canonical_names
+        # was never asked to resolve — see the resume-side comment in
+        # resume_tasks.py::_resume_projection_tx for the full rationale.
+        if raw_name not in resolved_skills:
+            raise skills_graph.UnresolvedSkillNameError(
+                "job required-skill name has no resolution entry"
+            )
+        canonical = resolved_skills[raw_name]
+        if canonical is None:
+            # F3: shape-rejected as PII — drop this skill/edge silently.
+            continue
+        await skills_graph.ensure_categories(tx, canonical)
+        # ADR-008: `display_name` is written ONLY from the job/JD side, in a
+        # dedicated statement — a job description carries no candidate
+        # identity, so stamping the RAW (cleartext) skill name here is always
+        # safe, even when `canonical` is an opaque `h:<hash>` key for a
+        # non-vocab skill. Kept as its own statement (not folded into the
+        # REQUIRES MERGE below) so the edge write's own params never carry
+        # the raw name.
+        await tx.run(
+            "MATCH (s:Skill {canonical_key: $cname}) SET s.display_name = $display",
+            cname=canonical,
+            display=raw_name,
+        )
+        await tx.run(
+            """
+            MATCH (j:Job {id: $jid}), (s:Skill {canonical_key: $cname})
+            MERGE (j)-[r:REQUIRES]->(s)
+            SET r.min_years = $miny, r.is_must_have = $must
+            """,
+            jid=job_id,
+            cname=canonical,
+            miny=skill.get("min_years"),
+            must=True,
+        )
+
+    for skill in extracted.get("nice_to_have_skills", []):
+        raw_name = skill["name"]
+        if raw_name not in resolved_skills:
+            raise skills_graph.UnresolvedSkillNameError(
+                "job nice-to-have-skill name has no resolution entry"
+            )
+        canonical = resolved_skills[raw_name]
+        if canonical is None:
+            continue
+        await skills_graph.ensure_categories(tx, canonical)
+        await tx.run(
+            "MATCH (s:Skill {canonical_key: $cname}) SET s.display_name = $display",
+            cname=canonical,
+            display=raw_name,
+        )
+        await tx.run(
+            """
+            MATCH (j:Job {id: $jid}), (s:Skill {canonical_key: $cname})
+            MERGE (j)-[r:NICE_TO_HAVE]->(s)
+            SET r.min_years = $miny
+            """,
+            jid=job_id,
+            cname=canonical,
+            miny=skill.get("min_years"),
+        )
+
+    # R8: no Company/Institution writes from this module.
