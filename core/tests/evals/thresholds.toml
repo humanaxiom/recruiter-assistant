@@ -27,7 +27,11 @@
 # 39.5%. (Round-7 finding N-2: this said "roughly half the time", which was a
 # made-up number. The point stands either way -- a threshold a coin-flip ranker
 # clears 2 times in 5 is not a quality gate -- but the corpus does not get to
-# invent figures.)
+# invent figures.) ROUND-8 NOTE: the corpus has since grown to 20 fixtures (9
+# strong + 5 borderline + 5 weak + 1 adversarial, see fixtures/labels.json's
+# round-8 comment) -- the 39.5% figure above was computed against the
+# 17-fixture population and has not been recomputed; the qualitative point
+# (a fixed-precision floor below 1.0 is coin-flip-clearable) still holds.
 #
 # BOTH VALUES ARE PINNED EXACTLY by test_evals_corpus.py -- changing either
 # needs a human, the same way verification_rate_min / temperature /
@@ -79,6 +83,37 @@ min_completeness_in_topk = 1.0
 # FABRICATED quote that MUST score BELOW fuzz_threshold against that chunk and
 # be blanked. 4c must run these and fail if any of them verifies.
 negative_evidence_must_fail = true
+# Evidence-RECALL floor on the EXTRACTOR, not the verifier (round-8 addition,
+# docs/EXTRACTION_PLAN.md's carried-forward finding R2: "the corpus gates the
+# evidence verifier, never the evidence extractor"). Stage 3 is
+# LLM-extract-then-verify; every OTHER key in this section gates the verify
+# half only (negative_evidence_must_fail catches a verifier that accepts
+# fabrications; verification_rate_min catches a verifier that accepts
+# unverifiable quotes) -- neither one catches a stage-3 LLM that simply FAILS
+# TO FIND real evidence that genuinely exists. min_completeness_in_topk only
+# catches the total-failure limit (zero quotes at all for a shortlisted
+# candidate); a MEDIOCRE extractor that finds some requirements' evidence and
+# silently misses others shuffles freely inside this corpus's deliberately-wide
+# tier bands without failing anything above.
+#
+# gold_recall_min is the floor on the fraction of fixtures/labels.json's
+# `gold_evidence` anchors (r01's Python/PostgreSQL, r02's Apache Airflow/Docker)
+# that must come back from the FULL stage-3 pipeline -- extract, then verify --
+# tagged `status="met"` with a SURVIVING (i.e. not blanked by the verifier)
+# quote that itself clears `fuzz_threshold` against the anchor's cited chunk.
+# Pinned to 1.0, the same way verification_rate_min is: every gold anchor is a
+# hand-picked, unambiguous, exact-substring quote a competent extractor has no
+# excuse to miss, so "the extractor found 4 of 4 anchors but missed 1" is not a
+# vacuous edge case to tolerate, it is the exact failure R2 names. Distinct
+# from verification_rate_min (which is computed over whatever the extractor
+# SURFACED, so an extractor that surfaces nothing passes it vacuously) and from
+# min_completeness_in_topk (which only requires >= 1 quote per top-k entry, not
+# that every gold requirement specifically was recovered). 4c must run stage 3
+# end-to-end against r01/r02 and assert every gold_evidence anchor's
+# requirement is `met` with a verified quote, not just that verification/
+# fabrication-rejection behave correctly on the requirements the LLM happened
+# to surface.
+gold_recall_min = 1.0
 
 [adversarial]
 # Backstop invariant (Phase-4a strengthening, 4c-required T3): an adversarial
@@ -129,7 +164,11 @@ negative_evidence_must_fail = true
 # with a NO-OP evidence verifier: seniority 0.271 -> r09 rank 8 -> precision@5 =
 # 1.00 -> a BAD ENGINE PASSES. The trap fires iff seniority(r09) >= 0.638, and
 # the strong tier sits at 0.71-0.88. The hole moved from a 0.10 sub-score to a
-# 0.15 one.
+# 0.15 one. (ROUND-8 CAVEAT: "rank 8" above was measured against the
+# 17-fixture corpus; the corpus has since grown to 20 -- see fixtures/
+# labels.json's round-8 comment -- and this has not been re-measured. The
+# qualitative point, that a years-blind seniority sub-score lets the bait rank
+# outside the k=5 window under a no-op verifier, is unaffected.)
 #
 # Fixed by giving the bait the JD's own title (which is also what a real
 # keyword-stuffer does), pinning seniority at 1.0 by ARITHMETIC rather than by a
@@ -146,11 +185,15 @@ negative_evidence_must_fail = true
 # the correct verifier is NOT gated and is NOT stable across builds -- it lands
 # just below the strong tier, in a near-tie with r04 (measured 0.596994 vs
 # 0.596711, a 2.8e-04 spread, so the two swap between builds; both stay in band,
-# because `adversarial` admits [8, null] and `borderline` admits [8, 12]). Do not
-# re-pin a rank here. What IS gated, and by ~0.19 of margin either way: the bait
-# is BELOW EVERY STRONG FIXTURE and therefore outside the k=5 window (score
-# ~0.597 vs the 5th-place cutoff ~0.785). See fixtures/labels.json's r09
-# `expected_rank_band_note`.
+# because `adversarial` admits [10, null] and `borderline` admits [10, 15] --
+# ROUND-8: these two band values were [8, null] / [8, 12] against the
+# 17-fixture corpus; see fixtures/labels.json's round-8 comment for the
+# recomputed 20-fixture bands). Do not re-pin a rank here. What IS gated, and by
+# ~0.19 of margin either way: the bait is BELOW EVERY STRONG FIXTURE and
+# therefore outside the k=5 window (score ~0.597 vs the 5th-place cutoff
+# ~0.785 -- ROUND-8 CAVEAT: this cutoff figure was also measured against the
+# 17-fixture corpus and has not been re-measured against the 20-fixture one).
+# See fixtures/labels.json's r09 `expected_rank_band_note`.
 must_not_surface_in_topk = true
 
 [ordering_controls]
@@ -266,11 +309,37 @@ must_not_surface_in_topk = true
 # segment are both pinned to differ ONLY in degree/field, so the degree TEXT is
 # the residual's sole contributor ("Data Engineering" embeds closer to this JD
 # than "Computer Science" -- which is what aims it at the LOWER twin).
+#
+# ROUND-8 ADDITIONS (docs/EXTRACTION_PLAN.md 4b->4c blockers #1/#2a/#2b; closes
+# R1's "the corpus is blind to the internals of the skill sub-score" for
+# missing-must-have and recency-decay specifically). Two new pairs below,
+# `skill_missing_must` and `recency` -- full rationale in fixtures/labels.json's
+# `ordering_controls` entries of the same name, not duplicated here. Short
+# version: `recency` (r19 vs r10) has BYTE-IDENTICAL embedding input between its
+# twins (same technique as overqual/motivation), so weights.skill = 0 AND a
+# recency-decay-disabled mutation both collapse it to an EXACT tie -- the
+# strongest falsifiability guarantee of any pair in this file, no embedder
+# measurement needed. `skill_missing_must` (r01 vs r18) isolates a genuinely
+# missing must-have (REST API design, which carries no family in categories.yaml
+# so its absence is an unambiguous ontology_weight=0, unlike Apache Airflow whose
+# family is shared with Python) and is gated by weights.skill = 0, but NOT by
+# must_have_miss_penalty: 0.5 -> 1.0 -- that mutation only SHRINKS this pair's gap
+# (0.144 -> 0.048), it cannot reverse or collapse it below min_score_gap for ANY
+# twin of this "present vs genuinely-absent" shape, which is a property of the
+# algorithm's arithmetic (a missing row is forced to contribute exactly 0.0 to
+# the pre-penalty mean, independent of the penalty multiplier). That specific
+# mutation is therefore a REVIEW OBLIGATION verified on r18 ALONE (score_final at
+# must_have_miss_penalty=0.5 vs =1.0 should differ by ~0.048), not something this
+# pairwise mechanism -- or any key in this file -- can gate. Recorded here in the
+# same spirit as the round-7 M-3 obligations above, and in
+# `core/tests/evals/README_4c_twins.md`.
 enforce = true
 pairs = [
   { dimension = "education", higher_id = "r14_devon_ashworth", lower_id = "r11_skyler_brooks" },
   { dimension = "overqual", higher_id = "r15_cameron_whitfield", lower_id = "r13_quinn_delgado" },
   { dimension = "motivation", higher_id = "r04_morgan_lee", lower_id = "r16_rowan_castillo" },
+  { dimension = "skill_missing_must", higher_id = "r01_casey_rivera", lower_id = "r18_casey_rivera_missing_must_have" },
+  { dimension = "recency", higher_id = "r19_jamie_okafor_recency_twin", lower_id = "r10_jamie_okafor" },
 ]
 # The anti-tie epsilon (round-6 finding F5). PINNED EXACTLY by
 # test_evals_corpus.py, like every other numeric threshold here, and bounded on
@@ -281,6 +350,9 @@ pairs = [
 #   * far below 0.0120, the SMALLEST gap a correct engine can produce (the
 #     overqual pair: 0.6 * 0.25 * (1.00 - 0.92), pure arithmetic off MatchWeights
 #     and the twins' years) -- otherwise the guard could fail a CORRECT engine.
+#     ROUND-8 NOTE: the two new pairs' correct-engine gaps (0.144 each) are
+#     larger still, so 0.0120 remains the smallest gap across all five pairs and
+#     the bound this key must clear is unchanged.
 # It is a float-noise epsilon, not a separation the fixtures have to earn: do not
 # raise it to "make the pairs more decisive", and do not lower it to 0.
 min_score_gap = 1e-6

@@ -1,0 +1,83 @@
+{
+  "candidate": {
+    "name": "Casey Rivera",
+    "email": "casey.rivera@example.test",
+    "phone": "555-0101",
+    "location": "Vancouver, BC"
+  },
+  "summary": "Backend engineer with 6 years building Python data pipelines and REST APIs on PostgreSQL, orchestrated with Apache Airflow and deployed via Docker/Kubernetes.",
+  "total_years_experience": 6,
+  "skills": [
+    { "name": "Python", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "PostgreSQL", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
+    { "name": "Apache Airflow", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
+    { "name": "Docker", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] },
+    { "name": "REST APIs", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
+    { "name": "Kubernetes", "years": 2, "last_used_year": 2025, "evidence_chunk_ids": ["c_004"] }
+  ],
+  "experience": [
+    {
+      "company": "Nimbus Analytics Inc",
+      "title": "Senior Backend Engineer",
+      "start": "2022-01",
+      "end": null,
+      "is_current": true,
+      "bullets": [
+        { "text": "Designed and shipped Python REST APIs consumed by 40+ internal services.", "chunk_id": "c_001" },
+        { "text": "Optimized PostgreSQL schemas and queries, cutting p95 latency 35% across core tables.", "chunk_id": "c_002" }
+      ]
+    },
+    {
+      "company": "Beacon Data Co",
+      "title": "Backend Engineer",
+      "start": "2019-06",
+      "end": "2021-12",
+      "is_current": false,
+      "bullets": [
+        { "text": "Built Apache Airflow DAGs orchestrating nightly ETL across 12 data sources.", "chunk_id": "c_003" },
+        { "text": "Containerized every pipeline service with Docker and wrote the Kubernetes manifests used for staging rollout.", "chunk_id": "c_004" }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "institution": "Fraser Valley Institute of Technology",
+      "field": "Computer Science",
+      "year": 2018
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c_001",
+      "section": "experience",
+      "page": 1,
+      "text": "Designed and shipped Python REST APIs consumed by 40+ internal services at Nimbus Analytics Inc, using FastAPI and typed request/response contracts."
+    },
+    {
+      "id": "c_002",
+      "section": "experience",
+      "page": 1,
+      "text": "Optimized PostgreSQL schemas and queries, cutting p95 latency 35% across core tables handling 2M+ rows at Nimbus Analytics Inc."
+    },
+    {
+      "id": "c_003",
+      "section": "experience",
+      "page": 1,
+      "text": "Built Apache Airflow DAGs orchestrating nightly ETL across 12 data sources at Beacon Data Co, with SLA alerting on failed tasks."
+    },
+    {
+      "id": "c_004",
+      "section": "experience",
+      "page": 1,
+      "text": "Containerized every pipeline service with Docker and wrote the Kubernetes manifests used for the staging rollout at Beacon Data Co."
+    },
+    {
+      "id": "c_005",
+      "section": "education",
+      "page": 1,
+      "text": "BSc Computer Science, Fraser Valley Institute of Technology, graduated 2018."
+    }
+  ],
+  "cover_letter_chunks": []
+}

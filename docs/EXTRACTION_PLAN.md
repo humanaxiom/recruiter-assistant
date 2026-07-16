@@ -56,9 +56,9 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | **3 · Ingest + parse** | `extract`/`chunk`, LLM client+cache, `parse_resume`/`parse_job`, cover-letter parse, **PII encryption on parse** (incl. carried-forward criteria: strict `current_setting('app.pii_key')`, no `missing_ok`; per-field `max_length` on LLM string fields) | ✅ done |
 | **4 · Ranking engine** | Split into 4 gated sub-phases (below) — each its own branch/PR, `make gates` + reviewer/security/ranking-evals green before the next | 🔄 in progress (started 2026-07-12) |
 | &nbsp;&nbsp;**4a · Evals corpus** | `core/tests/evals/` labelled resumes-vs-JD fixtures + `thresholds.toml` (precision@k, evidence-verification-rate, PII-leak, determinism) — **zero product code**; built first so the matching engine's first green build is falsifiable | ✅ corpus done — merged to `main` via PR #8 (merge `875eac2`), CI green, 2026-07-12. **Falsifiability hardening also done** on branch `fix/phase-4a-corpus-falsifiability`, **merged to `main` via PR #10** (merge `464a479`), CI green, tip `583427f`, 18 commits. See "4a hardening" below. [activity](activity/phase-4a-ranking-evals-corpus.md) |
-| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (**1739 unit @ 97.04%**, 82 integration) on branch `feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`. **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below; do not start 4c without reading it.** [activity](activity/phase-4b-graph-projection.md) | ✅ done — **PR #11** open, CI green, awaiting merge |
-| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **Also blocking, from 4b's ranking-evals run (see "4b → 4c BLOCKERS" below): the `missing_must` must-have-miss-penalty nullification bug, two new skill-dimension twins (must-have-miss + recency), a spelling-divergence twin, and the `canonical_name`→`canonical_key` Cypher rename.** | not started |
-| &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5) | not started |
+| &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (**1739 unit @ 97.04%**, 82 integration) on branch `feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`. **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below (now CLOSED).** [activity](activity/phase-4b-graph-projection.md) | ✅ done — **MERGED via PR #11**, merge `68fe821`, CI green, 2026-07-15 |
+| &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **All four 4b→4c blockers closed** (`missing_must` keyed off `ontology_weight == 0`; must-have-miss + recency skill-dimension twins added; `canonical_name`→`canonical_key` renamed) — see "4b → 4c BLOCKERS" below (CLOSED) and [ADR-009](adr/009-matching-engine-port.md). | ✅ done — gate-green on branch `feat/phase-4c-matching-engine`, tip `ed4a142`, 6 commits, off `main` @ `68fe821`, 2026-07-15. **NOT yet PR'd / NOT merged.** [activity](activity/phase-4c-matching-engine.md) |
+| &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — 4c only proved the bridge in isolation.** | not started |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service`, `redaction` (blind-default), csv/evidence-csv/json export with `reveal`; **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) | not started |
 | **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started |
 | **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started |
@@ -76,23 +76,29 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of this writing — Phases 0–3 are merged to `main`, CI green. Phase 4 (Ranking engine) is 🔄 IN
+**As of 2026-07-15 — Phases 0–3 are merged to `main`, CI green. Phase 4 (Ranking engine) is 🔄 IN
 PROGRESS, split into 4 gated sub-phases** (planner pass 2026-07-12). Sub-phase **4a (evals corpus) is
 COMPLETE and MERGED to `main`** via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking
 gates green; corpus = 16 labelled fixtures + matched-pair dimension controls + `thresholds.toml` + a
 RED-pending-4c harness stub — see
 [activity/phase-4a-ranking-evals-corpus.md](activity/phase-4a-ranking-evals-corpus.md)). Its
 **falsifiability hardening is also COMPLETE and MERGED**, via **PR #10** (merge `464a479`), CI green,
-tip `583427f`, 18 commits. **Sub-phase 4b (graph projection) is COMPLETE and gate-green, sitting in
-PR #11** (https://github.com/humanaxiom/recruiter-assistant/pull/11), branch
-`feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479` — **CI is fully
-green, but the PR is OPEN, awaiting human merge; it has NOT merged.** See
-[activity/phase-4b-graph-projection.md](activity/phase-4b-graph-projection.md) and "4b → 4c BLOCKERS"
-below. **4c (matching engine) is the next sub-phase to build**, once #11 merges; 4c→4d follow, each on
-its own branch/PR with the full reviewer/security/ranking-evals gate before the next starts. The split
-mirrors Phases 0–3's one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit
-rounds even scoped tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness
-surface, so isolating them keeps each diff auditable.
+tip `583427f`, 18 commits. **Sub-phase 4b (graph projection) is COMPLETE and MERGED via PR #11**
+(https://github.com/humanaxiom/recruiter-assistant/pull/11), branch `feat/phase-4b-graph-projection`,
+tip `429adc7`, 20 commits, off `main` @ `464a479` — **merge `68fe821`, CI green, merged 2026-07-15.**
+See [activity/phase-4b-graph-projection.md](activity/phase-4b-graph-projection.md) and "4b → 4c
+BLOCKERS" below (now CLOSED). **Sub-phase 4c (matching engine) is COMPLETE, gate-green, and in PR #12** on branch
+`feat/phase-4c-matching-engine` (https://github.com/humanaxiom/recruiter-assistant/pull/12), off
+`main` @ `68fe821` — **all three merge-blocking gates green (security PASS, reviewer APPROVE,
+ranking-evals PASS) AND CI (`gates-all`) fully green; PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human
+merge — NOT yet merged.** See
+[activity/phase-4c-matching-engine.md](activity/phase-4c-matching-engine.md) and
+[ADR-009](adr/009-matching-engine-port.md). **4d (shortlist + reverse-match write path) is the next
+sub-phase to build**, once PR #12 is reviewed and merged; each sub-phase runs on its own branch/PR with
+the full reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
+one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
+tighter), and 4b/4c carry the security-sensitive PII-boundary + scoring-correctness surface, so
+isolating them keeps each diff auditable.
 
 **4a hardening — `fix/phase-4a-corpus-falsifiability`, merged to `main` via PR #10 (merge `464a479`),
 zero product code.** Three opus-tier gates audited the merged corpus and found it **could not fail a
@@ -441,6 +447,11 @@ rework once). **4c requirement:** add matched-pair twins for the skill sub-score
 twin for r10 at minimum, and a must-have-miss twin), the same way r14/r15/r16 isolate
 education/overqual/motivation — a `weights.skill = 0` mutation must FAIL.
 
+> **CLOSED (Phase 4c, 2026-07-15).** The must-have-miss twin (`r18`) and the recency twin (`r19` vs
+> `r10`) both landed; `weights.skill = 0`, `must_have_miss_penalty 0.5→1.0`, and disabled recency decay
+> each now FAIL against the live orchestrator. See [ADR-009](adr/009-matching-engine-port.md) and "4b →
+> 4c BLOCKERS" above.
+
 **R2 — the corpus gates the evidence *verifier*, never the evidence *extractor*.** Stage 3 is
 LLM-extract-then-verify; every eval assertion is on the verify half (`negative_evidence_must_fail`,
 `verification_rate_min`). A stage-3 LLM that simply **fails to find** real evidence is caught only in the
@@ -449,7 +460,38 @@ some quotes and misses others shuffles freely inside the deliberately-wide tier 
 an evidence-**recall** assertion against the `gold_evidence` anchors (each gold anchor's requirement must
 come back `met` with a verified quote), not just an evidence-**precision** one.
 
-### 4b → 4c BLOCKERS — ranking-evals against a REAL Neo4j graph projection (2026-07-14)
+### 4b → 4c BLOCKERS — ranking-evals against a REAL Neo4j graph projection (2026-07-14) — **CLOSED 2026-07-15**
+
+**All six items below are CLOSED as of Phase 4c** (branch `feat/phase-4c-matching-engine`, tip
+`ed4a142`). Full decision record: [ADR-009](adr/009-matching-engine-port.md); activity report:
+[activity/phase-4c-matching-engine.md](activity/phase-4c-matching-engine.md). Summary of how each
+closed (the original findings below are left intact as the historical record of what 4b's real-Neo4j
+run found):
+
+1. **`missing_must` off `ontology_weight == 0`** — CLOSED. `score_skill_breakdown` now stamps
+   `reason="missing"` on a row when its (pre-contribution) `ontology_weight == 0`, and
+   `missing_must` filters on `reason`, never on the built contribution's numeric `score`. Verified
+   single-candidate on fixture `r18` (a pairwise rank/gap check is provably unable to gate this —
+   ADR-009 §2 has the algebra) via `run_evals.py::_assert_must_have_penalty_fires_on_r18`.
+2. **Two skill-dimension twins, not one** — CLOSED. `r18_casey_rivera_missing_must_have` (must-have-miss
+   twin, vs `r01`) and `r19_jamie_okafor_recency_twin` (recency twin, vs `r10`) both landed; both
+   independently make `weights.skill = 0`, `must_have_miss_penalty 0.5→1.0`, and disabled recency decay
+   FAIL, closing Phase 4a's R1 residual for good (it is no longer merely carried forward).
+3. **Spelling-divergence twin** — CLOSED, but not via a new dedicated fixture. The −0.144 swing that
+   motivated this item was a **4b graph-normalisation** issue (`_basic_normalise` not folding
+   `REST APIs` to the same key as `REST API design`), and was already fixed in 4b itself
+   (`_basic_normalise` trailing-version/parenthetical stripping — see
+   [activity/phase-4b-graph-projection.md](activity/phase-4b-graph-projection.md)). 4c's own r18/r19
+   twins cover the skill sub-score's internals for 4c's own scoring surface; no further fixture was
+   needed for this item.
+4. **`canonical_name` → `canonical_key` rename** — CLOSED. `_stage2_skill_rows`' Cypher reads
+   `reqSkill.canonical_key` from day one of the port, verified against a real Neo4j
+   (`test_stage2_skill_rows_reads_canonical_key_not_canonical_name`).
+5. **`categories.yaml` family-credit effect** — CLOSED (recorded, not a defect to fix): the mechanism
+   itself (0.5 family credit for a same-family skill) is intended; item #1's fix ensures it no longer
+   also silences the must-have-miss penalty.
+6. **R1 now live, not hypothetical** — CLOSED per item #2: the ontology bug 4b's real-Neo4j run
+   surfaced is fixed in 4c's `stages.py`, not merely fenced off by a fixture.
 
 **4b (graph projection) landed** the outbox drainer + the Neo4j skill-graph half of `skill_normalize`
 (ADR-008's canonical-key-hashing rework) + `categories.yaml` (**new in 4b** — no ontology/family-credit
