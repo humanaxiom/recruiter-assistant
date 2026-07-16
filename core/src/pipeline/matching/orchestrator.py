@@ -62,6 +62,7 @@ from src.schemas.matching import (
     PipelineMeta,
     ScoreBreakdown,
 )
+from src.settings import Settings, non_matchable_families_from_settings
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,44 @@ class MatchingContext:
     # ``settings.git_sha`` (never ``os.environ`` directly — see settings.py's
     # docstring invariant) and threaded into PipelineMeta.git_sha.
     git_sha: str | None = None
+
+
+def matching_context_from_settings(
+    settings: Settings,
+    *,
+    db: asyncpg.Connection,
+    neo4j: AsyncDriver,
+    llm: LLMClient,
+    embedder: CachedEmbedder,
+) -> MatchingContext:
+    """Build a ``MatchingContext`` sourcing EVERY non-weight tunable from
+    ``Settings`` (Phase 4d / ADR-009 REQUIREMENT 1 — the "Tunable-default
+    duplication" residual).
+
+    This is the SINGLE call site that populates ``family_weight`` /
+    ``non_matchable_families`` / ``llm_concurrency`` / ``evidence_max_tokens`` /
+    ``model_gen`` / ``model_emb`` / ``git_sha`` from settings rather than the
+    dataclass-field defaults (which mirror ``orchestrator.py``'s module-level
+    ``_FAMILY_MATCH_WEIGHT`` / ``_NON_MATCHABLE_FAMILIES`` / ``_LLM_CONCURRENCY``
+    / ``_EVIDENCE_MAX_TOKENS`` literals). The worker tasks
+    (``src.worker.matching_tasks``) call this with the live ``ctx`` deps so a
+    non-default ``.env`` actually reaches the engine — 4c only proved the
+    settings bridge (``weights_from_settings``) correct in isolation; nothing
+    called it at a real construction site until here.
+    """
+    return MatchingContext(
+        db=db,
+        neo4j=neo4j,
+        llm=llm,
+        embedder=embedder,
+        model_gen=settings.llm_model_generation,
+        model_emb=settings.llm_model_embedding,
+        family_weight=settings.match_family_weight,
+        non_matchable_families=non_matchable_families_from_settings(settings),
+        llm_concurrency=settings.match_llm_concurrency,
+        evidence_max_tokens=settings.match_evidence_max_tokens,
+        git_sha=settings.git_sha,
+    )
 
 
 @dataclass(frozen=True)
