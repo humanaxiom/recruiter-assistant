@@ -168,15 +168,17 @@ Four stages, implemented in `core/src/pipeline/matching/{stages,orchestrator}.py
 1. **Coarse recall** — Neo4j `resume_summary_idx` vector query, scoped to the job, 3× oversample → k = 50.
 2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty (keyed off the candidate's actual ontology match, not a raw zero score — see [ADR-009](docs/adr/009-matching-engine-port.md)).
 3. **Evidence** — LLM per-requirement evidence, then anti-fabrication verify: every quote fuzzy-matched (`rapidfuzz.fuzz.partial_ratio` ≥ 0.85) against its cited résumé chunk, or blanked.
-4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → ranked entries. Reverse-match (résumé → jobs) reuses stages 2–4 against an inverted stage-1 query. Persistence to `shortlist_entries`/`reverse_match_entries` (Postgres) + `SHORTLISTED` edges (Neo4j) is Phase 4d.
+4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → ranked entries. Reverse-match (résumé → jobs) reuses stages 2–4 against an inverted stage-1 query.
 
-Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text`, cosine — matching the Neo4j indexes. `MatchWeights` is sourced from `Settings` via `weights_from_settings` (no hard-coded tunables); wiring the real worker call sites to use it is a Phase 4d requirement.
+Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text`, cosine — matching the Neo4j indexes. `MatchWeights` is sourced from `Settings` via `weights_from_settings`, and (Phase 4d) `matching_context_from_settings` is the single call site that builds the rest of `MatchingContext` (family weight, concurrency, model names, `git_sha`) from `Settings` too — no hard-coded tunables reach a real worker run.
+
+**Write path (Phase 4d, `core/src/worker/matching_tasks.py` + `core/src/services/shortlist_service.py`):** the arq tasks `shortlist_job`/`reverse_match_job` run the orchestrator and persist the result with `persist_shortlist`/`persist_reverse_match` — raw asyncpg, DELETE-first per run (rerun replaces, never duplicates), into `shortlist_entries`/`reverse_match_entries` (Postgres only; there is no Neo4j `SHORTLISTED` edge write in this repo). The two persist functions are deliberate mirror images of each other (dictated by the two tables' different column shapes — see [ADR-010](docs/adr/010-shortlist-reverse-match-write-path.md)): `shortlist_entries` has no dedicated `score_structured`/`score_evidence` columns and a `NOT NULL` evidence column, so those scores are folded into the `score_breakdown` jsonb and a missing evidence object is written as `{}`; `reverse_match_entries` has dedicated columns and a nullable evidence column, written as SQL `NULL` when absent. Evidence quotes are persisted verbatim — no redaction happens at this layer (display-time redaction is Phase 5's job).
 
 ---
 
 ## Status & roadmap
 
-**Phases 0–3 are merged to `main`, CI green.** Phase 4 (Ranking engine) is split into four gated sub-phases: **4a (evals corpus)** and **4b (graph projection)** are merged to `main`; **4c (matching engine)** is complete and gate-green on branch `feat/phase-4c-matching-engine` (tip `ed4a142`) but not yet opened as a PR; **4d (shortlist/reverse-match write path)** is next. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline and the Neo4j skill graph are wired, and the API serves `/health`. **There are still no ranking, upload, or shortlist HTTP routes** — those land in Phase 6; the matching engine itself has no persistence or API surface yet (Phase 4d/6).
+**Phases 0–3 are merged to `main`, CI green.** Phase 4 (Ranking engine) is split into four gated sub-phases: **4a (evals corpus)**, **4b (graph projection)**, and **4c (matching engine)** are merged to `main`; **4d (shortlist/reverse-match write path)** is complete and gate-green on branch `feat/phase-4d-shortlist-writepath` (tip `6c2bf43`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, and the 4-stage matching engine are wired, and the API serves `/health`. **There are still no ranking, upload, or shortlist HTTP routes** — those land in Phase 6; the write path (4d, not yet merged) persists ranking results but nothing reads them back yet (Phase 5's `list_for_job`/`get_one`/`export_rows`).
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -186,8 +188,8 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 | **3 · Ingest + parse** | extract/chunk, LLM client+cache, PII encryption on parse, `parse_job`/`parse_resume` | **done, merged** |
 | **4a · Evals corpus** | Labelled resumes-vs-JD fixture corpus + `thresholds.toml` | **done, merged** |
 | **4b · Graph projection** | Outbox drainer + Neo4j skill graph (`skill_normalize`, ADR-008 PII-safe-by-construction) | **done, merged** |
-| **4c · Matching engine** | `stages`/`orchestrator` (4-stage hybrid), reverse-match, `weights_from_settings` | **done, gate-green, not yet merged** |
-| 4d · Shortlist + reverse-match write path | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match` | pending |
+| **4c · Matching engine** | `stages`/`orchestrator` (4-stage hybrid), reverse-match, `weights_from_settings` | **done, merged** |
+| **4d · Shortlist + reverse-match write path** | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match`, `matching_context_from_settings` | **done, gate-green, not yet merged** |
 | 5 · Persist + anonymize + export | list/get/export, redaction, csv/json export with `reveal` | pending |
 | 6 · API | job/resume/shortlist/reverse-match routes, minimal auth | pending |
 | 7 · Evals + viewer | precision@k / evidence-verification fixtures (live, wired in 4c), Flask viewer | partially done (harness) |
@@ -243,12 +245,12 @@ recruiter-assistant/
 │   ├── src/
 │   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store)
 │   │   ├── models/      # asyncpg pool + idempotent startup DDL
-│   │   ├── pipeline/    # extract/chunk, LLM client+cache, skills scan (Phase 3)
+│   │   ├── pipeline/    # extract/chunk, LLM client+cache, skills scan (Phase 3); matching/{stages,orchestrator} 4-stage ranking engine (Phase 4c/4d)
 │   │   ├── prompts/     # Jinja prompt templates: jd_extract/resume_core/resume_skills/cover_letter (Phase 3)
 │   │   ├── schemas/     # pydantic contract layer: jobs/resumes/matching (Phase 2)
-│   │   ├── services/    # pii, job/resume/outbox services (Phase 3)
+│   │   ├── services/    # pii, job/resume/outbox services (Phase 3); shortlist_service — write-only persist (Phase 4d)
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
-│   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume tasks (Phase 3)
+│   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume (Phase 3); shortlist_job/reverse_match_job (Phase 4d)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
 │   ├── frontend/        # Flask viewer (Phase 0: stub)
 │   └── tests/{unit,integration}/

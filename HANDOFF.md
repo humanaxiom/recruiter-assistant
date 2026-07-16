@@ -19,7 +19,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** this session (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is COMPLETE, gate-green, and opened as PR #12** (https://github.com/humanaxiom/recruiter-assistant/pull/12, branch `feat/phase-4c-matching-engine`, off `main` @ `68fe821`) — **all three merge-blocking gates green AND CI (`gates-all`) fully green; PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human merge — NOT yet merged.** **4d (shortlist + reverse-match write path) is the next sub-phase to build, once PR #12 merges.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", and "Phase 4 resume" below.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is 🔄 in progress, split into 4 gated sub-phases.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is MERGED to `main` via PR #12** (merge `fd12d1a`), CI green. **Sub-phase 4d (shortlist + reverse-match write path) is COMPLETE and gate-green on branch `feat/phase-4d-shortlist-writepath`** (off `main` @ `fd12d1a`) — **all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); NOT yet PR'd, NOT merged — a PR opens after a human check-in.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists. **Phase 5 (persist + anonymize + export — read/list/get/export + display redaction) is the next sub-phase to build, once 4d is reviewed and merged.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", "4d status", and "Phase 4 resume" below.
 
 ### Phase 4a status — corpus + hardening both MERGED (read this before starting 4c)
 
@@ -200,15 +200,16 @@ Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196
 (Ranking engine) is split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
 table). **Sub-phase 4a (evals corpus) is COMPLETE and MERGED** (PR #8), and its **falsifiability
 hardening is also COMPLETE and MERGED via PR #10** (merge `464a479`). **Sub-phase 4b (graph
-projection) is COMPLETE and MERGED via PR #11 on 2026-07-15** (merge `68fe821`) — see "Phase 4b status"
-below for the full detail (the PII architectural pivot, the ranking-cost measurement, final gate
-numbers). **Sub-phase 4c (matching engine) is COMPLETE and gate-green on branch
-`feat/phase-4c-matching-engine`** (off `main` @ `68fe821`) — all three merge-blocking gates green
-AND CI fully green, **opened as PR #12 (https://github.com/humanaxiom/recruiter-assistant/pull/12),
-OPEN / MERGEABLE / CLEAN, awaiting human merge — NOT yet merged**; see "4c status" below for the
-closed blockers and final gate numbers. **4d (shortlist + reverse-match write path) is the next
-sub-phase to build**, once PR #12 is reviewed and merged — see "4d (Shortlist + reverse-match write
-path) is the next sub-phase" below.
+projection) is COMPLETE and MERGED via PR #11** (merge `68fe821`) — see "Phase 4b status" below for the
+full detail (the PII architectural pivot, the ranking-cost measurement, final gate numbers). **Sub-phase
+4c (matching engine) is COMPLETE and MERGED to `main` via PR #12** (merge `fd12d1a`) — see "4c status"
+below for the closed blockers and final gate numbers. **Sub-phase 4d (shortlist + reverse-match write
+path) is COMPLETE and gate-green on branch `feat/phase-4d-shortlist-writepath`** (off `main` @
+`fd12d1a`) — all three merge-blocking gates green; **NOT yet opened as a PR — awaiting a human
+check-in before opening one**; see "4d status" below for the closed Requirement 1, the persistence
+asymmetry, and the PII residual. **Your next action is Phase 5 (persist + anonymize + export —
+`list_for_job`/`get_one`/`export_rows` + display redaction), once 4d is reviewed, PR'd, and merged.**
+Confirm 4d's merge status with the human first (it is currently pre-PR, on its own branch).
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -261,15 +262,15 @@ single ranking bottleneck** — growing it is the only lever that improves non-v
 auto-merge no longer affects scoring at all; and a candidate whose name collides with a vocab term
 (`julia`, `hudson`, `kafka`, …) still gets a deniable-but-cleartext `canonical_key`.
 
-### 4c status — DONE, gate-green + CI green, in PR #12 (OPEN, awaiting merge) — read this before starting 4d
+### 4c status — DONE, MERGED to `main` via PR #12 (merge `fd12d1a`) — read this before starting 4d/5
 
 `core/src/pipeline/matching/{stages,orchestrator}.py` (the 4-stage ranking engine) + `MatchWeights`
 settings wiring (`src/settings.py::weights_from_settings`) + the live orchestrator wired into
-`run_evals.py::main()` are built and gate-green on branch `feat/phase-4c-matching-engine`, off `main`
+`run_evals.py::main()` were built and gate-green on branch `feat/phase-4c-matching-engine`, off `main`
 @ `68fe821` (PR #11's merge), opened as **PR #12**
 (https://github.com/humanaxiom/recruiter-assistant/pull/12) on 2026-07-15. **All three merge-blocking
-gates are green (security PASS, reviewer APPROVE, ranking-evals PASS) AND CI (`gates-all`) is fully
-green — PR #12 is OPEN, MERGEABLE/CLEAN, awaiting human merge; NOT yet merged.** Full write-up:
+gates were green (security PASS, reviewer APPROVE, ranking-evals PASS) AND CI (`gates-all`) was fully
+green — PR #12 was MERGED to `main` (merge `fd12d1a`).** Full write-up:
 [docs/activity/phase-4c-matching-engine.md](docs/activity/phase-4c-matching-engine.md); decisions +
 residuals: [docs/adr/009-matching-engine-port.md](docs/adr/009-matching-engine-port.md).
 
@@ -308,31 +309,77 @@ mutation obligations (`weights.education=0`, `overqual_ratio=99`, `weights.motiv
 `weights.skill=0`, `must_have_miss_penalty 0.5→1.0`, disabled recency) FAIL the corpus as required,
 plus the optional WRatio-swap.
 
-**Carried forward into 4d** (see the "4d" section immediately below): wire
-`MatchingContext`/`weights` from `Settings` at the real worker call sites (4c only proves the bridge
-in isolation); the open `jd.education.fields` human decision; 4d ships the write path only.
+**Carried forward into 4d** (see the "4d status" section immediately below — the settings-wiring item is
+now CLOSED there; the `jd.education.fields` decision is still open): wire `MatchingContext`/`weights`
+from `Settings` at the real worker call sites (4c only proves the bridge in isolation); the open
+`jd.education.fields` human decision; 4d ships the write path only.
 
-### 4d (Shortlist + reverse-match write path) is the next sub-phase to build
+### 4d status — DONE, gate-green, NOT yet PR'd (pre-PR) — read this before starting Phase 5
 
-Once 4c is reviewed and merged, run the per-phase subagent loop on a fresh `feat/phase-4d-...` branch:
-planner → tester → `data-pipeline` coder → reviewer + security + ranking-evals (all merge-blocking) →
-docs. `make gates` green, then PR to `main`, let CI go green. Per the plan-of-record, 4d ships
-**`shortlist_job`/`reverse_match_job` arq tasks + write-only `persist_shortlist`/
-`persist_reverse_match`** wired to the 4c orchestrator (`generate_shortlist`/`match_resume_to_jobs`) —
-**list/get/export + display redaction stay Phase 5**, not 4d.
+`core/src/services/shortlist_service.py` (`persist_shortlist`/`persist_reverse_match`) +
+`core/src/worker/matching_tasks.py` (`shortlist_job`/`reverse_match_job` arq tasks) +
+`matching_context_from_settings`/`non_matchable_families_from_settings` (the ADR-009 "Requirement 1"
+settings-wiring closure) were built and gate-green on branch `feat/phase-4d-shortlist-writepath`, tip
+`6c2bf43`, 2 commits (RED `24419b0` → GREEN `6c2bf43`), off `main` @ `fd12d1a` (PR #12's merge).
+**All three merge-blocking gates are green (reviewer APPROVE, security PASS, ranking-evals PASS).
+NOT yet opened as a PR, NOT merged — awaiting a human check-in before opening one, per protocol.** CI
+(`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) has **not** run yet, since no
+PR exists — do not treat 4c's last-measured live-eval numbers as re-confirmed by this branch until CI
+runs (the scoring code itself, `stages.py`/`orchestrator.py`, is byte-unchanged by 4d — only the new
+additive `matching_context_from_settings` factory touches `orchestrator.py`). Full write-up:
+[docs/activity/phase-4d-shortlist-writepath.md](docs/activity/phase-4d-shortlist-writepath.md);
+decisions + residuals: [ADR-010](docs/adr/010-shortlist-reverse-match-write-path.md).
 
-**Requirements carried from 4c (ADR-009), read before starting 4d:**
-1. **Wire `MatchingContext`/`weights` from `Settings`, not schema/in-code defaults.** 4c's
-   `weights_from_settings` and `MatchingContext`'s dataclass-field defaults both agree with
-   `Settings.match_*` today (pinned by `test_settings_matching.py`), but nothing yet **calls**
-   `weights_from_settings` at a real worker construction site — 4c only proves the bridge is correct
-   in isolation. `shortlist_job`/`reverse_match_job` must be the call sites that actually build
-   `MatchingContext` from `get_settings()`.
-2. **Open human decision, still unresolved:** `score_education` ignores `jd.education.fields` —
-   either extend the scorer or drop `fields` from the JD contract. Do not resolve this silently while
-   wiring the write path.
-3. **Scope discipline:** 4d is write-path only. `list_for_job`/`get_one`/`export_rows` and redaction
-   are Phase 5's job, per the plan-of-record — do not pull them forward.
+**Requirement 1 (ADR-009, carried from 4c) is now CLOSED.** `matching_context_from_settings(settings,
+*, db, neo4j, llm, embedder)` is the single call site populating every non-weight `MatchingContext`
+tunable from `Settings`; `shortlist_job`/`reverse_match_job` call it with `get_settings()` and pass
+`weights=weights_from_settings(get_settings())` into the orchestrator — never `DEFAULT_WEIGHTS`. The
+load-bearing test class here is a settings-wiring unit test built around **non-default** `Settings`
+values, because `run_evals.py` structurally cannot catch a silent fallback to `DEFAULT_WEIGHTS`:
+`Settings()`'s own `match_*` defaults equal `MatchWeights`' defaults by construction, so the corpus
+(which only ever runs against default `Settings`) would pass either way. See ADR-010 §3.
+
+**The mirror-image persistence asymmetry (ADR-010 §2).** `shortlist_entries` has no dedicated
+`score_structured`/`score_evidence` columns and `evidence JSONB NOT NULL` → `persist_shortlist` folds
+those two scores into the `score_breakdown` jsonb and coerces `evidence=None` to `{}`.
+`reverse_match_entries` has dedicated columns and a nullable `evidence JSONB` →
+`persist_reverse_match` writes those as their own SQL args and passes `evidence=None` through as SQL
+`NULL`. Residual: at the raw-SQL level, shortlist's `{}` cannot distinguish "never evidence-scored"
+from "scored, found nothing" — a minor info-loss Phase 5's read layer should be aware of.
+
+**PII-at-rest residual, security-flagged and recorded (not just in a test docstring, per instruction) —
+ADR-010 §6.** Evidence quotes (verbatim résumé/cover-letter chunk text) are written unredacted into
+both tables. This is symmetric with, not a new instance beyond, ADR-007 §6/§7's already-accepted
+cleartext-at-rest posture for `resumes.parsed` — same Postgres instance, same DB-access boundary,
+derivative of already-accepted-cleartext chunk text, and it never rides the outbox or an embedding.
+Accepted for v1; revisit before multi-tenant.
+
+**Both DELETE-first persist functions are per-run idempotent, keyed on the DDL's real unique
+constraints** (`shortlist_entries (job_id, resume_id)`, `reverse_match_entries (resume_id, job_id)`),
+proven against a real Postgres including the `NOT NULL`/`UniqueViolationError` cases a mocked
+connection can't exercise. **No advisory lock exists for concurrent duplicate enqueues** — accepted
+(last-committer-wins; nothing currently enqueues duplicates by design), revisit once Phase 6 ships a
+user-facing regenerate route (ADR-010 §1).
+
+**`reverse_match_job`'s `allowed_job_ids` filter is `description_parsed IS NOT NULL`, not
+`status = 'open'`** — `jobs.status` is never transitioned by any code path through 4d (no Phase-6 route
+yet), so filtering on it would filter to zero or an arbitrary default; ADR-010 §4 has the full
+reasoning and the note to revisit once Phase 6 starts transitioning `status`.
+
+**Open human decision, carried forward AGAIN, still unresolved:** `score_education` ignores
+`jd.education.fields` (ADR-009 §7) — 4d touches none of `stages.py`/`orchestrator.py`'s scoring code
+(byte-unchanged), so this is untouched, not newly relevant. Either extend the scorer to read `fields`,
+or drop `fields` from the JD contract.
+
+**Final gate state, HEAD `6c2bf43`:** ruff/black/`mypy --strict` clean; **1947 unit tests @ 91.98%
+coverage**; **93 integration tests** vs real Postgres+Neo4j (87 carried forward + 6 new, all in
+`test_shortlist_persistence_pg.py`). Reviewer's sign-off rests on 8 behavioral guards (rerun-replaces
+×2, `NOT NULL` coercion, weights-from-settings ×2, `matching_context_from_settings` tunable coverage,
+the `allowed_job_ids` scoping, and the no-silent-redaction guard) — full table in the activity report.
+
+**Carried forward into Phase 5:** `list_for_job`/`get_one`/`export_rows` + display redaction (deferred
+by 4d's own scope, per the plan-of-record); the shortlist-side `evidence = {}` ambiguity (above); the
+still-open `jd.education.fields` decision; no advisory lock on concurrent runs.
 
 ## Historical: original Phase 3 plan (for reference)
 
@@ -369,7 +416,8 @@ decisions, environment quirks, and the hris source-file map (Appendix A).
 Architecture rationale: Phase 0 in docs/adr/004-*.md, Phase 1 in docs/adr/005-*.md,
 Phase 2 in docs/adr/006-*.md, Phase 3 in docs/adr/007-*.md, the Phase 4b PII
 rearchitecture in docs/adr/008-skill-graph-pii-by-construction.md, the Phase 4c
-matching-engine port in docs/adr/009-matching-engine-port.md.
+matching-engine port in docs/adr/009-matching-engine-port.md, the Phase 4d
+shortlist/reverse-match write path in docs/adr/010-shortlist-reverse-match-write-path.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
@@ -377,68 +425,83 @@ cover-letter/reverse-match/minimal viewer/blind-default). Phases 0, 1, 2, and 3 
 ALL complete and merged to main, CI green: Phase 0 (seed & infra) PR #1, Phase 1
 (storage — filesystem BlobStore) PR #2, Phase 2 (schemas) PR #3, Phase 3 (ingest +
 parse) PR #6 (merge 49196d7). Phase 4 (Ranking engine) is split into 4 gated
-sub-phases: 4a (evals corpus) is MERGED (PR #8, merge 875eac2), and its
-falsifiability hardening is ALSO MERGED via PR #10 (merge 464a479). Sub-phase 4b
-(graph projection) MERGED via PR #11 on 2026-07-15 (merge 68fe821). Sub-phase
-4c (matching engine) is COMPLETE, gate-green, and CI-green in PR #12
-(https://github.com/humanaxiom/recruiter-assistant/pull/12, branch
-feat/phase-4c-matching-engine, off main @ 68fe821) — all three merge-blocking
-gates green (security PASS, reviewer APPROVE, ranking-evals PASS) AND CI fully
-green; PR #12 is OPEN / MERGEABLE / CLEAN, awaiting human merge — NOT yet merged.
-main today has 1739 unit tests (post-4b); the 4c branch (once merged)
-brings that to 1916 unit tests @ 90.71% coverage + 87 integration tests, and
-run_evals.py now exits 0 (the corpus's first real live-engine run).
+sub-phases, ALL FOUR now built: 4a (evals corpus) MERGED (PR #8, merge 875eac2),
+falsifiability hardening MERGED via PR #10 (merge 464a479); 4b (graph projection)
+MERGED via PR #11 (merge 68fe821); 4c (matching engine) MERGED via PR #12
+(merge fd12d1a) — all three merge-blocking gates were green (security PASS,
+reviewer APPROVE, ranking-evals PASS) AND CI was fully green before merge.
+main today has 1916 unit tests @ 90.71% coverage + 87 integration tests
+(post-4c-merge), and run_evals.py exits 0 (the corpus's first real live-engine run).
 
-**4c ported the 4-stage matching engine (stages.py + orchestrator.py) and closed
-all four 4b→4c blockers** — full detail in docs/adr/009-matching-engine-port.md
-and docs/activity/phase-4c-matching-engine.md. Headlines: (1) missing_must now
-keys off reason=="missing" (row ontology_weight==0), never the built
-contribution's score==0.0 — verified single-candidate on fixture r18, because
-the must-have-miss penalty is PROVABLY uncatchable by any pairwise rank+gap
-check (the algebra is in ADR-009 §2); (2) _fuzz_substring was REPLACED with
-rapidfuzz.fuzz.partial_ratio, re-measured against the full corpus (rejects all
-4 fabrications at 0.41–0.46, survives all 4 gold anchors at 1.000); (3)
-canonical_name → canonical_key renamed in the Cypher, verified against a real
-Neo4j; (4) NICE_TO_HAVE skills feed stage-3 evidence text but not the stage-2
-structured skill sub-score — ported verbatim, recorded not "fixed". A reviewer
-finding also caught orchestrator.py reading os.environ.get("GIT_SHA") directly
-(CLAUDE.md violation) — fixed by routing git_sha through Settings, backed by a
-new AST meta-test (test_no_scattered_os_environ.py). Read HANDOFF.md's "4c
-status" section and the ADR before touching 4d — this changes what "correctly
-wired" means for the worker path 4d builds.
+**4d (shortlist + reverse-match write path) is COMPLETE and gate-green on branch
+feat/phase-4d-shortlist-writepath** (off main @ fd12d1a, tip 6c2bf43, 2 commits:
+red 24419b0 -> green(4d) 6c2bf43). All three merge-blocking gates are green
+(reviewer APPROVE, security PASS, ranking-evals PASS) — **NOT yet opened as a
+PR, NOT merged; a PR opens only after a human check-in.** CI (gates-all, incl. a
+live run_evals.py re-measurement against Ollama) has NOT run yet since no PR
+exists. The branch brings 1947 unit tests @ 91.98% coverage + 93 integration
+tests (87 carried forward + 6 new). Full detail:
+docs/activity/phase-4d-shortlist-writepath.md and
+docs/adr/010-shortlist-reverse-match-write-path.md.
 
-**Your next action is Phase 4d (shortlist + reverse-match write path)** — NOT the
-evals corpus (done), NOT graph projection (done), and NOT the matching engine
-(done). Confirm 4c's merge status with the human first: 4c is in PR #12
-(https://github.com/humanaxiom/recruiter-assistant/pull/12), OPEN / MERGEABLE /
-CLEAN with CI green — check whether it has merged (gh pr view 12) since 4d should
-build on top of it once merged. Then run the per-phase
-subagent loop (planner → tester → data-pipeline coder → reviewer + security +
-ranking-evals → docs) on a feat/phase-4d-... branch. Per the plan-of-record, 4d
-ships shortlist_job/reverse_match_job arq tasks + write-only
-persist_shortlist/persist_reverse_match, wired to the 4c orchestrator
-(generate_shortlist/match_resume_to_jobs) — list/get/export + display redaction
-stay Phase 5, do not pull them forward.
+**4d closed ADR-009's carried "Requirement 1"** — matching_context_from_settings
+(new, src/pipeline/matching/orchestrator.py) is the single call site that builds
+MatchingContext from Settings (family_weight, non_matchable_families,
+llm_concurrency, evidence_max_tokens, model_gen/emb, git_sha); shortlist_job/
+reverse_match_job (src/worker/matching_tasks.py, new) call it with get_settings()
+and pass weights=weights_from_settings(get_settings()) — never DEFAULT_WEIGHTS.
+This closes the one bug class run_evals.py structurally cannot catch: Settings()'s
+own defaults equal MatchWeights' defaults by construction, so a silent fallback to
+DEFAULT_WEIGHTS is invisible to the live-eval corpus and can only be caught by a
+settings-wiring unit test built around NON-default Settings values (see
+test_matching_context_settings_wiring.py / ADR-010 §3). stages.py/orchestrator.py's
+SCORING code is byte-unchanged by 4d — this branch is persistence wiring only.
+
+**4d also shipped src/services/shortlist_service.py (persist_shortlist/
+persist_reverse_match)** — both DELETE-first per-run (rerun-replaces idempotency
+keyed on the DDL's real unique constraints, shortlist_entries(job_id,resume_id) /
+reverse_match_entries(resume_id,job_id)), and deliberate MIRROR-IMAGE handling of
+score_structured/score_evidence/evidence dictated by the two tables' different DDL
+shapes (shortlist folds scores into score_breakdown jsonb + coerces evidence=None
+to {} for a NOT NULL column; reverse-match uses dedicated columns + passes
+evidence=None as SQL NULL for a nullable column) — full rationale + the accepted
+residual (shortlist's {} conflates "never scored" with "scored empty" at the raw
+SQL level) in ADR-010 §2. reverse_match_job scopes allowed_job_ids to
+description_parsed IS NOT NULL, never None (ADR-010 §4 — NOT status='open',
+because jobs.status is never transitioned anywhere in the codebase yet). Evidence
+quotes are written verbatim with no new redaction — a deliberate v1 decision,
+symmetric with ADR-007 §6/§7's already-accepted cleartext-at-rest posture for
+resumes.parsed, recorded explicitly in ADR-010 §6 (security-flagged).
+
+**Your next action is Phase 5 (persist + anonymize + export)** — NOT the evals
+corpus (done), NOT graph projection (done), NOT the matching engine (done), and
+NOT the write path (done, pre-PR). Confirm 4d's status with the human first: it
+is on branch feat/phase-4d-shortlist-writepath, gate-green, NOT yet opened as a
+PR — check whether a PR has since been opened/merged (gh pr list) before
+building on top of it. Phase 5 ships list_for_job/get_one/export_rows +
+display redaction (blind-default, ADR-006 §4's redaction-boundary contract:
+ResumeOut/ResumeListItem can serialize decrypted PII with blinded=True, so
+redaction must mask candidate.*/candidate_name/cover_letter_text BEFORE DTO
+construction). Run the per-phase subagent loop (planner -> tester ->
+data-pipeline coder -> reviewer + security + ranking-evals -> docs) on a
+feat/phase-5-... branch once 4d is merged.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 (data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
-data-pipeline UP to opus for 4d if the write-path wiring touches the
-MatchingContext/weights construction (the hard-core surface the model policy
-escalates for); mechanical arq/plumbing work can stay on sonnet. Defaults live in
+data-pipeline UP to opus for Phase 5 if the export/redaction wiring touches the
+PII boundary directly (the hard-core surface the model policy escalates for);
+mechanical list/get route plumbing can stay on sonnet. Defaults live in
 .claude/agents/*.md frontmatter.
 
-**Two requirements carried from 4c (ADR-009) — read before starting 4d:**
-1. Wire MatchingContext/weights from Settings via weights_from_settings at the
-   REAL worker call sites (shortlist_job/reverse_match_job) — 4c only proved the
-   settings bridge correct in isolation; nothing yet calls it outside tests. Do
-   not let 4d construct MatchingContext from the in-code/schema defaults.
-2. Open human decision, still UNRESOLVED: score_education ignores
-   jd.education.fields — either extend the scorer or drop fields from the JD
-   contract. Do not resolve this silently while wiring the write path.
+**Open human decision, carried forward across 4c AND 4d, still UNRESOLVED:**
+score_education ignores jd.education.fields (ADR-009 §7, restated ADR-010 §5) —
+either extend the scorer or drop fields from the JD contract. Neither 4c nor 4d
+touched stages.py's scoring code, so this remains exactly as open as it was
+after 4c. Do not resolve this silently while building Phase 5.
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening any Phase 4d PR.
+HANDOFF.md. Check in with me before opening the Phase 4d PR or any Phase 5 PR.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.
