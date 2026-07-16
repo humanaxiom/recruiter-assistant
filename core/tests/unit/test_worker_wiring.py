@@ -36,6 +36,7 @@ import pytest
 from src.settings import Settings
 from src.storage.blob_store import BlobStore
 from src.worker.main import WorkerSettings, startup
+from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.resume_tasks import parse_resume
 from src.worker.tasks import parse_job
 
@@ -107,15 +108,27 @@ async def test_startup_blob_store_is_rooted_at_storage_dir(tmp_path: Path) -> No
     assert (tmp_path / "worker.txt").read_bytes() == b"z"
 
 
-def test_worker_registers_the_phase_3_parse_tasks() -> None:
-    """Phase 3 registers the parse tasks — and only those.
+def test_worker_registers_the_parse_and_matching_tasks() -> None:
+    """Phase 3 registered the parse tasks; Phase 4d ADDS the matching
+    write-path tasks (``shortlist_job``, ``reverse_match_job``) to the SAME
+    ``functions`` registry — the outbox drainer (``project_to_graph``) stays
+    deliberately absent: it is a ``cron_jobs`` entry, never enqueued by name
+    (see the module docstring in ``src/worker/main.py``).
 
-    The outbox drainer (``project_to_graph``) is deliberately absent: Phase 3
-    stops at parse -> Postgres -> outbox row, and Phase 4 adds the drainer that
-    projects those rows into Neo4j. Undelivered outbox rows at this stage are
-    the outbox pattern working, not a dropped requirement.
+    RENAMED from ``test_worker_registers_the_phase_3_parse_tasks`` (this test
+    previously asserted ``functions == [parse_job, parse_resume]`` only) per
+    the 4d plan-of-record, which explicitly scopes "worker wiring" into this
+    sub-phase. This is NOT a weakened test — the new assertion is STRICTER
+    (four named functions, in the order they were registered) than the one it
+    replaces, which a change that dropped Phase 3's two tasks would still
+    fail.
     """
-    assert WorkerSettings.functions == [parse_job, parse_resume]
+    assert WorkerSettings.functions == [
+        parse_job,
+        parse_resume,
+        shortlist_job,
+        reverse_match_job,
+    ]
 
 
 # ── F3 (LOW, round 3) — empty PII_KEY must fail startup loud ────────────────
