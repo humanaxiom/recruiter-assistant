@@ -59,9 +59,9 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | &nbsp;&nbsp;**4b · Graph projection** | Outbox drainer `project_to_graph` (job+resume → Neo4j; **must NOT project `parsed.candidate` or log payload**; chunk-text preview read from `resumes.parsed`, NOT the outbox — ADR-007 stripped it) + Neo4j skill-graph half of `skill_normalize` (+ `categories.yaml`, ADR-008's canonical-key hashing) + the spelling-recall normalisation fix (`_basic_normalise` trailing-version/parenthetical handling). ✅ done — all three merge-blocking gates green (**1739 unit @ 97.04%**, 82 integration) on branch `feat/phase-4b-graph-projection`, tip `429adc7`, 20 commits, off `main` @ `464a479`. **Ranking-evals ran the 4a corpus through 4b's real code into a real Neo4j and found blockers for 4c — see "4b → 4c BLOCKERS" below (now CLOSED).** [activity](activity/phase-4b-graph-projection.md) | ✅ done — **MERGED via PR #11**, merge `68fe821`, CI green, 2026-07-15 |
 | &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **All four 4b→4c blockers closed** (`missing_must` keyed off `ontology_weight == 0`; must-have-miss + recency skill-dimension twins added; `canonical_name`→`canonical_key` renamed) — see "4b → 4c BLOCKERS" below (CLOSED) and [ADR-009](adr/009-matching-engine-port.md). | ✅ done — **MERGED via PR #12**, merge `fd12d1a`, CI green, tip `ed4a142`, 6 commits, off `main` @ `68fe821`. [activity](activity/phase-4c-matching-engine.md) |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — CLOSED, see below.** | ✅ done — **MERGED via PR #13**, merge `5945320`, CI green, tip `6c2bf43`, 2 commits, off `main` @ `fd12d1a`. [activity](activity/phase-4d-shortlist-writepath.md) |
-| **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — gate-green on branch `feat/phase-5-persist-anonymize-export`, tip `b6b1ec7`, 4 commits (red → green → red security-fix → green), off `main` @ `5945320`, 2026-07-16. **NOT yet PR'd / NOT merged.** [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
-| **6 · API** | Routes: job create/parse, resume upload, shortlist generate/list/get/export, reverse-match; minimal auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it | not started — **next sub-phase, once Phase 5 is reviewed and merged** |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started |
+| **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — **MERGED via PR #14**, merge `6deade3`, CI green, tip `02af27c`, 6 commits (three RED→GREEN cycles: initial build, cover-letter-chunks security fix, `original_filename` de-anonymization fix), off `main` @ `5945320`. [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
+| **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — gate-green on branch `feat/phase-6-api-routes`, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`, 2026-07-16. **NOT yet PR'd / NOT merged.** [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started — **next sub-phase, once Phase 6 is reviewed and merged** |
 
 ## Subagent structure
 
@@ -76,9 +76,10 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of 2026-07-16 — Phases 0–4 are merged to `main`, CI green** (Phase 4, Ranking engine, split into 4
-gated sub-phases, planner pass 2026-07-12, **all four now merged**). **Phase 5 (persist + anonymize +
-export) is COMPLETE and gate-green, pre-PR** — see below. Sub-phase **4a (evals corpus) is COMPLETE and
+**As of 2026-07-16 — Phases 0–5 are merged to `main`, CI green** (Phase 4, Ranking engine, split into 4
+gated sub-phases, planner pass 2026-07-12, **all four now merged**; Phase 5, persist + anonymize +
+export, merged via PR #14). **Phase 6 (API routes) is COMPLETE and gate-green, pre-PR** — see below.
+Sub-phase **4a (evals corpus) is COMPLETE and
 MERGED to `main`**
 via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking gates green; corpus = 16
 labelled fixtures + matched-pair dimension controls + `thresholds.toml` + a RED-pending-4c harness stub —
@@ -96,24 +97,41 @@ COMPLETE and MERGED to `main` via PR #13** (merge `5945320`, CI green, merged 20
 2 commits, off `main` @ `fd12d1a`. See
 [activity/phase-4d-shortlist-writepath.md](activity/phase-4d-shortlist-writepath.md) and
 [ADR-010](adr/010-shortlist-reverse-match-write-path.md). **Phase 5 (persist + anonymize + export) is
-COMPLETE and gate-green** on branch `feat/phase-5-persist-anonymize-export`, tip `b6b1ec7`, 4 commits
-(red → green → red security-fix → green), off `main` @ `5945320` — **all three merge-blocking gates
-green (reviewer APPROVE, security PASS, ranking-evals PASS); NOT yet opened as a PR, NOT merged —
-awaiting a human check-in before opening one.** CI (`gates-all`, incl. a live `run_evals.py`
-re-measurement) has not yet run since no PR exists. See
+MERGED to `main` via PR #14** (merge `6deade3`, CI green), tip `02af27c`, 6 commits across three
+RED→GREEN cycles (initial build; a HIGH `cover_letter_chunks` PII-leak security fix; the
+`original_filename` de-anonymization residual fix), off `main` @ `5945320`. See
 [activity/phase-5-persist-anonymize-export.md](activity/phase-5-persist-anonymize-export.md) and
-[ADR-011](adr/011-display-redaction-read-export-boundary.md). **Phase 6 (API routes) is the next
-sub-phase to build**, once Phase 5 is reviewed and merged; each sub-phase runs on its own branch/PR
+[ADR-011](adr/011-display-redaction-read-export-boundary.md). **Phase 6 (API routes) is COMPLETE and
+gate-green** on branch `feat/phase-6-api-routes`, tip `837de9e`, 6 commits across three RED→GREEN cycles
+(initial routes; SEC-1/SEC-2/SEC-4 security hardening + exact `fastapi`/`starlette`/`python-multipart`
+pins; a non-ASCII-`X-API-Key` 401 generalization + upload file-count-ordering regression pin), off
+`main` @ `6deade3` — **all three merge-blocking gates green (reviewer APPROVE, security PASS,
+ranking-evals PASS); NOT yet opened as a PR, NOT merged — awaiting a human check-in before opening
+one.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists.
+See [activity/phase-6-api-routes.md](activity/phase-6-api-routes.md) and
+[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is the next
+sub-phase to build**, once Phase 6 is reviewed and merged; each sub-phase runs on its own branch/PR
 with the full reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
 one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
-tighter), and 4b/4c/5 carry the security-sensitive PII-boundary + scoring-correctness surface, so
-isolating them keeps each diff auditable.
+tighter), and 4b/4c/5/6 carry the security-sensitive PII-boundary + scoring-correctness + HTTP-surface,
+so isolating them keeps each diff auditable.
 
 **4d closed ADR-009's carried "Requirement 1"** (wire `MatchingContext`/`MatchWeights` from `Settings` at
 a real worker call site — `matching_context_from_settings` + `shortlist_job`/`reverse_match_job` calling
 `weights_from_settings`; full detail: [ADR-010](adr/010-shortlist-reverse-match-write-path.md) §3) but did
 **not** touch `stages.py`/`orchestrator.py`'s scoring code (byte-unchanged) — the still-open
 `jd.education.fields` human decision (ADR-009 §7) is therefore **still open**, unaffected by 4d.
+
+**Phase 6 closed ADR-006 §4's `JobOut.blind_review` fail-open note** (`_row_to_jobout` now sets it
+explicitly from the row on every construction path; full detail:
+[ADR-012](adr/012-api-routes-auth-upload-scope.md) "Carry-forwards now CLOSED") and shipped the first code
+path (`PATCH /jobs/{id}/status`) that ever transitions `jobs.status` — which makes ADR-010 §4's note about
+`reverse_match_job`'s `allowed_job_ids` filter (`description_parsed IS NOT NULL`, not `status='open'`)
+**partially relevant again**: a status route now exists, so scoping the filter to `status='open'` is no
+longer structurally impossible, but Phase 6 did not itself change `matching_tasks.py`, so the filter is
+still `description_parsed IS NOT NULL` — recorded as a live follow-up, not resolved. Phase 6 touched no
+`stages.py`/`orchestrator.py` scoring code either, so `jd.education.fields` (ADR-009 §7) remains **still
+open**, unaffected.
 
 **Phase 5 closed ADR-006 §4's redaction-boundary contract in code** (`core/src/services/redaction.py` +
 the redaction-before-DTO-construction ordering in `shortlist_service`/`resume_service`'s blind read
