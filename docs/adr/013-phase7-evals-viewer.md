@@ -12,12 +12,12 @@ web viewer." Every prior phase served the ranking pipeline through direct servic
 raw HTTP (Phase 6); this is the first phase with a human-facing surface, and the first client of Phase 6's
 routes other than a test.
 
-Built on branch `feat/phase-7-evals-viewer`, off `main` @ `e910669` (Phase 6's merge), HEAD `92ca4ae`.
-Commit chain: `55ee0a0` docs (interim HANDOFF/plan stamp) → `942e8f5` red (failing tests for the viewer,
-the api client, and the gate-scope meta-test) → `f28c22e` green (the viewer + client + gate-scope fix) →
-`92ca4ae` refactor/fix (post-review findings closed). All three merge-blocking gates are green on `92ca4ae`
-(reviewer APPROVE, security PASS, ranking-evals PASS). **Phase 7 is gate-green and pre-PR — a PR opens
-after a human check-in.** Do not read this ADR as recording a merged state.
+Built on branch `feat/phase-7-evals-viewer`, off `main` @ `e910669` (Phase 6's merge), pre-merge HEAD
+`92ca4ae`. Commit chain: `55ee0a0` docs (interim HANDOFF/plan stamp) → `942e8f5` red (failing tests for the
+viewer, the api client, and the gate-scope meta-test) → `f28c22e` green (the viewer + client + gate-scope
+fix) → `92ca4ae` refactor/fix (post-review findings closed). All three merge-blocking gates were green on
+`92ca4ae` (reviewer APPROVE, security PASS, ranking-evals PASS). **MERGED via PR #16 (squash `1039e5c`),
+2026-07-17.** Branch `feat/phase-7-evals-viewer` is deleted (local + remote).
 
 The plan's Phase 7 row also named "ranking-quality fixtures (precision@k, evidence-verification rate)" —
 see §4 below for why that shipped no new code this phase.

@@ -1,10 +1,11 @@
 # Phase 7 — Evals + minimal Flask viewer
 
-**Status:** built and gate-green on branch `feat/phase-7-evals-viewer`, off `main` @ `e910669` (Phase 6's
-merge), tip `92ca4ae`. **All three merge-blocking gates green (reviewer APPROVE, security PASS,
-ranking-evals PASS).** Opened as PR #16. **Post-review addition (2026-07-17): the live end-to-end eval
+**Status:** MERGED to `main` via PR #16 (squash `1039e5c`), 2026-07-17, CI green. Built on branch
+`feat/phase-7-evals-viewer`, off `main` @ `e910669` (Phase 6's merge), pre-merge tip `92ca4ae` (branch now
+deleted, local + remote). **All three merge-blocking gates were green (reviewer APPROVE, security PASS,
+ranking-evals PASS).** **Post-review addition (2026-07-17): the live end-to-end eval
 against the real stack — originally deferred (ADR-013 §5) — was reversed, built, run, and PASSED,
-reproduced identically twice, and made a prerequisite for merging PR #16.** See "Live end-to-end eval
+reproduced identically twice, and was a prerequisite for merging PR #16.** See "Live end-to-end eval
 (post-review addition)" below.
 
 This phase ships the last v1-scope item from `docs/EXTRACTION_PLAN.md`'s locked decisions: a minimal

@@ -11,6 +11,13 @@ Extract the **resume-ranking feature** from `C:\repos\hris` into a bare-essentia
 | 3 | Graph store | **Keep Neo4j** — load-bearing for vector recall (stage 1) + skill-graph scoring (stage 2); already in the template |
 | 4 | v1 scope | Include cover-letter/motivation, reverse-match, a minimal web viewer, and **blind-review redaction ON by default** (reveal is opt-in + audited) |
 
+**v1 complete (2026-07-17).** All four decisions above are delivered and merged to `main`, CI green:
+template-first port (Phases 0–2), filesystem `BlobStore` (Phase 1), Neo4j kept as the graph/vector store
+(Phases 0, 4b), and full v1 scope — cover-letter/motivation (Phase 3/4c), reverse-match (Phase 4d/6/7),
+the minimal read-only Flask viewer (Phase 7), and blind-by-default redaction (Phase 5) — all shipped. The
+phased build below (Phases 0–7) is entirely done; there is no Phase 8. See "Current status & next step"
+below for the merge trail and `HANDOFF.md`'s "Next session" section for what a human could scope next.
+
 ## What we keep vs cut
 
 **KEEP (port):** parsing (`extract`/`chunk`, PyMuPDF/python-docx), LLM client + Redis embed cache, the 4-stage matching engine (`orchestrator`/`stages`), `MatchWeights`, PII encryption (`pii.py`, pgcrypto), display-time redaction (`redaction.py`), trimmed `shortlist_service` (persist/list/get/export), exports (csv / evidence-csv / json with `reveal`), schemas (`resumes`, `matching` minus review types, `jobs`), the arq jobs `parse_job` / `parse_resume` / `project_to_graph` / `shortlist_job` / `reverse_match_job`, Neo4j bootstrap (4× 768-d cosine indexes + skill graph).
@@ -67,7 +74,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — CLOSED, see below.** | ✅ done — **MERGED via PR #13**, merge `5945320`, CI green, tip `6c2bf43`, 2 commits, off `main` @ `fd12d1a`. [activity](activity/phase-4d-shortlist-writepath.md) |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — **MERGED via PR #14**, merge `6deade3`, CI green, tip `02af27c`, 6 commits (three RED→GREEN cycles: initial build, cover-letter-chunks security fix, `original_filename` de-anonymization fix), off `main` @ `5945320`. [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
 | **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — **MERGED via PR #15**, squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`. [PR #15](https://github.com/humanaxiom/recruiter-assistant/pull/15) · [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate) — **already satisfied by 4a/4c, no new fixtures shipped as part of the viewer build**; minimal read-only Flask viewer (blind-only, no reveal control); **live end-to-end eval — built, run, PASS (post-review addition, 2026-07-17), now a merge prerequisite** | ✅ done — **gate-green, opened as PR #16 (CI running); live eval PASSED, reproduced twice** on `feat/phase-7-evals-viewer`, tip `92ca4ae` + post-review addition, off `main` @ `e910669` (Phase 6's merge). [PR #16](https://github.com/humanaxiom/recruiter-assistant/pull/16) · [activity](activity/phase-7-evals-viewer.md) · [ADR-013](adr/013-phase7-evals-viewer.md) |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate) — **already satisfied by 4a/4c, no new fixtures shipped as part of the viewer build**; minimal read-only Flask viewer (blind-only, no reveal control); **live end-to-end eval — built, run, PASS (post-review addition, 2026-07-17), was a merge prerequisite** | ✅ done — **MERGED via PR #16**, squash merge `1039e5c`, CI green, merged 2026-07-17, pre-merge tip `92ca4ae`, off `main` @ `e910669` (Phase 6's merge). [PR #16](https://github.com/humanaxiom/recruiter-assistant/pull/16) · [activity](activity/phase-7-evals-viewer.md) · [ADR-013](adr/013-phase7-evals-viewer.md) |
 
 ## Subagent structure
 
@@ -82,10 +89,20 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of 2026-07-17 — Phases 0–6 are merged to `main`, CI green** (Phase 4, Ranking engine, split into 4
+**v1 complete as of 2026-07-17 — Phases 0–7 are ALL merged to `main`, CI green.** This is the plan's last
+row (see the phase table above); the four locked decisions at the top of this document are all delivered:
+template-first port done, filesystem `BlobStore` replaces MinIO, Neo4j kept and load-bearing, and v1 scope
+(cover-letter/motivation, reverse-match, the minimal Flask viewer, blind-review-by-default redaction) all
+shipped. **There is no Phase 8.** Any further work is a follow-up chore that needs a human to scope it —
+see `HANDOFF.md`'s "Next session" section for the current list of candidates (the open
+`jd.education.fields` decision, the deferred connectors feature, the no-advisory-lock gap, at-rest
+cleartext PII posture before multi-tenant, and others).
+
+(Phase 4, Ranking engine, split into 4
 gated sub-phases, planner pass 2026-07-12, **all four now merged**; Phase 5, persist + anonymize +
-export, merged via PR #14; **Phase 6, API routes, merged via PR #15, squash merge `e910669`**). **Phase 7
-(read-only Flask viewer + gate-scope fix) is COMPLETE and gate-green — opened as PR #16, CI running** — see below.
+export, merged via PR #14; Phase 6, API routes, merged via PR #15, squash merge `e910669`; **Phase 7
+(read-only Flask viewer + gate-scope fix + live end-to-end eval) is COMPLETE and MERGED via PR #16, squash
+merge `1039e5c`, 2026-07-17**) — see below.
 Sub-phase **4a (evals corpus) is COMPLETE and
 MERGED to `main`**
 via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking gates green; corpus = 16
@@ -119,16 +136,19 @@ stand-in inside the gated unit suite — it never calls a live Ollama endpoint, 
 here and elsewhere calling this "a live `run_evals.py` re-measurement against Ollama" was inaccurate and
 is corrected as of Phase 7 — see below.)
 See [activity/phase-6-api-routes.md](activity/phase-6-api-routes.md) and
-[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is now DONE
-and gate-green, opened as PR #16 (CI running)**, on branch `feat/phase-7-evals-viewer` (off `main` @
-`e910669`, tip `92ca4ae`) — all three merge-blocking gates green (reviewer APPROVE, security PASS,
-ranking-evals PASS). Phase 7 shipped the viewer only; the plan's Phase 7 evals-fixtures line item was
-already satisfied by 4a (corpus) + 4c (live orchestrator wiring). **Post-review addition (2026-07-17): the
-live end-to-end eval, previously recorded as deferred, was reversed, built, run, and PASSED (reproduced
-identically twice), and is now a prerequisite for merging PR #16** — see below and
+[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is now MERGED
+to `main` via PR #16, squash merge `1039e5c`, CI green, merged 2026-07-17**, built on branch
+`feat/phase-7-evals-viewer` (off `main` @ `e910669`, pre-merge tip `92ca4ae`, branch now deleted local +
+remote) — all three merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS).
+Phase 7 shipped the viewer only; the plan's Phase 7 evals-fixtures line item was already satisfied by 4a
+(corpus) + 4c (live orchestrator wiring). **Post-review addition (2026-07-17): the live end-to-end eval,
+previously recorded as deferred, was reversed, built, run, and PASSED (reproduced identically twice), and
+was a prerequisite for merging PR #16** — see below and
 [activity/phase-7-evals-viewer.md](activity/phase-7-evals-viewer.md)
-and [ADR-013](adr/013-phase7-evals-viewer.md). **This is the last row in the phase table above** — once
-Phase 7's PR is reviewed, gated in CI, and merged, the plan's locked v1 scope is complete. Each sub-phase
+and [ADR-013](adr/013-phase7-evals-viewer.md). **This is the last row in the phase table above, and it is
+now merged: the plan's locked v1 scope is COMPLETE.** All seven phases (0–7) are merged to `main`, CI
+green. There is no Phase 8 — any further work is a follow-up chore for a human to scope (see
+`HANDOFF.md`'s "Next session" section). Each sub-phase
 ran on its own branch/PR with the full reviewer/security/ranking-evals gate before the next started. The
 split mirrors Phases 0–3's one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit
 rounds even scoped tighter), and 4b/4c/5/6 carry the security-sensitive PII-boundary + scoring-correctness
