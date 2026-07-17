@@ -209,13 +209,13 @@ persistence asymmetry, and the PII residual. **Phase 5 (persist + anonymize + ex
 `original_filename` residual. **Phase 6 (API routes — job create/read/list/status, résumé
 upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and
 gate-green on branch `feat/phase-6-api-routes`** (off `main` @ `6deade3`, HEAD `837de9e`) — all three
-merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); **NOT yet opened as a
-PR — awaiting a human check-in before opening one.** See "Phase 6 status" below for the auth switch, the
+merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **Human check-in
+received 2026-07-17; opened as PR #15** (https://github.com/humanaxiom/recruiter-assistant/pull/15) —
+CI (`gates-all`) running, merge held for a human go-ahead. See "Phase 6 status" below for the auth switch, the
 upload/zip scope, the status-transition route, the reverse-match-no-redaction decision, the security
 hardening (SEC-1/2/4), and the `pool.py` latent-bug fix. **Your next action is Phase 7 (ranking-quality
-evals fixtures + a minimal read-only Flask viewer — see the plan table), once Phase 6 is reviewed, PR'd,
-and merged.** Confirm Phase 6's merge status with the human first (it is currently pre-PR, on its own
-branch).
+evals fixtures + a minimal read-only Flask viewer — see the plan table), once Phase 6's PR #15 is
+reviewed and merged.** Confirm PR #15's merge status with the human first (`gh pr view 15`).
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -464,7 +464,7 @@ fixed); no advisory lock on concurrent shortlist/reverse-match runs (ADR-010 §1
 ships a user-facing regenerate route; CSV formula/injection in `shortlist_csv`/`shortlist_evidence_csv` —
 accepted for v1, one-line fix noted.
 
-### Phase 6 status — DONE, gate-green, pre-PR — read this before starting Phase 7
+### Phase 6 status — DONE, gate-green, PR #15 OPEN (CI running) — read this before starting Phase 7
 
 `core/src/api/deps.py` (new — `require_api_key`/`resolve_actor`/`get_arq`/`log_auth_mode`),
 `core/src/api/routes/{jobs,resumes,shortlist}.py` (new — 11 routes), `core/src/services/zip_upload.py`
@@ -475,8 +475,10 @@ mid-build after a session-limit interruption) → RED `1f2b161` → GREEN `344f6
 security hardening + exact `fastapi`/`starlette`/`python-multipart` pins) → RED `c75f4a7` → GREEN
 `837de9e` (non-ASCII `X-API-Key` 401 generalization + upload file-count-ordering regression pin). **All
 three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS) — re-verified
-after the security-hardening round.** **NOT yet opened as a PR — awaiting a human check-in before opening
-one.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) has not run. Full
+after the security-hardening round.** **Opened as PR #15
+(https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after the human check-in;
+merge held for go-ahead.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama)
+is running on the PR. Full
 write-up: [docs/activity/phase-6-api-routes.md](docs/activity/phase-6-api-routes.md); decisions +
 residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.md).
 
@@ -621,10 +623,11 @@ session-limit interruption) -> red 1f2b161 -> green 344f6bf (SEC-1/SEC-2/SEC-4
 security hardening + exact fastapi/starlette/python-multipart pins) -> red
 c75f4a7 -> green 837de9e (non-ASCII X-API-Key 401 generalization + upload
 file-count-ordering regression pin). **All three merge-blocking gates green
-(reviewer APPROVE, security PASS, ranking-evals PASS) — NOT yet opened as a
-PR, NOT merged; a PR opens only after a human check-in.** CI (gates-all, incl.
-a live run_evals.py re-measurement against Ollama) has NOT run yet since no PR
-exists. Full detail: docs/activity/phase-6-api-routes.md and
+(reviewer APPROVE, security PASS, ranking-evals PASS). Opened as PR #15
+(https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after
+the human check-in; merge held for a human go-ahead.** CI (gates-all, incl.
+a live run_evals.py re-measurement against Ollama) is running on PR #15. Full
+detail: docs/activity/phase-6-api-routes.md and
 docs/adr/012-api-routes-auth-upload-scope.md.
 
 **Phase 6 shipped src/api/deps.py (new — require_api_key/resolve_actor/
@@ -661,8 +664,8 @@ byte-unchanged).
 read-only Flask viewer)** — NOT the evals corpus (done), NOT graph projection
 (done), NOT the matching engine (done), NOT the write path (done, merged), NOT
 persist+anonymize+export (done, merged), NOT API routes (done, gate-green,
-awaiting PR). A PR for Phase 6 opens after a human check-in; CI (gates-all) is
-pending on it. Once Phase 6 is merged, Phase 7 ships the precision@k /
+PR #15 OPEN with CI running). Confirm PR #15's merge status (gh pr view 15)
+before building on it. Once Phase 6 is merged, Phase 7 ships the precision@k /
 evidence-verification-rate fixture harness (already partially live via 4c's
 run_evals.py wiring) and the minimal Flask viewer (read-only, consumes the
 Phase 6 routes). Run the per-phase subagent loop (planner -> tester ->
