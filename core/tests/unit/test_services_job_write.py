@@ -44,7 +44,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from src.errors import NotFoundError
-from src.schemas.jobs import JobCreate, JobListItem, JobOut
+from src.schemas.jobs import JobCreate, JobListItem, JobOut, JobUpdate
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
 
@@ -326,3 +326,117 @@ async def test_transition_status_raises_not_found_for_a_missing_job() -> None:
     conn.fetchval = AsyncMock(return_value=None)
     with pytest.raises(NotFoundError):
         await job_service.transition_status(conn, uuid4(), "open")
+
+
+# ── update_job — general partial-update endpoint ────────────────────────────
+#
+# ``JobUpdate`` (src/schemas/jobs.py) has every field optional and a PATCH
+# omit (field unset) must mean "unchanged", NOT "set to null" — this is why
+# the implementation MUST build its SET clause from
+# ``payload.model_dump(exclude_unset=True)``, never from the model's full
+# field set (which would stamp every unset field to None/its default and
+# clobber the row). ``blind_review`` is the sharpest case: it is a bool, so
+# ``False`` is a legitimate value a client sends on purpose and must be
+# distinguishable from "omitted".
+
+
+@pytest.mark.asyncio
+async def test_update_job_partial_update_only_touches_sent_fields() -> None:
+    """Only ``title`` was sent — the SQL args must carry the new title but
+    must NOT carry any other JobUpdate field name/value pair."""
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="New Title"))
+    await job_service.update_job(
+        conn, job_id, JobUpdate.model_validate({"title": "New Title"})
+    )
+    query, *args = conn.fetchrow.await_args.args
+    assert "New Title" in args
+    assert "title" in query.lower()
+    # Only the job_id + the one changed value should be bound — no other
+    # JobUpdate field (department, location, ...) leaks into the args.
+    assert len(args) == 2  # job_id, "New Title"
+
+
+@pytest.mark.asyncio
+async def test_update_job_blind_review_flip_true_to_false() -> None:
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, blind_review=False))
+    out = await job_service.update_job(
+        conn, job_id, JobUpdate.model_validate({"blind_review": False})
+    )
+    assert out.blind_review is False
+    query, *args = conn.fetchrow.await_args.args
+    assert False in args
+    assert "blind_review" in query.lower()
+
+
+@pytest.mark.asyncio
+async def test_update_job_blind_review_flip_false_to_true() -> None:
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, blind_review=True))
+    out = await job_service.update_job(
+        conn, job_id, JobUpdate.model_validate({"blind_review": True})
+    )
+    assert out.blind_review is True
+    query, *args = conn.fetchrow.await_args.args
+    assert True in args
+
+
+@pytest.mark.asyncio
+async def test_update_job_omitted_blind_review_leaves_it_unchanged() -> None:
+    """Sending only ``title`` must NOT assign ``blind_review`` in the SQL SET
+    clause, proving the implementation reads ``exclude_unset`` rather than
+    the full model (which would otherwise stamp ``blind_review=None`` over
+    the row). ``blind_review`` may still legitimately appear elsewhere in the
+    query (e.g. a ``RETURNING`` column list needed to rebuild the ``JobOut``)
+    — only an *assignment* to it is forbidden here."""
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="New Title"))
+    await job_service.update_job(
+        conn, job_id, JobUpdate.model_validate({"title": "New Title"})
+    )
+    query = conn.fetchrow.await_args.args[0]
+    assert "blind_review =" not in query.lower()
+    assert "blind_review=" not in query.lower()
+
+
+@pytest.mark.asyncio
+async def test_update_job_raises_not_found_for_missing_id() -> None:
+    from src.services import job_service
+
+    conn = _mock_conn(fetchrow=None)
+    with pytest.raises(NotFoundError):
+        await job_service.update_job(
+            conn, uuid4(), JobUpdate.model_validate({"title": "New Title"})
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_job_empty_payload_is_a_noop_returning_current_row() -> None:
+    """No fields sent at all — the service must not error, and must return
+    the CURRENT row (fetched via a plain SELECT / get_job path, never an
+    UPDATE with an empty SET clause, which is invalid SQL)."""
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="Unchanged Title"))
+    out = await job_service.update_job(conn, job_id, JobUpdate())
+    assert out.id == job_id
+    assert out.title == "Unchanged Title"
+
+
+@pytest.mark.asyncio
+async def test_update_job_empty_payload_missing_id_still_raises_not_found() -> None:
+    from src.services import job_service
+
+    conn = _mock_conn(fetchrow=None)
+    with pytest.raises(NotFoundError):
+        await job_service.update_job(conn, uuid4(), JobUpdate())

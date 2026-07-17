@@ -260,6 +260,73 @@ async def test_patch_job_status_rejects_an_invalid_transition() -> None:
     assert resp.status_code == 409
 
 
+# ── PATCH /jobs/{id} — general partial update ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_patch_job_returns_200_with_updated_jobout() -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="Updated Title"))
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"title": "Updated Title"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Updated Title"
+
+
+@pytest.mark.asyncio
+async def test_patch_job_404_for_missing_job() -> None:
+    conn = _mock_conn(fetchrow=None)
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{uuid4()}", json={"title": "New Title"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_patch_job_422_rejects_status_field() -> None:
+    """``status`` has its own state-machine-guarded transition endpoint —
+    it must not be smuggled through the general PATCH. ``JobUpdate`` has no
+    ``status`` field at all, so pydantic's ``extra="forbid"`` rejects it with
+    a 422 before the route body is ever handled."""
+    conn = _mock_conn(fetchrow=_job_row())
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{uuid4()}", json={"status": "open"})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_job_422_rejects_approval_required_2nd_review_field() -> None:
+    """A cut hris column must not be smuggled in through extra="forbid"."""
+    conn = _mock_conn(fetchrow=_job_row())
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(
+            f"/jobs/{uuid4()}", json={"approval_required_2nd_review": True}
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_job_requires_auth_like_sibling_routes() -> None:
+    """Same router-level ``require_api_key`` dependency as every other route
+    on this router — remove the override and a 401/403 must surface."""
+    from fastapi import HTTPException
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id))
+    app = _build_app(conn)
+
+    def _deny() -> None:
+        raise HTTPException(status_code=401, detail="missing api key")
+
+    app.dependency_overrides[require_api_key] = _deny
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"title": "X"})
+    assert resp.status_code == 401
+
+
 # ── POST /jobs/jd-extract ────────────────────────────────────────────────
 
 
