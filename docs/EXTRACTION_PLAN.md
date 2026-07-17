@@ -60,8 +60,8 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | &nbsp;&nbsp;**4c · Matching engine** | `stages` (pure scoring fns) + `orchestrator` (stage 1–4) + `MatchWeights` settings wiring (`weights_from_settings`) + `shortlist_evidence_v1`/`_v2` prompts — opus-tier; first real `ranking-evals` gate. **Carried-forward determinism requirement (4a hardening F1): pin `seed`** on the eval path (`llm/client.py` passes only `temperature`/`num_predict` to Ollama today, and greedy decode is not bit-stable across batch/kv-cache splits) **and specify the embedding-cache state across the two determinism runs** (`llm/cache.py` caches by text hash, so a warm-Redis repeat run compares the *cache* to itself, not the model to itself, and the check passes vacuously). Ranking-**order** stability (`max_rank_delta = 0`) is the zero-tolerance invariant; `score_final` compares at `max_score_delta = 1e-9`. **All four 4b→4c blockers closed** (`missing_must` keyed off `ontology_weight == 0`; must-have-miss + recency skill-dimension twins added; `canonical_name`→`canonical_key` renamed) — see "4b → 4c BLOCKERS" below (CLOSED) and [ADR-009](adr/009-matching-engine-port.md). | ✅ done — **MERGED via PR #12**, merge `fd12d1a`, CI green, tip `ed4a142`, 6 commits, off `main` @ `68fe821`. [activity](activity/phase-4c-matching-engine.md) |
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — CLOSED, see below.** | ✅ done — **MERGED via PR #13**, merge `5945320`, CI green, tip `6c2bf43`, 2 commits, off `main` @ `fd12d1a`. [activity](activity/phase-4d-shortlist-writepath.md) |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — **MERGED via PR #14**, merge `6deade3`, CI green, tip `02af27c`, 6 commits (three RED→GREEN cycles: initial build, cover-letter-chunks security fix, `original_filename` de-anonymization fix), off `main` @ `5945320`. [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
-| **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — gate-green on branch `feat/phase-6-api-routes`, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`, 2026-07-16. **PR #15 OPEN (2026-07-17), CI running — merge held for human go-ahead.** [PR #15](https://github.com/humanaxiom/recruiter-assistant/pull/15) · [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | not started — **next sub-phase, once Phase 6 is reviewed and merged** |
+| **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — **MERGED via PR #15**, squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`. [PR #15](https://github.com/humanaxiom/recruiter-assistant/pull/15) · [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | in progress — **active sub-phase on `feat/phase-7-evals-viewer`** (Phase 6 merged via PR #15, merge `e910669`) |
 
 ## Subagent structure
 
@@ -102,15 +102,16 @@ RED→GREEN cycles (initial build; a HIGH `cover_letter_chunks` PII-leak securit
 `original_filename` de-anonymization residual fix), off `main` @ `5945320`. See
 [activity/phase-5-persist-anonymize-export.md](activity/phase-5-persist-anonymize-export.md) and
 [ADR-011](adr/011-display-redaction-read-export-boundary.md). **Phase 6 (API routes) is COMPLETE and
-gate-green** on branch `feat/phase-6-api-routes`, tip `837de9e`, 6 commits across three RED→GREEN cycles
-(initial routes; SEC-1/SEC-2/SEC-4 security hardening + exact `fastapi`/`starlette`/`python-multipart`
-pins; a non-ASCII-`X-API-Key` 401 generalization + upload file-count-ordering regression pin), off
-`main` @ `6deade3` — **all three merge-blocking gates green (reviewer APPROVE, security PASS,
-ranking-evals PASS); NOT yet opened as a PR, NOT merged — awaiting a human check-in before opening
-one.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists.
+MERGED to `main` via PR #15** (squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17),
+tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes; SEC-1/SEC-2/SEC-4 security
+hardening + exact `fastapi`/`starlette`/`python-multipart` pins; a non-ASCII-`X-API-Key` 401
+generalization + upload file-count-ordering regression pin), off `main` @ `6deade3` — **all three
+merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI
+(`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) went fully green before merge.**
 See [activity/phase-6-api-routes.md](activity/phase-6-api-routes.md) and
-[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is the next
-sub-phase to build**, once Phase 6 is reviewed and merged; each sub-phase runs on its own branch/PR
+[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is now the
+active sub-phase**, being built on branch `feat/phase-7-evals-viewer` (off `main` @ `e910669`); each
+sub-phase runs on its own branch/PR
 with the full reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
 one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
 tighter), and 4b/4c/5/6 carry the security-sensitive PII-boundary + scoring-correctness + HTTP-surface,
