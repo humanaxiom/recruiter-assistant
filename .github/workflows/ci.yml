@@ -40,9 +40,9 @@ jobs:
           cache: pip
           cache-dependency-path: core/requirements*.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: ruff check src tests
-      - run: black --check src tests
-      - run: mypy src --strict
+      - run: ruff check src tests frontend
+      - run: black --check src tests frontend
+      - run: mypy src frontend --strict
 
   # ─── Gates 4 & 6: Unit tests + Coverage ─────────────────────────────────
   unit:
@@ -61,7 +61,7 @@ jobs:
       - name: Unit tests with coverage gate
         run: |
           pytest tests/unit \
-            --cov=src --cov-report=xml --cov-report=term-missing \
+            --cov=src --cov=frontend --cov-report=xml --cov-report=term-missing \
             --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
             --timeout=120 -v
       - uses: actions/upload-artifact@v4

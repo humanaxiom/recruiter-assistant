@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }}{% endblock %}
+{% block content %}
+<h2>{{ job.title }}</h2>
+<p>{{ job.department }} — {{ job.status }}</p>
+<p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">Shortlist</a></p>
+
+<h3>Resumes</h3>
+<ul>
+  {% for resume in resumes %}
+  <li><a href="{{ url_for('resume_detail', resume_id=resume.id) }}">{{ resume.original_filename }}</a></li>
+  {% else %}
+  <li>No resumes uploaded yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}
