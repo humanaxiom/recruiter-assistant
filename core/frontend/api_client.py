@@ -50,6 +50,22 @@ class BackendUnavailable(BackendError):  # noqa: N818 — same rationale as
     """The backend responded 5xx, or the connection itself failed."""
 
 
+class BadRequest(BackendError):  # noqa: N818 — matches the `NotFound` /
+    # `BackendUnavailable` naming convention (subclasses `BackendError`, which
+    # already carries the "Error" suffix).
+    """The backend rejected the request with a 4xx (e.g. 422 validation).
+
+    Carries the backend ``status_code`` and its parsed ``detail`` body so the
+    Flask route layer can re-render the offending form with a friendly message
+    and the recruiter's inputs intact (no data loss).
+    """
+
+    def __init__(self, message: str, *, status_code: int, detail: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+
+
 def build_client() -> httpx.Client:
     """Build an ``httpx.Client`` bound to ``settings.api_base_url``.
 
@@ -86,6 +102,17 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise BackendUnavailable(
             f"backend {response.status_code}: {response.request.url}"
         )
+    if response.status_code >= 400:
+        detail: Any
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text
+        raise BadRequest(
+            f"backend {response.status_code}: {response.request.url}",
+            status_code=response.status_code,
+            detail=detail,
+        )
 
 
 def _request(
@@ -93,12 +120,16 @@ def _request(
     path: str,
     *,
     params: dict[str, Any] | None = None,
+    json: Any | None = None,
+    files: Any | None = None,
     client: httpx.Client | None = None,
 ) -> httpx.Response:
     active, owns_it = _client_or_default(client)
     try:
         try:
-            response = active.request(method, path, params=params)
+            response = active.request(
+                method, path, params=params, json=json, files=files
+            )
         except httpx.ConnectError as exc:
             raise BackendUnavailable(f"connection failed: {exc}") from exc
         _raise_for_status(response)
@@ -119,6 +150,26 @@ def list_jobs(
     if status is not None:
         params["status"] = status
     response = _request("GET", "/jobs", params=params, client=client)
+    return response.json()
+
+
+def create_job(payload: dict[str, Any], *, client: httpx.Client | None = None) -> Any:
+    """POST /jobs (JSON ``JobCreate``). A backend 422 surfaces as
+    ``BadRequest`` so the route can re-render the form with inputs intact."""
+    response = _request("POST", "/jobs", json=payload, client=client)
+    return response.json()
+
+
+def extract_jd(
+    filename: str,
+    content: bytes,
+    content_type: str,
+    *,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/jd-extract (multipart ``file=``) → ``{filename,text,chars}``."""
+    files = {"file": (filename, content, content_type)}
+    response = _request("POST", "/jobs/jd-extract", files=files, client=client)
     return response.json()
 
 
@@ -180,8 +231,11 @@ __all__ = [
     "BackendError",
     "NotFound",
     "BackendUnavailable",
+    "BadRequest",
     "build_client",
     "list_jobs",
+    "create_job",
+    "extract_jd",
     "get_job",
     "list_resumes",
     "list_shortlist",

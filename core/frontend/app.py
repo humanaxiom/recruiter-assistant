@@ -16,7 +16,15 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from flask import Flask, Response, abort, render_template
+from flask import (
+    Flask,
+    Response,
+    abort,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from frontend import api_client
 from src.settings import get_settings
@@ -36,13 +44,104 @@ def _unavailable(exc: api_client.BackendUnavailable) -> Any:
     return render_template("error.html"), 503
 
 
+_JOB_STATUSES = ("draft", "open", "closed", "archived")
+
+
 @app.get("/")
 def index() -> Any:
+    status = request.args.get("status") or None
     try:
-        jobs = api_client.list_jobs()
+        jobs = api_client.list_jobs(status=status)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("index.html", jobs=jobs)
+    return render_template(
+        "index.html",
+        jobs=jobs,
+        statuses=_JOB_STATUSES,
+        status_filter=status,
+        form={},
+        errors=None,
+        show_form=False,
+    )
+
+
+def _job_create_payload(form: Any) -> dict[str, Any]:
+    """Build the ``JobCreate`` dict from the submitted form. Empty optional
+    fields collapse to ``None``; the Blind-review checkbox is present in the
+    form IFF checked (default checked) — absence means the recruiter opted
+    out."""
+    min_years_raw = (form.get("min_years") or "").strip()
+    min_years: int | None
+    try:
+        min_years = int(min_years_raw) if min_years_raw else None
+    except ValueError:
+        min_years = None
+    return {
+        "title": (form.get("title") or "").strip(),
+        "department": (form.get("department") or "").strip() or None,
+        "location": (form.get("location") or "").strip() or None,
+        "min_years": min_years,
+        "description_raw": form.get("description_raw") or "",
+        "blind_review": "blind_review" in form,
+    }
+
+
+@app.post("/jobs/jd-extract")
+def jd_extract() -> Any:
+    """Proxy a JD upload to the backend extractor and return the extracted
+    text as the HTMX swap fragment that prefills the ``#description``
+    textarea."""
+    upload = request.files.get("file")
+    if upload is None:
+        abort(400)
+    try:
+        result = api_client.extract_jd(
+            upload.filename or "upload",
+            upload.read(),
+            upload.content_type or "application/octet-stream",
+        )
+    except api_client.BadRequest:
+        return "Could not extract text from this file.", 200
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return str(result.get("text", ""))
+
+
+@app.post("/jobs")
+def create_job() -> Any:
+    payload = _job_create_payload(request.form)
+    try:
+        job = api_client.create_job(payload)
+    except api_client.BadRequest as exc:
+        try:
+            jobs = api_client.list_jobs()
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        return (
+            render_template(
+                "index.html",
+                jobs=jobs,
+                statuses=_JOB_STATUSES,
+                status_filter=None,
+                form=request.form,
+                errors=_format_error(exc.detail),
+                show_form=True,
+            ),
+            200,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("job_detail", job_id=job["id"]))
+
+
+def _format_error(detail: Any) -> str:
+    """Render a backend validation ``detail`` into a short human message."""
+    if detail is None:
+        return "Please correct the highlighted fields and try again."
+    if isinstance(detail, dict):
+        inner = detail.get("detail", detail)
+        return str(inner)
+    return str(detail)
 
 
 @app.get("/jobs/<uuid:job_id>")
