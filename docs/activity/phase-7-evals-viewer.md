@@ -2,7 +2,10 @@
 
 **Status:** built and gate-green on branch `feat/phase-7-evals-viewer`, off `main` @ `e910669` (Phase 6's
 merge), tip `92ca4ae`. **All three merge-blocking gates green (reviewer APPROVE, security PASS,
-ranking-evals PASS).** NOT yet opened as a PR — a PR opens after a human check-in.
+ranking-evals PASS).** Opened as PR #16. **Post-review addition (2026-07-17): the live end-to-end eval
+against the real stack — originally deferred (ADR-013 §5) — was reversed, built, run, and PASSED,
+reproduced identically twice, and made a prerequisite for merging PR #16.** See "Live end-to-end eval
+(post-review addition)" below.
 
 This phase ships the last v1-scope item from `docs/EXTRACTION_PLAN.md`'s locked decisions: a minimal
 read-only web viewer over the Phase 6 HTTP API. It is the first phase with a human-facing surface and the
@@ -92,13 +95,16 @@ Re-verification on `92ca4ae`: reviewer **APPROVE**, security **PASS** (both find
 4. No new evals fixtures this phase — the plan's Phase 7 evals line item (precision@k, evidence-verification
    rate) was already satisfied by Phase 4a (corpus) + 4c (live orchestrator wiring); `run_evals.py::main()`
    already runs inside the gated unit suite.
-5. Live end-to-end eval (real API → Postgres/Neo4j/Ollama, re-measuring `thresholds.toml` against
-   persisted shortlist rows) deferred — needs a reachable host Ollama + `docker compose up`, which CI does
-   not provide by design. Recorded as a follow-up, not built.
+5. Live end-to-end eval (real pipeline, re-measuring `thresholds.toml` against persisted shortlist rows)
+   was recorded here as deferred, needing a reachable host Ollama + `docker compose up`, which CI does not
+   provide by design. **Reversed 2026-07-17**: the human un-deferred it and made it a prerequisite for
+   merging PR #16 — built, run, and PASSED, reproduced twice. See "Live end-to-end eval (post-review
+   addition)" above and ADR-013 §5.
 6. Corrected a recurring documentation inaccuracy: prior HANDOFF/plan text said CI runs "a live
    `run_evals.py` re-measurement against Ollama." CI runs the offline deterministic stand-in harness inside
    the unit suite; it never calls Ollama (`.github/workflows/ci.yml`'s own comment: "CI never calls a model
-   endpoint; inference is host-only by design"). Corrected wherever it appeared.
+   endpoint; inference is host-only by design"). Corrected wherever it appeared. This remains accurate — the
+   live eval added in item 5 above runs as a separate script, outside CI, not inside the gated unit suite.
 
 ## Evals workstream — confirmed already built, not re-verified from scratch this phase
 
@@ -107,8 +113,11 @@ Re-verification on `92ca4ae`: reviewer **APPROVE**, security **PASS** (both find
 - Phase 4c (`run_evals.py`): live orchestrator wiring — `precision@5 = 1.0`, `gold_recall = 4/4`, 0 PII
   leaks / 116 inputs scanned, determinism exact, all six mutation obligations FAIL as required — merged
   before this phase.
-- Phase 7 touched neither directory. `run_evals.py::main()` continues to run inside `pytest tests/unit`
-  (part of the 2229-test count below) and continues to exit 0.
+- The viewer build itself (first-green commit `f28c22e` through `92ca4ae`) touched neither directory.
+  `run_evals.py::main()` continues to run inside `pytest tests/unit` (part of the 2229-test count below) and
+  continues to exit 0. **Post-review (2026-07-17), `core/tests/evals/` gained one new file**
+  (`run_evals_live.py`, the live end-to-end harness — see "Live end-to-end eval (post-review addition)"
+  above); `run_evals.py` itself is unchanged.
 
 ## Reviewer, security, ranking-evals — verdicts
 
@@ -133,6 +142,9 @@ code byte-unchanged: `stages.py`/`orchestrator.py` untouched by this phase; offl
 - **2229 unit tests @ 91.67% coverage.**
 - Frontend is now format/type/coverage-gated for the first time (previously invisible to every quality
   gate — it is a sibling of `core/src/`, not nested under it).
+- **Post-review update (2026-07-17):** `test_evals_live_metrics.py` (16 new offline unit tests) brings the
+  offline suite to **2245 unit tests @ 91.67% coverage**; ruff/black/mypy remain clean. See "Live end-to-end
+  eval (post-review addition)" above.
 - **All three merge-blocking gates green:** reviewer APPROVE (guard table above), security PASS (both
   findings closed), ranking-evals PASS (no scoring code touched; offline corpus 352 tests green;
   `run_evals.main()` exits 0).
@@ -147,6 +159,74 @@ code byte-unchanged: `stages.py`/`orchestrator.py` untouched by this phase; offl
 - `core/tests/unit/test_gates_cover_frontend.py` (new)
 - `Makefile` (modified — gate-scope widening)
 - `.github/workflows/ci.yml` (modified — gate-scope widening)
+- `core/tests/evals/run_evals_live.py` (new, post-review addition, 2026-07-17 — live end-to-end eval
+  harness against the real stack; see "Live end-to-end eval (post-review addition)" above)
+- `core/tests/unit/test_evals_live_metrics.py` (new, post-review addition, 2026-07-17 — 16 offline tests
+  for the live harness's pure metric layer)
+
+## Live end-to-end eval (post-review addition)
+
+**Reversed 2026-07-17.** ADR-013 §5 originally recorded a live end-to-end eval as deferred — the one
+genuine verification gap Phase 7 left open. After the viewer's own gates went green and PR #16 was opened,
+the human reversed that decision and made a live run a **prerequisite for merging PR #16**. It was then
+built, run, and independently reproduced. Full decision text: [ADR-013 §5](../adr/013-phase7-evals-viewer.md).
+
+**What was built.** `core/tests/evals/run_evals_live.py` (new, 812 lines) drives the 4a/4c corpus through
+the real stack: real `nomic-embed-text` 768-d embeddings, the real Neo4j skill graph, the real
+`shortlist_job` orchestrator, and real Postgres persistence. `core/tests/unit/test_evals_live_metrics.py`
+(new, 16 tests) offline-unit-tests the pure metric layer (`eval_*` functions) against known-bad rankings —
+weak-in-topk, a fabricated surfaced quote, a dropped gold anchor, reversed/tied ordering, a PII leak, score
+drift — asserting each one FAILS. The live orchestration script itself lives under `core/tests/evals/`, not
+`core/tests/unit/`, so `pytest tests/unit` never collects it and CI stays green with no Ollama reachable.
+
+**Design (faithfulness).** The 4a corpus is pre-parsed by design — no raw résumé/JD documents, only
+pre-parsed JSON, because 4a fixed the parsed representation to isolate ranking quality from
+non-deterministic LLM parsing. So the harness does **not** literally "upload the corpus through Phase 6's
+HTTP routes" (ADR-013 §5's original wording) — that would re-introduce parse variance the corpus was built
+to exclude and drift every calibrated threshold. Instead it seeds the corpus at the **post-parse
+boundary**: a `jobs` row + 20 `resumes` rows with `parsed` jsonb, PII encrypted through the real `pii.py`
+path, and `job.parsed`/`resume.parsed` outbox events carrying real `nomic-embed-text` embeddings computed
+through the production embed boundary (with PII redaction applied). From there it drives the real
+`project_to_graph` (Neo4j) → real `shortlist_job` → reads the persisted `shortlist_entries` rows →
+evaluates every gate in `thresholds.toml`. It reuses `run_evals.load_corpus`/`load_thresholds`/`_labels`
+(no duplication) and calls the **real** `stages.verify_evidence` and the **real** redaction functions for
+the anti-fabrication and PII gates, not `run_evals.py`'s offline stand-ins. `project_to_graph`/
+`shortlist_job` ran with a directly-constructed `ctx` (not dequeued off arq/Redis) — identical production
+task code and live dependencies, but the queue hop itself is unexercised. Ran against a remote Ollama with
+the calibrated models (`nomic-embed-text` + `gpt-oss:20b`); the local metal host lacked them.
+
+**Verified results — reproduced identically on two independent runs, exit 0 both times:**
+
+| Gate | Result |
+|---|---|
+| `precision@5` | 1.000 (top-5 all `strong`) |
+| adversarial bait (r09) | ranked 14th, outside k=5 — `must_not_surface`: no offenders |
+| `evidence.verification_rate` | 78/78 = 1.000 |
+| `evidence.min_completeness_in_topk` | 5/5 = 1.000 |
+| `evidence.gold_recall` | 4/4 = 1.000 |
+| `evidence.negative_evidence_must_fail` | 4 fabrications, all scrubbed |
+| `ordering_controls` | education +0.0411, overqual +0.0120, motivation +0.0900, skill_missing_must +0.1460, recency +0.1440 — all pass |
+| `pii.embedding_input_pii_free` | 0 leaks / 20 fixtures |
+| `pii.exported_output_pii_free` | 0 leaks / top-5 |
+| determinism | order identical, `max_rank_delta=0`, `max_score_delta=0` |
+
+The measured ordering gaps track `labels.json`'s arithmetic predictions against a real embedder closely
+(overqual +0.0120 exact; education +0.0411 vs the ~0.0391 predicted) — evidence the real pipeline
+reproduces the calibrated behaviour the corpus's thresholds assume, not just what the offline stand-in
+reproduces.
+
+**Deviations and residuals, recorded honestly:**
+- ADR-013 §5's original literal "HTTP upload" wording is intentionally not followed — see "Design" above.
+- `project_to_graph`/`shortlist_job` ran with a real `ctx` constructed directly, not enqueued on the arq
+  worker — identical production task code + live dependencies, but bypasses the queue hop.
+- The second determinism run used a warm Redis embed cache, so the embedding half of the comparison is
+  cache-vs-itself, not model-vs-itself on a cold cache; `gpt-oss:20b`'s greedy decode is not guaranteed
+  bit-stable, so a nonzero score drift on the generation half would have been a real observation — it
+  measured exactly zero.
+- The `jd.education.fields` open decision (ADR-009 §7) remains unresolved and untouched.
+
+**Gate effect.** Offline suite grew from 2229 to **2245 unit tests @ 91.67% coverage** (+16, the new
+`test_evals_live_metrics.py` tests); ruff/black/mypy remain clean.
 
 ## Carried forward, still unresolved
 
@@ -156,5 +236,7 @@ code byte-unchanged: `stages.py`/`orchestrator.py` untouched by this phase; offl
   `description_parsed IS NOT NULL`, not `status = 'open'`, unaffected by this phase.
 - **No advisory lock on concurrent shortlist/reverse-match runs** (ADR-010 §1, restated ADR-012) — the
   viewer is read-only and triggers no writes, so this is unaffected by Phase 7.
-- **Live end-to-end eval against the real HTTP→Postgres/Neo4j/Ollama path** (ADR-013 §5) — new this phase,
-  deferred, not built. The one genuine verification gap Phase 7 leaves open.
+- **Live end-to-end eval against the real HTTP-adjacent/Postgres/Neo4j/Ollama path** (ADR-013 §5) — no
+  longer a gap. Built, run, and PASSED, reproduced twice — see "Live end-to-end eval (post-review
+  addition)" above. It does not exercise the Phase 6 HTTP upload/parse routes themselves or the arq/Redis
+  queue hop; those remain covered only by Phase 3/4/6's own tests.

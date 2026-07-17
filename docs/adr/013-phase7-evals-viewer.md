@@ -76,16 +76,78 @@ it added zero new evals fixtures, zero changes to `core/tests/evals/`, and zero 
 Recording this explicitly so a future reader does not read the plan's Phase 7 row as an open evals gap:
 that line item was already satisfied two phases ago.
 
-### 5. Live end-to-end eval deferred — a human decision this session
+### 5. Live end-to-end eval — reversed 2026-07-17: built, run, and PASSED
 
-A live run of the 4a/4c corpus through the real API → Postgres/Neo4j/Ollama pipeline (uploading the
-corpus fixtures through Phase 6's HTTP routes and re-checking `thresholds.toml`'s thresholds against
-persisted `shortlist_entries` rows, rather than against the orchestrator called directly) is the one
-genuine gap. Phase 4c proved the corpus passes once, manually, against the orchestrator in isolation; it
-has never been run through the full HTTP-to-Postgres path. This was deferred because it needs a reachable
-host Ollama plus `docker compose up` and cannot run in CI — `.github/workflows/ci.yml`'s integration job
-is explicit about this (line ~104: "CI never calls a model endpoint; inference is host-only by design").
-Recorded here as a documented follow-up, not built this phase.
+Originally recorded here as deferred (see the superseded text below for the original reasoning). The
+human reversed that decision on **2026-07-17**, after PR #16 was opened, and made a live run a
+**prerequisite for merging PR #16**. It has since been built (`core/tests/evals/run_evals_live.py`, new,
+812 lines) and independently reproduced twice against a real stack — **identical PASS both times, exit
+0.**
+
+**Design (faithfulness to the corpus's own contract).** The 4a corpus is pre-parsed by design — 4a fixed
+the parsed representation to isolate ranking quality from non-deterministic LLM parsing, so there are no
+raw résumé/JD documents in the corpus, only pre-parsed JSON. A literal reading of "upload the corpus
+fixtures through Phase 6's HTTP routes" (this section's original wording) is therefore not followed:
+re-running the corpus through the LLM parse step would inject parse variance the corpus was deliberately
+built to exclude, drifting every calibrated threshold in `thresholds.toml`. Instead, the harness seeds the
+pre-parsed corpus at the **post-parse boundary** — a `jobs` row + 20 `resumes` rows with `parsed` jsonb,
+PII encrypted via the real `pii.py` path, and `job.parsed`/`resume.parsed` outbox events carrying **real**
+`nomic-embed-text` embeddings computed through the production embed boundary (with PII redaction) — then
+drives the real `project_to_graph` (Neo4j) → real `shortlist_job` → reads the persisted
+`shortlist_entries` rows → evaluates every gate in `thresholds.toml`. It reuses
+`run_evals.load_corpus`/`load_thresholds`/`_labels` (no duplication of the corpus-loading logic) and calls
+the **real** `stages.verify_evidence` and the **real** redaction functions for the anti-fabrication and PII
+gates — not the offline stand-ins `run_evals.py` uses in CI. `project_to_graph`/`shortlist_job` are
+invoked directly with a real `ctx` (not enqueued on the arq worker) — identical production task code and
+live dependencies, just not routed through Redis. The run used a remote Ollama with the calibrated models
+(`nomic-embed-text` + `gpt-oss:20b`); the local metal host lacked them.
+
+**Verified results (reproduced exactly, both runs, exit 0):**
+
+| Gate | Result |
+|---|---|
+| `precision@5` | 1.000 (top-5 all `strong`) |
+| adversarial bait (r09) | ranked 14th, outside k=5 — `must_not_surface`: no offenders |
+| `evidence.verification_rate` | 78/78 = 1.000 |
+| `evidence.min_completeness_in_topk` | 5/5 = 1.000 |
+| `evidence.gold_recall` | 4/4 = 1.000 |
+| `evidence.negative_evidence_must_fail` | 4 fabrications, all scrubbed |
+| `ordering_controls` | education +0.0411, overqual +0.0120, motivation +0.0900, skill_missing_must +0.1460, recency +0.1440 — all pass |
+| `pii.embedding_input_pii_free` | 0 leaks / 20 fixtures |
+| `pii.exported_output_pii_free` | 0 leaks / top-5 |
+| determinism | order identical, `max_rank_delta=0`, `max_score_delta=0` |
+
+The measured ordering gaps track `labels.json`'s arithmetic predictions against a real embedder closely
+(overqual +0.0120 exact match to the arithmetic prediction; education +0.0411 vs the ~0.0391 predicted in
+the "4a hardening" round-7 correction, §"N-1" — the residual is the embedder-measured vector component the
+prediction always acknowledged as approximate) — evidence the real pipeline reproduces the calibrated
+behaviour this corpus's thresholds assume, not just what the offline stand-in reproduces.
+
+**Gate-ability.** The pure metric layer (`eval_*` functions) is offline-unit-tested — `core/tests/unit/test_evals_live_metrics.py`
+(new, 16 tests), asserting bad rankings FAIL: weak-in-topk, a fabricated surfaced quote, a dropped gold
+anchor, reversed/tied ordering, a PII leak, and score drift. The live orchestration script itself lives
+under `core/tests/evals/` (not `core/tests/unit/`, so it is not collected by `pytest tests/unit`) and only
+runs as a script against a live stack — CI stays green with no Ollama reachable. The offline suite grew
+from 2229 to **2245 unit tests @ 91.67% coverage**; ruff/black/mypy remain clean.
+
+**Deviations and residuals, recorded honestly, not smoothed over:**
+- This section's original wording ("uploading the corpus fixtures through Phase 6's HTTP routes") is
+  intentionally **not** followed — see "Design" above for why seeding at the post-parse boundary is the
+  faithful choice, not a shortcut.
+- `project_to_graph`/`shortlist_job` ran with a directly-constructed `ctx`, not dequeued off arq/Redis —
+  identical production task code and live dependencies, but the queue hop itself is unexercised by this
+  harness.
+- The determinism check's second run used a warm Redis embed cache, so the embedding half of the
+  determinism comparison is cache-vs-itself, not model-vs-itself on a cold cache; `gpt-oss:20b`'s greedy
+  decode is not guaranteed bit-stable across runs, so a nonzero score drift on the generation half would
+  have been a real (not artefactual) observation — here it measured exactly zero.
+- The `jd.education.fields` open decision (ADR-009 §7, restated through ADR-013) remains **unresolved and
+  untouched** by this addition.
+
+**Superseded original text (kept for the historical record of what was decided 2026-07-17 morning, before
+the reversal later the same day):** "A live run of the 4a/4c corpus through the real API →
+Postgres/Neo4j/Ollama pipeline … was deferred because it needs a reachable host Ollama plus `docker
+compose up` and cannot run in CI … Recorded here as a documented follow-up, not built this phase."
 
 ### 6. Documentation correction — CI does not call Ollama
 
@@ -96,7 +158,9 @@ stand-in harness (`run_evals.py::main()`, invoked inside the `pytest tests/unit`
 `_best_partial_ratio`/stdlib-`SequenceMatcher` stand-in verifier and a mocked embedder — see the 4a
 hardening notes in `docs/EXTRACTION_PLAN.md`); it never calls Ollama, by explicit design
 (`.github/workflows/ci.yml`'s own comment). What does *not* run in CI is any live measurement against a
-real Ollama endpoint — that is exactly §5's deferred follow-up, not something CI was ever doing.
+real Ollama endpoint — that is exactly what §5's live harness now does, run manually/by a human as a merge
+prerequisite (`docker compose … exec -T api python tests/evals/run_evals_live.py` against a stack pointed
+at an Ollama with `nomic-embed-text` + `gpt-oss:20b`), never inside CI.
 
 ## Architecture Diagram
 
@@ -140,8 +204,11 @@ browser, not merely configured not to.
    the viewer (§3) — one gate command, one coverage number, one meta-test pinning it.
 4. No new evals fixtures this phase — the plan's Phase 7 evals line item was already satisfied by 4a/4c
    (§4).
-5. Live end-to-end eval (real API → Postgres/Neo4j/Ollama, re-measuring `thresholds.toml` against persisted
-   rows) deferred — recorded as a follow-up, not built (§5).
+5. Live end-to-end eval (real API-adjacent pipeline — post-parse-boundary seed → real `project_to_graph` →
+   real `shortlist_job` → persisted rows — re-measuring `thresholds.toml`) was recorded here as deferred,
+   then **reversed on 2026-07-17**: the human un-deferred it and made it a prerequisite for merging PR #16.
+   Built (`run_evals_live.py` + `test_evals_live_metrics.py`), run, and PASSED, reproduced identically
+   twice (§5).
 
 ## Accepted-for-v1 residuals (non-blocking, recorded not fixed)
 
@@ -180,12 +247,15 @@ future reader looking for the viewer under `core/src/web/` is redirected to the 
 - The viewer's blind-only posture (§1/§2) means a recruiter using only the viewer can never see an
   unredacted candidate — reveal remains an audited backend-only capability reachable only by a direct API
   call with the configured `X-API-Key` (or no auth, if `settings.api_key` is unset per ADR-012 §1).
-- The live end-to-end eval gap (§5) means the corpus's thresholds have still never been checked against a
-  real, persisted, HTTP-served shortlist row — only against the orchestrator called directly (4c) and now,
-  additionally, against nothing new this phase. This is a real, if narrow, verification gap: a future bug
-  in the HTTP→Postgres round-trip (e.g. the `ScoreBreakdown` fold/unfold in ADR-011 §2, or a serialization
-  mismatch) would not be caught by any currently-running gate, only by a human running the deferred live
-  eval manually.
+- **Reversed 2026-07-17 (see §5).** The corpus's thresholds have now been checked against a real,
+  persisted shortlist row produced by the real `shortlist_job`/`persist_shortlist` path (seeded at the
+  post-parse boundary, not through the HTTP upload routes themselves — see §5's "Design" for why). This
+  closes the narrow verification gap this bullet originally described for the code paths the live harness
+  exercises: `project_to_graph`, `shortlist_job`, `persist_shortlist`, the `ScoreBreakdown` fold/unfold read
+  guard (ADR-011 §2), and the real evidence verifier and redaction functions. It does **not** exercise the
+  Phase 6 HTTP upload/parse routes themselves (`POST /jobs/{id}/resumes`, `parse_job`/`parse_resume`) or the
+  arq/Redis queue hop — those remain covered only by Phase 3/4/6's own unit and integration tests, not by
+  this live eval.
 
 ## Alternatives Considered
 
@@ -200,10 +270,14 @@ future reader looking for the viewer under `core/src/web/` is redirected to the 
   means the frontend is covered by construction, and the meta-test (§3) pins it against silent regression
   the same way router-level auth dependencies were chosen over per-route ones in ADR-012 §1's "Alternatives
   Considered."
-- **Build the live end-to-end eval now, inside this phase** — rejected/deferred (§5): it requires a
-  reachable host Ollama and a running `docker compose up` stack, neither of which CI provides by design,
-  and building it without being able to gate it in CI would leave an unverifiable manual script rather than
-  a real gate. Left as a documented follow-up rather than shipped half-verified.
+- **Build the live end-to-end eval now, inside this phase** — originally rejected/deferred (§5): it
+  requires a reachable host Ollama and a running `docker compose up` stack, neither of which CI provides by
+  design, and building it without being able to gate it in CI would leave an unverifiable manual script
+  rather than a real gate. **Reversed 2026-07-17** — see §5: the human decided the manual, non-CI script is
+  still worth building and running as a merge prerequisite for PR #16, precisely because CI's offline
+  `run_evals.py` stand-in cannot verify the real HTTP-adjacent/Postgres/Neo4j/Ollama path at all. Built as
+  a script under `core/tests/evals/` (not collected by `pytest tests/unit`) so CI's gate posture is
+  unchanged; its pure-metric layer is separately unit-tested so it isn't wholly outside the gated suite.
 - **Keep the résumé template's PII-rendering code but gate it purely on the backend's `blinded` flag** —
   rejected (§2): ADR-012 already documents that `JobOut.blind_review`'s fail-open history was a real
   historical bug (closed in Phase 6, but real). Relying on a single upstream flag for the viewer's own
