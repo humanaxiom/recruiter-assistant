@@ -38,7 +38,17 @@ async def require_api_key(
         return None
     # Constant-time compare — never short-circuit on the first differing byte,
     # so response timing cannot be used to recover the key byte-by-byte.
-    if not (x_api_key and secrets.compare_digest(x_api_key, settings.api_key)):
+    # Compare on UTF-8 bytes, not ``str``: ``secrets.compare_digest`` requires
+    # ASCII-only strings and raises ``TypeError`` otherwise — Starlette
+    # latin-1-decodes header bytes, so a non-ASCII ``X-API-Key`` header is a
+    # valid (non-ASCII) ``str`` that would otherwise crash this dependency
+    # into an unhandled 500 instead of failing closed with 401.
+    if not (
+        x_api_key
+        and secrets.compare_digest(
+            x_api_key.encode("utf-8"), settings.api_key.encode("utf-8")
+        )
+    ):
         raise HTTPException(status_code=401, detail="invalid or missing API key")
     return None
 
