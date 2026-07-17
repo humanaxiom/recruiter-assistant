@@ -23,15 +23,21 @@ from fastapi import (
 )
 
 from src.api.deps import get_arq, require_api_key, resolve_actor
-from src.errors import NotFoundError
+from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
 from src.services import resume_service, shortlist_service
-from src.services.zip_upload import ZipRejected, expand_zip_entries
+from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 from src.storage.blob_store import BlobStore, get_blob_store
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+# Cap the number of files in a single multipart batch (memory-exhaustion
+# guard): each accepted file is read fully into memory, so an unbounded batch
+# is a DoS vector. Kept consistent with the zip-expansion entry cap so a raw
+# multi-file upload and a zipped batch are bounded identically.
+_MAX_UPLOAD_FILES = _MAX_ZIP_ENTRIES
 
 
 @router.post("/jobs/{job_id}/resumes", status_code=status.HTTP_202_ACCEPTED)
@@ -52,6 +58,15 @@ async def upload_resumes(
     entries alongside it. ``parse_resume`` is enqueued ONCE PER ACCEPTED
     résumé, after the upload's own transaction has committed.
     """
+    # Reject an oversized batch on COUNT FIRST — before any body is read into
+    # memory or expanded — so a flood of files cannot exhaust memory.
+    if len(files) > _MAX_UPLOAD_FILES:
+        raise FileRejectedError(
+            f"upload has {len(files)} files; the per-request cap is "
+            f"{_MAX_UPLOAD_FILES}",
+            count=len(files),
+        )
+
     expanded: list[tuple[str, bytes]] = []
     for f in files:
         filename = f.filename or "upload"

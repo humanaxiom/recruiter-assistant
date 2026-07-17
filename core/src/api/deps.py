@@ -11,6 +11,7 @@ so a misconfigured deploy is impossible to miss in the logs.
 from __future__ import annotations
 
 import logging
+import secrets
 
 from arq.connections import ArqRedis
 from fastapi import Header, HTTPException, Request
@@ -18,6 +19,10 @@ from fastapi import Header, HTTPException, Request
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# Cap the attacker-controlled ``X-Actor-Name`` header so an unbounded string
+# cannot fill the audit ``created_by``/``uploaded_by`` TEXT columns.
+_MAX_ACTOR_NAME_CHARS = 128
 
 
 async def require_api_key(
@@ -31,7 +36,9 @@ async def require_api_key(
     settings = get_settings()
     if not settings.api_key:
         return None
-    if x_api_key != settings.api_key:
+    # Constant-time compare — never short-circuit on the first differing byte,
+    # so response timing cannot be used to recover the key byte-by-byte.
+    if not (x_api_key and secrets.compare_digest(x_api_key, settings.api_key)):
         raise HTTPException(status_code=401, detail="invalid or missing API key")
     return None
 
@@ -39,9 +46,10 @@ async def require_api_key(
 def resolve_actor(
     x_actor_name: str | None = Header(default=None, alias="X-Actor-Name"),
 ) -> str:
-    """The optional ``X-Actor-Name`` header, or the fixed default ``"api"``."""
+    """The optional ``X-Actor-Name`` header (truncated to
+    ``_MAX_ACTOR_NAME_CHARS``), or the fixed default ``"api"``."""
     if x_actor_name:
-        return x_actor_name
+        return x_actor_name[:_MAX_ACTOR_NAME_CHARS]
     return "api"
 
 
