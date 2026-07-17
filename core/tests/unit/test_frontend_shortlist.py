@@ -261,9 +261,7 @@ def test_card_with_null_evidence_renders_fallback_without_crashing(
     job_id = uuid4()
     entry = _full_entry(uuid4())
     entry["evidence"] = None
-    monkeypatch.setattr(
-        api_client, "list_shortlist", MagicMock(return_value=[entry])
-    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     assert resp.status_code == 200
     assert "Evidence not available for this candidate" in resp.get_data(as_text=True)
@@ -275,9 +273,7 @@ def test_card_with_empty_evidence_requirements_renders_fallback(
     job_id = uuid4()
     entry = _full_entry(uuid4())
     entry["evidence"] = {"requirements": [], "overall_summary": ""}
-    monkeypatch.setattr(
-        api_client, "list_shortlist", MagicMock(return_value=[entry])
-    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     assert resp.status_code == 200
     assert "Evidence not available for this candidate" in resp.get_data(as_text=True)
@@ -298,9 +294,7 @@ def test_card_uses_display_label_never_a_real_name(
         "email": _REAL_EMAIL,
         "phone": _REAL_PHONE,
     }
-    monkeypatch.setattr(
-        api_client, "list_shortlist", MagicMock(return_value=[entry])
-    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
     raw = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
     assert "Candidate A" in raw
     assert _REAL_NAME not in raw

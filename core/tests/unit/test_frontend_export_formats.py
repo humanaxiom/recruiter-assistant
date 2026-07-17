@@ -40,9 +40,7 @@ def test_all_three_export_formats_are_linked(monkeypatch: Any, client: Any) -> N
     assert f"{base}?format=json" in body
 
 
-def test_export_links_never_carry_a_reveal_param(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_export_links_never_carry_a_reveal_param(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
@@ -52,9 +50,9 @@ def test_export_links_never_carry_a_reveal_param(
 def test_shortlist_template_has_no_reveal_control() -> None:
     """Structural guard: the template source has no ``reveal`` field/param
     anywhere — exports cannot be de-anonymized from the browser."""
-    template = (
-        Path(app.root_path) / "templates" / "shortlist_list.html"
-    ).read_text(encoding="utf-8")
+    template = (Path(app.root_path) / "templates" / "shortlist_list.html").read_text(
+        encoding="utf-8"
+    )
     lowered = template.lower()
     assert 'name="reveal"' not in lowered
     assert "reveal=true" not in lowered

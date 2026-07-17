@@ -223,9 +223,7 @@ def test_error_page_uses_card(monkeypatch: Any, client: Any) -> None:
 # ── blind byte-scan regression gate (must still pass unchanged) ──────────
 
 
-def test_regression_resume_detail_no_pii_bytes(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_regression_resume_detail_no_pii_bytes(monkeypatch: Any, client: Any) -> None:
     resume_id = uuid4()
     monkeypatch.setattr(
         api_client,
@@ -238,9 +236,7 @@ def test_regression_resume_detail_no_pii_bytes(
     assert _REAL_PHONE not in raw
 
 
-def test_regression_shortlist_cards_no_pii_bytes(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_regression_shortlist_cards_no_pii_bytes(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     entry = _full_entry(uuid4())
     entry["candidate_name"] = _REAL_NAME

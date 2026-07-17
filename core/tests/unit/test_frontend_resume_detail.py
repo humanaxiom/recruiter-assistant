@@ -131,9 +131,7 @@ def _resume(
             "I am excited to bring my platform experience to your team."
         )
         payload["cover_letter_parsed"] = {
-            "raw_text": (
-                "I am excited to bring my platform experience to your team."
-            ),
+            "raw_text": ("I am excited to bring my platform experience to your team."),
             "themes": ["platform ownership", "mentorship"],
             "key_claims": ["scaled the API 10x"],
             "sentiment": "positive",
@@ -309,9 +307,9 @@ def test_resume_detail_structural_no_pii_byte_scan(
 def test_resume_detail_template_has_no_candidate_render_branch() -> None:
     """Structural guard: the template source itself must never reference a
     ``candidate.<pii>`` field — there is no code path capable of printing it."""
-    template = (
-        Path(app.root_path) / "templates" / "resume_detail.html"
-    ).read_text(encoding="utf-8")
+    template = (Path(app.root_path) / "templates" / "resume_detail.html").read_text(
+        encoding="utf-8"
+    )
     for banned in (
         "candidate.name",
         "candidate.email",

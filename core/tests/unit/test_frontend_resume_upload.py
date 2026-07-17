@@ -267,9 +267,7 @@ def test_upload_route_with_consent_calls_backend_and_redirects(
     assert spy.call_args.kwargs["consent_acknowledged"] is True
 
 
-def test_upload_route_forwards_cover_letter_text(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_upload_route_forwards_cover_letter_text(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     spy = MagicMock(return_value=[])
     monkeypatch.setattr(api_client, "upload_resumes", spy)
