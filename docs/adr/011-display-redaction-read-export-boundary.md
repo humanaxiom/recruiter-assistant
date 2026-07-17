@@ -117,15 +117,23 @@ bare "Smith" token still redacts.
 
 ## Accepted-for-v1 residuals (security-flagged, non-blocking)
 
-- **`original_filename` shown verbatim under blind — an OPEN decision, not resolved this phase.**
-  `resume_service.get_one`/`list_for_job` and `shortlist_csv`'s `resume_file` column both surface the
-  uploaded file's original name unmasked even when `blinded=True`. A résumé uploaded as
-  `First_Last_Resume.pdf` is a real blind de-anonymization vector — the filename alone can identify the
-  candidate the redaction is supposed to hide. It was left unmasked because it is plaintext,
-  uploader-controlled metadata, not decrypted ciphertext PII — strictly outside the redaction boundary
-  ADR-006 §4 defines (`candidate.*`/`candidate_name`/`cover_letter_text`). **This needs a human decision:
-  accept the residual as-is, or normalize/strip the filename under blind review (e.g. replace with
-  `resume_{pseudonym}.pdf`).** Not resolved here — do not treat this as closed.
+- **`original_filename` shown verbatim under blind — RESOLVED (fixed post-first-green).** A real
+  de-anonymization vector (`First_Last_Resume.pdf` identifying a candidate under blind shortlist review)
+  was closed by a post-first-green commit: `redacted_filename(original: str | None) -> str` (new in
+  `redaction.py`) returns a generic `resume<ext>` (extension preserved+lowercased, bare `resume` if no
+  extension or None), replacing the candidate-identifying original name under blind review ONLY
+  (reveal=True or non-blind jobs pass the real filename straight through). Wired at the three blind
+  surfaces: `resume_service.get_one`, `resume_service.list_for_job`, `shortlist_service._apply_reveal`
+  (csv/json export under reveal=False). TDD: RED `c1e4e04` → GREEN `02af27c` with mutation-proven gate
+  re-verification (security PASS and reviewer APPROVE both re-confirmed). The human chose to fix it now
+  rather than defer.
+- **`redacted_filename` trusts `os.path.splitext` — LOW residual, deferred to Phase 6 upload validation.**
+  A pathological filename like `cover.Jane_Smith` (no true extension) yields `resume.jane_smith`,
+  leaking the lowercased suffix of a candidate's name if it happens to collide with the part after a dot.
+  Real-world résumé filenames (e.g. `Name_Resume.pdf`) are fully masked by this fix. Accepted for v1:
+  the risk is low (requires both a dot-containing name component AND upload under that exact name).
+  Recommend an extension allowlist (e.g. `.pdf`, `.docx`) + a length cap on the extension when Phase 6
+  implements upload validation, to eliminate even the low residual.
 - **`candidate_email_hash` returned under blind.** `resume_service.get_one` returns the plaintext
   `candidate_email_hash` (a one-way sha256) even when `blinded=True`. Accepted: it is non-reversible and
   is deliberately plaintext-by-design so a subject-access request can look a candidate up by email without
@@ -191,7 +199,7 @@ flowchart TB
     EXP --> ECSV
     EXP --> JSON
 
-    RESIDUAL["original_filename rides through UNMASKED\neven under blind — OPEN decision, not this ADR's to resolve"]
+    RESIDUAL["redacted_filename(original)->resume&lt;ext&gt;<br/>applied at 3 blind surfaces<br/>(resolved post-first-green)"]
     DTO -.-> RESIDUAL
 
     style REDACT fill:#F59F00,color:#000
@@ -212,10 +220,11 @@ flowchart TB
   `shortlist_entries` — not just Phase 5's own read path. A future feature that queries the table directly
   must repeat this pop or hit the same `ValidationError` every 4d-written row would raise.
   `reverse_match_entries` has no equivalent because its dedicated columns never needed folding (ADR-010 §2).
-- The `original_filename` residual is a real, open, unresolved decision — a security-flagged blind
-  de-anonymization vector that this phase deliberately did not close, because it sits outside the
-  redaction-boundary contract's stated scope (`candidate.*`/`candidate_name`/`cover_letter_text`) and
-  closing it (e.g. renaming files under blind) is a product decision, not a mechanical redaction fix.
+- The `original_filename` de-anonymization vector is RESOLVED (above, §"Accepted-for-v1 residuals") via
+  `redacted_filename()` in the read/export paths; a LOW residual on `os.path.splitext` truncation is
+  recorded for Phase 6 upload validation to close. The earlier phase deliberately did not close this
+  because it sat outside the redaction-boundary contract's stated scope; the human later chose to fix it
+  before the PR, proving that scope-reassessment and human oversight remain live.
 - ADR-007 §6/§7 and ADR-010 §6's cleartext-at-rest postures are unchanged and remain the accepted v1
   posture — nothing in this phase encrypts or scrubs data at rest; it only changes what a blind caller's
   response payload contains.
@@ -231,10 +240,13 @@ flowchart TB
 - **Port `_redact_evidence` verbatim from hris (leaving `cover_letter_evidence`/`overall_motivation`
   unredacted)** — rejected once the gap was noticed (§3): shipping a known, then-still-open redaction hole
   in the exact field most likely to carry a name would defeat the whole point of this phase.
-- **Treat `original_filename` as in-scope and rename it under blind, in this phase** — rejected for now
-  as scope creep beyond ADR-006 §4's stated field list, and because a rename touches export/download
-  behaviour a human should sign off on (does a recruiter need the ability to recover the original name
-  under blind for any legitimate reason?). Flagged as an open decision instead of resolved unilaterally.
+- **Treat `original_filename` as in-scope and redact it under blind** — initially rejected as scope
+  creep beyond ADR-006 §4's stated field list (filename is plaintext metadata, not ciphertext PII). The
+  human later decided to fix it preemptively and built `redacted_filename()` in a post-first-green commit
+  (`c1e4e04`→`02af27c`), reasoning that a blind de-anonymization vector (`First_Last_Resume.pdf` naming
+  a shortlist candidate) is too real to ship even as an accepted v1 residual. Decided: generic
+  `resume<ext>` under blind; real filename under reveal/non-blind. A LOW residual on extension
+  truncation-leaking is recorded for Phase 6's upload validation to close.
 - **Leave `ScoreBreakdown` as `extra="ignore"` instead of popping the folded keys** — considered,
   rejected: `extra="ignore"` would silently swallow `score_structured`/`score_evidence` into nowhere
   instead of routing them to their real destination (the export formatters' `score_structured`/

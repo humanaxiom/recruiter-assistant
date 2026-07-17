@@ -381,20 +381,21 @@ the `allowed_job_ids` scoping, and the no-silent-redaction guard) — full table
 by 4d's own scope, per the plan-of-record); the shortlist-side `evidence = {}` ambiguity (above); the
 still-open `jd.education.fields` decision; no advisory lock on concurrent runs.
 
-### Phase 5 status — DONE, gate-green, NOT yet PR'd (pre-PR) — read this before starting Phase 6
+### Phase 5 status — DONE, gate-green, PR opening this session — read this before starting Phase 6
 
 `core/src/services/redaction.py` (new — `redact_text`/`pseudonym`/`blind_label_map`/
-`is_foreign_location`, ported near-verbatim from hris) + `core/src/errors.py` (new —
+`is_foreign_location` + `redacted_filename`, ported near-verbatim from hris) + `core/src/errors.py` (new —
 `AppError`/`NotFoundError`) + the read/export extensions to `shortlist_service.py`
 (`list_for_job`/`get_one`/`export_rows` + pure `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`
 formatters) and `resume_service.py` (`list_for_job`/`get_one(reveal=...)`) were built and gate-green on
-branch `feat/phase-5-persist-anonymize-export`, off `main` @ `5945320` (PR #13's merge), tip `b6b1ec7`,
-4 commits (RED `3e383ff` → GREEN `33512c2` → RED `8b1597e`, a security-fix regression test → GREEN
-`b6b1ec7`, the fix). **All three merge-blocking gates are green (reviewer APPROVE, security PASS,
-ranking-evals PASS). NOT yet opened as a PR, NOT merged — awaiting a human check-in before opening one,
-per protocol.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) has **not**
-run yet, since no PR exists — the scoring code itself, `stages.py`/`orchestrator.py`, is byte-unchanged
-by Phase 5 (this phase is entirely read/export/redaction, no ranking logic). Full write-up:
+branch `feat/phase-5-persist-anonymize-export`, off `main` @ `5945320` (PR #13's merge), tip `02af27c`,
+6 commits across three RED→GREEN cycles (RED `3e383ff` → GREEN `33512c2` initial build; RED `8b1597e` →
+GREEN `b6b1ec7` cover-letter-chunks security fix; RED `c1e4e04` → GREEN `02af27c` filename
+de-anonymization fix). **All three merge-blocking gates are green (reviewer APPROVE, security PASS,
+ranking-evals PASS) — re-verified after each post-first-green fix.** A PR is being opened this session;
+CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) is pending on the PR. The
+scoring code itself, `stages.py`/`orchestrator.py`, is byte-unchanged by Phase 5 (this phase is entirely
+read/export/redaction, no ranking logic). Full write-up:
 [docs/activity/phase-5-persist-anonymize-export.md](docs/activity/phase-5-persist-anonymize-export.md);
 decisions + residuals: [ADR-011](docs/adr/011-display-redaction-read-export-boundary.md).
 
@@ -416,11 +417,15 @@ extension of it to `shortlist_entries`/`reverse_match_entries` are both unchange
 4d ever wrote raises `ValidationError` on read. Proven against the real jsonb codec in
 `test_shortlist_read_export_pg.py`.
 
-**A security-gate HIGH finding, found AFTER first green, closed in-branch.** The first GREEN
-(`33512c2`) redacted `resumes.parsed.chunks[].text` but not `cover_letter_chunks[].text` — a cover
-letter's opening lines routinely carry raw letterhead PII (name/email/phone), so that text was still
-reachable through a blind `ResumeOut.parsed`. Written as a failing regression test first (`8b1597e`),
-fixed (`b6b1ec7`) by extending `_blind_parsed` to redact `cover_letter_chunks[].text` too, mutation-proven.
+**Two post-first-green security/residual fixes (ADR-011 §4/§1):** (1) HIGH: the first GREEN
+(`33512c2`) redacted `resumes.parsed.chunks[].text` but not `cover_letter_chunks[].text` — raw letterhead
+PII still reachable under blind — written as a failing regression test first (`8b1597e`), fixed by
+extending `_blind_parsed` (`b6b1ec7`), mutation-proven. (2) RESIDUAL FIX: the human decided preemptively
+to close the `original_filename` de-anonymization vector (a `First_Last_Resume.pdf` identifying a candidate
+under blind review) rather than accept it as v1. Fixed by adding `redacted_filename()` helper, wired at
+three blind surfaces (`resume_service.get_one`/`list_for_job`, `shortlist_service._apply_reveal` for
+csv/json export), returning generic `resume<ext>` under blind; real filename under reveal/non-blind
+(RED `c1e4e04` → GREEN `02af27c`, mutation-proven).
 
 **Two hris gaps closed beyond a verbatim port (ADR-011 §3/§5):** `_redact_evidence` now redacts
 `cover_letter_evidence[].evidence`/`overall_motivation` in BOTH the read and export paths (hris's
@@ -428,19 +433,22 @@ version never did); the name/term redaction regex is now grouped
 (`(?<![\w])(?:{alt})(?![\w])`) so a middle name-part can't match inside a longer unrelated word — a
 latent hris bug, not a Phase-5-introduced one.
 
-**Open human decision, NEW this phase, NOT resolved:** `original_filename` is shown verbatim under
-blind review (`resume_service.get_one`/`list_for_job` and `shortlist_csv`'s `resume_file` column) — a
-résumé uploaded as `First_Last_Resume.pdf` is a real blind de-anonymization vector. It is
-uploader-controlled plaintext metadata, not decrypted ciphertext PII, so it sits outside ADR-006 §4's
-stated field list (`candidate.*`/`candidate_name`/`cover_letter_text`) — a human must decide whether to
-accept it or normalize the filename under blind. **Do not resolve this silently.**
+**A LOW residual from the filename fix (not a blocker):** `redacted_filename()` trusts `os.path.splitext`,
+so a pathological filename like `cover.Jane_Smith` (no true extension) yields `resume.jane_smith`,
+leaking the lowercased suffix. Accepted for v1 (low risk: requires dot-containing name component AND
+upload under that exact name). Recommend an extension allowlist + length cap when Phase 6's upload
+validation lands.
+
+**One pre-existing CI flake (not introduced by Phase 5):** `test_evals_corpus.py::test_every_threshold_key_is_enumerated_by_both_consumers`
+is order-dependent (passes in isolation, can fail under `pytest-randomly`). Flagged by the reviewer as a
+separate follow-up chore, not a gate blocker.
 
 **Open human decision, carried forward AGAIN, still unresolved:** `score_education` ignores
 `jd.education.fields` (ADR-009 §7, restated ADR-010 §5) — Phase 5 touches no scoring code, so this is
 untouched.
 
-**Final gate state, HEAD `b6b1ec7`:** ruff/black/`mypy --strict` clean; **2024 unit tests @ 91.80%
-coverage**; integration tests green vs real Postgres (`test_shortlist_read_export_pg.py`,
+**Final gate state, HEAD `02af27c`:** ruff/black/`mypy --strict` clean; **2039 unit tests @ 91.86%
+coverage**; **18 integration tests** green vs real Postgres (`test_shortlist_read_export_pg.py`,
 `test_resume_read_pg.py`). Reviewer APPROVE (5 mutation obligations fired — full table in the activity
 report), security PASS (after the `cover_letter_chunks` fix), ranking-evals PASS (scoring code
 byte-unchanged).
@@ -553,27 +561,25 @@ overall_motivation are now redacted (hris's version never did); the name/term
 regex alternation is now grouped so a middle name-part can't match inside an
 unrelated longer word.
 
-**Open human decision, NEW this phase, NOT resolved:** original_filename is
-shown verbatim under blind review (resume_service.get_one/list_for_job and
-shortlist_csv's resume_file column) — a résumé uploaded as
-First_Last_Resume.pdf is a real blind de-anonymization vector. It is
-uploader-controlled plaintext metadata, outside ADR-006 §4's stated field list
-— accept it, or normalize the filename under blind. Do not resolve this
-silently.
+**Phase 5 final state (HEAD 02af27c — PR opening this session):** 2039 unit tests @ 91.86% coverage +
+the two new Phase-5 PG integration files (18 tests) green this session (the full `gates-all` integration
+suite is re-run live by CI on the PR). All three merge-blocking gates re-verified after two post-first-green fixes:
+(a) HIGH cover-letter-chunks PII leak fixed red 8b1597e→green b6b1ec7; (b) RESIDUAL
+original_filename de-anonymization vector fixed red c1e4e04→green 02af27c (the human decided to close it
+now rather than accept as v1). New redacted_filename() helper wires generic resume<ext> at three blind
+surfaces; real filename under reveal/non-blind. A LOW residual on os.path.splitext truncation-leaking is
+recorded for Phase 6's upload validation extension. One pre-existing CI flake (test_every_threshold_key...
+order-dependent) flagged by reviewer as separate follow-up chore, not a gate blocker.
 
-**Your next action is Phase 6 (API routes)** — NOT the evals corpus (done),
-NOT graph projection (done), NOT the matching engine (done), NOT the write path
-(done, merged), and NOT persist+anonymize+export (done, pre-PR). Confirm
-Phase 5's status with the human first: it is on branch
-feat/phase-5-persist-anonymize-export, gate-green, NOT yet opened as a PR —
-check whether a PR has since been opened/merged (gh pr list) before building
-on top of it. Phase 6 ships routes: job create/parse, resume upload, shortlist
-generate/list/get/export, reverse-match, minimal auth — remember to set
-JobOut.blind_review explicitly from the row (the DTO defaults it False,
-fail-open, if a route omits it — Phase 2 security low, still open). Run the
-per-phase subagent loop (planner -> tester -> data-pipeline coder -> reviewer +
-security + ranking-evals -> docs) on a feat/phase-6-... branch once Phase 5 is
-merged.
+**Your next action is Phase 6 (API routes)** — NOT the evals corpus (done), NOT graph projection
+(done), NOT the matching engine (done), NOT the write path (done, merged), NOT persist+anonymize+export
+(done, PRing this session). A PR for Phase 5 is being opened; CI (gates-all) is pending on it. Once Phase
+5 is merged, Phase 6 ships routes: job create/parse, resume upload, shortlist generate/list/get/export,
+reverse-match, minimal auth — remember to set JobOut.blind_review explicitly from the row (the DTO
+defaults it False, fail-open, if a route omits it — Phase 2 security low, still open). The extension
+allowlist + cap on redacted_filename will close the filename LOW residual. Run the per-phase subagent loop
+(planner -> tester -> data-pipeline coder -> reviewer + security + ranking-evals -> docs) on a
+feat/phase-6-... branch.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers

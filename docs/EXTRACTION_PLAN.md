@@ -118,10 +118,12 @@ a real worker call site — `matching_context_from_settings` + `shortlist_job`/`
 **Phase 5 closed ADR-006 §4's redaction-boundary contract in code** (`core/src/services/redaction.py` +
 the redaction-before-DTO-construction ordering in `shortlist_service`/`resume_service`'s blind read
 paths; full detail: [ADR-011](adr/011-display-redaction-read-export-boundary.md) §1) and also touched no
-scoring code, so `jd.education.fields` remains open, unaffected. Phase 5 opened one **new** unresolved
-decision: `original_filename` is shown verbatim under blind review (a real de-anonymization vector via
-`First_Last_Resume.pdf`-shaped filenames) — recorded but **not resolved** in ADR-011; a human must decide
-whether to accept it or normalize the filename under blind before Phase 6 builds a route around it.
+scoring code, so `jd.education.fields` remains open, unaffected. Phase 5 also **resolved** the
+`original_filename` de-anonymization vector (a `First_Last_Resume.pdf`-shaped filename identifying a
+candidate under blind review) with a post-first-green fix (red `c1e4e04` → green `02af27c`): new
+`redacted_filename()` helper in `redaction.py` returns generic `resume<ext>` under blind; real filename
+under reveal/non-blind. A LOW residual on `os.path.splitext` truncation-leaking is recorded for Phase 6's
+upload validation to close (ADR-011 "Accepted residuals").
 
 **4a hardening — `fix/phase-4a-corpus-falsifiability`, merged to `main` via PR #10 (merge `464a479`),
 zero product code.** Three opus-tier gates audited the merged corpus and found it **could not fail a

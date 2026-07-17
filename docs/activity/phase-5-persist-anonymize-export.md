@@ -1,10 +1,10 @@
 # Phase 5 — Persist + anonymize + export
 
 **Status:** built and gate-green on branch `feat/phase-5-persist-anonymize-export`, off `main` @
-`5945320` (Phase 4d's merge commit, PR #13), tip `b6b1ec7`, 4 commits. **All three merge-blocking gates
-green (reviewer APPROVE, security PASS, ranking-evals PASS). NOT yet PR'd, NOT merged** — a PR opens
-after a human check-in. CI (`gates-all`, including a live `run_evals.py` re-measurement against Ollama)
-has not yet run, since no PR exists.
+`5945320` (Phase 4d's merge commit, PR #13), tip `02af27c`, 6 commits. **All three merge-blocking gates
+green (reviewer APPROVE, security PASS, ranking-evals PASS) — re-verified after two post-first-green
+RED→GREEN cycles.** A PR is being opened this session; CI (`gates-all`, including a live `run_evals.py`
+re-measurement against Ollama) pending on the PR.
 
 This sub-phase ships the read/export side of the shortlist + résumé persistence Phase 4d wrote:
 `list_for_job`/`get_one`/`export_rows` (+ the pure csv/evidence-csv/json formatters) for shortlists, and
@@ -14,17 +14,18 @@ recorded risk. Full decisions and residuals: [ADR-011](../adr/011-display-redact
 
 ## TDD sequence
 
-Two RED/GREEN pairs — an initial build, then a security-finding regression fix:
+Three RED/GREEN pairs — an initial build, then two post-first-green security/residual fixes:
 
 | Commit | Label | What it added |
 |---|---|---|
 | `3e383ff` | `red` | Failing unit + integration tests for `redaction.py` (didn't exist), `errors.py` (didn't exist), the extended `shortlist_service.list_for_job`/`get_one`/`export_rows`/formatters, and `resume_service.list_for_job`/`get_one(reveal=...)`. Fails at collection/import against modules that don't exist yet. |
 | `33512c2` | `green(5)` | `src/services/redaction.py` (ported from hris, with the alternation-grouping fix, §5 of ADR-011); `src/errors.py` (`AppError`/`NotFoundError`); the read/export extensions to `shortlist_service.py` and `resume_service.py`. Minimal implementation to turn every RED test green. |
-| `8b1597e` | `red` | A security-gate finding, written as a failing regression test FIRST: `resumes.parsed.cover_letter_chunks[].text` was still reachable, unredacted, through a blind `ResumeOut` — raw letterhead PII (name/email/phone in the opening lines of a cover letter) leaking past the ADR-006 §4 boundary this phase exists to close. |
-| `b6b1ec7` | `green(5-fix)` | `resume_service._blind_parsed` extended to redact `cover_letter_chunks[].text` with the same `_r()` helper already used for `chunks[].text`/`experience[].bullets[].text`. Mutation-proven: removing the new redaction line re-fails the round-2 regression test. |
+| `8b1597e` | `red` | A security-gate finding (round 2), written as a failing regression test FIRST: `resumes.parsed.cover_letter_chunks[].text` was still reachable, unredacted, through a blind `ResumeOut` — raw letterhead PII (name/email/phone in the opening lines of a cover letter) leaking past the ADR-006 §4 boundary this phase exists to close. |
+| `b6b1ec7` | `green(5-fix-1)` | `resume_service._blind_parsed` extended to redact `cover_letter_chunks[].text` with the same `_r()` helper already used for `chunks[].text`/`experience[].bullets[].text`. Mutation-proven: removing the new redaction line re-fails the security regression test. |
+| `c1e4e04` | `red` | A third RED/GREEN pair (round 3): the human decided to close the `original_filename` de-anonymization vector preemptively. Failing regression test: blind `ResumeOut`/shortlist export under reveal=False still surfaces the original filename (`First_Last_Resume.pdf`), identifying the candidate despite all other redaction. |
+| `02af27c` | `green(5-fix-2)` | `redaction.py` gains `redacted_filename(original: str | None) -> str`, wired at three blind surfaces: `resume_service.get_one`, `resume_service.list_for_job`, `shortlist_service._apply_reveal` (csv/json export). Returns generic `resume<ext>` (extension+lowercased, bare `resume` if none) under blind; real filename under reveal=True/non-blind. Mutation-proven. Both merge-blocking gates (security PASS, reviewer APPROVE) re-confirmed at this commit. |
 
-Four commits total — the security finding surfaced **after** first green (not caught by the initial RED
-suite), which is why this phase has two RED→GREEN cycles instead of one.
+Six commits total — the two post-first-green cycles (cover-letter-chunks security fix, filename de-anonymization fix) each surfaced and were closed in the same TDD round, so the gate verdicts were re-verified twice.
 
 ## What each new module/function does (see ADR-011 for full rationale)
 
@@ -92,23 +93,26 @@ guard set (ADR-011 §1):
 integration-tagged ones, `test_shortlist_read_export_pg.py`/`test_resume_read_pg.py`, against a real
 Postgres, including the `ScoreBreakdown` fold-pop round trip against the real jsonb codec).
 
-## Final gate state — HEAD `b6b1ec7`
+## Final gate state — HEAD `02af27c`
 
 - Offline: ruff / black / `mypy --strict` clean.
-- **2024 unit tests @ 91.80% coverage** (up from 1947 on `main` post-4d — Phase 4d is not yet merged to
-  `main`, so this delta is measured against this branch's own base).
-- Integration tests green vs a real Postgres: `test_shortlist_read_export_pg.py`,
-  `test_resume_read_pg.py`.
-- **All three merge-blocking gates green:** reviewer APPROVE (guard table above), security PASS (empty
-  findings table on the final HEAD, after the `cover_letter_chunks` fix), ranking-evals PASS (no scoring
-  code touched — `stages.py`/`orchestrator.py` byte-unchanged).
+- **2039 unit tests @ 91.86% coverage** (up from 1947 on `main` post-4d merge; includes both security-fix
+  and filename-residual-fix regression tests).
+- **18 integration tests** green vs a real Postgres: `test_shortlist_read_export_pg.py`,
+  `test_resume_read_pg.py` (updated for filename redaction at both blind surfaces).
+- **All three merge-blocking gates green (re-verified after each post-first-green fix):** reviewer APPROVE
+  (guard table above, plus two additional mutation guards for the fixes), security PASS
+  (cover-letter-chunks leak + filename de-anonymization vector both closed and mutation-proven), ranking-evals
+  PASS (no scoring code touched — `stages.py`/`orchestrator.py` byte-unchanged).
 
 ## Accepted-for-v1 residuals (see ADR-011 for full detail — not restated here)
 
-- **`original_filename` shown verbatim under blind — an OPEN decision, not resolved this phase.** A
-  résumé uploaded as `First_Last_Resume.pdf` is a real blind de-anonymization vector, surfaced in both
-  `resume_service.get_one`/`list_for_job` and `shortlist_csv`'s `resume_file` column. Flagged for a human:
-  accept, or normalize the filename under blind review.
+- **`original_filename` blind de-anonymization — RESOLVED (fixed post-first-green, round 3).** A
+  `First_Last_Resume.pdf`-shaped filename identifying a candidate under blind shortlist review was
+  closed by `redacted_filename(original) -> resume<ext>` (new in `redaction.py`), wired at three blind
+  surfaces. The human decided to close it preemptively rather than accept it as a v1 residual. A LOW
+  residual on `os.path.splitext` truncation-leaking (pathological names like `cover.Jane_Smith` → 
+  `resume.jane_smith`) is recorded for Phase 6's upload validation extension.
 - `candidate_email_hash` returned under blind — accepted, one-way sha256, plaintext-by-design for
   subject-access lookup, symmetric with the at-rest posture.
 - CSV formula/injection (unneutralized leading `=`/`+`/`-`/`@` in exported cells) — accepted for v1
@@ -121,5 +125,4 @@ Postgres, including the `ScoreBreakdown` fold-pop round trip against the real js
 
 - **`score_education` ignores `jd.education.fields`** (ADR-009 §7, restated ADR-010 §5) — Phase 5 touches
   no scoring code, so this is untouched again.
-- **`original_filename` under blind** (new this phase, ADR-011) — needs a human decision before Phase 6
-  or any later phase builds a route that surfaces it.
+- **Pre-existing CI flake in `test_evals_corpus.py`** (NOT introduced by Phase 5) — `test_every_threshold_key_is_enumerated_by_both_consumers` is order-dependent: passes in isolation, can fail under `pytest-randomly`. Flagged by the reviewer as a separate follow-up chore, not a gate blocker.
