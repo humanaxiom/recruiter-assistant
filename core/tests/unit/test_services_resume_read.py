@@ -38,6 +38,10 @@ import pytest
 
 from src.errors import NotFoundError
 
+# A distinctive résumé filename that leaks candidate identity verbatim — the
+# de-anonymization leak this phase closes (a résumé named after its candidate).
+_IDENTITY_FILENAME = "Zzyzxqrst_Wibblesworth_CV.pdf"
+
 
 class _Row(dict[str, Any]):
     def __getitem__(self, key: str) -> Any:
@@ -56,11 +60,12 @@ def _list_row(
     resume_id: UUID | None = None,
     candidate_name: str | None = None,
     has_cover_letter: bool = False,
+    original_filename: str = "resume.pdf",
 ) -> _Row:
     return _Row(
         {
             "id": resume_id or uuid4(),
-            "original_filename": "resume.pdf",
+            "original_filename": original_filename,
             "status": "parsed",
             "uploaded_at": dt.datetime(2026, 7, 15, tzinfo=dt.UTC),
             "parsed_at": dt.datetime(2026, 7, 15, tzinfo=dt.UTC),
@@ -81,6 +86,7 @@ def _get_row(
     cover_letter_text: str | None = None,
     cover_letter_parsed: dict[str, Any] | None = None,
     status: str = "parsed",
+    original_filename: str = "resume.pdf",
 ) -> _Row:
     cl_parsed = (
         json.dumps(cover_letter_parsed) if cover_letter_parsed is not None else None
@@ -89,7 +95,7 @@ def _get_row(
         {
             "id": resume_id,
             "job_id": job_id or uuid4(),
-            "original_filename": "resume.pdf",
+            "original_filename": original_filename,
             "mime_type": "application/pdf",
             "file_size_bytes": 12345,
             "sha256": "deadbeef",
@@ -241,6 +247,36 @@ async def test_list_for_job_preserves_has_cover_letter_flag() -> None:
     assert items[0].has_cover_letter is True
 
 
+# ── filename redaction: the résumé-name de-anonymization leak ──────────────
+
+
+@pytest.mark.asyncio
+async def test_list_for_job_blind_redacts_identifying_filename() -> None:
+    from src.services.resume_service import list_for_job
+
+    job_id = uuid4()
+    row = _list_row(candidate_name="Jane Smith", original_filename=_IDENTITY_FILENAME)
+    conn = _mock_conn(blind=True, rows=[row])
+
+    items = await list_for_job(conn, job_id=job_id)
+
+    assert items[0].original_filename == "resume.pdf"
+    assert "Wibblesworth" not in items[0].original_filename
+
+
+@pytest.mark.asyncio
+async def test_list_for_job_non_blind_keeps_real_filename() -> None:
+    from src.services.resume_service import list_for_job
+
+    job_id = uuid4()
+    row = _list_row(candidate_name="Jane Smith", original_filename=_IDENTITY_FILENAME)
+    conn = _mock_conn(blind=False, rows=[row])
+
+    items = await list_for_job(conn, job_id=job_id)
+
+    assert items[0].original_filename == _IDENTITY_FILENAME
+
+
 # ── get_one: blind masking ──────────────────────────────────────────────
 
 
@@ -274,6 +310,58 @@ async def test_get_one_blind_masks_candidate_and_redacts_parsed_fields() -> None
     assert out.parsed.experience[0].company == "Employer A"
     assert out.parsed.education[0].institution == "Institution A"
     assert out.parsed.education[0].year is None
+
+
+@pytest.mark.asyncio
+async def test_get_one_blind_redacts_identifying_filename() -> None:
+    from src.services.resume_service import get_one
+
+    resume_id = uuid4()
+    row = _get_row(
+        resume_id=resume_id,
+        candidate_name="Jane Smith",
+        original_filename=_IDENTITY_FILENAME,
+    )
+    conn = _mock_conn(blind=True, row=row)
+
+    out = await get_one(conn, resume_id)
+
+    assert out.original_filename == "resume.pdf"
+    assert "Wibblesworth" not in out.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_get_one_reveal_true_keeps_real_filename() -> None:
+    from src.services.resume_service import get_one
+
+    resume_id = uuid4()
+    row = _get_row(
+        resume_id=resume_id,
+        candidate_name="Jane Smith",
+        original_filename=_IDENTITY_FILENAME,
+    )
+    conn = _mock_conn(blind=True, row=row)
+
+    out = await get_one(conn, resume_id, reveal=True)
+
+    assert out.original_filename == _IDENTITY_FILENAME
+
+
+@pytest.mark.asyncio
+async def test_get_one_non_blind_keeps_real_filename() -> None:
+    from src.services.resume_service import get_one
+
+    resume_id = uuid4()
+    row = _get_row(
+        resume_id=resume_id,
+        candidate_name="Jane Smith",
+        original_filename=_IDENTITY_FILENAME,
+    )
+    conn = _mock_conn(blind=False, row=row)
+
+    out = await get_one(conn, resume_id)
+
+    assert out.original_filename == _IDENTITY_FILENAME
 
 
 @pytest.mark.asyncio
@@ -392,6 +480,7 @@ async def test_black_box_scan_no_pii_in_blind_resume_out() -> None:
         candidate_email=real_email,
         candidate_phone=real_phone,
         cover_letter_text=cover_letter,
+        original_filename=_IDENTITY_FILENAME,
     )
     conn = _mock_conn(blind=True, row=row)
 
@@ -401,6 +490,9 @@ async def test_black_box_scan_no_pii_in_blind_resume_out() -> None:
     assert real_name not in dumped
     assert real_email not in dumped
     assert real_phone not in dumped
+    # The résumé's own filename leaks identity verbatim too (a landmine the
+    # field-by-field asserts miss): the raw filename must be absent.
+    assert _IDENTITY_FILENAME not in dumped
 
 
 @pytest.mark.asyncio

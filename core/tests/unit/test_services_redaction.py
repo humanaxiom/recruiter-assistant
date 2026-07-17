@@ -28,6 +28,7 @@ from src.services.redaction import (
     is_foreign_location,
     pseudonym,
     redact_text,
+    redacted_filename,
 )
 
 # ---------------- redact_text: name masking ----------------
@@ -181,6 +182,36 @@ def test_blind_label_map_empty_inputs_yield_empty_map() -> None:
 def test_blind_label_map_skips_blank_entries() -> None:
     labels = blind_label_map(["", "  ", "Acme Corp"], [])
     assert labels == {"Acme Corp": "Employer A"}
+
+
+# ---------------- redacted_filename (blind de-anonymization leak) ----------
+
+
+def test_redacted_filename_masks_identity_preserving_extension() -> None:
+    """Résumés are commonly named ``Jane_Smith_Resume.pdf`` — under blind
+    review the real filename leaks identity. Mask to a non-identifying
+    ``resume<ext>`` that keeps the extension visible for UX."""
+    assert redacted_filename("Jane_Smith_Resume.pdf") == "resume.pdf"
+
+
+def test_redacted_filename_lowercases_extension() -> None:
+    assert redacted_filename("CV.DOCX") == "resume.docx"
+
+
+def test_redacted_filename_no_extension_returns_bare_resume() -> None:
+    assert redacted_filename("JaneSmithResume") == "resume"
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_redacted_filename_none_or_blank_is_safe_default(value: str | None) -> None:
+    assert redacted_filename(value) == "resume"
+
+
+def test_redacted_filename_carries_no_candidate_tokens() -> None:
+    out = redacted_filename("Zzyzxqrst_Wibblesworth_CV.pdf")
+    assert "Zzyzxqrst" not in out
+    assert "Wibblesworth" not in out
+    assert out == "resume.pdf"
 
 
 # ---------------- is_foreign_location / redact_locations -------------------

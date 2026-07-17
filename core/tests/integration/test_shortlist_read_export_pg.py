@@ -120,6 +120,7 @@ async def _insert_resume_with_pii(
     email: str | None = None,
     phone: str | None = None,
     parsed: dict[str, Any] | None = None,
+    original_filename: str = "resume.pdf",
 ) -> UUID:
     async with pool.acquire() as conn:
         resume_id: UUID = await conn.fetchval(
@@ -127,12 +128,13 @@ async def _insert_resume_with_pii(
             INSERT INTO resumes (
                 job_id, blob_key, original_filename, mime_type,
                 file_size_bytes, sha256, consent_acknowledged, status, parsed
-            ) VALUES ($1, $2, 'resume.pdf', 'application/pdf', 1024, $3, TRUE,
-                       'parsed', $4::jsonb)
+            ) VALUES ($1, $2, $3, 'application/pdf', 1024, $4, TRUE,
+                       'parsed', $5::jsonb)
             RETURNING id
             """,
             job_id,
             f"resumes/{uuid.uuid4().hex}.pdf",
+            original_filename,
             uuid.uuid4().hex,
             json.dumps(parsed) if parsed is not None else None,
         )
@@ -464,3 +466,39 @@ async def test_export_rows_reveal_false_pseudonymizes_against_real_rows(
 
     assert rows[0]["candidate_name"] == "Candidate A"
     assert "Jane Smith" not in rows[0]["evidence"]["requirements"][0]["evidence"]
+
+
+@pytest.mark.asyncio
+async def test_export_rows_reveal_false_redacts_identifying_filename_real_rows(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """A résumé named after its candidate leaks identity through the blind
+    export — reveal=False must mask ``original_filename`` to ``resume.pdf``."""
+    from src.services.shortlist_service import export_rows, persist_shortlist
+
+    job_id = await _insert_job(pg_pool, blind_review=False)
+    resume_id = await _insert_resume_with_pii(
+        pg_pool,
+        job_id,
+        name="Jane Smith",
+        original_filename="Zzyzxqrst_Wibblesworth_CV.pdf",
+    )
+    entry = ShortlistResultEntry(
+        resume_id=resume_id,
+        rank=1,
+        score_final=0.85,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown(),
+        evidence=_real_evidence("Jane Smith"),
+    )
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn, ShortlistResult(job_id=job_id, entries=[entry], pipeline_meta=_meta())
+        )
+
+    async with pg_pool.acquire() as conn, conn.transaction():
+        await set_pii_key(conn)
+        rows = await export_rows(conn, job_id=job_id, reveal=False)
+
+    assert rows[0]["original_filename"] == "resume.pdf"

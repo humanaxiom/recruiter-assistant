@@ -135,6 +135,7 @@ async def _insert_resume(
     cover_letter_text: str | None = None,
     parsed: dict[str, Any] | None = None,
     status: str = "parsed",
+    original_filename: str = "resume.pdf",
 ) -> UUID:
     async with pool.acquire() as conn:
         resume_id: UUID = await conn.fetchval(
@@ -142,12 +143,13 @@ async def _insert_resume(
             INSERT INTO resumes (
                 job_id, blob_key, original_filename, mime_type,
                 file_size_bytes, sha256, consent_acknowledged, status, parsed
-            ) VALUES ($1, $2, 'resume.pdf', 'application/pdf', 1024, $3, TRUE,
-                       $4, $5::jsonb)
+            ) VALUES ($1, $2, $3, 'application/pdf', 1024, $4, TRUE,
+                       $5, $6::jsonb)
             RETURNING id
             """,
             job_id,
             f"resumes/{uuid.uuid4().hex}.pdf",
+            original_filename,
             uuid.uuid4().hex,
             status,
             json.dumps(parsed) if parsed is not None else None,
@@ -330,6 +332,50 @@ async def test_get_one_blind_redacts_cover_letter_chunks_against_real_pii(
     assert name not in dumped
     assert email not in dumped
     assert phone not in dumped
+
+
+@pytest.mark.asyncio
+async def test_get_one_blind_redacts_identifying_filename_against_real_row(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """A résumé named after its candidate (``Zzyzxqrst_Wibblesworth_CV.pdf``)
+    leaks identity verbatim through the blind surface — round-tripped through a
+    real blind ``jobs`` join, the filename must be masked to ``resume.pdf``."""
+    from src.services.resume_service import get_one
+
+    job_id = await _insert_job(pg_pool, blind_review=True)
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        name="Jane Smith",
+        original_filename="Zzyzxqrst_Wibblesworth_CV.pdf",
+    )
+
+    async with pg_pool.acquire() as conn:
+        out = await get_one(conn, resume_id)
+
+    assert out.original_filename == "resume.pdf"
+    assert "Wibblesworth" not in out.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_list_for_job_blind_redacts_identifying_filename_against_real_row(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.resume_service import list_for_job
+
+    job_id = await _insert_job(pg_pool, blind_review=True)
+    await _insert_resume(
+        pg_pool,
+        job_id,
+        name="Jane Smith",
+        original_filename="Zzyzxqrst_Wibblesworth_CV.pdf",
+    )
+
+    async with pg_pool.acquire() as conn:
+        items = await list_for_job(conn, job_id=job_id)
+
+    assert items[0].original_filename == "resume.pdf"
 
 
 @pytest.mark.asyncio

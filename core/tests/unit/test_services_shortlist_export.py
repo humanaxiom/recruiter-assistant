@@ -236,6 +236,65 @@ async def test_export_rows_reveal_false_pseudonymizes_and_redacts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_export_rows_reveal_false_redacts_identifying_filename() -> None:
+    """The résumé filename (e.g. ``Jane_Smith_Resume.pdf``) leaks identity
+    verbatim through the blind export surface — mask it to ``resume<ext>``."""
+    from src.services.shortlist_service import export_rows
+
+    job_id = uuid4()
+    raw_row = _raw_export_row(
+        rank=1,
+        candidate_name="Jane Smith",
+        original_filename="Jane_Smith_Resume.pdf",
+    )
+    conn = _mock_export_conn(rows=[raw_row])
+
+    rows = await export_rows(conn, job_id=job_id, reveal=False)
+
+    assert rows[0]["original_filename"] == "resume.pdf"
+    assert "Jane_Smith" not in rows[0]["original_filename"]
+
+
+@pytest.mark.asyncio
+async def test_export_rows_reveal_true_keeps_real_filename() -> None:
+    from src.services.shortlist_service import export_rows
+
+    job_id = uuid4()
+    raw_row = _raw_export_row(
+        rank=1,
+        candidate_name="Jane Smith",
+        original_filename="Jane_Smith_Resume.pdf",
+    )
+    conn = _mock_export_conn(rows=[raw_row])
+
+    rows = await export_rows(conn, job_id=job_id, reveal=True)
+
+    assert rows[0]["original_filename"] == "Jane_Smith_Resume.pdf"
+
+
+@pytest.mark.asyncio
+async def test_shortlist_csv_resume_file_redacted_under_blind_export() -> None:
+    """End-to-end: a blind export feeds ``shortlist_csv`` — the ``resume_file``
+    column must carry the placeholder, never the identifying filename."""
+    from src.services.shortlist_service import export_rows, shortlist_csv
+
+    job_id = uuid4()
+    raw_row = _raw_export_row(
+        rank=1,
+        candidate_name="Jane Smith",
+        original_filename="Jane_Smith_Resume.pdf",
+    )
+    conn = _mock_export_conn(rows=[raw_row])
+
+    rows = await export_rows(conn, job_id=job_id, reveal=False)
+    csv_text = shortlist_csv(rows)
+    data = next(csv.DictReader(io.StringIO(csv_text)))
+
+    assert data["resume_file"] == "resume.pdf"
+    assert "Jane_Smith" not in data["resume_file"]
+
+
+@pytest.mark.asyncio
 async def test_export_rows_reveal_false_pseudonym_keyed_on_rank() -> None:
     from src.services.shortlist_service import export_rows
 
@@ -258,11 +317,13 @@ async def test_black_box_scan_no_pii_in_export_row_reveal_false() -> None:
     real_name = "Zzyzxqrst Wibblesworth"
     real_email = "zzyzxqrst.wibblesworth@example.test"
     real_phone = "778-555-0199"
+    identity_filename = "Zzyzxqrst_Wibblesworth_CV.pdf"
     raw_row = _raw_export_row(
         rank=1,
         candidate_name=real_name,
         candidate_email=real_email,
         candidate_phone=real_phone,
+        original_filename=identity_filename,
         candidate_parsed={
             "candidate": {"name": real_name},
             "experience": [],
@@ -289,6 +350,7 @@ async def test_black_box_scan_no_pii_in_export_row_reveal_false() -> None:
     assert real_name not in dumped
     assert real_email not in dumped
     assert real_phone not in dumped
+    assert identity_filename not in dumped
 
 
 # ── shortlist_csv: exact header set (the load-bearing test) ────────────────
