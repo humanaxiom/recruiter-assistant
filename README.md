@@ -181,7 +181,7 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 ## API layer (Phase 6)
 
 `core/src/api/routes/{jobs,resumes,shortlist}.py` — eleven routes over the service layer Phases 3–5
-built, plus `core/src/api/deps.py`'s configurable auth switch. **Not yet merged** — see "Status &
+built, plus `core/src/api/deps.py`'s configurable auth switch. **Merged to `main`** — see "Status &
 roadmap" below.
 
 | Method | Path | Purpose |
@@ -215,9 +215,36 @@ Full decisions + residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.
 
 ---
 
+## Viewer (Phase 7)
+
+`core/frontend/{api_client.py,app.py,templates/}` — a minimal, read-only Flask viewer over the Phase 6
+API. `api_client.py` is a thin sync `httpx` wrapper (one function per consumed route,
+`build_client()`/`BackendError`/`NotFound`/`BackendUnavailable`); `app.py` serves `/`, `/jobs/<uuid>`,
+`/jobs/<uuid>/shortlist`, `/shortlist/<uuid>`, `/resumes/<uuid>`, `/resumes/<uuid>/match-results`,
+`/jobs/<uuid>/shortlist/export`, and `/health`, all server-side Jinja2 with no client-side JS.
+
+**Blind-only by construction, not by default.** The viewer never sends `reveal` to the backend — the
+shortlist list/detail functions (`list_shortlist`/`get_shortlist_entry`) take no `reveal` parameter at
+all, and the résumé route hardcodes `reveal=False`, ignoring any browser-supplied `?reveal=` query
+string. The résumé-detail template goes one step further than flag-gating: it has no branch capable of
+rendering `candidate.name`/`email`/`phone`/`location` at all, so even a future backend regression that
+served unredacted data couldn't leak it through this page. Reveal/reveal-export remains an audited,
+non-viewer backend surface (ADR-011/012).
+
+The plan's Phase 7 evals-fixtures line item (precision@k, evidence-verification rate) was already
+satisfied by Phase 4a (corpus) + 4c (live orchestrator wiring) — Phase 7 shipped no new evals code. One
+gap this phase left open, deliberately deferred: a live run of the eval corpus through the real HTTP →
+Postgres/Neo4j/Ollama pipeline has never happened (only against the orchestrator directly, in 4c) — it
+needs a reachable host Ollama and cannot run in CI by design.
+
+Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); activity report:
+[docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md).
+
+---
+
 ## Status & roadmap
 
-**Phases 0–5 are merged to `main`, CI green** — all four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path) and Phase 5 (persist + anonymize + export, PR #14) are merged. **Phase 6 (API routes)** is complete and gate-green on branch `feat/phase-6-api-routes` (tip `837de9e`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, and the persist/anonymize/export read layer are wired, and the API serves `/health`. **There are still no job/resume/shortlist HTTP routes on `main`** — Phase 6's route layer (above, not yet merged) is the first thing that exposes any of this over HTTP.
+**Phases 0–6 are merged to `main`, CI green** — all four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), and Phase 6 (API routes, PR #15) are merged. **Phase 7 (evals + minimal Flask viewer)** is complete and gate-green on branch `feat/phase-7-evals-viewer` (tip `92ca4ae`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, and the eleven job/résumé/shortlist/reverse-match HTTP routes are all wired and merged. **The read-only Flask viewer (above) is gate-green but not yet merged** — it is the first human-facing surface over any of this.
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -230,8 +257,8 @@ Full decisions + residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.
 | **4c · Matching engine** | `stages`/`orchestrator` (4-stage hybrid), reverse-match, `weights_from_settings` | **done, merged** |
 | **4d · Shortlist + reverse-match write path** | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match`, `matching_context_from_settings` | **done, merged** |
 | **5 · Persist + anonymize + export** | `list_for_job`/`get_one`/`export_rows`, `redaction.py`, csv/evidence-csv/json export with `reveal` | **done, merged (PR #14)** |
-| **6 · API** | job/resume/shortlist/reverse-match routes (above), configurable auth | **done, gate-green, not yet merged** |
-| 7 · Evals + viewer | precision@k / evidence-verification fixtures (live, wired in 4c), Flask viewer | pending — **next sub-phase**; partially done (harness) |
+| **6 · API** | job/resume/shortlist/reverse-match routes (above), configurable auth | **done, merged (PR #15)** |
+| **7 · Evals + viewer** | precision@k / evidence-verification fixtures (already satisfied by 4a/4c, no new fixtures this phase); read-only Flask viewer (blind-only, above) | **done, gate-green, pending PR** |
 
 Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
@@ -291,7 +318,7 @@ recruiter-assistant/
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
 │   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume (Phase 3); shortlist_job/reverse_match_job (Phase 4d)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
-│   ├── frontend/        # Flask viewer (Phase 0: stub)
+│   ├── frontend/        # Flask viewer — api_client.py + app.py + templates/ (Phase 7, read-only, blind-only)
 │   └── tests/{unit,integration}/
 ├── CLAUDE.md            # Claude Code instruction layer (auto-read)
 ├── .claude/            # build subagents + commands

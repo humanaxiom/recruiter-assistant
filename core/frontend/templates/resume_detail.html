@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Résumé{% endblock %}
+{% block content %}
+<h2>{{ resume.original_filename }}</h2>
+<p>Status: {{ resume.status }}</p>
+<p><em>Blind review — candidate identity is redacted.</em></p>
+<p><a href="{{ url_for('resume_match_results', resume_id=resume.id) }}">Match results</a></p>
+{% endblock %}

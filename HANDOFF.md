@@ -19,7 +19,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is ✅ complete — all 4 gated sub-phases merged to `main`.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is MERGED to `main` via PR #12** (merge `fd12d1a`), CI green. **Sub-phase 4d (shortlist + reverse-match write path) is MERGED to `main` via PR #13** (merge `5945320`) this session, CI green. **Phase 5 (persist + anonymize + export — read/list/get/export + display redaction) is MERGED to `main` via PR #14** (merge `6deade3`), CI green. **Phase 6 (API routes — job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and gate-green on branch `feat/phase-6-api-routes`** (off `main` @ `6deade3`, HEAD `837de9e`) — **all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); NOT yet PR'd, NOT merged — a PR opens after a human check-in.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists. **Phase 7 (evals + minimal Flask viewer) is the next sub-phase to build, once Phase 6 is reviewed and merged.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", "4d status", "Phase 5 status", and "Phase 6 status" below.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is ✅ complete — all 4 gated sub-phases merged to `main`.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is MERGED to `main` via PR #12** (merge `fd12d1a`), CI green. **Sub-phase 4d (shortlist + reverse-match write path) is MERGED to `main` via PR #13** (merge `5945320`) this session, CI green. **Phase 5 (persist + anonymize + export — read/list/get/export + display redaction) is MERGED to `main` via PR #14** (merge `6deade3`), CI green. **Phase 6 (API routes — job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and MERGED to `main` via PR #15** (squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17), tip `837de9e` — all three merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's `gates-all` (offline `run_evals.py` running inside the gated unit suite — CI never calls a model endpoint; inference is host-only by design) went fully green before merge. **Phase 7 (evals + minimal Flask viewer) is now DONE and gate-green on branch `feat/phase-7-evals-viewer`** (off `main` @ `e910669`, HEAD `92ca4ae`) — all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); opened as **PR #16**. **Post-review addition (2026-07-17): the live end-to-end eval against the real stack — previously recorded as deferred — was reversed, built, run, and PASSED (reproduced identically twice), and made a prerequisite for merging PR #16.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", "4d status", "Phase 5 status", "Phase 6 status", and "Phase 7 status" below.
 
 ### Phase 4a status — corpus + hardening both MERGED (read this before starting 4c)
 
@@ -194,7 +194,19 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); TDD (failing tests first); offline only (no cloud endpoints — local Ollama/OpenAI-compatible client); config via settings; a single red gate = not done. Privacy: PII never enters embeddings; anonymization non-destructive; PIPEDA/FIPPA.
 
-## Phase 6 resume — EXACT next step (do this first, before anything else)
+## Phase 7 resume — EXACT next step (do this first, before anything else)
+
+**Phase 6 is MERGED** (PR #15, squash merge `e910669`, CI `gates-all` fully green, 2026-07-17; human
+go-ahead received 2026-07-17). **Phase 7 (a minimal read-only Flask viewer over the Phase 6 API) is DONE
+and gate-green on branch `feat/phase-7-evals-viewer`** (off `main` @ `e910669`, tip `92ca4ae`) — all
+three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **Opened as PR #16
+(https://github.com/humanaxiom/recruiter-assistant/pull/16) on 2026-07-17 after a human go-ahead; CI
+(`gates-all`) running, merge held for a human go-ahead.** **Post-review addition, same day: the live
+end-to-end eval — recorded below as deferred — was reversed, built, run, and PASSED (reproduced
+identically twice against a real stack), and is now a prerequisite for merging PR #16.** See "Phase 7
+status" below for the full write-up (the viewer's blind-only posture, the gate-scope widening to
+`core/frontend/`, the confirmation that the evals-fixtures line item was already satisfied in 4a/4c, and
+the live end-to-end eval's build-run-PASS). The full historical resume trail is retained below for context.
 
 Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). Phase 4
 (Ranking engine) was split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
@@ -208,14 +220,16 @@ persistence asymmetry, and the PII residual. **Phase 5 (persist + anonymize + ex
 `ScoreBreakdown` fold-read guard, the `cover_letter_chunks` security fix, and the (now resolved)
 `original_filename` residual. **Phase 6 (API routes — job create/read/list/status, résumé
 upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and
-gate-green on branch `feat/phase-6-api-routes`** (off `main` @ `6deade3`, HEAD `837de9e`) — all three
-merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **Human check-in
-received 2026-07-17; opened as PR #15** (https://github.com/humanaxiom/recruiter-assistant/pull/15) —
-CI (`gates-all`) running, merge held for a human go-ahead. See "Phase 6 status" below for the auth switch, the
-upload/zip scope, the status-transition route, the reverse-match-no-redaction decision, the security
-hardening (SEC-1/2/4), and the `pool.py` latent-bug fix. **Your next action is Phase 7 (ranking-quality
-evals fixtures + a minimal read-only Flask viewer — see the plan table), once Phase 6's PR #15 is
-reviewed and merged.** Confirm PR #15's merge status with the human first (`gh pr view 15`).
+MERGED to `main` via PR #15** (squash merge `e910669`, off `main` @ `6deade3`, tip `837de9e`) — all three
+merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's `gates-all`
+went fully green before merge. See "Phase 6 status" below for the auth switch, the upload/zip scope, the
+status-transition route, the reverse-match-no-redaction decision, the security hardening (SEC-1/2/4), and
+the `pool.py` latent-bug fix. **Your next action is to confirm PR #16's CI + merge status with the human
+(`gh pr view 16`) and merge on their go-ahead.** The live end-to-end eval (previously deferred, now built,
+run, and PASSED — see "Phase 7 status" below) has been made a prerequisite for that merge.
+`docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7 —
+once PR #16 is gated in CI and merged, the extraction plan's locked v1 scope is complete; see "Phase 7
+status" below for what, if anything, remains as a follow-up chore rather than a new phase.
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -327,9 +341,10 @@ from `Settings` at the real worker call sites (4c only proves the bridge in isol
 `matching_context_from_settings`/`non_matchable_families_from_settings` (the ADR-009 "Requirement 1"
 settings-wiring closure) were built on branch `feat/phase-4d-shortlist-writepath`, tip `6c2bf43`, 2
 commits (RED `24419b0` → GREEN `6c2bf43`), off `main` @ `fd12d1a` (PR #12's merge). **All three
-merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI
-(`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) went fully green — PR #13 was
-MERGED to `main` (merge `5945320`) this session.** The scoring code itself, `stages.py`/
+merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's
+`gates-all` (offline `run_evals.py` running inside the gated unit suite — CI never calls a model
+endpoint) went fully green — PR #13 was MERGED to `main` (merge `5945320`) this session.** The scoring
+code itself, `stages.py`/
 `orchestrator.py`, is byte-unchanged by 4d — only the new additive `matching_context_from_settings`
 factory touches `orchestrator.py`. Full write-up:
 [docs/activity/phase-4d-shortlist-writepath.md](docs/activity/phase-4d-shortlist-writepath.md);
@@ -464,21 +479,22 @@ fixed); no advisory lock on concurrent shortlist/reverse-match runs (ADR-010 §1
 ships a user-facing regenerate route; CSV formula/injection in `shortlist_csv`/`shortlist_evidence_csv` —
 accepted for v1, one-line fix noted.
 
-### Phase 6 status — DONE, gate-green, PR #15 OPEN (CI running) — read this before starting Phase 7
+### Phase 6 status — DONE, MERGED to `main` via PR #15 (merge `e910669`) — read this before starting Phase 7
 
 `core/src/api/deps.py` (new — `require_api_key`/`resolve_actor`/`get_arq`/`log_auth_mode`),
 `core/src/api/routes/{jobs,resumes,shortlist}.py` (new — 11 routes), `core/src/services/zip_upload.py`
 (new — `expand_zip_entries`/`ZipRejected`), `core/src/services/jd_import_service.py` (new —
 `extract_jd_text`) were built and gate-green on branch `feat/phase-6-api-routes`, off `main` @ `6deade3`
-(PR #14's merge), HEAD `837de9e`, commit chain: RED `209bff7` → GREEN `bc9a3d6` (initial routes, resumed
+(PR #14's merge), tip `837de9e`, commit chain: RED `209bff7` → GREEN `bc9a3d6` (initial routes, resumed
 mid-build after a session-limit interruption) → RED `1f2b161` → GREEN `344f6bf` (SEC-1/SEC-2/SEC-4
 security hardening + exact `fastapi`/`starlette`/`python-multipart` pins) → RED `c75f4a7` → GREEN
 `837de9e` (non-ASCII `X-API-Key` 401 generalization + upload file-count-ordering regression pin). **All
 three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS) — re-verified
-after the security-hardening round.** **Opened as PR #15
+after the security-hardening round.** Opened as PR #15
 (https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after the human check-in;
-merge held for go-ahead.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama)
-is running on the PR. Full
+**CI's `gates-all` (offline `run_evals.py` running inside the gated unit suite — CI never calls a model
+endpoint; inference is host-only by design) went fully green, and PR #15 was squash-merged to `main`
+(merge `e910669`) on 2026-07-17.** Full
 write-up: [docs/activity/phase-6-api-routes.md](docs/activity/phase-6-api-routes.md); decisions +
 residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.md).
 
@@ -519,8 +535,8 @@ actually used `Db` (never true before Phase 6) — fixed with a `TYPE_CHECKING`-
 **Final gate state, HEAD `837de9e`:** ruff/black/`mypy --strict` clean; **2156 unit tests @ 91.68%
 coverage**; **123 integration tests** vs real Postgres+Neo4j+Redis, incl. 12 new Phase-6 ASGI integration
 tests (real HTTP through the FastAPI app). Reviewer APPROVE (6 mutation obligations fired), security PASS
-(SEC-1/SEC-2 closed on re-audit), ranking-evals PASS (scoring byte-unchanged; CI's `gates-all`
-re-measures `run_evals.py` live on the PR).
+(SEC-1/SEC-2 closed on re-audit), ranking-evals PASS (scoring byte-unchanged; CI's `gates-all` runs the
+offline `run_evals.py` stand-in inside the gated unit suite — no live Ollama call, by design).
 
 **Carried forward into Phase 7:** `score_education` ignores `jd.education.fields` (still open,
 untouched); `reverse_match_job`'s `allowed_job_ids` filter still `description_parsed IS NOT NULL`, not
@@ -529,6 +545,113 @@ the `redacted_filename` `os.path.splitext` truncation LOW residual (not addresse
 validation); no advisory lock on concurrent shortlist/reverse-match runs — a user-facing regenerate route
 now exists (`POST /jobs/{id}/shortlist`, `POST /resumes/{id}/match-jobs`), so this question (ADR-010 §1)
 is now live, not hypothetical.
+
+### Phase 7 status — DONE, gate-green, PR #16 OPEN (CI running), live eval PASS — this is the current resume point
+
+`core/frontend/api_client.py` (new — sync `httpx` wrapper: `build_client` + one fn per Phase-6 route +
+`BackendError`/`NotFound`/`BackendUnavailable`), `core/frontend/app.py` (extended from a `/health`-only
+stub with routes `/`, `/jobs/<uuid>`, `/jobs/<uuid>/shortlist`, `/shortlist/<uuid>`, `/resumes/<uuid>`,
+`/resumes/<uuid>/match-results`, `/jobs/<uuid>/shortlist/export`), `core/frontend/templates/*.html` (new,
+server-side Jinja2, autoescaped) were built and gate-green on branch `feat/phase-7-evals-viewer`, off
+`main` @ `e910669` (PR #15's merge), tip `92ca4ae`, commit chain: `55ee0a0` docs (interim HANDOFF/plan
+stamp) → `942e8f5` red → `f28c22e` green (the viewer + client + gate-scope fix) → `92ca4ae`
+refactor/fix (post-review security findings closed). **All three merge-blocking gates green (reviewer
+APPROVE, security PASS, ranking-evals PASS).** **NOT yet opened as a PR — a PR opens after a human
+check-in.** Full write-up: [docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md);
+decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md).
+
+**Gate-scope fix, the other half of this phase.** `Makefile` (`gates`/`gates-fast`) and
+`.github/workflows/ci.yml` (`static`/`unit` jobs) are widened so ruff/black/mypy/coverage now cover
+`core/frontend/` alongside `core/src`/`core/tests` — previously the frontend directory was invisible to
+every quality gate (it is a sibling of `core/src/`, not nested under it). A meta-test
+(`core/tests/unit/test_gates_cover_frontend.py`) pins this so it can't silently regress.
+
+**Locked human decisions this phase (ADR-013):** (1) blind-only viewer for v1 — no reveal control
+anywhere; shortlist list/detail reads are unconditionally blind (`api_client.list_shortlist`/
+`get_shortlist_entry` take no `reveal` param at all) and the résumé route hardcodes `reveal=False`,
+ignoring any browser-supplied `?reveal=`. (2) the blind résumé page is structurally PII-incapable —
+`resume_detail.html` has no branch that renders `candidate.name/email/phone/location` at all, closing a
+latent path that had been gated only on the backend's `blinded` flag (which ADR-012 notes had a fail-open
+history). (3) gate scope widened to `core/frontend/`, pinned by a meta-test, rather than a second gate
+suite. (4) no new evals fixtures this phase — the plan's Phase 7 evals line item (precision@k,
+evidence-verification rate) was already satisfied by 4a (corpus) + 4c (live orchestrator wiring);
+`run_evals.py::main()` already runs inside the gated unit suite. (5) a live end-to-end eval (the 4a/4c
+corpus run through the real pipeline, re-checking thresholds against persisted rows) was originally
+recorded as deferred — it needs a reachable host Ollama + `docker compose up`, which CI does not provide by
+design — but that decision was **reversed on 2026-07-17**: the human un-deferred it and made it a
+prerequisite for merging PR #16. It has since been **built, run, and PASSED**, reproduced identically
+twice against a real stack (real `nomic-embed-text` embeddings, real Neo4j, real `shortlist_job`, real
+Postgres persistence). See "Live end-to-end eval — built, run, PASS (post-review addition)" immediately
+below.
+
+**Live end-to-end eval — built, run, PASS (post-review addition, 2026-07-17).**
+`core/tests/evals/run_evals_live.py` (new, 812 lines) + `core/tests/unit/test_evals_live_metrics.py` (new,
+16 offline tests) were built after PR #16 was opened. The corpus is pre-parsed by design (4a fixed the
+parsed representation to isolate ranking from non-deterministic LLM parsing — no raw docs exist in the
+corpus), so the harness seeds the pre-parsed corpus at the **post-parse boundary** (a `jobs` row + 20
+`resumes` rows with `parsed` jsonb, PII encrypted via the real `pii.py` path, and `job.parsed`/
+`resume.parsed` outbox events carrying real `nomic-embed-text` embeddings through the production embed
+boundary with PII redaction), then drives the real `project_to_graph` (Neo4j) → real `shortlist_job` →
+reads the persisted `shortlist_entries` → evaluates every `thresholds.toml` gate, reusing
+`run_evals.load_corpus`/`load_thresholds`/`_labels` and the real `stages.verify_evidence` + real redaction
+functions. Ran against a remote Ollama with the calibrated models (`nomic-embed-text` + `gpt-oss:20b`); the
+local metal host lacked them. Run via `docker compose ... exec -T api python tests/evals/run_evals_live.py`
+against a stack pointed at that Ollama. **Verified results, reproduced exactly on two independent runs,
+exit 0 both times:** `precision@5 = 1.000`; adversarial bait (r09) ranked 14th, outside k=5, no
+`must_not_surface` offenders; `evidence.verification_rate = 78/78 = 1.000`;
+`evidence.min_completeness_in_topk = 5/5 = 1.000`; `evidence.gold_recall = 4/4 = 1.000`;
+`evidence.negative_evidence_must_fail`: 4 fabrications, all scrubbed; `ordering_controls` all pass
+(education +0.0411, overqual +0.0120, motivation +0.0900, skill_missing_must +0.1460, recency +0.1440);
+`pii.embedding_input_pii_free`: 0/20; `pii.exported_output_pii_free`: 0/top-5; determinism: order
+identical, `max_rank_delta=0`, `max_score_delta=0`. The pure metric layer (`eval_*`) is offline-unit-tested
+(16 tests, bad rankings FAIL); the live orchestration script lives under `tests/evals` (not collected by
+`pytest tests/unit`), so CI stays green with no Ollama. Offline suite: **2245 unit tests @ 91.67%**
+(was 2229; +16), ruff/black/mypy clean. **Deviations, recorded honestly:** ADR-013 §5's literal "HTTP
+upload" wording is intentionally not followed (seeding at the post-parse boundary is what keeps thresholds
+meaningful); `project_to_graph`/`shortlist_job` ran with a direct `ctx`, not enqueued on the worker; the
+second determinism run used a warm Redis embed cache (embed half compares cache to itself); the
+`jd.education.fields` open decision remains unresolved and untouched. Full detail:
+[ADR-013 §5](docs/adr/013-phase7-evals-viewer.md) and
+[docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md)'s "Live end-to-end eval
+(post-review addition)" section.
+
+**Accepted residual (ADR-013):** `_unavailable(exc: BackendUnavailable)` in `app.py` has an unused `exc`
+parameter (its value is no longer rendered after the security fix below made the error page fully
+static). Kept because the signature documents the handler's intent; ruff's unused-arg rules aren't
+enabled in this repo. Security finding #2 (an earlier draft rendered the raised exception's message,
+risking a backend-URL leak to the browser) is CLOSED, not a residual.
+
+**Final gate state, HEAD `92ca4ae`:** ruff/black/`mypy src frontend --strict` clean; **2229 unit tests @
+91.67% coverage** (frontend now format/type/coverage-gated for the first time). Reviewer APPROVE, security
+PASS (both hardening findings closed — the structurally-PII-incapable résumé template and the fully
+static error page), ranking-evals PASS (scoring code byte-unchanged; offline corpus 352 tests green,
+`run_evals.py::main()` exits 0). **Post-review (2026-07-17):** `test_evals_live_metrics.py`'s 16 new
+offline tests bring the count to **2245 unit tests @ 91.67% coverage**, ruff/black/mypy still clean — see
+"Live end-to-end eval — built, run, PASS (post-review addition)" above.
+
+**Carried forward, still unresolved:** `score_education` ignores `jd.education.fields` (ADR-009 §7,
+restated through ADR-012 — untouched, scoring byte-unchanged); `reverse_match_job`'s `allowed_job_ids`
+filter still `description_parsed IS NOT NULL`, not `status='open'`; no advisory lock on concurrent
+shortlist/reverse-match runs (the viewer is read-only, so this is unaffected). **Resolved post-review
+(2026-07-17):** the live end-to-end eval — the one genuine verification gap Phase 7 originally left open —
+was built, run, and PASSED against the real stack (reproduced twice); see "Live end-to-end eval — built,
+run, PASS (post-review addition)" above and ADR-013 §5. It does not exercise the Phase 6 HTTP upload/parse
+routes themselves or the arq/Redis queue hop — those remain covered only by Phase 3/4/6's own tests.
+
+**Documentation correction made this phase:** prior HANDOFF/plan text repeatedly said CI runs "a live
+`run_evals.py` re-measurement against Ollama" for Phases 4d/5/6. That was inaccurate — CI's `gates-all`
+runs the offline deterministic stand-in harness (`run_evals.py::main()`) inside the gated unit suite; it
+never calls Ollama (`.github/workflows/ci.yml`'s own comment: "CI never calls a model endpoint; inference
+is host-only by design"). Corrected everywhere it appeared in this file and in
+`docs/EXTRACTION_PLAN.md`.
+
+**Your next action:** confirm PR #16's CI + merge status with the human (`gh pr view 16`) and merge on
+their go-ahead — the live end-to-end eval (above) is now a merge prerequisite and has already passed.
+`docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7 — once PR #16 is gated in CI and
+merged, the extraction plan's
+v1 scope (as locked in the plan's four decisions) is complete. Any further work (the still-open
+`jd.education.fields` decision, the accepted residuals catalogued across
+ADR-009 through ADR-013) is a follow-up chore, not a new numbered phase, unless the human scopes one.
 
 ## Historical: original Phase 3 plan (for reference)
 
@@ -569,7 +692,8 @@ matching-engine port in docs/adr/009-matching-engine-port.md, the Phase 4d
 shortlist/reverse-match write path in docs/adr/010-shortlist-reverse-match-write-path.md,
 the Phase 5 display-redaction read/export boundary in
 docs/adr/011-display-redaction-read-export-boundary.md, the Phase 6 API-routes
-auth/upload scope in docs/adr/012-api-routes-auth-upload-scope.md.
+auth/upload scope in docs/adr/012-api-routes-auth-upload-scope.md, and the
+Phase 7 read-only Flask viewer in docs/adr/013-phase7-evals-viewer.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
@@ -616,18 +740,18 @@ under reveal/non-blind) — both mutation-proven, both merge-blocking gates
 re-verified. Full detail: docs/activity/phase-5-persist-anonymize-export.md and
 docs/adr/011-display-redaction-read-export-boundary.md.
 
-**Phase 6 (API routes) is COMPLETE and gate-green on branch
-feat/phase-6-api-routes** (off main @ 6deade3, HEAD 837de9e), commit chain:
+**Phase 6 (API routes) is COMPLETE and MERGED to main via PR #15** (squash
+merge e910669, off main @ 6deade3, tip 837de9e), commit chain:
 red 209bff7 -> green bc9a3d6 (initial routes, resumed mid-build after a
 session-limit interruption) -> red 1f2b161 -> green 344f6bf (SEC-1/SEC-2/SEC-4
 security hardening + exact fastapi/starlette/python-multipart pins) -> red
 c75f4a7 -> green 837de9e (non-ASCII X-API-Key 401 generalization + upload
-file-count-ordering regression pin). **All three merge-blocking gates green
-(reviewer APPROVE, security PASS, ranking-evals PASS). Opened as PR #15
-(https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after
-the human check-in; merge held for a human go-ahead.** CI (gates-all, incl.
-a live run_evals.py re-measurement against Ollama) is running on PR #15. Full
-detail: docs/activity/phase-6-api-routes.md and
+file-count-ordering regression pin). **All three merge-blocking gates were
+green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's
+gates-all went fully green before merge (2026-07-17).** Note: CI's gates-all
+runs the offline run_evals.py stand-in inside the gated unit suite — it never
+calls a live Ollama endpoint, by design (see the Phase 7 correction below).
+Full detail: docs/activity/phase-6-api-routes.md and
 docs/adr/012-api-routes-auth-upload-scope.md.
 
 **Phase 6 shipped src/api/deps.py (new — require_api_key/resolve_actor/
@@ -660,36 +784,98 @@ integration tests. Reviewer APPROVE (6 mutation obligations fired), security
 PASS (SEC-1/SEC-2 closed on re-audit), ranking-evals PASS (scoring
 byte-unchanged).
 
-**Your next action is Phase 7 (ranking-quality evals fixtures + a minimal
-read-only Flask viewer)** — NOT the evals corpus (done), NOT graph projection
-(done), NOT the matching engine (done), NOT the write path (done, merged), NOT
-persist+anonymize+export (done, merged), NOT API routes (done, gate-green,
-PR #15 OPEN with CI running). Confirm PR #15's merge status (gh pr view 15)
-before building on it. Once Phase 6 is merged, Phase 7 ships the precision@k /
-evidence-verification-rate fixture harness (already partially live via 4c's
-run_evals.py wiring) and the minimal Flask viewer (read-only, consumes the
-Phase 6 routes). Run the per-phase subagent loop (planner -> tester ->
-data-pipeline coder -> reviewer + security + ranking-evals -> docs) on a
-feat/phase-7-... branch.
+**Phase 7 (a minimal read-only Flask viewer over the Phase 6 API) is DONE and
+gate-green on branch feat/phase-7-evals-viewer** (off main @ e910669, tip
+92ca4ae), commit chain: docs 55ee0a0 (interim HANDOFF/plan stamp) -> red
+942e8f5 -> green f28c22e (core/frontend/api_client.py new, core/frontend/app.py
+extended with 7 new routes + templates, Makefile/ci.yml gate-scope widening)
+-> refactor/fix 92ca4ae (two post-review security findings closed: the
+résumé-detail template rewritten so it is structurally incapable of rendering
+candidate.name/email/phone/location rather than merely flag-gated on the
+backend's blinded flag, and the error page made fully static so no
+backend-supplied text reaches the browser). **All three merge-blocking gates
+green (reviewer APPROVE, security PASS, ranking-evals PASS). NOT yet opened as
+a PR — check in with me before opening it.** Full detail:
+docs/activity/phase-7-evals-viewer.md and docs/adr/013-phase7-evals-viewer.md.
+
+**Phase 7 shipped a blind-only viewer, by construction, not by default.**
+Shortlist list/detail reads (api_client.list_shortlist/get_shortlist_entry)
+take no reveal parameter at all; the résumé route hardcodes reveal=False and
+ignores any browser-supplied ?reveal=. Reveal/reveal-export remains an
+audited, non-viewer backend surface (ADR-011/012) — the viewer can never
+de-anonymize from the browser. **Phase 7 also fixed a real, previously
+un-gated hole:** core/frontend/ (api_client.py, app.py, the new tests) was
+invisible to every quality gate before this phase — it is a sibling of
+core/src/, and every gate command named "src tests" explicitly. Makefile and
+.github/workflows/ci.yml now run ruff/black/mypy/coverage over frontend too,
+pinned by a new meta-test (test_gates_cover_frontend.py).
+
+**Phase 7 shipped NO new evals fixtures as part of the viewer build — that line
+item was already done.** The plan's Phase 7 row said "ranking-quality fixtures
+(precision@k, evidence-verification rate)"; those shipped in 4a (corpus) + 4c
+(live orchestrator wiring, run_evals.py::main() already running inside the
+gated unit suite). A live end-to-end eval of the corpus through the real
+pipeline (post-parse boundary -> project_to_graph -> shortlist_job -> persisted
+rows) had never run (4c only proved it against the orchestrator directly) and
+was originally deferred this session — needing a reachable host Ollama +
+docker compose up, which CI cannot provide by design. **Reversed later the
+same day (2026-07-17): the human un-deferred it and made it a prerequisite for
+merging PR #16. It is now BUILT + RUN + PASS, reproduced identically twice**
+(core/tests/evals/run_evals_live.py, new, 812 lines +
+core/tests/unit/test_evals_live_metrics.py, new, 16 tests). Full detail:
+ADR-013 §5 and docs/activity/phase-7-evals-viewer.md's "Live end-to-end eval
+(post-review addition)" section.
+
+**Documentation correction made this session, apply it wherever you see the
+old phrasing:** prior HANDOFF/plan text said CI runs "a live run_evals.py
+re-measurement against Ollama" for Phases 4d/5/6. That is inaccurate — CI's
+gates-all runs the OFFLINE run_evals.py stand-in inside the gated unit suite;
+it never calls Ollama (.github/workflows/ci.yml's own comment: "CI never
+calls a model endpoint; inference is host-only by design"). CI itself still
+never calls Ollama — the live measurement against a real Ollama endpoint
+(above) runs as a separate script outside CI, via
+`docker compose ... exec -T api python tests/evals/run_evals_live.py`
+against a stack pointed at an Ollama with nomic-embed-text + gpt-oss:20b, not
+inside the gated unit suite.
+
+**Phase 7 final state (tip 92ca4ae, pre-live-eval):** 2229 unit tests @ 91.67%
+coverage (frontend now format/type/coverage-gated for the first time).
+Reviewer APPROVE, security PASS (both findings closed), ranking-evals PASS
+(scoring code byte-unchanged; offline corpus 352 tests green;
+run_evals.py::main() exits 0). **Post-review (2026-07-17): the 16 new
+test_evals_live_metrics.py tests bring the offline suite to 2245 unit tests @
+91.67% coverage**, ruff/black/mypy still clean.
+
+**Phase 7 is opened as PR #16 (CI running); your next action is to confirm
+its CI + merge status with me (`gh pr view 16`) and merge on my go-ahead** —
+the live end-to-end eval (above) is now a merge prerequisite for PR #16 and
+has already passed, reproduced twice.
+docs/EXTRACTION_PLAN.md's phase table ends at Phase 7 — once PR #16 is
+gated in CI and merged, the extraction plan's locked v1 scope
+(the four decisions at the top of the plan) is complete. Do not invent a new
+numbered phase on your own initiative; any further work (the still-open
+jd.education.fields decision, the accepted
+residuals catalogued across ADR-009 through ADR-013) is a follow-up chore that
+needs a human to scope it, not an automatic Phase 8.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
 (data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Defaults
 live in .claude/agents/*.md frontmatter.
 
-**Open human decision, carried forward across 4c/4d/5/6, still UNRESOLVED:**
+**Open human decision, carried forward across 4c/4d/5/6/7, still UNRESOLVED:**
 score_education ignores jd.education.fields (ADR-009 §7, restated ADR-010 §5,
-ADR-011) — either extend the scorer or drop fields from the JD contract.
-Neither 4c, 4d, 5, nor 6 touched stages.py's scoring code, so this remains
-exactly as open as it was after 4c. Do not resolve this silently while
-building Phase 7. Also carried: reverse_match_job's allowed_job_ids filter is
-still description_parsed IS NOT NULL, not status='open', even though Phase 6
-added a status route (ADR-012 §3 revisits but does not resolve this); no
-advisory lock on concurrent shortlist/reverse-match runs now that a
-user-facing regenerate route exists (ADR-010 §1, now live not hypothetical).
+ADR-011, ADR-013) — either extend the scorer or drop fields from the JD
+contract. Neither 4c, 4d, 5, 6, nor 7 touched stages.py's scoring code, so
+this remains exactly as open as it was after 4c. Do not resolve this silently.
+Also carried: reverse_match_job's allowed_job_ids filter is still
+description_parsed IS NOT NULL, not status='open', even though Phase 6 added a
+status route (ADR-012 §3 revisits but does not resolve this); no advisory
+lock on concurrent shortlist/reverse-match runs (ADR-010 §1, still open, the
+viewer is read-only so Phase 7 didn't touch this either).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening the Phase 6 PR or any Phase 7 PR.
+HANDOFF.md. Phase 7's PR #16 is already open; check in with me before merging it (or opening any new PR).
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<h2>Jobs</h2>
+<ul>
+  {% for job in jobs %}
+  <li>
+    <a href="{{ url_for('job_detail', job_id=job.id) }}">{{ job.title }}</a>
+    — {{ job.department }} — {{ job.status }}
+  </li>
+  {% else %}
+  <li>No jobs yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

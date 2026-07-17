@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Match results{% endblock %}
+{% block content %}
+<h2>Match results</h2>
+<table>
+  <thead><tr><th>Job</th><th>Score</th></tr></thead>
+  <tbody>
+    {% for entry in results.entries %}
+    <tr>
+      <td>{{ entry.job_id }}</td>
+      <td>{{ entry.score_final }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2">No match results yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
