@@ -126,6 +126,15 @@ def test_resolve_actor_defaults_to_api_for_an_empty_header() -> None:
     assert deps.resolve_actor(x_actor_name="") == "api"
 
 
+def test_resolve_actor_caps_an_overlong_header() -> None:  # SEC-4
+    from src.api import deps
+
+    overlong = "z" * 5000
+    result = deps.resolve_actor(x_actor_name=overlong)
+    assert len(result) <= 128
+    assert result == overlong[:128]
+
+
 # ── get_arq ──────────────────────────────────────────────────────────────
 
 

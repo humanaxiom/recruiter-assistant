@@ -222,6 +222,82 @@ async def test_upload_resumes_multi_file_returns_202_and_enqueues_per_file() -> 
         assert call.args[0] == "parse_resume"
 
 
+# ── upload: file-count cap (SEC-2, memory-exhaustion DoS) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_over_max_count_rejected_nothing_enqueued() -> None:
+    from src.services.zip_upload import _MAX_ZIP_ENTRIES
+
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    files = [
+        ("files", (f"r{i}.pdf", _PDF_MAGIC, "application/pdf"))
+        for i in range(_MAX_ZIP_ENTRIES + 1)
+    ]
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=files,
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code in (413, 422)
+    arq.enqueue_job.assert_not_awaited()
+    store.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_over_max_count_rejected_before_bodies_processed(
+    monkeypatch: Any,
+) -> None:
+    from src.services.zip_upload import _MAX_ZIP_ENTRIES
+
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    # Spy the service: the batch must be rejected on count BEFORE any body is
+    # read/expanded and BEFORE the service is ever invoked.
+    spy = AsyncMock()
+    monkeypatch.setattr(resumes_routes.resume_service, "upload_resumes", spy)
+    files = [
+        ("files", (f"r{i}.pdf", _PDF_MAGIC, "application/pdf"))
+        for i in range(_MAX_ZIP_ENTRIES + 1)
+    ]
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=files,
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code in (413, 422)
+    spy.assert_not_awaited()
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_at_max_count_is_accepted() -> None:
+    from src.services.zip_upload import _MAX_ZIP_ENTRIES
+
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    files = [
+        ("files", (f"r{i}.pdf", _PDF_MAGIC, "application/pdf"))
+        for i in range(_MAX_ZIP_ENTRIES)
+    ]
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=files,
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+
+
 # ── upload: zip expansion ────────────────────────────────────────────────
 
 
