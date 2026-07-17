@@ -17,6 +17,7 @@ same redaction-boundary contract into Phase 5).
 
 from __future__ import annotations
 
+import os
 import re
 import string
 
@@ -363,6 +364,20 @@ def _letter(n: int) -> str:
         n, rem = divmod(n - 1, 26)
         letters = string.ascii_uppercase[rem] + letters
     return letters
+
+
+def redacted_filename(original: str | None) -> str:
+    """Blind-review placeholder for a résumé's ``original_filename``. Résumés
+    are commonly named after their candidate ("Jane_Smith_Resume.pdf"), so
+    returning the real filename through a blind surface leaks identity — the
+    same privacy concern that drives name/PII masking. Return a non-identifying
+    ``resume<ext>`` that PRESERVES the extension (so ``.pdf``/``.docx`` stays
+    visible for UX), lower-cased. No extension (or None/blank) → a bare
+    ``resume``. The placeholder carries NO rank/pseudonym or candidate data."""
+    if not original or not original.strip():
+        return "resume"
+    ext = os.path.splitext(original.strip())[1]
+    return f"resume{ext.lower()}" if ext else "resume"
 
 
 def pseudonym(rank: int) -> str:

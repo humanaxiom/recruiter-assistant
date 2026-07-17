@@ -54,7 +54,12 @@ from src.schemas.matching import (
 from src.schemas.resumes import ResumeParsed
 from src.services import DbConn
 from src.services.pii import set_pii_key
-from src.services.redaction import blind_label_map, pseudonym, redact_text
+from src.services.redaction import (
+    blind_label_map,
+    pseudonym,
+    redact_text,
+    redacted_filename,
+)
 
 _DELETE_SHORTLIST_SQL = "DELETE FROM shortlist_entries WHERE job_id = $1"
 
@@ -424,9 +429,10 @@ def _redact_evidence_dict(
 
 def _apply_reveal(rows: list[dict[str, Any]], *, reveal: bool) -> None:
     """When ``reveal`` is False, strip decrypted identity and substitute the
-    rank-based pseudonym, and scrub name/contact + employer/school labels out of
-    the evidence quote text (using the REAL name still present here BEFORE it is
-    swapped). Mutates rows in place."""
+    rank-based pseudonym, mask the identifying résumé filename, and scrub
+    name/contact + employer/school labels out of the evidence quote text (using
+    the REAL name still present here BEFORE it is swapped). Mutates rows in
+    place."""
     if reveal:
         return
     for r in rows:
@@ -442,6 +448,9 @@ def _apply_reveal(rows: list[dict[str, Any]], *, reveal: bool) -> None:
         r["candidate_name"] = pseudonym(int(r["rank"]))
         r["candidate_email"] = ""
         r["candidate_phone"] = ""
+        # A résumé named after its candidate leaks identity through the export
+        # (the resume_file column) — mask it, keeping only its extension.
+        r["original_filename"] = redacted_filename(r.get("original_filename"))
 
 
 async def export_rows(

@@ -34,7 +34,12 @@ from src.schemas.resumes import (
 from src.services import DbConn
 from src.services import pii as pii_service
 from src.services.pii import set_pii_key
-from src.services.redaction import blind_label_map, is_foreign_location, redact_text
+from src.services.redaction import (
+    blind_label_map,
+    is_foreign_location,
+    redact_text,
+    redacted_filename,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +180,13 @@ async def list_for_job(
     return [
         ResumeListItem(
             id=r["id"],
-            original_filename=r["original_filename"],
+            # A résumé named after its candidate leaks identity — mask the
+            # filename under blind review, keeping only its extension.
+            original_filename=(
+                redacted_filename(r["original_filename"])
+                if blind
+                else r["original_filename"]
+            ),
             status=r["status"],
             uploaded_at=r["uploaded_at"],
             parsed_at=r["parsed_at"],
@@ -213,7 +224,9 @@ async def get_one(conn: DbConn, resume_id: UUID, *, reveal: bool = False) -> Res
         return ResumeOut(
             id=row["id"],
             job_id=row["job_id"],
-            original_filename=row["original_filename"],
+            # A résumé named after its candidate ("Jane_Smith_Resume.pdf")
+            # leaks identity verbatim — mask it, keeping only the extension.
+            original_filename=redacted_filename(row["original_filename"]),
             mime_type=row["mime_type"],
             file_size_bytes=row["file_size_bytes"],
             sha256=row["sha256"],
