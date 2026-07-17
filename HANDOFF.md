@@ -199,8 +199,9 @@ Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); 
 **Phase 6 is MERGED** (PR #15, squash merge `e910669`, CI `gates-all` fully green, 2026-07-17; human
 go-ahead received 2026-07-17). **Phase 7 (a minimal read-only Flask viewer over the Phase 6 API) is DONE
 and gate-green on branch `feat/phase-7-evals-viewer`** (off `main` @ `e910669`, tip `92ca4ae`) — all
-three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **NOT yet opened
-as a PR — check in with the human before opening it.** See "Phase 7 status" below for the full write-up
+three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **Opened as PR #16
+(https://github.com/humanaxiom/recruiter-assistant/pull/16) on 2026-07-17 after a human go-ahead; CI
+(`gates-all`) running, merge held for a human go-ahead.** See "Phase 7 status" below for the full write-up
 (the viewer's blind-only posture, the gate-scope widening to `core/frontend/`, the confirmation that the
 evals-fixtures line item was already satisfied in 4a/4c, and the deferred live end-to-end eval). The full
 historical resume trail is retained below for context.
@@ -221,10 +222,10 @@ MERGED to `main` via PR #15** (squash merge `e910669`, off `main` @ `6deade3`, t
 merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's `gates-all`
 went fully green before merge. See "Phase 6 status" below for the auth switch, the upload/zip scope, the
 status-transition route, the reverse-match-no-redaction decision, the security hardening (SEC-1/2/4), and
-the `pool.py` latent-bug fix. **Your next action is to confirm with the human whether to open Phase 7's
-PR now.** `docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7 — once this PR is reviewed, gated in
-CI, and merged, the extraction plan's locked v1 scope is complete; see "Phase 7 status" below for what,
-if anything, remains as a follow-up chore rather than a new phase.
+the `pool.py` latent-bug fix. **Your next action is to confirm PR #16's CI + merge status with the human
+(`gh pr view 16`) and merge on their go-ahead.** `docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7 —
+once PR #16 is gated in CI and merged, the extraction plan's locked v1 scope is complete; see "Phase 7
+status" below for what, if anything, remains as a follow-up chore rather than a new phase.
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -541,7 +542,7 @@ validation); no advisory lock on concurrent shortlist/reverse-match runs — a u
 now exists (`POST /jobs/{id}/shortlist`, `POST /resumes/{id}/match-jobs`), so this question (ADR-010 §1)
 is now live, not hypothetical.
 
-### Phase 7 status — DONE, gate-green, NOT yet PR'd — this is the current resume point
+### Phase 7 status — DONE, gate-green, PR #16 OPEN (CI running) — this is the current resume point
 
 `core/frontend/api_client.py` (new — sync `httpx` wrapper: `build_client` + one fn per Phase-6 route +
 `BackendError`/`NotFound`/`BackendUnavailable`), `core/frontend/app.py` (extended from a `/health`-only
@@ -601,8 +602,9 @@ never calls Ollama (`.github/workflows/ci.yml`'s own comment: "CI never calls a 
 is host-only by design"). Corrected everywhere it appeared in this file and in
 `docs/EXTRACTION_PLAN.md`.
 
-**Your next action:** confirm with the human whether to open Phase 7's PR now. `docs/EXTRACTION_PLAN.md`'s
-phase table ends at Phase 7 — once this PR is reviewed, gated in CI, and merged, the extraction plan's
+**Your next action:** confirm PR #16's CI + merge status with the human (`gh pr view 16`) and merge on
+their go-ahead. `docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7 — once PR #16 is gated in CI and
+merged, the extraction plan's
 v1 scope (as locked in the plan's four decisions) is complete. Any further work (the deferred live
 end-to-end eval, the still-open `jd.education.fields` decision, the accepted residuals catalogued across
 ADR-009 through ADR-013) is a follow-up chore, not a new numbered phase, unless the human scopes one.
@@ -790,9 +792,10 @@ APPROVE, security PASS (both findings closed), ranking-evals PASS (scoring
 code byte-unchanged; offline corpus 352 tests green; run_evals.py::main()
 exits 0).
 
-**Your next action is to confirm with me whether to open Phase 7's PR now.**
-docs/EXTRACTION_PLAN.md's phase table ends at Phase 7 — once this PR is
-reviewed, gated in CI, and merged, the extraction plan's locked v1 scope
+**Phase 7 is opened as PR #16 (CI running); your next action is to confirm
+its CI + merge status with me (`gh pr view 16`) and merge on my go-ahead.**
+docs/EXTRACTION_PLAN.md's phase table ends at Phase 7 — once PR #16 is
+gated in CI and merged, the extraction plan's locked v1 scope
 (the four decisions at the top of the plan) is complete. Do not invent a new
 numbered phase on your own initiative; any further work (the deferred live
 end-to-end eval, the still-open jd.education.fields decision, the accepted
@@ -816,7 +819,7 @@ lock on concurrent shortlist/reverse-match runs (ADR-010 §1, still open, the
 viewer is read-only so Phase 7 didn't touch this either).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening the Phase 7 PR (or any PR).
+HANDOFF.md. Phase 7's PR #16 is already open; check in with me before merging it (or opening any new PR).
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

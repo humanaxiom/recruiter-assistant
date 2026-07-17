@@ -67,7 +67,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — CLOSED, see below.** | ✅ done — **MERGED via PR #13**, merge `5945320`, CI green, tip `6c2bf43`, 2 commits, off `main` @ `fd12d1a`. [activity](activity/phase-4d-shortlist-writepath.md) |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — **MERGED via PR #14**, merge `6deade3`, CI green, tip `02af27c`, 6 commits (three RED→GREEN cycles: initial build, cover-letter-chunks security fix, `original_filename` de-anonymization fix), off `main` @ `5945320`. [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
 | **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — **MERGED via PR #15**, squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`. [PR #15](https://github.com/humanaxiom/recruiter-assistant/pull/15) · [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate) — **already satisfied by 4a/4c, no new fixtures shipped this phase**; minimal read-only Flask viewer (blind-only, no reveal control) | ✅ done — **gate-green, pending PR** on `feat/phase-7-evals-viewer`, tip `92ca4ae`, off `main` @ `e910669` (Phase 6's merge). [activity](activity/phase-7-evals-viewer.md) · [ADR-013](adr/013-phase7-evals-viewer.md) |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate) — **already satisfied by 4a/4c, no new fixtures shipped this phase**; minimal read-only Flask viewer (blind-only, no reveal control) | ✅ done — **gate-green, opened as PR #16 (CI running)** on `feat/phase-7-evals-viewer`, tip `92ca4ae`, off `main` @ `e910669` (Phase 6's merge). [PR #16](https://github.com/humanaxiom/recruiter-assistant/pull/16) · [activity](activity/phase-7-evals-viewer.md) · [ADR-013](adr/013-phase7-evals-viewer.md) |
 
 ## Subagent structure
 
@@ -82,9 +82,10 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 ## Current status & next step
 
-**As of 2026-07-16 — Phases 0–5 are merged to `main`, CI green** (Phase 4, Ranking engine, split into 4
+**As of 2026-07-17 — Phases 0–6 are merged to `main`, CI green** (Phase 4, Ranking engine, split into 4
 gated sub-phases, planner pass 2026-07-12, **all four now merged**; Phase 5, persist + anonymize +
-export, merged via PR #14). **Phase 6 (API routes) is COMPLETE and gate-green, pre-PR** — see below.
+export, merged via PR #14; **Phase 6, API routes, merged via PR #15, squash merge `e910669`**). **Phase 7
+(read-only Flask viewer + gate-scope fix) is COMPLETE and gate-green — opened as PR #16, CI running** — see below.
 Sub-phase **4a (evals corpus) is COMPLETE and
 MERGED to `main`**
 via PR #8 (merge `875eac2`), CI green, 2026-07-12 (all three merge-blocking gates green; corpus = 16
