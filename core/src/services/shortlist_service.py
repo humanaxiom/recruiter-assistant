@@ -47,6 +47,8 @@ from src.pipeline.matching.orchestrator import JobMatchResult, ShortlistResult
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
     EvidenceObject,
+    JobMatchEntry,
+    JobMatchResultOut,
     PipelineMeta,
     ScoreBreakdown,
     ShortlistEntry,
@@ -151,6 +153,79 @@ async def persist_reverse_match(conn: DbConn, result: JobMatchResult) -> int:
             meta_json,
         )
     return len(result.entries)
+
+
+# ── reverse-match read (Phase 6) ────────────────────────────────────────────
+#
+# Placed alongside persist_reverse_match for symmetry: the write and read
+# sides of the SAME table live together, mirroring list_for_job/get_one below
+# for shortlist_entries.
+
+_REVERSE_MATCH_COLS = (
+    "rm.job_id, j.title, j.department, rm.rank, rm.score_final, "
+    "rm.score_structured, rm.score_evidence, rm.score_breakdown, rm.evidence, "
+    "rm.requirement_count, rm.must_have_count, rm.pipeline_meta, rm.generated_at"
+)
+_REVERSE_MATCH_QUERY = (
+    f"SELECT {_REVERSE_MATCH_COLS} FROM reverse_match_entries rm "
+    "JOIN jobs j ON j.id = rm.job_id WHERE rm.resume_id = $1 ORDER BY rm.rank ASC"
+)
+
+
+def _row_to_job_match_entry(row: Any) -> JobMatchEntry:
+    raw = dict(row)
+    sb = raw["score_breakdown"]
+    if isinstance(sb, str):
+        sb = json.loads(sb)
+    ev = raw["evidence"]
+    if isinstance(ev, str):
+        ev = json.loads(ev)
+    return JobMatchEntry(
+        job_id=raw["job_id"],
+        title=raw["title"],
+        department=raw["department"],
+        rank=raw["rank"],
+        score_final=raw["score_final"],
+        score_structured=raw["score_structured"],
+        score_evidence=raw["score_evidence"],
+        # No fold-pop here (the mirror image of the shortlist read path): this
+        # table never folded score_structured/score_evidence into the jsonb,
+        # so ScoreBreakdown.model_validate runs on the jsonb AS-IS.
+        score_breakdown=ScoreBreakdown.model_validate(sb),
+        evidence=EvidenceObject.model_validate(ev) if ev is not None else None,
+        requirement_count=raw["requirement_count"],
+        must_have_count=raw["must_have_count"],
+    )
+
+
+async def get_reverse_match_result(conn: DbConn, resume_id: UUID) -> JobMatchResultOut:
+    """All ``reverse_match_entries`` rows for ``resume_id``, ordered by rank,
+    joined to ``jobs`` for title/department.
+
+    A résumé that has never been reverse-matched (zero rows — not a missing
+    résumé; that is the route's job) returns the empty shape. ``pipeline_meta``
+    / ``generated_at`` are per-row on the table but singular on the DTO — every
+    row from one run carries the identical value, so they are taken from the
+    first row.
+    """
+    rows = await conn.fetch(_REVERSE_MATCH_QUERY, resume_id)
+    if not rows:
+        return JobMatchResultOut(
+            resume_id=resume_id, entries=[], pipeline_meta=None, generated_at=None
+        )
+    entries = [_row_to_job_match_entry(r) for r in rows]
+    first = dict(rows[0])
+    meta_raw = first["pipeline_meta"]
+    if isinstance(meta_raw, str):
+        meta_raw = json.loads(meta_raw)
+    return JobMatchResultOut(
+        resume_id=resume_id,
+        entries=entries,
+        pipeline_meta=(
+            PipelineMeta.model_validate(meta_raw) if meta_raw is not None else None
+        ),
+        generated_at=first["generated_at"],
+    )
 
 
 # ── read (Phase 5) ─────────────────────────────────────────────────────────

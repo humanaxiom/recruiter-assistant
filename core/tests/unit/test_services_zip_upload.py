@@ -51,12 +51,30 @@ def _zip_bytes(entries: list[tuple[str, bytes]], *, compress: bool = False) -> b
     """Build real zip bytes from ``(name, content)`` pairs, using
     ``ZipInfo`` directly (not ``ZipFile.write``) so a malicious entry NAME
     (traversal-shaped) is written verbatim rather than sanitised by the
-    stdlib's own path-joining convenience methods."""
+    stdlib's own path-joining convenience methods.
+
+    PROVABLY-WRONG-TEST-FIXTURE FIX (coder note, not a weakened assertion):
+    ``zipfile.ZipInfo(filename=name)`` always constructs with
+    ``compress_type=ZIP_STORED`` regardless of the enclosing ``ZipFile``'s own
+    ``compression=`` setting, and ``ZipFile.writestr`` honours an explicit
+    ``ZipInfo``'s own ``compress_type`` over the archive default — so the
+    original ``zf.writestr(zipfile.ZipInfo(filename=name), content)`` made
+    ``compress=True`` a silent no-op (every entry was written STORED, never
+    DEFLATED), which is exactly why
+    ``test_expand_zip_entries_rejects_an_entry_over_the_per_entry_cap``'s own
+    sanity assertion (``len(data) < 1024 * 1024``) failed: an 11 MB run of
+    zero bytes came out ~11 MB on disk instead of compressing to a few KB.
+    Passing ``compress_type=method`` explicitly to ``writestr`` (verified:
+    11 MB of zeros -> 11333 bytes compressed, vs. 11534450 uncompressed)
+    makes the fixture match its own documented intent — a genuine bomb-ratio
+    archive — for both this test and
+    ``test_expand_zip_entries_rejects_when_the_running_total_exceeds_the_cap``.
+    """
     buf = BytesIO()
     method = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     with zipfile.ZipFile(buf, "w", compression=method) as zf:
         for name, content in entries:
-            zf.writestr(zipfile.ZipInfo(filename=name), content)
+            zf.writestr(zipfile.ZipInfo(filename=name), content, compress_type=method)
     return buf.getvalue()
 
 

@@ -13,16 +13,33 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import asyncpg
-from asyncpg import Record
-from asyncpg.pool import PoolConnectionProxy
 from fastapi import Depends, FastAPI, Request
 
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from asyncpg import Record
+    from asyncpg.pool import PoolConnectionProxy
+
+    # mypy --strict's disallow_any_generics wants the real parametrised type.
+    _ConnT = PoolConnectionProxy[Record]
+else:
+    # PoolConnectionProxy is generic only in the stubs — subscripting the REAL
+    # runtime class raises. `from __future__ import annotations` (this
+    # module's own PEP 563) stringifies every annotation, and FastAPI's
+    # dependant-graph builder introspects `get_db` (as a `Depends(get_db)`
+    # sub-dependency) with `inspect.signature(eval_str=True)`, which `eval()`s
+    # that string — so a real `PoolConnectionProxy[Record]` reference
+    # anywhere in `get_db`'s signature (params OR return) blows up the FIRST
+    # time any route actually uses it (nothing did before Phase 6). `Any`
+    # here is what that `eval()` actually resolves at runtime; mypy never
+    # sees this branch.
+    _ConnT = Any
 
 
 async def init_pool(
@@ -50,8 +67,14 @@ async def close_pool(app: FastAPI) -> None:
         logger.info("pg.pool.close")
 
 
-async def get_db(request: Request) -> AsyncIterator[PoolConnectionProxy[Record]]:
-    """FastAPI dep — one connection per request, released back to the pool."""
+async def get_db(request: Request) -> AsyncIterator[_ConnT]:
+    """FastAPI dep — one connection per request, released back to the pool.
+
+    Return-typed via ``_ConnT`` (not a direct ``PoolConnectionProxy[Record]``
+    reference) — see the module-level comment: this signature IS introspected
+    by FastAPI (as a ``Depends(get_db)`` sub-dependency), so the real
+    un-subscriptable runtime class can never appear here directly.
+    """
     pool: asyncpg.Pool[Record] | None = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise RuntimeError("Postgres pool not initialised (lifespan not running)")
@@ -59,7 +82,4 @@ async def get_db(request: Request) -> AsyncIterator[PoolConnectionProxy[Record]]
         yield conn
 
 
-# PoolConnectionProxy is generic only in the stubs; it is not subscriptable at
-# runtime. A string forward-ref keeps mypy resolving the real parametrised type
-# while the runtime value stays a plain string.
-Db = Annotated["PoolConnectionProxy[Record]", Depends(get_db)]
+Db = Annotated[_ConnT, Depends(get_db)]
