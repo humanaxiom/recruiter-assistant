@@ -129,6 +129,7 @@ def _request(
     *,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
+    data: dict[str, Any] | None = None,
     files: Any | None = None,
     client: httpx.Client | None = None,
 ) -> httpx.Response:
@@ -136,7 +137,7 @@ def _request(
     try:
         try:
             response = active.request(
-                method, path, params=params, json=json, files=files
+                method, path, params=params, json=json, data=data, files=files
             )
         except httpx.ConnectError as exc:
             raise BackendUnavailable(f"connection failed: {exc}") from exc
@@ -211,6 +212,49 @@ def list_resumes(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def upload_resumes(
+    job_id: UUID,
+    files: list[tuple[str, bytes, str]],
+    *,
+    consent_acknowledged: bool,
+    cover_letter_text: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/{id}/resumes (multipart).
+
+    ``files`` is a list of ``(filename, content, content_type)`` tuples,
+    forwarded as repeated ``files=`` parts (a ``.zip`` is expanded *server*-side
+    — we only forward the raw bytes, never expand it here). ``consent_acknowledged``
+    is sent as the string ``"true"``/``"false"`` form field the backend expects
+    (it accepts iff ``.strip().lower() == "true"``). An optional
+    ``cover_letter_text`` form field is included only when provided. A backend
+    4xx surfaces as ``BadRequest`` so the route can re-render with a message."""
+    multipart = [
+        ("files", (filename, content, ctype)) for filename, content, ctype in files
+    ]
+    form: dict[str, Any] = {
+        "consent_acknowledged": "true" if consent_acknowledged else "false"
+    }
+    if cover_letter_text is not None:
+        form["cover_letter_text"] = cover_letter_text
+    response = _request(
+        "POST",
+        f"/jobs/{job_id}/resumes",
+        data=form,
+        files=multipart,
+        client=client,
+    )
+    return response.json()
+
+
+def generate_shortlist(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /jobs/{id}/shortlist — enqueues the ranking job. Returns the
+    enqueue ack ``{job_id, status: "enqueued"}`` (results appear
+    asynchronously; the caller polls ``list_shortlist`` for them)."""
+    response = _request("POST", f"/jobs/{job_id}/shortlist", client=client)
+    return response.json()
+
+
 def list_shortlist(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/jobs/{job_id}/shortlist", client=client)
     return response.json()
@@ -269,6 +313,8 @@ __all__ = [
     "transition_status",
     "patch_job",
     "list_resumes",
+    "upload_resumes",
+    "generate_shortlist",
     "list_shortlist",
     "get_shortlist_entry",
     "get_resume",

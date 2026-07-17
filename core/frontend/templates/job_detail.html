@@ -56,16 +56,34 @@
 
 <div class="card">
   <p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a></p>
+
+  {% if job.status == 'open' %}
+  <h3>Upload résumés</h3>
+  <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
+        enctype="multipart/form-data" hx-encoding="multipart/form-data">
+    <div class="form-group">
+      <label class="label" for="resume-files">Résumé file(s) — PDF/DOCX, or a
+        .zip of many</label>
+      <input class="input" id="resume-files" name="files" type="file" multiple>
+    </div>
+    <div class="form-group">
+      <label class="label" for="cover_letter_text">Cover letter (optional)</label>
+      <textarea class="textarea" id="cover_letter_text" name="cover_letter_text"
+                placeholder="Paste an optional cover letter…"></textarea>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="consent_acknowledged" name="consent_acknowledged"
+             value="true" required>
+      <label class="label" for="consent_acknowledged" style="margin:0">
+        I confirm the candidate consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">Upload</button>
+    </div>
+  </form>
+  {% endif %}
+
   <h3>Résumés</h3>
-  <ul class="list">
-    {% for resume in resumes %}
-    <li>
-      <a href="{{ url_for('resume_detail', resume_id=resume.id) }}">
-        {{ resume.original_filename }}</a>
-    </li>
-    {% else %}
-    <li class="muted">No resumes uploaded yet.</li>
-    {% endfor %}
-  </ul>
+  {% include "resumes_table.html" %}
 </div>
 {% endblock %}

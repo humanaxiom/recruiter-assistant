@@ -159,6 +159,19 @@ _TRANSITION_LABELS: dict[str, str] = {
 }
 
 
+# A résumé row is "terminal" once the backend has finished parsing it (or
+# given up). While ANY row is still uploaded/parsing the résumés table keeps
+# its HTMX poll trigger; once every row is terminal the trigger is dropped so
+# the browser stops polling.
+_TERMINAL_RESUME_STATUSES = ("parsed", "failed")
+# Defensive cap on the free-text cover letter before it ever hits the network.
+_MAX_COVER_LETTER_CHARS = 20000
+
+
+def _any_resume_pending(resumes: list[dict[str, Any]]) -> bool:
+    return any(r.get("status") not in _TERMINAL_RESUME_STATUSES for r in resumes)
+
+
 def _render_job_detail(
     job_id: UUID, *, error: str | None = None, status_code: int = 200
 ) -> Any:
@@ -175,11 +188,77 @@ def _render_job_detail(
             "job_detail.html",
             job=job,
             resumes=resumes,
+            resumes_pending=_any_resume_pending(resumes),
             next_states=next_states,
             transition_labels=_TRANSITION_LABELS,
             error=error,
         ),
         status_code,
+    )
+
+
+@app.post("/jobs/<uuid:job_id>/resumes")
+def upload_resumes(job_id: UUID) -> Any:
+    """Multipart résumé upload. Consent is MANDATORY: if the recruiter did not
+    tick the consent checkbox we do NOT call the backend at all — we re-render
+    the job detail with an error, so no candidate bytes ever leave the browser
+    without an explicit PIPEDA/FIPPA acknowledgement."""
+    consent = (request.form.get("consent_acknowledged") or "").strip().lower() == "true"
+    if not consent:
+        return _render_job_detail(
+            job_id,
+            error="You must confirm the candidate consented to this processing.",
+            status_code=400,
+        )
+    uploads = request.files.getlist("files")
+    files: list[tuple[str, bytes, str]] = [
+        (
+            upload.filename or "upload",
+            upload.read(),
+            upload.content_type or "application/octet-stream",
+        )
+        for upload in uploads
+        if upload.filename
+    ]
+    cover_letter_raw = request.form.get("cover_letter_text")
+    cover_letter_text: str | None = None
+    if cover_letter_raw:
+        cover_letter_text = cover_letter_raw[:_MAX_COVER_LETTER_CHARS]
+    try:
+        api_client.upload_resumes(
+            job_id,
+            files,
+            consent_acknowledged=True,
+            cover_letter_text=cover_letter_text,
+        )
+    except api_client.BadRequest as exc:
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.get("/jobs/<uuid:job_id>/resumes-table")
+def resumes_table(job_id: UUID) -> Any:
+    """HTMX poll fragment. While any résumé row is still uploaded/parsing it
+    keeps its ``hx-trigger`` so the browser re-polls every 3s; once every row
+    is terminal (parsed/failed) it renders without the trigger, so polling
+    stops."""
+    try:
+        resumes = api_client.list_resumes(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "resumes_table.html",
+        job_id=job_id,
+        resumes=resumes,
+        resumes_pending=_any_resume_pending(resumes),
     )
 
 
