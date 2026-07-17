@@ -39,8 +39,14 @@ core/src/
   services/    # pii, redaction, shortlist_service (trimmed), resume_service
   worker/      # arq jobs + neo4j_bootstrap
   api/         # routes: jobs, resumes, shortlist(generate/list/get/export)
-  web/         # minimal Flask read-only viewer
 ```
+
+> **Correction (Phase 7, 2026-07-17):** this sketch originally showed the viewer at `core/src/web/`. The
+> shipped location is **`core/frontend/`** — a sibling of `core/src/`, not nested under it (matching the
+> repository layout the README's "Repository layout" section already documented). A future reader looking
+> for the viewer under `core/src/web/` should look in `core/frontend/` instead. This also meant the viewer
+> code was invisible to every quality gate until Phase 7 explicitly widened `Makefile`/CI to cover it — see
+> [ADR-013](adr/013-phase7-evals-viewer.md) §3.
 
 Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven queries), schema created via **idempotent DDL on startup** (template's "no migration framework yet" stance — no Alembic).
 
@@ -61,7 +67,7 @@ Data access: **raw asyncpg + hand-written jsonb SQL** (port hris's proven querie
 | &nbsp;&nbsp;**4d · Shortlist + reverse-match jobs** | `shortlist_job`, `reverse_match_job` arq tasks + write-only `persist_shortlist`/`persist_reverse_match` + `match_resume_to_jobs` + worker wiring. (list/get/export → Phase 5). **Carried from 4c (ADR-009): wire `MatchingContext`/`weights` from `Settings` via `weights_from_settings` at the real call sites — CLOSED, see below.** | ✅ done — **MERGED via PR #13**, merge `5945320`, CI green, tip `6c2bf43`, 2 commits, off `main` @ `fd12d1a`. [activity](activity/phase-4d-shortlist-writepath.md) |
 | **5 · Persist + anonymize + export** | Trimmed `shortlist_service` read/export (`list_for_job`/`get_one`/`export_rows` + `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json`), `resume_service` read (`list_for_job`/`get_one(reveal=...)`), `redaction.py` (blind-default); **redaction MUST mask `candidate.*`/`candidate_name`/`cover_letter_text` before building `ResumeOut`/`ResumeListItem`** (schema can't enforce it — ADR-006 §4) — **now ENFORCED in code, see below.** | ✅ done — **MERGED via PR #14**, merge `6deade3`, CI green, tip `02af27c`, 6 commits (three RED→GREEN cycles: initial build, cover-letter-chunks security fix, `original_filename` de-anonymization fix), off `main` @ `5945320`. [activity](activity/phase-5-persist-anonymize-export.md) · [ADR-011](adr/011-display-redaction-read-export-boundary.md) |
 | **6 · API** | Routes: job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match; configurable auth. **Set `JobOut.blind_review` explicitly from the row** — the DTO defaults it `False` (fail-open) if a route omits it — **now CLOSED, see below.** | ✅ done — **MERGED via PR #15**, squash merge `e910669`, CI `gates-all` fully green, merged 2026-07-17, tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes, SEC-1/2/4 security hardening + exact pins, non-ASCII-key 401 + upload-ordering pin), off `main` @ `6deade3`. [PR #15](https://github.com/humanaxiom/recruiter-assistant/pull/15) · [activity](activity/phase-6-api-routes.md) · [ADR-012](adr/012-api-routes-auth-upload-scope.md) |
-| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate); minimal Flask viewer | in progress — **active sub-phase on `feat/phase-7-evals-viewer`** (Phase 6 merged via PR #15, merge `e910669`) |
+| **7 · Evals + viewer** | Ranking-quality fixtures (precision@k, evidence-verification rate) — **already satisfied by 4a/4c, no new fixtures shipped this phase**; minimal read-only Flask viewer (blind-only, no reveal control) | ✅ done — **gate-green, pending PR** on `feat/phase-7-evals-viewer`, tip `92ca4ae`, off `main` @ `e910669` (Phase 6's merge). [activity](activity/phase-7-evals-viewer.md) · [ADR-013](adr/013-phase7-evals-viewer.md) |
 
 ## Subagent structure
 
@@ -106,16 +112,29 @@ MERGED to `main` via PR #15** (squash merge `e910669`, CI `gates-all` fully gree
 tip `837de9e`, 6 commits across three RED→GREEN cycles (initial routes; SEC-1/SEC-2/SEC-4 security
 hardening + exact `fastapi`/`starlette`/`python-multipart` pins; a non-ASCII-`X-API-Key` 401
 generalization + upload file-count-ordering regression pin), off `main` @ `6deade3` — **all three
-merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI
-(`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) went fully green before merge.**
+merge-blocking gates were green (reviewer APPROVE, security PASS, ranking-evals PASS) AND CI's
+`gates-all` went fully green before merge.** (Note: CI's `gates-all` runs the *offline* `run_evals.py`
+stand-in inside the gated unit suite — it never calls a live Ollama endpoint, by design; prior wording
+here and elsewhere calling this "a live `run_evals.py` re-measurement against Ollama" was inaccurate and
+is corrected as of Phase 7 — see below.)
 See [activity/phase-6-api-routes.md](activity/phase-6-api-routes.md) and
-[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is now the
-active sub-phase**, being built on branch `feat/phase-7-evals-viewer` (off `main` @ `e910669`); each
-sub-phase runs on its own branch/PR
-with the full reviewer/security/ranking-evals gate before the next starts. The split mirrors Phases 0–3's
-one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit rounds even scoped
-tighter), and 4b/4c/5/6 carry the security-sensitive PII-boundary + scoring-correctness + HTTP-surface,
-so isolating them keeps each diff auditable.
+[ADR-012](adr/012-api-routes-auth-upload-scope.md). **Phase 7 (evals + minimal Flask viewer) is now DONE
+and gate-green, pending a PR**, on branch `feat/phase-7-evals-viewer` (off `main` @ `e910669`, tip
+`92ca4ae`) — all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS).
+Phase 7 shipped the viewer only; the plan's Phase 7 evals-fixtures line item was already satisfied by 4a
+(corpus) + 4c (live orchestrator wiring) — see [activity/phase-7-evals-viewer.md](activity/phase-7-evals-viewer.md)
+and [ADR-013](adr/013-phase7-evals-viewer.md). **This is the last row in the phase table above** — once
+Phase 7's PR is reviewed, gated in CI, and merged, the plan's locked v1 scope is complete. Each sub-phase
+ran on its own branch/PR with the full reviewer/security/ranking-evals gate before the next started. The
+split mirrors Phases 0–3's one-phase-per-PR cadence — Phase 4 is larger than Phase 3 (which took 4 audit
+rounds even scoped tighter), and 4b/4c/5/6 carry the security-sensitive PII-boundary + scoring-correctness
++ HTTP-surface, so isolating them kept each diff auditable.
+
+**Live end-to-end eval — deferred, not built (ADR-013 §5).** The 4a/4c corpus has been proven against the
+orchestrator called directly (4c) but never through the real HTTP→Postgres/Neo4j/Ollama pipeline (Phase
+6's routes → persisted `shortlist_entries` rows, re-checked against `thresholds.toml`). This needs a
+reachable host Ollama + `docker compose up`, which CI does not provide by design. Recorded as a documented
+follow-up chore, not a gap in any currently-running gate.
 
 **4d closed ADR-009's carried "Requirement 1"** (wire `MatchingContext`/`MatchWeights` from `Settings` at
 a real worker call site — `matching_context_from_settings` + `shortlist_job`/`reverse_match_job` calling
@@ -133,6 +152,11 @@ longer structurally impossible, but Phase 6 did not itself change `matching_task
 still `description_parsed IS NOT NULL` — recorded as a live follow-up, not resolved. Phase 6 touched no
 `stages.py`/`orchestrator.py` scoring code either, so `jd.education.fields` (ADR-009 §7) remains **still
 open**, unaffected.
+
+**Phase 7 shipped the viewer only and touched no scoring code** — `stages.py`/`orchestrator.py` are
+byte-unchanged, so `jd.education.fields` (ADR-009 §7) remains open, unaffected, and the
+`reverse_match_job`/`allowed_job_ids` follow-up above is likewise untouched (the viewer is read-only and
+triggers no writes). Phase 7's own new residual is the deferred live end-to-end eval, above.
 
 **Phase 5 closed ADR-006 §4's redaction-boundary contract in code** (`core/src/services/redaction.py` +
 the redaction-before-DTO-construction ordering in `shortlist_service`/`resume_service`'s blind read
