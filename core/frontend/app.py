@@ -144,8 +144,24 @@ def _format_error(detail: Any) -> str:
     return str(detail)
 
 
-@app.get("/jobs/<uuid:job_id>")
-def job_detail(job_id: UUID) -> Any:
+# Legal job-status edges (mirrors the backend's transition guard):
+# draft→{open,archived}, open→{closed,archived}, closed→{archived}.
+_LEGAL_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "draft": ("open", "archived"),
+    "open": ("closed", "archived"),
+    "closed": ("archived",),
+    "archived": (),
+}
+_TRANSITION_LABELS: dict[str, str] = {
+    "open": "Open for applicants",
+    "closed": "Close",
+    "archived": "Archive",
+}
+
+
+def _render_job_detail(
+    job_id: UUID, *, error: str | None = None, status_code: int = 200
+) -> Any:
     try:
         job = api_client.get_job(job_id)
         resumes = api_client.list_resumes(job_id)
@@ -153,7 +169,71 @@ def job_detail(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("job_detail.html", job=job, resumes=resumes)
+    next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
+    return (
+        render_template(
+            "job_detail.html",
+            job=job,
+            resumes=resumes,
+            next_states=next_states,
+            transition_labels=_TRANSITION_LABELS,
+            error=error,
+        ),
+        status_code,
+    )
+
+
+@app.get("/jobs/<uuid:job_id>")
+def job_detail(job_id: UUID) -> Any:
+    return _render_job_detail(job_id)
+
+
+@app.get("/jobs/<uuid:job_id>/parse-status")
+def parse_status(job_id: UUID) -> Any:
+    """HTMX poll fragment. While ``parsed_at`` is null it renders a
+    ``parsing…`` badge AND keeps its ``hx-trigger`` so the browser polls again;
+    once the LLM sets ``parsed_at`` it renders the required-skill pills WITHOUT
+    the trigger, so polling stops."""
+    try:
+        job = api_client.get_job(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template("parse_status.html", job=job)
+
+
+@app.post("/jobs/<uuid:job_id>/status")
+def transition_status(job_id: UUID) -> Any:
+    to = (request.form.get("to") or "").strip()
+    try:
+        api_client.transition_status(job_id, to)
+    except api_client.Conflict as exc:
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/blind-review")
+def blind_review(job_id: UUID) -> Any:
+    desired = (request.form.get("blind_review") or "").strip().lower() in (
+        "true",
+        "1",
+        "on",
+        "yes",
+    )
+    try:
+        api_client.patch_job(job_id, {"blind_review": desired})
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("job_detail", job_id=job_id))
 
 
 @app.get("/jobs/<uuid:job_id>/shortlist")

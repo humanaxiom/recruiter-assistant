@@ -66,6 +66,15 @@ class BadRequest(BackendError):  # noqa: N818 — matches the `NotFound` /
         self.detail = detail
 
 
+class Conflict(BadRequest):  # noqa: N818 — same naming convention as the
+    # other typed errors (subclasses `BadRequest`/`BackendError`, which already
+    # carry the "Error" suffix).
+    """The backend responded 409 — an illegal state transition (e.g. an
+    illegal job-status edge). A specialisation of :class:`BadRequest` so the
+    route can surface it as a friendly message while still catching it as a
+    generic 4xx if it wants to."""
+
+
 def build_client() -> httpx.Client:
     """Build an ``httpx.Client`` bound to ``settings.api_base_url``.
 
@@ -108,11 +117,10 @@ def _raise_for_status(response: httpx.Response) -> None:
             detail = response.json()
         except ValueError:
             detail = response.text
-        raise BadRequest(
-            f"backend {response.status_code}: {response.request.url}",
-            status_code=response.status_code,
-            detail=detail,
-        )
+        message = f"backend {response.status_code}: {response.request.url}"
+        if response.status_code == 409:
+            raise Conflict(message, status_code=response.status_code, detail=detail)
+        raise BadRequest(message, status_code=response.status_code, detail=detail)
 
 
 def _request(
@@ -178,6 +186,26 @@ def get_job(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def transition_status(
+    job_id: UUID, to: str, *, client: httpx.Client | None = None
+) -> Any:
+    """PATCH /jobs/{id}/status (JSON ``{to}``). A backend 409 (illegal
+    transition) surfaces as ``Conflict`` so the route can show a friendly
+    message."""
+    response = _request(
+        "PATCH", f"/jobs/{job_id}/status", json={"to": to}, client=client
+    )
+    return response.json()
+
+
+def patch_job(
+    job_id: UUID, payload: dict[str, Any], *, client: httpx.Client | None = None
+) -> Any:
+    """PATCH /jobs/{id} (partial JSON, e.g. ``{"blind_review": false}``)."""
+    response = _request("PATCH", f"/jobs/{job_id}", json=payload, client=client)
+    return response.json()
+
+
 def list_resumes(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/jobs/{job_id}/resumes", client=client)
     return response.json()
@@ -232,11 +260,14 @@ __all__ = [
     "NotFound",
     "BackendUnavailable",
     "BadRequest",
+    "Conflict",
     "build_client",
     "list_jobs",
     "create_job",
     "extract_jd",
     "get_job",
+    "transition_status",
+    "patch_job",
     "list_resumes",
     "list_shortlist",
     "get_shortlist_entry",
