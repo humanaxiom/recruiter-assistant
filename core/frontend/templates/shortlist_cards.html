@@ -1,0 +1,80 @@
+{#
+  HTMX poll fragment. Rendered both inline (in shortlist_list.html) and
+  standalone (by the GET /jobs/<id>/shortlist-cards route, and returned by the
+  POST /jobs/<id>/shortlist generate route). While the (blind) shortlist read is
+  still empty it renders "Generating…" AND keeps its `hx-trigger` so the browser
+  re-polls every 3s; once ranked entries exist it renders the cards WITHOUT the
+  trigger, so polling stops.
+
+  Blind-boundary: every card surfaces `entry.display_label` ("Candidate A") —
+  NEVER a real candidate name/email/phone. No other candidate field is read.
+#}
+<div id="shortlist-cards"
+  {%- if not entries %}
+     hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+  {%- endif %}>
+  {% if not entries %}
+  <p class="muted">Generating… ranked candidates will appear here.</p>
+  {% else %}
+  {% for entry in entries %}
+  {% set sb = entry.score_breakdown or {} %}
+  <div class="card candidate-card">
+    <div class="card-header">
+      <span class="rank">#{{ entry.rank }}</span>
+      <h3 style="margin:0">{{ entry.display_label }}</h3>
+      <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
+    </div>
+
+    <div class="tiles">
+      {% for key in ['skill', 'experience', 'education', 'seniority', 'vector'] %}
+      {% set v = sb.get(key) %}
+      <div class="tile">
+        <span class="tile-label">{{ key }}</span>
+        <span class="tile-value">
+          {%- if v is not none %}{{ (v * 100)|round|int }}{% else %}—{% endif -%}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="chips">
+      {% for c in sb.get('skill_contributions') or [] %}
+      {% if c.get('reason') == 'missing' %}
+      <span class="chip chip-missing">{{ c.skill }} — missing{% if c.is_must_have %}
+        · must-have{% endif %}</span>
+      {% else %}
+      <span class="chip chip-matched">{{ c.skill }}{% if c.is_must_have %}
+        · must-have{% endif %}</span>
+      {% endif %}
+      {% endfor %}
+    </div>
+
+    {% set ev = entry.evidence %}
+    <details class="evidence">
+      <summary>Evidence</summary>
+      {% if ev and ev.get('requirements') %}
+      {% for req in ev.requirements %}
+      <div class="req">
+        <span class="badge badge-{{ req.status }}">{{ req.status }}</span>
+        <span class="req-text">{{ req.requirement }}</span>
+        {% if req.evidence %}
+        <blockquote class="req-evidence">{{ req.evidence }}</blockquote>
+        {% endif %}
+        {% if req.evidence_chunk_ids %}
+        <span class="muted chunks">chunks: {{ req.evidence_chunk_ids|join(', ') }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% if ev.get('overall_summary') %}
+      <p class="summary">{{ ev.overall_summary }}</p>
+      {% endif %}
+      {% else %}
+      <p class="muted">Evidence not available for this candidate</p>
+      {% endif %}
+    </details>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>

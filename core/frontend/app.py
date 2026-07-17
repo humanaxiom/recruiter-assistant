@@ -329,6 +329,42 @@ def job_shortlist(job_id: UUID) -> Any:
     return render_template("shortlist_list.html", job_id=job_id, entries=entries)
 
 
+@app.post("/jobs/<uuid:job_id>/shortlist")
+def generate_shortlist(job_id: UUID) -> Any:
+    """Enqueue the ranking job, then return the pollable ``shortlist-cards``
+    fragment. Ranking runs asynchronously on the backend, so the fragment comes
+    back empty → it shows "Generating…" and keeps its ``hx-trigger`` until the
+    ranked entries appear."""
+    try:
+        api_client.generate_shortlist(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _render_shortlist_cards(job_id)
+
+
+@app.get("/jobs/<uuid:job_id>/shortlist-cards")
+def shortlist_cards(job_id: UUID) -> Any:
+    """HTMX poll fragment. While the (blind) shortlist read is still empty it
+    renders "Generating…" AND keeps its ``hx-trigger`` so the browser re-polls
+    every 3s; once ranked entries exist it renders the cards WITHOUT the
+    trigger, so polling stops."""
+    return _render_shortlist_cards(job_id)
+
+
+def _render_shortlist_cards(job_id: UUID) -> Any:
+    # Blind by design: no `reveal` kwarg is ever passed here — the card-render
+    # read is unconditionally redacted, exactly like the list read above.
+    try:
+        entries = api_client.list_shortlist(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template("shortlist_cards.html", job_id=job_id, entries=entries)
+
+
 @app.get("/shortlist/<uuid:entry_id>")
 def shortlist_entry_detail(entry_id: UUID) -> Any:
     try:

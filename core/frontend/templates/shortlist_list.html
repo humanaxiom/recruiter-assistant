@@ -2,19 +2,13 @@
 {% block title %}Shortlist{% endblock %}
 {% block content %}
 <h2>Shortlist</h2>
-<p><a href="{{ url_for('shortlist_export', job_id=job_id) }}">Export CSV</a></p>
-<table>
-  <thead><tr><th>Rank</th><th>Candidate</th><th>Score</th></tr></thead>
-  <tbody>
-    {% for entry in entries %}
-    <tr>
-      <td>{{ entry.rank }}</td>
-      <td><a href="{{ url_for('shortlist_entry_detail', entry_id=entry.id) }}">{{ entry.display_label }}</a></td>
-      <td>{{ entry.score_final }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="3">No shortlist entries yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="filter-row">
+  <a href="{{ url_for('shortlist_export', job_id=job_id) }}">Export CSV</a>
+</div>
+<button class="btn btn-primary"
+        hx-post="{{ url_for('generate_shortlist', job_id=job_id) }}"
+        hx-target="#shortlist-cards" hx-swap="outerHTML">
+  {{ 'Regenerate shortlist' if entries else 'Generate shortlist' }}
+</button>
+{% include "shortlist_cards.html" %}
 {% endblock %}

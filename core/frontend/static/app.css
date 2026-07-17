@@ -384,3 +384,133 @@ details.newjob summary {
   background: #fef3c7;
   color: #b45309;
 }
+
+/* ── shortlist candidate cards ───────────────────────────────────────── */
+
+.candidate-card .rank {
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.candidate-card .score-final {
+  margin-left: auto;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 84px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.tile-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.tile-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chip-matched {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.chip-missing {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.evidence {
+  margin-top: 12px;
+}
+
+.evidence summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.req {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.req:last-child {
+  border-bottom: none;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-right: 6px;
+}
+
+.badge-met {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge-partial {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge-missing {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.req-evidence {
+  margin: 6px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text);
+  font-style: italic;
+}
+
+.chunks {
+  font-size: 12px;
+}
+
+.summary {
+  margin-top: 10px;
+  font-weight: 500;
+}
