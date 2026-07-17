@@ -278,6 +278,51 @@ async def test_upload_resumes_over_max_count_rejected_before_bodies_processed(
 
 
 @pytest.mark.asyncio
+async def test_upload_resumes_over_max_count_never_reads_any_body(
+    monkeypatch: Any,
+) -> None:
+    """Regression guard (security re-audit LOW): pin that the >50-file cap is
+    rejected BEFORE any file body is read into memory. A mutation that moves
+    the count check to after the ``for f in files: await f.read()`` loop
+    would still pass ``test_upload_resumes_over_max_count_rejected_*`` above
+    (those only assert nothing was enqueued/persisted downstream) — this test
+    spies directly on ``UploadFile.read`` and asserts it is never awaited on
+    the over-cap path.
+    """
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    from src.services.zip_upload import _MAX_ZIP_ENTRIES
+
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+
+    read_calls = 0
+    original_read = StarletteUploadFile.read
+
+    async def _spy_read(self: Any, *args: Any, **kwargs: Any) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        return await original_read(self, *args, **kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(StarletteUploadFile, "read", _spy_read)
+
+    files = [
+        ("files", (f"r{i}.pdf", _PDF_MAGIC, "application/pdf"))
+        for i in range(_MAX_ZIP_ENTRIES + 1)
+    ]
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=files,
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code in (413, 422)
+    assert read_calls == 0, "over-cap batch must be rejected before any body is read"
+
+
+@pytest.mark.asyncio
 async def test_upload_resumes_at_max_count_is_accepted() -> None:
     from src.services.zip_upload import _MAX_ZIP_ENTRIES
 

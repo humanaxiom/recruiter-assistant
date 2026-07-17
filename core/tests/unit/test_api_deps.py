@@ -81,6 +81,23 @@ async def test_require_api_key_rejects_a_missing_key(monkeypatch: Any) -> None:
     assert excinfo.value.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_require_api_key_rejects_a_non_ascii_key_with_401_not_500(
+    monkeypatch: Any,
+) -> None:
+    """Security re-audit LOW: Starlette latin-1-decodes header bytes, so a
+    non-ASCII ``X-API-Key`` header is a valid ``str`` containing non-ASCII
+    code points. ``secrets.compare_digest`` on two ``str`` requires both to be
+    ASCII-only or it raises ``TypeError`` — which previously propagated as an
+    unhandled 500 instead of the intended fail-closed 401."""
+    from src.api import deps
+
+    monkeypatch.setattr(deps, "get_settings", lambda: _settings(api_key="secret123"))
+    with pytest.raises(HTTPException) as excinfo:
+        await deps.require_api_key(x_api_key="clé-secrète-café")
+    assert excinfo.value.status_code == 401
+
+
 # ── require_api_key: disabled (empty key) ───────────────────────────────
 
 
