@@ -232,10 +232,13 @@ served unredacted data couldn't leak it through this page. Reveal/reveal-export 
 non-viewer backend surface (ADR-011/012).
 
 The plan's Phase 7 evals-fixtures line item (precision@k, evidence-verification rate) was already
-satisfied by Phase 4a (corpus) + 4c (live orchestrator wiring) — Phase 7 shipped no new evals code. One
-gap this phase left open, deliberately deferred: a live run of the eval corpus through the real HTTP →
-Postgres/Neo4j/Ollama pipeline has never happened (only against the orchestrator directly, in 4c) — it
-needs a reachable host Ollama and cannot run in CI by design.
+satisfied by Phase 4a (corpus) + 4c (live orchestrator wiring) — Phase 7 shipped no new evals code beyond
+the live end-to-end eval below. A live run of the eval corpus through the real pipeline — seeded at the
+post-parse boundary, driving the real `project_to_graph`/`shortlist_job`, reading persisted rows — was
+originally deferred (it needs a reachable host Ollama and cannot run in CI by design), then reversed and
+made a merge prerequisite: `core/tests/evals/run_evals_live.py` was built, run, and reproduced an
+identical PASS twice against a real stack. It is a manual/local harness (never CI). Full detail:
+[ADR-013](docs/adr/013-phase7-evals-viewer.md) §5.
 
 Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); activity report:
 [docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md).
@@ -244,7 +247,7 @@ Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); acti
 
 ## Status & roadmap
 
-**Phases 0–6 are merged to `main`, CI green** — all four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), and Phase 6 (API routes, PR #15) are merged. **Phase 7 (evals + minimal Flask viewer)** is complete and gate-green on branch `feat/phase-7-evals-viewer` (tip `92ca4ae`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, and the eleven job/résumé/shortlist/reverse-match HTTP routes are all wired and merged. **The read-only Flask viewer (above) is gate-green but not yet merged** — it is the first human-facing surface over any of this.
+**Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and **Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17)** are all merged. There is no Phase 8. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state and what a human could scope next. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the eleven job/résumé/shortlist/reverse-match HTTP routes, and **the read-only Flask viewer (above)** — the first human-facing surface over any of this — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -258,7 +261,7 @@ Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); acti
 | **4d · Shortlist + reverse-match write path** | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match`, `matching_context_from_settings` | **done, merged** |
 | **5 · Persist + anonymize + export** | `list_for_job`/`get_one`/`export_rows`, `redaction.py`, csv/evidence-csv/json export with `reveal` | **done, merged (PR #14)** |
 | **6 · API** | job/resume/shortlist/reverse-match routes (above), configurable auth | **done, merged (PR #15)** |
-| **7 · Evals + viewer** | precision@k / evidence-verification fixtures (already satisfied by 4a/4c, no new fixtures this phase); read-only Flask viewer (blind-only, above) | **done, gate-green, pending PR** |
+| **7 · Evals + viewer** | precision@k / evidence-verification fixtures (already satisfied by 4a/4c, no new fixtures this phase); read-only Flask viewer (blind-only, above); live end-to-end eval against a real stack | **done, merged (PR #16, squash `1039e5c`)** |
 
 Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
