@@ -285,6 +285,54 @@ async def test_get_one_blind_round_trips_and_masks_real_encrypted_pii(
 
 
 @pytest.mark.asyncio
+async def test_get_one_blind_redacts_cover_letter_chunks_against_real_pii(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Regression: cover-letter chunks carry the candidate's OWN identity in
+    their text (letterhead). Round-tripped through real jsonb + a real blind
+    ``jobs`` join, the serialised ``ResumeOut`` must not leak the raw
+    name/email/phone via ``parsed.cover_letter_chunks``."""
+    from src.services.resume_service import get_one
+
+    job_id = await _insert_job(pg_pool, blind_review=True)
+    name = "Zzyzxqrst Wibblesworth"
+    email = "zzyzxqrst.wibblesworth@example.test"
+    phone = "778-555-0199"
+    parsed = _full_parsed(name=name)
+    parsed["candidate"]["email"] = email
+    parsed["candidate"]["phone"] = phone
+    parsed["cover_letter_chunks"] = [
+        {
+            "id": "cl_001",
+            "section": "cover_letter",
+            "page": 0,
+            "text": f"{name}\n{email}\n{phone}\nDear hiring team,",
+        }
+    ]
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        name=name,
+        email=email,
+        phone=phone,
+        cover_letter_text=f"Sincerely, {name}.",
+        parsed=parsed,
+    )
+
+    async with pg_pool.acquire() as conn:
+        out = await get_one(conn, resume_id)
+
+    assert out.blinded is True
+    assert out.parsed is not None
+    assert out.parsed.cover_letter_chunks
+
+    dumped = out.model_dump_json()
+    assert name not in dumped
+    assert email not in dumped
+    assert phone not in dumped
+
+
+@pytest.mark.asyncio
 async def test_get_one_reveal_true_bypasses_masking_against_real_blind_job(
     pg_pool: asyncpg.Pool,
 ) -> None:

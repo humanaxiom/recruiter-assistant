@@ -401,3 +401,49 @@ async def test_black_box_scan_no_pii_in_blind_resume_out() -> None:
     assert real_name not in dumped
     assert real_email not in dumped
     assert real_phone not in dumped
+
+
+@pytest.mark.asyncio
+async def test_black_box_scan_no_pii_in_blind_cover_letter_chunks() -> None:
+    """Regression: cover-letter chunks carry the candidate's OWN
+    name/email/phone (the first ~200 chars of a cover letter are the
+    letterhead — see ``worker/resume_tasks.py``). The prior scan left
+    ``cover_letter_chunks`` EMPTY, so ``_blind_parsed`` omitting that field
+    slipped through. Make the chunks NON-empty and assert the raw identity is
+    absent from the serialised blind ``ResumeOut``."""
+    from src.services.resume_service import get_one
+
+    resume_id = uuid4()
+    real_name = "Zzyzxqrst Wibblesworth"
+    real_email = "zzyzxqrst.wibblesworth@example.test"
+    real_phone = "778-555-0199"
+    parsed = _full_parsed(name=real_name)
+    parsed["candidate"]["email"] = real_email
+    parsed["candidate"]["phone"] = real_phone
+    parsed["cover_letter_chunks"] = [
+        {
+            "id": "cl_001",
+            "section": "cover_letter",
+            "page": 0,
+            "text": f"{real_name}\n{real_email}\n{real_phone}\nDear hiring team,",
+        }
+    ]
+    row = _get_row(
+        resume_id=resume_id,
+        parsed=parsed,
+        candidate_name=real_name,
+        candidate_email=real_email,
+        candidate_phone=real_phone,
+        cover_letter_text=f"Sincerely, {real_name}.",
+    )
+    conn = _mock_conn(blind=True, row=row)
+
+    out = await get_one(conn, resume_id)
+    assert out.parsed is not None
+    # The chunk must survive redaction (redacted text, not dropped).
+    assert out.parsed.cover_letter_chunks
+    dumped = out.model_dump_json()
+
+    assert real_name not in dumped
+    assert real_email not in dumped
+    assert real_phone not in dumped
