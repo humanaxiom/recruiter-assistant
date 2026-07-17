@@ -83,8 +83,8 @@ def test_redact_text_does_not_eat_a_short_year_range() -> None:
 
 
 def test_redact_text_email_and_phone_safe_on_empty_or_none() -> None:
-    assert redact_text("", email="a@b.com", phone="6045550192") == ""
-    assert redact_text(None, email="a@b.com") is None  # type: ignore[arg-type]
+    assert redact_text("", email="a@example.test", phone="6045550192") == ""
+    assert redact_text(None, email="a@example.test") is None  # type: ignore[arg-type]
 
 
 # ---------------- redact_text: term_map (employer/institution labels) ------

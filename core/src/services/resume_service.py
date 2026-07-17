@@ -310,6 +310,13 @@ def _blind_parsed(
             "chunks": [
                 c.model_copy(update={"text": _r(c.text)}) for c in parsed.chunks
             ],
+            # Cover-letter chunk text carries the candidate's OWN letterhead
+            # (name/email/phone in the first ~200 chars) — redact it exactly
+            # like the résumé chunks so blind ResumeOut can't leak identity.
+            "cover_letter_chunks": [
+                c.model_copy(update={"text": _r(c.text)})
+                for c in parsed.cover_letter_chunks
+            ],
             "experience": [
                 e.model_copy(
                     update={
