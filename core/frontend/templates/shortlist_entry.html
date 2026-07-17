@@ -1,10 +1,16 @@
 {% extends "base.html" %}
 {% block title %}{{ entry.display_label }}{% endblock %}
 {% block content %}
-<h2>{{ entry.display_label }}</h2>
-<p>Rank: {{ entry.rank }}</p>
-<p>Score: {{ entry.score_final }}</p>
-{% if entry.resume_id %}
-<p><a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}">View résumé</a></p>
-{% endif %}
+<div class="card">
+  <div class="card-header">
+    <span class="rank">#{{ entry.rank }}</span>
+    <h2 style="margin:0">{{ entry.display_label }}</h2>
+    <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
+  </div>
+  {% if entry.resume_id %}
+  <p><a class="btn btn-secondary btn-sm"
+        href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}">View
+     résumé</a></p>
+  {% endif %}
+</div>
 {% endblock %}

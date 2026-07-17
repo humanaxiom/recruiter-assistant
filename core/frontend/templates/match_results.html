@@ -2,7 +2,7 @@
 {% block title %}Match results{% endblock %}
 {% block content %}
 <h2>Match results</h2>
-<table>
+<table class="table">
   <thead><tr><th>Job</th><th>Score</th></tr></thead>
   <tbody>
     {% for entry in results.entries %}
@@ -11,7 +11,7 @@
       <td>{{ entry.score_final }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="2">No match results yet.</td></tr>
+    <tr><td colspan="2" class="muted">No match results yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>

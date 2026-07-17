@@ -13,6 +13,7 @@ no such parameter).
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 from uuid import UUID
 
@@ -388,7 +389,14 @@ def resume_detail(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("resume_detail.html", resume=resume)
+    # `current_year` drives the skill-recency colour buckets in the template
+    # (current/aging/stale). Passed in so the comparison stays deterministic
+    # and doesn't need any candidate.* field.
+    return render_template(
+        "resume_detail.html",
+        resume=resume,
+        current_year=dt.date.today().year,
+    )
 
 
 @app.get("/resumes/<uuid:resume_id>/match-results")

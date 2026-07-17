@@ -16,7 +16,10 @@
      hx-swap="outerHTML"
   {%- endif %}>
   {% if not entries %}
-  <p class="muted">Generating… ranked candidates will appear here.</p>
+  <p class="muted">
+    <span class="htmx-indicator spinner">polling…</span>
+    Generating… ranked candidates will appear here.
+  </p>
   {% else %}
   {% for entry in entries %}
   {% set sb = entry.score_breakdown or {} %}

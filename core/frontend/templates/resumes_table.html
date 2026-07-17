@@ -14,6 +14,9 @@
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
+  {% if resumes_pending %}
+  <span class="htmx-indicator spinner">refreshing…</span>
+  {% endif %}
   <table class="table">
     <thead>
       <tr><th>Candidate</th><th>File</th><th>Status</th><th>Uploaded</th></tr>
