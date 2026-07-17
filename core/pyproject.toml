@@ -17,32 +17,9 @@ known-first-party = ["src"]
 # FastAPI's dependency-injection idiom: Depends()/Security() in arg defaults.
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
-[tool.ruff.lint.per-file-ignores]
-# Phase 7 test files carry a handful of `monkeypatch.setattr(...)` / fixture
-# lines that exceed 88 cols purely because of long, self-documenting mock
-# names and UUID-bearing f-strings — style-only, not a code-quality issue.
-# Scoped to exactly these two files (not the whole `tests/` tree) so E501
-# still applies everywhere else.
-"tests/unit/test_frontend_api_client.py" = ["E501"]
-"tests/unit/test_frontend_routes.py" = ["E501"]
-
 [tool.black]
 line-length = 88
 target-version = ["py311"]
-# The three Phase 7 RED test files were committed pre-`black`-formatted
-# (their author didn't run black before committing); their *content* is the
-# locked test contract this phase implements against and must not be
-# touched. `extend-exclude` only affects black's own recursive directory
-# walk (explicit file args on the CLI still get checked), so scoping it to
-# exactly these three files skips `black --check tests` for them alone,
-# without editing a single byte of test content, while every other test
-# file remains fully covered by the gate.
-extend-exclude = '''
-(?x)
-tests/unit/test_frontend_routes\.py
-|tests/unit/test_frontend_api_client\.py
-|tests/unit/test_gates_cover_frontend\.py
-'''
 
 [tool.mypy]
 strict = true

@@ -80,14 +80,18 @@ def _raising_handler(exc: Exception) -> Callable[[httpx.Request], httpx.Response
 
 def test_build_client_uses_the_configured_base_url(monkeypatch: Any) -> None:
     monkeypatch.setattr(
-        api_client, "get_settings", lambda: _settings(api_base_url="http://backend:9000")
+        api_client,
+        "get_settings",
+        lambda: _settings(api_base_url="http://backend:9000"),
     )
     client = api_client.build_client()
     assert str(client.base_url).rstrip("/") == "http://backend:9000"
 
 
 def test_build_client_attaches_api_key_header_when_configured(monkeypatch: Any) -> None:
-    monkeypatch.setattr(api_client, "get_settings", lambda: _settings(api_key="secret123"))
+    monkeypatch.setattr(
+        api_client, "get_settings", lambda: _settings(api_key="secret123")
+    )
     client = api_client.build_client()
     assert client.headers.get("X-API-Key") == "secret123"
 
@@ -389,7 +393,9 @@ def test_export_shortlist_defaults_to_csv_format_and_reveal_false() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = request.url
-        return httpx.Response(200, content=b"data", headers={"content-type": "text/csv"})
+        return httpx.Response(
+            200, content=b"data", headers={"content-type": "text/csv"}
+        )
 
     api_client.export_shortlist(job_id, client=_client_with(handler))
     assert captured["url"].params.get("format") == "csv"

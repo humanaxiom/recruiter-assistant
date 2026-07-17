@@ -187,7 +187,9 @@ def test_job_shortlist_call_carries_no_reveal_kwarg(
 def test_shortlist_entry_detail_renders(monkeypatch: Any, client: Any) -> None:
     entry_id = uuid4()
     monkeypatch.setattr(
-        api_client, "get_shortlist_entry", MagicMock(return_value=_shortlist_entry(entry_id))
+        api_client,
+        "get_shortlist_entry",
+        MagicMock(return_value=_shortlist_entry(entry_id)),
     )
     resp = client.get(f"/shortlist/{entry_id}")
     assert resp.status_code == 200
@@ -220,7 +222,9 @@ def test_resume_detail_renders(monkeypatch: Any, client: Any) -> None:
 
 def test_resume_detail_404s_when_missing(monkeypatch: Any, client: Any) -> None:
     monkeypatch.setattr(
-        api_client, "get_resume", MagicMock(side_effect=api_client.NotFound("no resume"))
+        api_client,
+        "get_resume",
+        MagicMock(side_effect=api_client.NotFound("no resume")),
     )
     resp = client.get(f"/resumes/{uuid4()}")
     assert resp.status_code == 404
@@ -280,9 +284,7 @@ def test_resume_match_results_renders_passthrough(
     assert resp.status_code == 200
 
 
-def test_resume_match_results_404s_when_missing(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_resume_match_results_404s_when_missing(monkeypatch: Any, client: Any) -> None:
     monkeypatch.setattr(
         api_client,
         "get_match_results",
@@ -299,12 +301,13 @@ def test_shortlist_export_proxies_body_and_content_disposition(
     monkeypatch: Any, client: Any
 ) -> None:
     job_id = uuid4()
+    content_disposition = f'attachment; filename="shortlist-{job_id}-anon.csv"'
     backend_resp = httpx.Response(
         200,
         content=b"rank,score\n1,0.9\n",
         headers={
             "content-type": "text/csv",
-            "content-disposition": f'attachment; filename="shortlist-{job_id}-anon.csv"',
+            "content-disposition": content_disposition,
         },
     )
     monkeypatch.setattr(
@@ -389,7 +392,9 @@ def test_flask_secret_key_never_leaks_into_a_rendered_page(
 ) -> None:
     marker = "distinctive-flask-secret-key-marker-abc123"
     monkeypatch.setattr(app, "secret_key", marker)
-    monkeypatch.setattr(api_client, "list_jobs", MagicMock(return_value=[_job(uuid4())]))
+    monkeypatch.setattr(
+        api_client, "list_jobs", MagicMock(return_value=[_job(uuid4())])
+    )
     monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(uuid4())))
     monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))

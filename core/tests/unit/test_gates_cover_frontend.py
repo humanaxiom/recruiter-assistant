@@ -58,9 +58,7 @@ def _make_recipe(makefile_text: str, target: str) -> str:
     the next target) — i.e. exactly the shell commands ``make`` would run for
     that target.
     """
-    pattern = re.compile(
-        rf"^{re.escape(target)}:.*\n((?:\t.*\n?)*)", re.MULTILINE
-    )
+    pattern = re.compile(rf"^{re.escape(target)}:.*\n((?:\t.*\n?)*)", re.MULTILINE)
     m = pattern.search(makefile_text)
     assert m is not None, f"Makefile target {target!r} not found"
     return m.group(1)
@@ -120,9 +118,9 @@ def test_makefile_gates_mypy_type_checks_frontend() -> None:
     mypy_lines = _lines_containing(recipe, "mypy ")
     assert mypy_lines, "`gates` target must run `mypy` at all"
     for line in mypy_lines:
-        assert _FRONTEND_WORD.search(line), (
-            f"`gates`'s `mypy` invocation must include `frontend`, got: {line!r}"
-        )
+        assert _FRONTEND_WORD.search(
+            line
+        ), f"`gates`'s `mypy` invocation must include `frontend`, got: {line!r}"
 
 
 def test_makefile_gates_coverage_covers_frontend_alongside_src() -> None:
@@ -202,8 +200,7 @@ def test_ci_static_job_mypy_type_checks_frontend() -> None:
     assert mypy_lines, "CI `static` job must run `mypy` at all"
     for line in mypy_lines:
         assert _FRONTEND_WORD.search(line), (
-            f"CI `static` job's `mypy` step must include `frontend`, "
-            f"got: {line!r}"
+            f"CI `static` job's `mypy` step must include `frontend`, " f"got: {line!r}"
         )
 
 

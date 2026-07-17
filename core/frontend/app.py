@@ -33,7 +33,7 @@ def health() -> dict[str, str]:
 
 
 def _unavailable(exc: api_client.BackendUnavailable) -> Any:
-    return render_template("error.html", message=str(exc)), 503
+    return render_template("error.html"), 503
 
 
 @app.get("/")
