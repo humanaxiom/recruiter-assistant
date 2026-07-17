@@ -13,9 +13,13 @@ from contextlib import asynccontextmanager
 
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
 
+from src.api.deps import log_auth_mode
+from src.api.routes import jobs, resumes, shortlist
+from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
 from src.settings import get_settings
@@ -39,6 +43,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "non-vocab Skill nodes would be keyed by an unsalted (dictionary-"
             "attackable) hash. Set SKILL_HASH_SALT."
         )
+    # Phase 6 — the configurable auth switch. A loud WARNING when disabled, an
+    # informational line otherwise; called once, here, at startup.
+    log_auth_mode(s)
     pool = await init_pool(app, s)
     # The schema comes up with the app — every statement is idempotent.
     await init_schema(pool)
@@ -66,6 +73,16 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.include_router(jobs.router)
+app.include_router(resumes.router)
+app.include_router(shortlist.router)
+
+
+@app.exception_handler(AppError)
+async def _app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+    content = {"code": exc.code, "message": exc.message, **exc.context}
+    return JSONResponse(status_code=exc.status, content=content)
 
 
 @app.get("/health")

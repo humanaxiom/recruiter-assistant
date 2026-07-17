@@ -174,13 +174,50 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 **Write path (Phase 4d, `core/src/worker/matching_tasks.py` + `core/src/services/shortlist_service.py`):** the arq tasks `shortlist_job`/`reverse_match_job` run the orchestrator and persist the result with `persist_shortlist`/`persist_reverse_match` — raw asyncpg, DELETE-first per run (rerun replaces, never duplicates), into `shortlist_entries`/`reverse_match_entries` (Postgres only; there is no Neo4j `SHORTLISTED` edge write in this repo). The two persist functions are deliberate mirror images of each other (dictated by the two tables' different column shapes — see [ADR-010](docs/adr/010-shortlist-reverse-match-write-path.md)): `shortlist_entries` has no dedicated `score_structured`/`score_evidence` columns and a `NOT NULL` evidence column, so those scores are folded into the `score_breakdown` jsonb and a missing evidence object is written as `{}`; `reverse_match_entries` has dedicated columns and a nullable evidence column, written as SQL `NULL` when absent. Evidence quotes are persisted verbatim — no redaction happens at this write layer (display-time redaction is Phase 5, below).
 
-**Read + export path (Phase 5, `core/src/services/{shortlist_service,resume_service,redaction}.py`):** `shortlist_service.list_for_job`/`get_one`/`export_rows` and `resume_service.list_for_job`/`get_one(reveal=...)` read the same tables back. Under blind review (`jobs.blind_review`, default `TRUE`), every one of these paths redacts BEFORE building the response DTO — never after — closing [ADR-006](docs/adr/006-schema-port-trim-ddl-alignment.md) §4's redaction-boundary contract in code: `redact_text` masks name/email/phone-shaped substrings and relabels employers/schools to stable pseudonyms ("Employer A"), `pseudonym(rank)` replaces the candidate's name in shortlist rows, and foreign (non-Canadian) locations are masked while Canadian ones stay visible. This is **display-only** — it changes what a blind caller's response contains, not what Postgres stores; ADR-007 §6/§7's cleartext-at-rest posture is unchanged. `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json` are pure formatters over `export_rows`' already-redacted output. Full boundary + accepted/open residuals (including an **open, unresolved** decision on whether `original_filename` should be masked under blind — it currently is not): [ADR-011](docs/adr/011-display-redaction-read-export-boundary.md).
+**Read + export path (Phase 5, `core/src/services/{shortlist_service,resume_service,redaction}.py`):** `shortlist_service.list_for_job`/`get_one`/`export_rows` and `resume_service.list_for_job`/`get_one(reveal=...)` read the same tables back. Under blind review (`jobs.blind_review`, default `TRUE`), every one of these paths redacts BEFORE building the response DTO — never after — closing [ADR-006](docs/adr/006-schema-port-trim-ddl-alignment.md) §4's redaction-boundary contract in code: `redact_text` masks name/email/phone-shaped substrings and relabels employers/schools to stable pseudonyms ("Employer A"), `pseudonym(rank)` replaces the candidate's name in shortlist rows, and foreign (non-Canadian) locations are masked while Canadian ones stay visible. This is **display-only** — it changes what a blind caller's response contains, not what Postgres stores; ADR-007 §6/§7's cleartext-at-rest posture is unchanged. `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json` are pure formatters over `export_rows`' already-redacted output. `original_filename` is also masked under blind (`redacted_filename()` returns a generic `resume<ext>`) — closed by a post-first-green fix rather than left open. Full boundary + accepted residuals: [ADR-011](docs/adr/011-display-redaction-read-export-boundary.md).
+
+---
+
+## API layer (Phase 6)
+
+`core/src/api/routes/{jobs,resumes,shortlist}.py` — eleven routes over the service layer Phases 3–5
+built, plus `core/src/api/deps.py`'s configurable auth switch. **Not yet merged** — see "Status &
+roadmap" below.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST / GET | `/jobs` | Create a draft job (enqueues `parse_job`) / list |
+| GET / PATCH | `/jobs/{id}` | Get one / update |
+| PATCH | `/jobs/{id}/status` | The only status-mutating route — forward-only, 409 on an invalid transition |
+| POST | `/jobs/jd-extract` | Pre-fill helper — extract JD text from an upload, no DB write |
+| POST / GET | `/jobs/{id}/resumes` | Upload résumés (multi-file or `.zip`) / list |
+| GET | `/resumes/{id}` | Get one résumé (redacted under blind review) |
+| POST | `/resumes/{id}/match-jobs` | Trigger reverse-match (enqueues `reverse_match_job`) |
+| GET | `/resumes/{id}/match-results` | Read reverse-match result — **no redaction** (the caller owns the résumé) |
+| GET / PATCH | `/jobs/{id}/shortlist` | List / (schema-level) |
+| GET | `/jobs/{id}/shortlist/export` | Export csv / evidence-csv / json, `reveal` query param |
+| GET | `/shortlist/{id}` | Get one shortlist entry |
+
+**Auth** is one settings flag, `Settings.api_key`: empty (default) disables auth entirely — every route
+unauthenticated, correct for local-only offline dev, with a loud startup `WARNING`; non-empty enables
+fail-closed 401 via a constant-time (`secrets.compare_digest`, UTF-8 bytes) `X-API-Key` header check. An
+optional `X-Actor-Name` header (capped at 128 chars) populates the nullable `created_by`/`uploaded_by`
+audit columns.
+
+**Upload** accepts local multi-file or a single `.zip` (expanded, one entry = one résumé) — the
+Taleo/CSV-manifest connector is explicitly cut and deferred to a future connectors feature. The zip guard
+(`core/src/services/zip_upload.py`) mirrors the Phase-3 DOCX decompression-bomb defense: never trusts the
+archive's declared entry size, streams and sums real decompressed bytes, and rejects path-traversal
+entries, disallowed extensions, and per-entry/total/entry-count overages before writing anything.
+
+Full decisions + residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.md); activity report:
+[docs/activity/phase-6-api-routes.md](docs/activity/phase-6-api-routes.md).
 
 ---
 
 ## Status & roadmap
 
-**Phases 0–4 are merged to `main`, CI green** — all four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path) are merged. **Phase 5 (persist + anonymize + export)** is complete and gate-green on branch `feat/phase-5-persist-anonymize-export` (tip `b6b1ec7`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, and the shortlist/reverse-match write path are wired, and the API serves `/health`. **There are still no ranking, upload, or shortlist HTTP routes** — those land in Phase 6; Phase 5's read/export layer (not yet merged) can now read back what 4d writes, but nothing on `main` exposes it over HTTP yet.
+**Phases 0–5 are merged to `main`, CI green** — all four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path) and Phase 5 (persist + anonymize + export, PR #14) are merged. **Phase 6 (API routes)** is complete and gate-green on branch `feat/phase-6-api-routes` (tip `837de9e`) but not yet opened as a PR. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, and the persist/anonymize/export read layer are wired, and the API serves `/health`. **There are still no job/resume/shortlist HTTP routes on `main`** — Phase 6's route layer (above, not yet merged) is the first thing that exposes any of this over HTTP.
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -192,9 +229,9 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 | **4b · Graph projection** | Outbox drainer + Neo4j skill graph (`skill_normalize`, ADR-008 PII-safe-by-construction) | **done, merged** |
 | **4c · Matching engine** | `stages`/`orchestrator` (4-stage hybrid), reverse-match, `weights_from_settings` | **done, merged** |
 | **4d · Shortlist + reverse-match write path** | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match`, `matching_context_from_settings` | **done, merged** |
-| **5 · Persist + anonymize + export** | `list_for_job`/`get_one`/`export_rows`, `redaction.py`, csv/evidence-csv/json export with `reveal` | **done, gate-green, not yet merged** |
-| 6 · API | job/resume/shortlist/reverse-match routes, minimal auth | pending — **next sub-phase** |
-| 7 · Evals + viewer | precision@k / evidence-verification fixtures (live, wired in 4c), Flask viewer | partially done (harness) |
+| **5 · Persist + anonymize + export** | `list_for_job`/`get_one`/`export_rows`, `redaction.py`, csv/evidence-csv/json export with `reveal` | **done, merged (PR #14)** |
+| **6 · API** | job/resume/shortlist/reverse-match routes (above), configurable auth | **done, gate-green, not yet merged** |
+| 7 · Evals + viewer | precision@k / evidence-verification fixtures (live, wired in 4c), Flask viewer | pending — **next sub-phase**; partially done (harness) |
 
 Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
@@ -245,12 +282,12 @@ curl localhost:8000/health    # -> {"status":"ok"}
 recruiter-assistant/
 ├── core/
 │   ├── src/
-│   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store)
+│   │   ├── api/         # FastAPI app (/health + lifespan; wires blob_store/arq); deps.py auth switch + routes/{jobs,resumes,shortlist}.py (Phase 6)
 │   │   ├── models/      # asyncpg pool + idempotent startup DDL
 │   │   ├── pipeline/    # extract/chunk, LLM client+cache, skills scan (Phase 3); matching/{stages,orchestrator} 4-stage ranking engine (Phase 4c/4d)
 │   │   ├── prompts/     # Jinja prompt templates: jd_extract/resume_core/resume_skills/cover_letter (Phase 3)
 │   │   ├── schemas/     # pydantic contract layer: jobs/resumes/matching (Phase 2)
-│   │   ├── services/    # pii, job/resume/outbox services (Phase 3); shortlist_service persist (Phase 4d) + list/get/export (Phase 5); redaction.py, errors.py (Phase 5)
+│   │   ├── services/    # pii, job/resume/outbox services (Phase 3); shortlist_service persist (Phase 4d) + list/get/export (Phase 5); redaction.py, errors.py (Phase 5); zip_upload.py, jd_import_service.py (Phase 6)
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
 │   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume (Phase 3); shortlist_job/reverse_match_job (Phase 4d)
 │   │   └── settings.py  # single source of truth (pydantic-settings)

@@ -33,3 +33,11 @@ class NotFoundError(AppError):
 
     code = "resource.not_found"
     status = 404
+
+
+class FileRejectedError(AppError):
+    """An upload is rejected at the route boundary before any body is read —
+    e.g. too many files in one multipart batch (memory-exhaustion guard)."""
+
+    code = "upload.rejected"
+    status = 413

@@ -19,7 +19,7 @@ The working copy now holds the **ranking-domain foundation** (Phases 0–2: infr
 
 ## Current state
 
-**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is ✅ complete — all 4 gated sub-phases merged to `main`.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is MERGED to `main` via PR #12** (merge `fd12d1a`), CI green. **Sub-phase 4d (shortlist + reverse-match write path) is MERGED to `main` via PR #13** (merge `5945320`) this session, CI green. **Phase 5 (persist + anonymize + export — read/list/get/export + display redaction) is COMPLETE and gate-green on branch `feat/phase-5-persist-anonymize-export`** (off `main` @ `5945320`) — **all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); NOT yet PR'd, NOT merged — a PR opens after a human check-in.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists. **Phase 6 (API routes) is the next sub-phase to build, once Phase 5 is reviewed and merged.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", "4d status", "Phase 5 status", and "Phase 5 resume" below.
+**Done:** repo created + `origin` repointed + pushed; 4 decisions locked; plan-of-record and the `data-pipeline` + `ranking-evals` subagents committed. **Phases 0, 1, 2, and 3 are all complete and merged to `main`, CI green:** Phase 0 (seed & infra) via PR #1 (merge `8b2b47c`), Phase 1 (storage) via PR #2 (merge `f7e7cbe`), Phase 2 (schemas) via PR #3 (merge `cefd545`), Phase 3 (ingest + parse) via PR #6 (merge `49196d7`). Phases 0–2 merged 2026-07-11; Phase 3 merged 2026-07-12. **Phase 4 (Ranking engine) is ✅ complete — all 4 gated sub-phases merged to `main`.** Sub-phase **4a (evals corpus) is MERGED to `main` via PR #8** (merge `875eac2`), CI green, 2026-07-12, and its **falsifiability hardening is also MERGED via PR #10** (merge `464a479`), CI green. **Sub-phase 4b (graph projection) MERGED to `main` via PR #11** (merge `68fe821`), CI green. **Sub-phase 4c (matching engine) is MERGED to `main` via PR #12** (merge `fd12d1a`), CI green. **Sub-phase 4d (shortlist + reverse-match write path) is MERGED to `main` via PR #13** (merge `5945320`) this session, CI green. **Phase 5 (persist + anonymize + export — read/list/get/export + display redaction) is MERGED to `main` via PR #14** (merge `6deade3`), CI green. **Phase 6 (API routes — job create/read/list/status, résumé upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and gate-green on branch `feat/phase-6-api-routes`** (off `main` @ `6deade3`, HEAD `837de9e`) — **all three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS); NOT yet PR'd, NOT merged — a PR opens after a human check-in.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement) has not yet run since no PR exists. **Phase 7 (evals + minimal Flask viewer) is the next sub-phase to build, once Phase 6 is reviewed and merged.** See "Phase 4a status", "Phase 4b status", "Phase 4c status", "4d status", "Phase 5 status", and "Phase 6 status" below.
 
 ### Phase 4a status — corpus + hardening both MERGED (read this before starting 4c)
 
@@ -194,23 +194,28 @@ Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (Re
 
 Never commit to `main` for feature work (branch `agent|feat|fix|chore/<slug>`); TDD (failing tests first); offline only (no cloud endpoints — local Ollama/OpenAI-compatible client); config via settings; a single red gate = not done. Privacy: PII never enters embeddings; anonymization non-destructive; PIPEDA/FIPPA.
 
-## Phase 5 resume — EXACT next step (do this first, before anything else)
+## Phase 6 resume — EXACT next step (do this first, before anything else)
 
 Phases 0–3 are **merged to `main`, CI green** (Phase 3 via PR #6, merge `49196d7`, 2026-07-12). Phase 4
 (Ranking engine) was split into 4 gated sub-phases (4a→4b→4c→4d, each its own branch/PR — see the plan
 table) and **all four are now MERGED to `main`, CI green**: 4a (evals corpus) via PR #8 (merge
 `875eac2`) plus falsifiability hardening via PR #10 (merge `464a479`); 4b (graph projection) via PR #11
-(merge `68fe821`); 4c (matching engine) via PR #12 (merge `fd12d1a`); **4d (shortlist + reverse-match
-write path) via PR #13 (merge `5945320`), merged this session** — see "4d status" below for the closed
-Requirement 1, the persistence asymmetry, and the PII residual. **Phase 5 (persist + anonymize + export
-— `list_for_job`/`get_one`/`export_rows` + display redaction) is COMPLETE and gate-green on branch
-`feat/phase-5-persist-anonymize-export`** (off `main` @ `5945320`) — all three merge-blocking gates
-green; **NOT yet opened as a PR — awaiting a human check-in before opening one**; see "Phase 5 status"
-above for the redaction-boundary enforcement, the `ScoreBreakdown` fold-read guard, the
-`cover_letter_chunks` security fix, and the open `original_filename` residual. **Your next action is
-Phase 6 (API routes — job create/parse, resume upload, shortlist generate/list/get/export,
-reverse-match, minimal auth), once Phase 5 is reviewed, PR'd, and merged.** Confirm Phase 5's merge
-status with the human first (it is currently pre-PR, on its own branch).
+(merge `68fe821`); 4c (matching engine) via PR #12 (merge `fd12d1a`); 4d (shortlist + reverse-match
+write path) via PR #13 (merge `5945320`) — see "4d status" below for the closed Requirement 1, the
+persistence asymmetry, and the PII residual. **Phase 5 (persist + anonymize + export —
+`list_for_job`/`get_one`/`export_rows` + display redaction) is MERGED to `main` via PR #14** (merge
+`6deade3`), CI green — see "Phase 5 status" below for the redaction-boundary enforcement, the
+`ScoreBreakdown` fold-read guard, the `cover_letter_chunks` security fix, and the (now resolved)
+`original_filename` residual. **Phase 6 (API routes — job create/read/list/status, résumé
+upload/read/list, shortlist generate/list/get/export, reverse-match, configurable auth) is COMPLETE and
+gate-green on branch `feat/phase-6-api-routes`** (off `main` @ `6deade3`, HEAD `837de9e`) — all three
+merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS). **Human check-in
+received 2026-07-17; opened as PR #15** (https://github.com/humanaxiom/recruiter-assistant/pull/15) —
+CI (`gates-all`) running, merge held for a human go-ahead. See "Phase 6 status" below for the auth switch, the
+upload/zip scope, the status-transition route, the reverse-match-no-redaction decision, the security
+hardening (SEC-1/2/4), and the `pool.py` latent-bug fix. **Your next action is Phase 7 (ranking-quality
+evals fixtures + a minimal read-only Flask viewer — see the plan table), once Phase 6's PR #15 is
+reviewed and merged.** Confirm PR #15's merge status with the human first (`gh pr view 15`).
 
 ### 4a recap (see "Phase 4a status" above for the full write-up)
 `core/tests/evals/` holds the labelled corpus (JD fixture + synthetic résumés, `labels.json`,
@@ -381,7 +386,7 @@ the `allowed_job_ids` scoping, and the no-silent-redaction guard) — full table
 by 4d's own scope, per the plan-of-record); the shortlist-side `evidence = {}` ambiguity (above); the
 still-open `jd.education.fields` decision; no advisory lock on concurrent runs.
 
-### Phase 5 status — DONE, gate-green, PR opening this session — read this before starting Phase 6
+### Phase 5 status — DONE, MERGED to `main` via PR #14 (merge `6deade3`) — read this before starting Phase 7
 
 `core/src/services/redaction.py` (new — `redact_text`/`pseudonym`/`blind_label_map`/
 `is_foreign_location` + `redacted_filename`, ported near-verbatim from hris) + `core/src/errors.py` (new —
@@ -392,10 +397,9 @@ branch `feat/phase-5-persist-anonymize-export`, off `main` @ `5945320` (PR #13's
 6 commits across three RED→GREEN cycles (RED `3e383ff` → GREEN `33512c2` initial build; RED `8b1597e` →
 GREEN `b6b1ec7` cover-letter-chunks security fix; RED `c1e4e04` → GREEN `02af27c` filename
 de-anonymization fix). **All three merge-blocking gates are green (reviewer APPROVE, security PASS,
-ranking-evals PASS) — re-verified after each post-first-green fix.** A PR is being opened this session;
-CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama) is pending on the PR. The
-scoring code itself, `stages.py`/`orchestrator.py`, is byte-unchanged by Phase 5 (this phase is entirely
-read/export/redaction, no ranking logic). Full write-up:
+ranking-evals PASS) — re-verified after each post-first-green fix.** **MERGED to `main` via PR #14
+(merge `6deade3`), CI green.** The scoring code itself, `stages.py`/`orchestrator.py`, is byte-unchanged
+by Phase 5 (this phase is entirely read/export/redaction, no ranking logic). Full write-up:
 [docs/activity/phase-5-persist-anonymize-export.md](docs/activity/phase-5-persist-anonymize-export.md);
 decisions + residuals: [ADR-011](docs/adr/011-display-redaction-read-export-boundary.md).
 
@@ -453,11 +457,78 @@ coverage**; **18 integration tests** green vs real Postgres (`test_shortlist_rea
 report), security PASS (after the `cover_letter_chunks` fix), ranking-evals PASS (scoring code
 byte-unchanged).
 
-**Carried forward into Phase 6:** the `original_filename` open decision (above); the still-open
-`jd.education.fields` decision; the shortlist-side `evidence = {}` ambiguity (ADR-010 §2, still
-unresolved, first touched by this phase's read code but not fixed); no advisory lock on concurrent
-shortlist/reverse-match runs (ADR-010 §1) — revisit once Phase 6 ships a user-facing regenerate route;
-CSV formula/injection in `shortlist_csv`/`shortlist_evidence_csv` — accepted for v1, one-line fix noted.
+**Carried forward into Phase 6:** the `original_filename` open decision (resolved by Phase 5's own
+post-first-green fix — see above); the still-open `jd.education.fields` decision; the shortlist-side
+`evidence = {}` ambiguity (ADR-010 §2, still unresolved, first touched by this phase's read code but not
+fixed); no advisory lock on concurrent shortlist/reverse-match runs (ADR-010 §1) — revisit once Phase 6
+ships a user-facing regenerate route; CSV formula/injection in `shortlist_csv`/`shortlist_evidence_csv` —
+accepted for v1, one-line fix noted.
+
+### Phase 6 status — DONE, gate-green, PR #15 OPEN (CI running) — read this before starting Phase 7
+
+`core/src/api/deps.py` (new — `require_api_key`/`resolve_actor`/`get_arq`/`log_auth_mode`),
+`core/src/api/routes/{jobs,resumes,shortlist}.py` (new — 11 routes), `core/src/services/zip_upload.py`
+(new — `expand_zip_entries`/`ZipRejected`), `core/src/services/jd_import_service.py` (new —
+`extract_jd_text`) were built and gate-green on branch `feat/phase-6-api-routes`, off `main` @ `6deade3`
+(PR #14's merge), HEAD `837de9e`, commit chain: RED `209bff7` → GREEN `bc9a3d6` (initial routes, resumed
+mid-build after a session-limit interruption) → RED `1f2b161` → GREEN `344f6bf` (SEC-1/SEC-2/SEC-4
+security hardening + exact `fastapi`/`starlette`/`python-multipart` pins) → RED `c75f4a7` → GREEN
+`837de9e` (non-ASCII `X-API-Key` 401 generalization + upload file-count-ordering regression pin). **All
+three merge-blocking gates green (reviewer APPROVE, security PASS, ranking-evals PASS) — re-verified
+after the security-hardening round.** **Opened as PR #15
+(https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after the human check-in;
+merge held for go-ahead.** CI (`gates-all`, incl. a live `run_evals.py` re-measurement against Ollama)
+is running on the PR. Full
+write-up: [docs/activity/phase-6-api-routes.md](docs/activity/phase-6-api-routes.md); decisions +
+residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.md).
+
+**Route map:** `POST/GET /jobs`, `GET/PATCH /jobs/{id}`, `PATCH /jobs/{id}/status` (draft→open, the only
+status-mutating route, forward-only, 409 on invalid transition), `POST /jobs/jd-extract` (pre-fill
+helper, no DB write), `POST/GET /jobs/{id}/resumes`, `GET/PATCH /jobs/{id}/shortlist`, `GET
+/jobs/{id}/shortlist/export`, `GET /resumes/{id}`, `POST /resumes/{id}/match-jobs`, `GET
+/resumes/{id}/match-results`, `GET /shortlist/{id}`.
+
+**Locked human decisions this phase (ADR-012):** (1) one settings flag `api_key` — empty disables auth
+(loud startup warning), non-empty enables fail-closed 401 with constant-time UTF-8-byte comparison;
+optional `X-Actor-Name` (128-char cap) populates `created_by`/`uploaded_by`. (2) Upload accepts local
+multi-file + zip only — Taleo/CSV-manifest connector pairing explicitly CUT and deferred to a future
+"sources/connectors" feature (the user's framing: "Taleo was a shortcut to get sample data … will add
+more connectors in the future"); zip expansion mirrors the Phase-3 DOCX-bomb defense (never trusts
+`ZipInfo.file_size`, streams real decompressed bytes, path-traversal/extension-allowlist/entry-count/
+per-entry/total-size guards, writes nothing on reject). (3) `PATCH /jobs/{id}/status` is the only
+status-mutating route. (4) Reverse-match is a subresource of `routes/resumes.py`; **explicitly NO
+redaction** on the reverse-match read (the caller owns the résumé they matched — no third party to
+protect, unlike every other blind-review-aware read path). (5) `POST /jobs/jd-extract` included.
+
+**Carry-forwards now CLOSED:** `JobOut.blind_review` fail-open (ADR-006 §4 note) — `_row_to_jobout` now
+sets it explicitly from the row on every path, reviewer mutation-proved both directions. Redaction
+boundary at the HTTP layer (ADR-006 §4 / ADR-011) — read/export routes route straight through to the
+already-redacting service functions; security byte-scanned actual serialized HTTP responses.
+
+**Security hardening + accepted residuals (ADR-012):** Fixed SEC-1 (non-ASCII API-key compare crashing
+to 500 instead of 401), SEC-2 (upload file-count cap now checked before any file body is read —
+regression-pinned), SEC-4 (`X-Actor-Name` 128-char cap); `fastapi`/`starlette`/`python-multipart` pinned
+`==` exactly (the route-walker test depends on a FastAPI-internal structure). Accepted-for-v1: SEC-3 (no
+LIMIT/OFFSET on shortlist/reverse-match reads, bounded by shortlist size in practice), SEC-5
+(`detect_mime`'s `txt` catch-all, intentional), blob-write-inside-transaction (a rollback leaves a
+harmless uuid-keyed orphan blob, no orphaned enqueue). Also fixed: a latent `pool.py` bug —
+`PoolConnectionProxy[Record]` isn't subscriptable at runtime; under `from __future__ import annotations` +
+FastAPI's `eval_str` signature introspection it crashed at route registration the first time any route
+actually used `Db` (never true before Phase 6) — fixed with a `TYPE_CHECKING`-gated alias.
+
+**Final gate state, HEAD `837de9e`:** ruff/black/`mypy --strict` clean; **2156 unit tests @ 91.68%
+coverage**; **123 integration tests** vs real Postgres+Neo4j+Redis, incl. 12 new Phase-6 ASGI integration
+tests (real HTTP through the FastAPI app). Reviewer APPROVE (6 mutation obligations fired), security PASS
+(SEC-1/SEC-2 closed on re-audit), ranking-evals PASS (scoring byte-unchanged; CI's `gates-all`
+re-measures `run_evals.py` live on the PR).
+
+**Carried forward into Phase 7:** `score_education` ignores `jd.education.fields` (still open,
+untouched); `reverse_match_job`'s `allowed_job_ids` filter still `description_parsed IS NOT NULL`, not
+`status='open'`, even though a status route now exists (ADR-012 §3 revisits but does not resolve this);
+the `redacted_filename` `os.path.splitext` truncation LOW residual (not addressed by Phase 6's upload
+validation); no advisory lock on concurrent shortlist/reverse-match runs — a user-facing regenerate route
+now exists (`POST /jobs/{id}/shortlist`, `POST /resumes/{id}/match-jobs`), so this question (ADR-010 §1)
+is now live, not hypothetical.
 
 ## Historical: original Phase 3 plan (for reference)
 
@@ -497,7 +568,8 @@ rearchitecture in docs/adr/008-skill-graph-pii-by-construction.md, the Phase 4c
 matching-engine port in docs/adr/009-matching-engine-port.md, the Phase 4d
 shortlist/reverse-match write path in docs/adr/010-shortlist-reverse-match-write-path.md,
 the Phase 5 display-redaction read/export boundary in
-docs/adr/011-display-redaction-read-export-boundary.md.
+docs/adr/011-display-redaction-read-export-boundary.md, the Phase 6 API-routes
+auth/upload scope in docs/adr/012-api-routes-auth-upload-scope.md.
 
 We are porting the resume-ranking feature from C:\repos\hris onto this template
 (template-first, filesystem storage instead of MinIO, keep Neo4j, v1 includes
@@ -508,10 +580,10 @@ parse) PR #6 (merge 49196d7). Phase 4 (Ranking engine) was split into 4 gated
 sub-phases and ALL FOUR are now MERGED to main, CI green: 4a (evals corpus)
 MERGED (PR #8, merge 875eac2), falsifiability hardening MERGED via PR #10
 (merge 464a479); 4b (graph projection) MERGED via PR #11 (merge 68fe821);
-4c (matching engine) MERGED via PR #12 (merge fd12d1a); **4d (shortlist +
-reverse-match write path) MERGED via PR #13 (merge 5945320), merged this
-session** — all three merge-blocking gates were green (security PASS, reviewer
-APPROVE, ranking-evals PASS) AND CI was fully green before each merge.
+4c (matching engine) MERGED via PR #12 (merge fd12d1a); 4d (shortlist +
+reverse-match write path) MERGED via PR #13 (merge 5945320) — all three
+merge-blocking gates were green (security PASS, reviewer APPROVE, ranking-evals
+PASS) AND CI was fully green before each merge.
 
 **4d closed ADR-009's carried "Requirement 1"** — matching_context_from_settings
 (src/pipeline/matching/orchestrator.py) is the single call site that builds
@@ -525,77 +597,99 @@ of score_structured/score_evidence/evidence dictated by the two tables'
 different DDL shapes). Full detail: docs/activity/phase-4d-shortlist-writepath.md
 and docs/adr/010-shortlist-reverse-match-write-path.md.
 
-**Phase 5 (persist + anonymize + export) is COMPLETE and gate-green on branch
-feat/phase-5-persist-anonymize-export** (off main @ 5945320, tip b6b1ec7, 4
-commits: red 3e383ff -> green(5) 33512c2 -> red 8b1597e (security-fix
-regression test) -> green(5-fix) b6b1ec7). All three merge-blocking gates are
-green (reviewer APPROVE, security PASS, ranking-evals PASS) — **NOT yet opened
-as a PR, NOT merged; a PR opens only after a human check-in.** CI (gates-all,
-incl. a live run_evals.py re-measurement against Ollama) has NOT run yet since
-no PR exists. The branch brings 2024 unit tests @ 91.80% coverage + integration
-tests green vs real Postgres (test_shortlist_read_export_pg.py,
-test_resume_read_pg.py). Full detail:
-docs/activity/phase-5-persist-anonymize-export.md and
+**Phase 5 (persist + anonymize + export) is MERGED to main via PR #14
+(merge 6deade3), CI green.** ADR-006 §4's redaction-boundary contract is now
+ENFORCED IN CODE, not just recorded: every blind read path
+(shortlist_service.list_for_job/get_one/export_rows,
+resume_service.list_for_job/get_one(reveal=...)) redacts BEFORE building the
+DTO, proven by black-box byte-scan tests plus reviewer mutation testing on
+every redaction call site. This is display-only redaction, NOT at-rest
+protection — ADR-007 §6/§7 and ADR-010 §6's cleartext-at-rest postures are
+UNCHANGED. The ScoreBreakdown fold-read guard (ADR-011 §2) pops
+score_structured/score_evidence back out of score_breakdown before
+model_validate — required to read ANY 4d-written shortlist row. Two
+post-first-green fixes landed before merge: a HIGH cover-letter-chunks PII leak
+(blind ResumeOut.parsed.cover_letter_chunks[].text still carried raw letterhead
+PII) and the original_filename de-anonymization vector (redacted_filename()
+now returns generic resume<ext> under blind at three surfaces; real filename
+under reveal/non-blind) — both mutation-proven, both merge-blocking gates
+re-verified. Full detail: docs/activity/phase-5-persist-anonymize-export.md and
 docs/adr/011-display-redaction-read-export-boundary.md.
 
-**Phase 5 shipped src/services/redaction.py (new — redact_text/pseudonym/
-blind_label_map/is_foreign_location, ported near-verbatim from hris) and
-src/errors.py (new — AppError/NotFoundError), plus the read/export extensions
-to shortlist_service.py (list_for_job/get_one/export_rows + pure
-shortlist_csv/shortlist_evidence_csv/shortlist_json formatters) and
-resume_service.py (list_for_job/get_one(reveal=...)).** ADR-006 §4's
-redaction-boundary contract is now ENFORCED IN CODE, not just recorded:
-every blind read path redacts BEFORE building the DTO, proven by three
-black-box byte-scan tests (the candidate's real name/email/phone byte-sequence
-must be absent anywhere in the serialized blind output) plus reviewer mutation
-testing on every redaction call site. This is display-only redaction, NOT
-at-rest protection — ADR-007 §6/§7 and ADR-010 §6's cleartext-at-rest postures
-are UNCHANGED. The ScoreBreakdown fold-read guard (ADR-011 §2) pops
-score_structured/score_evidence back out of score_breakdown before
-model_validate — required to read ANY 4d-written shortlist row, not an edge
-case. A security-gate HIGH finding surfaced AFTER first green — blind
-ResumeOut.parsed.cover_letter_chunks[].text still carried raw letterhead PII —
-closed red 8b1597e -> green b6b1ec7 with a mutation-proven regression test.
-Two hris gaps closed beyond a verbatim port: cover_letter_evidence/
-overall_motivation are now redacted (hris's version never did); the name/term
-regex alternation is now grouped so a middle name-part can't match inside an
-unrelated longer word.
+**Phase 6 (API routes) is COMPLETE and gate-green on branch
+feat/phase-6-api-routes** (off main @ 6deade3, HEAD 837de9e), commit chain:
+red 209bff7 -> green bc9a3d6 (initial routes, resumed mid-build after a
+session-limit interruption) -> red 1f2b161 -> green 344f6bf (SEC-1/SEC-2/SEC-4
+security hardening + exact fastapi/starlette/python-multipart pins) -> red
+c75f4a7 -> green 837de9e (non-ASCII X-API-Key 401 generalization + upload
+file-count-ordering regression pin). **All three merge-blocking gates green
+(reviewer APPROVE, security PASS, ranking-evals PASS). Opened as PR #15
+(https://github.com/humanaxiom/recruiter-assistant/pull/15) on 2026-07-17 after
+the human check-in; merge held for a human go-ahead.** CI (gates-all, incl.
+a live run_evals.py re-measurement against Ollama) is running on PR #15. Full
+detail: docs/activity/phase-6-api-routes.md and
+docs/adr/012-api-routes-auth-upload-scope.md.
 
-**Phase 5 final state (HEAD 02af27c — PR opening this session):** 2039 unit tests @ 91.86% coverage +
-the two new Phase-5 PG integration files (18 tests) green this session (the full `gates-all` integration
-suite is re-run live by CI on the PR). All three merge-blocking gates re-verified after two post-first-green fixes:
-(a) HIGH cover-letter-chunks PII leak fixed red 8b1597e→green b6b1ec7; (b) RESIDUAL
-original_filename de-anonymization vector fixed red c1e4e04→green 02af27c (the human decided to close it
-now rather than accept as v1). New redacted_filename() helper wires generic resume<ext> at three blind
-surfaces; real filename under reveal/non-blind. A LOW residual on os.path.splitext truncation-leaking is
-recorded for Phase 6's upload validation extension. One pre-existing CI flake (test_every_threshold_key...
-order-dependent) flagged by reviewer as separate follow-up chore, not a gate blocker.
+**Phase 6 shipped src/api/deps.py (new — require_api_key/resolve_actor/
+get_arq/log_auth_mode), src/api/routes/{jobs,resumes,shortlist}.py (new — 11
+routes), src/services/zip_upload.py (new — expand_zip_entries/ZipRejected),
+src/services/jd_import_service.py (new — extract_jd_text).** The configurable
+auth switch is ONE settings flag (settings.api_key): empty disables auth (loud
+startup WARNING), non-empty enables fail-closed 401 with constant-time
+UTF-8-byte comparison. Upload accepts local multi-file + zip ONLY — the
+Taleo/CSV-manifest connector is explicitly CUT and deferred to a future
+connectors feature; zip expansion mirrors the Phase-3 DOCX-bomb defense
+(streams real decompressed bytes, never trusts ZipInfo.file_size).
+PATCH /jobs/{id}/status is the only status-mutating route (forward-only, 409
+on an invalid transition) — the first code path in the whole repo that
+transitions jobs.status. Reverse-match (POST /resumes/{id}/match-jobs, GET
+/resumes/{id}/match-results) is a subresource of routes/resumes.py with
+EXPLICITLY NO redaction on the read (the caller owns the résumé they matched).
+ADR-006 §4's JobOut.blind_review fail-open note is now CLOSED —
+_row_to_jobout sets it explicitly from the row on every path, reviewer
+mutation-proved both directions. A latent pool.py bug was also fixed:
+PoolConnectionProxy[Record] isn't subscriptable at runtime; under
+`from __future__ import annotations` + FastAPI's eval_str signature
+introspection it crashed at route registration the first time any route
+actually used Db (never true before Phase 6) — fixed with a
+TYPE_CHECKING-gated alias.
 
-**Your next action is Phase 6 (API routes)** — NOT the evals corpus (done), NOT graph projection
-(done), NOT the matching engine (done), NOT the write path (done, merged), NOT persist+anonymize+export
-(done, PRing this session). A PR for Phase 5 is being opened; CI (gates-all) is pending on it. Once Phase
-5 is merged, Phase 6 ships routes: job create/parse, resume upload, shortlist generate/list/get/export,
-reverse-match, minimal auth — remember to set JobOut.blind_review explicitly from the row (the DTO
-defaults it False, fail-open, if a route omits it — Phase 2 security low, still open). The extension
-allowlist + cap on redacted_filename will close the filename LOW residual. Run the per-phase subagent loop
-(planner -> tester -> data-pipeline coder -> reviewer + security + ranking-evals -> docs) on a
-feat/phase-6-... branch.
+**Phase 6 final state (HEAD 837de9e):** 2156 unit tests @ 91.68% coverage;
+123 integration tests vs real Postgres+Neo4j+Redis, incl. 12 new Phase-6 ASGI
+integration tests. Reviewer APPROVE (6 mutation obligations fired), security
+PASS (SEC-1/SEC-2 closed on re-audit), ranking-evals PASS (scoring
+byte-unchanged).
+
+**Your next action is Phase 7 (ranking-quality evals fixtures + a minimal
+read-only Flask viewer)** — NOT the evals corpus (done), NOT graph projection
+(done), NOT the matching engine (done), NOT the write path (done, merged), NOT
+persist+anonymize+export (done, merged), NOT API routes (done, gate-green,
+PR #15 OPEN with CI running). Confirm PR #15's merge status (gh pr view 15)
+before building on it. Once Phase 6 is merged, Phase 7 ships the precision@k /
+evidence-verification-rate fixture harness (already partially live via 4c's
+run_evals.py wiring) and the minimal Flask viewer (read-only, consumes the
+Phase 6 routes). Run the per-phase subagent loop (planner -> tester ->
+data-pipeline coder -> reviewer + security + ranking-evals -> docs) on a
+feat/phase-7-... branch.
 
 Subagent model tiering is in effect (docs/SUBAGENT_MODEL_POLICY.md): the three
 merge-blocking gates (reviewer/security/ranking-evals) run on opus; producers
-(data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Override
-data-pipeline UP to opus for Phase 6 if a route touches the PII/redaction
-boundary directly (upload, reveal, export); mechanical CRUD route plumbing can
-stay on sonnet. Defaults live in .claude/agents/*.md frontmatter.
+(data-pipeline/planner/tester/coder) default to sonnet; docs on haiku. Defaults
+live in .claude/agents/*.md frontmatter.
 
-**Open human decision, carried forward across 4c/4d/5, still UNRESOLVED:**
-score_education ignores jd.education.fields (ADR-009 §7, restated ADR-010 §5) —
-either extend the scorer or drop fields from the JD contract. Neither 4c, 4d,
-nor 5 touched stages.py's scoring code, so this remains exactly as open as it
-was after 4c. Do not resolve this silently while building Phase 6.
+**Open human decision, carried forward across 4c/4d/5/6, still UNRESOLVED:**
+score_education ignores jd.education.fields (ADR-009 §7, restated ADR-010 §5,
+ADR-011) — either extend the scorer or drop fields from the JD contract.
+Neither 4c, 4d, 5, nor 6 touched stages.py's scoring code, so this remains
+exactly as open as it was after 4c. Do not resolve this silently while
+building Phase 7. Also carried: reverse_match_job's allowed_job_ids filter is
+still description_parsed IS NOT NULL, not status='open', even though Phase 6
+added a status route (ADR-012 §3 revisits but does not resolve this); no
+advisory lock on concurrent shortlist/reverse-match runs now that a
+user-facing regenerate route exists (ADR-010 §1, now live not hypothetical).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Check in with me before opening the Phase 5 PR or any Phase 6 PR.
+HANDOFF.md. Check in with me before opening the Phase 6 PR or any Phase 7 PR.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

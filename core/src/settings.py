@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     # ── Storage (filesystem BlobStore root — no MinIO/S3) ────────────────────
     storage_dir: str = "/data"
 
+    # ── API auth (Phase 6) ────────────────────────────────────────────────────
+    # ONE switch for the configurable auth boundary (decision 1). Empty string =
+    # auth DISABLED (local dev; fail-open by EXPLICIT configuration, never by
+    # omission-in-code — src.api.deps.log_auth_mode logs a loud WARNING at
+    # startup when it is empty). A non-empty value = auth ENABLED (fail-closed:
+    # require_api_key rejects a missing/wrong X-API-Key with 401).
+    api_key: str = ""
+
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
     blind_review_default: bool = True  # decision 4 — redaction ON by default

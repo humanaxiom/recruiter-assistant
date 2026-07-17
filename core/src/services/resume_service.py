@@ -18,18 +18,27 @@ enqueueing an outbox row.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from src.errors import NotFoundError
+from src.pipeline.parsing import (
+    MIME_DOCX,
+    MIME_PDF,
+    MIME_RTF,
+    MIME_TXT,
+    UnsupportedMimeError,
+)
 from src.schemas.resumes import (
     CandidateInfo,
     CoverLetterParsed,
     ResumeListItem,
     ResumeOut,
     ResumeParsed,
+    ResumeUploadResult,
 )
 from src.services import DbConn
 from src.services import pii as pii_service
@@ -40,10 +49,23 @@ from src.services.redaction import (
     redact_text,
     redacted_filename,
 )
+from src.storage.blob_store import BlobStore
 
 logger = logging.getLogger(__name__)
 
 _MAX_REASON_CHARS = 1000
+
+# Matches src/pipeline/parsing/extract.py's per-document cap — the upload
+# boundary must not accept anything the extractor would reject anyway.
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+_EXT_MIME: dict[str, str] = {
+    "pdf": MIME_PDF,
+    "docx": MIME_DOCX,
+    "rtf": MIME_RTF,
+    "txt": MIME_TXT,
+}
+_MIME_EXT: dict[str, str] = {v: k for k, v in _EXT_MIME.items()}
 
 # (candidate_name_enc, candidate_email_enc, candidate_phone_enc, email_hash)
 EncryptedPii = tuple[bytes | None, bytes | None, bytes | None, str | None]
@@ -133,6 +155,167 @@ async def record_parse_failure(conn: DbConn, resume_id: UUID, reason: str) -> No
     logger.warning(
         "resume.parse_failed resume_id=%s reason=%s", resume_id, reason[:200]
     )
+
+
+# ── upload / validation (Phase 6) ────────────────────────────────────────────
+
+
+def detect_mime(filename: str, data: bytes) -> str:
+    """Sniff the real mime type from MAGIC BYTES and cross-check it against
+    the filename's extension. Raises ``UnsupportedMimeError`` (the SAME
+    exception ``extract_text`` raises, so callers have one type to catch) on
+    an unsupported extension OR a extension/content mismatch (a
+    ``.pdf``-named file whose bytes are actually a DOCX zip)."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    expected = _EXT_MIME.get(ext)
+    if expected is None:
+        raise UnsupportedMimeError(f"unsupported file extension: {filename!r}")
+    actual = _sniff_mime(data)
+    if actual != expected:
+        raise UnsupportedMimeError(
+            f"file {filename!r} has extension {ext!r} but its content sniffs "
+            f"as {actual!r}, not {expected!r}"
+        )
+    return expected
+
+
+def _sniff_mime(data: bytes) -> str:
+    if data.startswith(b"%PDF"):
+        return MIME_PDF
+    if data.startswith(b"PK\x03\x04"):
+        return MIME_DOCX
+    if data.lstrip().startswith(rb"{\rtf"):
+        return MIME_RTF
+    return MIME_TXT
+
+
+_DEDUP_SQL = "SELECT id FROM resumes WHERE job_id = $1 AND sha256 = $2"
+
+_INSERT_UPLOADED_SQL = """
+INSERT INTO resumes (
+    id, job_id, blob_key, original_filename, mime_type, file_size_bytes,
+    sha256, consent_acknowledged, uploaded_by, cover_letter_text
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+"""
+
+
+async def upload_resumes(
+    conn: DbConn,
+    blob_store: BlobStore,
+    *,
+    job_id: UUID,
+    files: list[tuple[str, bytes]],
+    consent_acknowledged: bool,
+    uploaded_by: str | None = None,
+    cover_letter_file: tuple[str, bytes] | None = None,
+    cover_letter_text: str | None = None,
+) -> list[ResumeUploadResult]:
+    """Validate + persist a batch of résumé files.
+
+    ``consent_acknowledged=False`` raises ``ValueError`` immediately, before
+    touching the blob store or the connection at all (one flag for the whole
+    batch, not per file). Every other rejection (oversize, empty, unsupported
+    mime, sha256 duplicate) yields a per-file ``ResumeUploadResult`` row and
+    does not abort the rest of the batch.
+
+    The blob key is ALWAYS server-generated (``resumes/{uuid4()}.{ext}``) —
+    the same ``uuid4()`` also backs the inserted row's primary key, so a
+    caller can enqueue the parse task without a second DB round trip. A
+    pasted ``cover_letter_text`` is encrypted (via ``pii_service.set_pii_key``
+    + ``pii_service.encrypt``, called through the ``pii_service`` module
+    object so it stays monkeypatchable) inside the SAME transaction as the
+    résumé row insert(s) — a failure there (e.g. an unset PII_KEY) propagates
+    uncaught, never swallowed into a "rejected" row.
+    """
+    if not consent_acknowledged:
+        raise ValueError(
+            "consent_acknowledged must be true before any résumé upload I/O"
+        )
+    # cover_letter_file is accepted for signature parity with the documented
+    # contract (a file-attached cover letter, distinct from the pasted-text
+    # case) — no upload path in this phase wires it in yet.
+    del cover_letter_file
+
+    results: list[ResumeUploadResult] = []
+
+    async with conn.transaction():
+        encrypted_cover: bytes | None = None
+        if cover_letter_text is not None:
+            await pii_service.set_pii_key(conn)
+            encrypted_cover = await pii_service.encrypt(conn, cover_letter_text)
+
+        for filename, data in files:
+            if len(data) == 0:
+                results.append(
+                    ResumeUploadResult(
+                        original_filename=filename,
+                        outcome="rejected",
+                        reason="file is empty",
+                    )
+                )
+                continue
+            if len(data) > _MAX_UPLOAD_BYTES:
+                results.append(
+                    ResumeUploadResult(
+                        original_filename=filename,
+                        outcome="rejected",
+                        reason=(
+                            f"file is {len(data)} bytes; the cap is "
+                            f"{_MAX_UPLOAD_BYTES}"
+                        ),
+                    )
+                )
+                continue
+
+            try:
+                mime = detect_mime(filename, data)
+            except UnsupportedMimeError as exc:
+                results.append(
+                    ResumeUploadResult(
+                        original_filename=filename,
+                        outcome="rejected",
+                        reason=str(exc),
+                    )
+                )
+                continue
+
+            sha = hashlib.sha256(data).hexdigest()
+            dup_id = await conn.fetchval(_DEDUP_SQL, job_id, sha)
+            if dup_id is not None:
+                results.append(
+                    ResumeUploadResult(
+                        original_filename=filename,
+                        outcome="duplicate",
+                        resume_id=dup_id,
+                    )
+                )
+                continue
+
+            resume_id = uuid4()
+            blob_key = f"resumes/{resume_id}.{_MIME_EXT[mime]}"
+            await blob_store.put(blob_key, data, content_type=mime)
+            await conn.execute(
+                _INSERT_UPLOADED_SQL,
+                resume_id,
+                job_id,
+                blob_key,
+                filename,
+                mime,
+                len(data),
+                sha,
+                consent_acknowledged,
+                uploaded_by,
+                encrypted_cover,
+            )
+            results.append(
+                ResumeUploadResult(
+                    original_filename=filename,
+                    outcome="accepted",
+                    resume_id=resume_id,
+                )
+            )
+
+    return results
 
 
 # ── read (Phase 5) ─────────────────────────────────────────────────────────

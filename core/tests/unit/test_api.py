@@ -68,13 +68,69 @@ def test_template_demo_routes_are_gone(path: str) -> None:
     assert path not in paths
 
 
+# Phase 6 (API routes): this guard's invariant genuinely changes here — the
+# app now legitimately exposes the job/résumé/shortlist business routes, not
+# just /health. Updated to a POSITIVE set-equality against the exact route
+# table Phase 6 wires (src.api.routes.{jobs,resumes,shortlist}), so the guard
+# still catches an ACCIDENTAL route addition/removal — it just no longer
+# claims /health is the ONLY business route, because that claim is no longer
+# true by design, not because the guard was weakened.
+_PHASE_6_ROUTES: frozenset[str] = frozenset(
+    {
+        "/health",
+        "/jobs",
+        "/jobs/jd-extract",
+        "/jobs/{job_id}",
+        "/jobs/{job_id}/status",
+        "/jobs/{job_id}/resumes",
+        "/resumes/{resume_id}",
+        "/resumes/{resume_id}/match-jobs",
+        "/resumes/{resume_id}/match-results",
+        "/jobs/{job_id}/shortlist",
+        "/jobs/{job_id}/shortlist/export",
+        "/shortlist/{entry_id}",
+    }
+)
+
+
+def _all_route_paths(routes: object) -> set[str]:
+    """Flatten a ``routes`` iterable into the full set of registered path
+    strings, recursively.
+
+    The installed FastAPI wraps every ``include_router(...)`` target as an
+    opaque ``_IncludedRouter`` (its own ``.path`` is ``None``; the real
+    ``APIRoute``s live on ``.original_router.routes``) rather than flattening
+    them directly onto ``app.routes`` — so a shallow ``{r.path for r in
+    app.routes}`` silently drops every Phase-6 route behind an
+    ``include_router`` call. Walk recursively so the guard actually sees them.
+    """
+    paths: set[str] = set()
+    for route in routes:  # type: ignore[attr-defined]
+        sub_router = getattr(route, "original_router", None)
+        if sub_router is not None:
+            paths |= _all_route_paths(getattr(sub_router, "routes", ()))
+            continue
+        path = getattr(route, "path", None)
+        if path is not None:
+            paths.add(path)
+    return paths
+
+
 def test_health_is_the_only_business_route() -> None:
     paths = {
-        getattr(route, "path", "")
-        for route in app.routes
-        if not getattr(route, "path", "").startswith(("/openapi", "/docs", "/redoc"))
+        p
+        for p in _all_route_paths(app.routes)
+        if not p.startswith(("/openapi", "/docs", "/redoc"))
     }
-    assert paths == {"/health"}
+    assert paths == _PHASE_6_ROUTES
+
+
+def test_the_cut_review_workflow_routes_are_absent() -> None:
+    """hris's shortlist decision/stage routes are deliberately never wired —
+    there is no review pipeline in this project."""
+    paths = _all_route_paths(app.routes)
+    assert "/shortlist/{entry_id}/decision" not in paths
+    assert "/shortlist/{entry_id}/stage" not in paths
 
 
 # ── Phase 1 — BlobStore wiring ──────────────────────────────────────────────
