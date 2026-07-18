@@ -22,9 +22,12 @@ pairing half). DEVIATIONS from the hris source:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Final
+
+from src.errors import AppError
 
 # An uploaded file as this repo models it: ``(filename, content)``.
 UploadedFile = tuple[str, bytes]
@@ -45,6 +48,83 @@ _MANIFEST_MISSING_COVER_NOTE: Final = (
 _MANIFEST_MISSING_RESUME_REASON: Final = (
     "manifest names a résumé that wasn't in the upload"
 )
+
+# ``cover_letter_flag`` truthy vocabulary. Anything outside this set (including
+# an explicit "No"/"False"/"") forces NO cover for that applicant even when a
+# ``cover_letter_file`` is named — the flag is the operator's veto.
+_COVER_FLAG_TRUE: Final = frozenset({"true", "1", "yes", "y", "t"})
+
+# Defensive size bound on the untrusted manifest bytes BEFORE ``json.loads`` —
+# mirrors the zip-expansion / docx-decompression trust boundaries so a giant
+# blob can't exhaust memory in the parser. 1 MiB is far above any real pairing
+# manifest (a few hundred applicants of short filenames).
+_MAX_MANIFEST_BYTES: Final = 1 * 1024 * 1024
+
+
+class ManifestError(AppError):
+    """The pairing manifest couldn't be parsed or had an invalid shape.
+
+    Subclasses this repo's :class:`src.errors.AppError` (NOT hris's error base),
+    so the global FastAPI ``AppError`` handler renders it as a 422 without any
+    per-route ``try/except`` — mirrors ``NotFoundError``/``FileRejectedError``.
+    """
+
+    code = "bulk.manifest_invalid"
+    status = 422
+
+
+def _decode(blob: bytes) -> str:
+    """Decode manifest bytes tolerantly (strip a UTF-8 BOM, fall back to
+    latin-1) — ported from hris so a stray byte won't 500 before we can raise a
+    typed ``ManifestError``."""
+    for codec in ("utf-8-sig", "utf-8"):
+        try:
+            return blob.decode(codec)
+        except UnicodeDecodeError:
+            continue
+    return blob.decode("latin-1", errors="replace")
+
+
+def parse_pairing_manifest(blob: bytes) -> dict[str, str | None]:
+    """Parse a JSON pairing manifest into ``{resume_key: cover_key | None}``
+    (both lowercased basenames via :func:`basename_lower`).
+
+    Shape: ``{"applicants": [{"resume_file": "...", "cover_letter_file": "...",
+    "cover_letter_flag": "Yes"}, ...]}``. An applicant without a usable
+    ``resume_file`` string is skipped; a falsy ``cover_letter_flag`` (anything
+    outside ``_COVER_FLAG_TRUE``) forces no cover even if a file is named.
+    Raises :class:`ManifestError` (422) on oversize bytes, non-JSON, a non-dict
+    root, or a missing ``applicants`` array.
+    """
+    if len(blob) > _MAX_MANIFEST_BYTES:
+        raise ManifestError(
+            f"manifest is {len(blob)} bytes; the cap is {_MAX_MANIFEST_BYTES}"
+        )
+    try:
+        data = json.loads(_decode(blob))
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"manifest is not valid JSON: {exc}") from exc
+    applicants = data.get("applicants") if isinstance(data, dict) else None
+    if not isinstance(applicants, list):
+        raise ManifestError("manifest must be an object with an 'applicants' array")
+
+    out: dict[str, str | None] = {}
+    for entry in applicants:
+        if not isinstance(entry, dict):
+            continue
+        resume_file = entry.get("resume_file")
+        if not isinstance(resume_file, str) or not resume_file.strip():
+            continue
+        cover_file = entry.get("cover_letter_file")
+        flag = entry.get("cover_letter_flag")
+        flag_ok = flag is None or str(flag).strip().lower() in _COVER_FLAG_TRUE
+        cover_key = (
+            basename_lower(cover_file)
+            if flag_ok and isinstance(cover_file, str) and cover_file.strip()
+            else None
+        )
+        out[basename_lower(resume_file)] = cover_key
+    return out
 
 
 def basename_lower(filename: str) -> str:
@@ -167,8 +247,10 @@ def pair_applicants(
 
 __all__ = [
     "ApplicantFiles",
+    "ManifestError",
     "PairingResult",
     "UploadedFile",
     "basename_lower",
     "pair_applicants",
+    "parse_pairing_manifest",
 ]

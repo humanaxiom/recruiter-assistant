@@ -399,7 +399,10 @@ async def test_upload_resumes_malformed_manifest_is_422() -> None:
             f"/jobs/{uuid4()}/resumes",
             files=[
                 ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
-                ("pairing_manifest", ("manifest.json", b"{not json", "application/json")),
+                (
+                    "pairing_manifest",
+                    ("manifest.json", b"{not json", "application/json"),
+                ),
             ],
             data={"consent_acknowledged": "true"},
         )

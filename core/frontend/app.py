@@ -252,6 +252,15 @@ def upload_resumes(job_id: UUID) -> Any:
             cover_upload.read(),
             cover_upload.content_type or "application/octet-stream",
         )
+
+    manifest_upload = request.files.get("pairing_manifest")
+    pairing_manifest: tuple[str, bytes, str] | None = None
+    if manifest_upload is not None and manifest_upload.filename:
+        pairing_manifest = (
+            manifest_upload.filename,
+            manifest_upload.read(),
+            manifest_upload.content_type or "application/json",
+        )
     try:
         results = api_client.upload_resumes(
             job_id,
@@ -259,6 +268,7 @@ def upload_resumes(job_id: UUID) -> Any:
             consent_acknowledged=True,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_letter_file,
+            pairing_manifest=pairing_manifest,
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(

@@ -76,6 +76,14 @@
              type="file">
     </div>
     <div class="form-group">
+      <label class="label" for="pairing_manifest">Pairing manifest
+        (manifest.json)</label>
+      <input class="input" id="pairing_manifest" name="pairing_manifest"
+             type="file" accept=".json,application/json">
+      <p class="hint">Optional — pairs each résumé with its cover letter by name.
+        Upload as its own file, NOT inside the résumé zip.</p>
+    </div>
+    <div class="form-group">
       <label class="label" for="cover_letter_text">…or paste cover letter text
         (optional)</label>
       <textarea class="textarea" id="cover_letter_text" name="cover_letter_text"

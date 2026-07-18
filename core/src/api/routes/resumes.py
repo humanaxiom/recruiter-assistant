@@ -56,6 +56,7 @@ async def upload_resumes(
     consent_acknowledged: Annotated[str, Form()],
     cover_letter_text: Annotated[str | None, Form()] = None,
     cover_letter_file: Annotated[UploadFile | None, File()] = None,
+    pairing_manifest: Annotated[UploadFile | None, File()] = None,
 ) -> list[ResumeUploadResult]:
     """Multipart upload: one or more résumé files, OR one entry ending
     ``.zip`` which is expanded and merged into the same accepted/rejected
@@ -81,9 +82,27 @@ async def upload_resumes(
             try:
                 expanded.extend(expand_zip_entries(data))
             except ZipRejected as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                # A ``manifest.json`` zipped WITH the résumés trips the zip
+                # allowlist (json isn't an accepted résumé extension). Surface
+                # the fix, not the generic "disallowed extension" message.
+                detail = str(exc)
+                if ".json" in detail.lower():
+                    detail = (
+                        "upload the pairing manifest as its own field, not "
+                        "inside the résumé zip"
+                    )
+                raise HTTPException(status_code=400, detail=detail) from exc
         else:
             expanded.append((filename, data))
+
+    # FU-3 Slice 3: an explicit résumé↔cover pairing manifest (its own field).
+    # A malformed manifest raises ``ManifestError`` (AppError, 422) → the global
+    # handler renders it before any body is persisted.
+    manifest: dict[str, str | None] | None = None
+    if pairing_manifest is not None:
+        manifest = bulk_ingest_service.parse_pairing_manifest(
+            await pairing_manifest.read()
+        )
 
     cover_file: tuple[str, bytes] | None = None
     if cover_letter_file is not None:
@@ -92,10 +111,11 @@ async def upload_resumes(
             await cover_letter_file.read(),
         )
 
-    # FU-3 Slice 2: pair each résumé with ITS OWN cover letter by filename
-    # convention (manifest is Slice 3 — plumbed but not passed here). A plain
-    # no-suffix upload pairs no cover → empty maps → today's behaviour.
-    pairing = bulk_ingest_service.pair_applicants(expanded)
+    # FU-3 Slice 2/3: pair each résumé with ITS OWN cover letter. The manifest
+    # (when supplied) takes precedence; everything it doesn't name falls back to
+    # the filename convention. A plain no-suffix upload with no manifest pairs
+    # no cover → empty maps → today's behaviour.
+    pairing = bulk_ingest_service.pair_applicants(expanded, manifest=manifest)
     resume_files: list[tuple[str, bytes]] = []
     cover_letter_map: dict[str, tuple[str, bytes]] = {}
     warnings_map: dict[str, list[str]] = {}

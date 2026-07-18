@@ -224,6 +224,7 @@ def upload_resumes(
     consent_acknowledged: bool,
     cover_letter_text: str | None = None,
     cover_letter_file: tuple[str, bytes, str] | None = None,
+    pairing_manifest: tuple[str, bytes, str] | None = None,
     client: httpx.Client | None = None,
 ) -> Any:
     """POST /jobs/{id}/resumes (multipart).
@@ -236,12 +237,17 @@ def upload_resumes(
     ``cover_letter_text`` form field is included only when provided; an optional
     ``cover_letter_file`` (filename, content, content_type) is forwarded as a
     ``cover_letter_file`` part (the backend stores it as a blob and parses it at
-    parse time). A backend 4xx surfaces as ``BadRequest``."""
+    parse time). An optional ``pairing_manifest`` (filename, content,
+    content_type) is forwarded as its OWN ``pairing_manifest`` part — the backend
+    pairs each résumé with its cover by name (never inside the résumé zip). A
+    backend 4xx surfaces as ``BadRequest``."""
     multipart = [
         ("files", (filename, content, ctype)) for filename, content, ctype in files
     ]
     if cover_letter_file is not None:
         multipart.append(("cover_letter_file", cover_letter_file))
+    if pairing_manifest is not None:
+        multipart.append(("pairing_manifest", pairing_manifest))
     form: dict[str, Any] = {
         "consent_acknowledged": "true" if consent_acknowledged else "false"
     }
