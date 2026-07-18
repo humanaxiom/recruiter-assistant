@@ -739,6 +739,54 @@ it.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0 (PR 
 7, and nothing in this file should be read as auto-starting further numbered-phase work. The Workflow UI
 (above) is tracked as a named feature, not a phase.
 
+### Planned follow-ups — user-requested Workflow-UI enhancements (added 2026-07-17)
+
+These three are **explicitly requested** (not a generic options list) while PR #18 is under review — build after #18 merges. They expand/supersede the generic "reverse-match UI" and "deferred connectors" bullets below.
+
+- **FU-1 — Full résumé reveal from the shortlist (AUDITED).** Clicking the candidate label
+  ("Candidate A") on a shortlist card reveals the full, un-blinded résumé (name/email/phone/employers/
+  schools/grad years). **This deliberately reverses the blind-only frontend posture** locked in
+  ADR-013/014 — the user reversed that decision on 2026-07-17. Backend already supports it:
+  `GET /resumes/{id}?reveal=true` decrypts PII (the frontend currently hardcodes `reveal=False` and
+  never forwards reveal). Build: a reveal action on the card/entry (shortlist entry → `resume_id` is the
+  link) that calls `get_resume(reveal=True)` and renders the un-blinded record; **blind stays the
+  default, reveal is opt-in.** MUST be **audited** (log actor + `resume_id` + timestamp on every reveal —
+  hris did this; recruiter-assistant has no reveal-audit sink yet, so add an append-only audit table/log).
+  Record the reversal + the audit control in a new ADR (015). Keep the blind byte-scan tests on the
+  default (non-reveal) paths.
+
+- **FU-2 — Evidence: expand chunk ids to actual content.** The evidence export (`shortlist_evidence_csv`)
+  and the UI evidence `<details>` panel show opaque `evidence_chunk_ids` (`c_001`). Resolve each id → its
+  real chunk text from `resumes.parsed.chunks[]` (`id → {section, text}`) and show that instead of / next
+  to the id. **Redaction-aware**: under anonymized export / blind view the expanded chunk text runs
+  through the same display redaction as everything else; under reveal it's full text. Backend: the export
+  path (`shortlist_service.export_rows` / `shortlist_evidence_csv`) needs the résumé chunks joined in to
+  resolve ids — today it likely doesn't; add a chunk-id→text resolver with redaction applied.
+
+- **FU-3 — Bulk ingest (local, offline): many résumés + per-résumé cover letters + bulk JDs.** The
+  clarified shape of the "connectors" ask. Model: **candidates apply to a job** (résumé tied to a job);
+  the **cover letter is optional** and counts as bonus intention/motivation (feeds the motivation
+  sub-score). Three parts:
+  1. **Bulk résumé upload** — many résumés in one action, loose files OR a `.zip` (backend already
+     multi-file + zip-expands per Phase 6). NEW: **per-résumé cover-letter pairing** — match each résumé
+     to its own cover letter via a `manifest.json` or a filename convention (`<base>_resume` ↔
+     `<base>_cover_letter`); not all résumés have one; unmatched cover files demote to standalone/ignore.
+     `upload_resumes` today takes a single `cover_letter_text` → extend to a pairing map. **hris prior
+     art:** `C:\repos\hris\apps\api\src\api\services\bulk_ingest_service.py`
+     (`pair_applicants`/`parse_pairing_manifest`).
+  2. **Bulk JD upload** — multiple JD files (individual OR a `.zip`) → parse each into its own job;
+     optional CSV manifest mapping filename → job metadata (title/dept/…). Backend has single
+     `jd-extract` + `POST /jobs`; NEW: a bulk endpoint that expands files/zip, extracts JD text per file,
+     and creates + enqueues a `parse_job` per file. **hris prior art:** bulk-JD create in its `jobs.py` +
+     `bulk_ingest_service.parse_csv_manifest`.
+  3. **Many-to-many views** — a candidate can be shortlisted across multiple jobs; navigate candidate↔job
+     both ways ("which jobs is this candidate matched to" = reverse-match; "candidates for this job" =
+     shortlist). Ties to the reverse-match UI (FU adjacent).
+  Security: forward `.zip` bytes verbatim (never client-expand — preserves the backend zip-bomb/
+  path-traversal guards); consent gate per résumé; blind posture unchanged. This is the **offline** half
+  of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
+  thing (see the connectors bullet below).
+
 What a **human** could scope next — options, not a queued to-do list:
 
 - **Wire the reverse-match UI** — now a concrete, scoped follow-up (see "Workflow UI status" above): the
