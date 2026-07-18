@@ -792,6 +792,20 @@ These three are **explicitly requested** (not a generic options list) while PR #
   3. **Many-to-many views** — a candidate can be shortlisted across multiple jobs; navigate candidate↔job
      both ways ("which jobs is this candidate matched to" = reverse-match; "candidates for this job" =
      shortlist). Ties to the reverse-match UI (FU adjacent).
+  4. **Shortlist-generation UX fixes (from live testing 2026-07-18, folded into FU-3):**
+     - **The "Generating… forever" bug** — `shortlist_cards.html` polls every 3s and shows "Generating…"
+       whenever `entries` is empty, with NO stop condition. Clicking **Generate before any résumé has
+       finished parsing** makes `shortlist_job` return `empty`, and the page then polls indefinitely — it
+       LOOKS stuck (this is exactly what the 009_adejoke test hit). FIX: bound the poll (e.g. stop after
+       ~2–3 min / N attempts) with a real empty-state ("No ranked candidates yet — make sure résumés show
+       'parsed', then Generate again"), and/or disable/​warn the **Generate** button until ≥1 résumé is
+       `parsed`. hris used a 20-min safety valve on this poll.
+     - **Parse speed is accepted as inherent** to the offline local LLM (real PDFs take ~60–116s each to
+       parse on the remote 20B model; shortlist_job adds ~30–57s) — NOT a bug. Just **surface a UI hint**
+       ("large PDFs take ~1–2 min to parse on the local model") so the wait isn't mistaken for a hang.
+  - **Sample data for testing:** `C:\repos\hris\fixtures\llm_split\*.pdf` (21 real résumé/cover-letter
+    PDFs, e.g. `009_adejoke_adeyemi_resume.pdf`, some `NNN_name_cover_letter.pdf` pairs) — ideal for
+    exercising FU-3's bulk upload + per-résumé cover-letter pairing against realistic inputs.
   Security: forward `.zip` bytes verbatim (never client-expand — preserves the backend zip-bomb/
   path-traversal guards); consent gate per résumé; blind posture unchanged. This is the **offline** half
   of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
