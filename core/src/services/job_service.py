@@ -321,6 +321,22 @@ async def create_jobs_bulk(
             )
             continue
 
+        # Floor check BEFORE the dedup probe: a sub-floor JD is never valid, so
+        # fail it outright rather than possibly reporting it as a "duplicate".
+        if len(description_raw) < _MIN_DESCRIPTION_CHARS:
+            results.append(
+                BulkJobResult(
+                    original_filename=filename,
+                    outcome="failed",
+                    reason=(
+                        f"extracted description is too short "
+                        f"({len(description_raw)} chars; min "
+                        f"{_MIN_DESCRIPTION_CHARS})"
+                    ),
+                )
+            )
+            continue
+
         sha = _description_sha256(description_raw)
         existing = await conn.fetchval(_JOB_BY_SHA_SQL, sha) or created_in_batch.get(
             sha
@@ -334,20 +350,6 @@ async def create_jobs_bulk(
                         existing if isinstance(existing, UUID) else UUID(str(existing))
                     ),
                     reason="a job with an identical description already exists",
-                )
-            )
-            continue
-
-        if len(description_raw) < _MIN_DESCRIPTION_CHARS:
-            results.append(
-                BulkJobResult(
-                    original_filename=filename,
-                    outcome="failed",
-                    reason=(
-                        f"extracted description is too short "
-                        f"({len(description_raw)} chars; min "
-                        f"{_MIN_DESCRIPTION_CHARS})"
-                    ),
                 )
             )
             continue

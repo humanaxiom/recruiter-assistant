@@ -142,6 +142,26 @@ async def test_bulk_three_files_returns_202_and_three_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bulk_over_file_count_cap_rejected_nothing_enqueued() -> None:
+    """Memory-exhaustion guard (parity with the résumé route): a batch over the
+    per-request file cap is rejected on COUNT before any body is read, and
+    nothing is enqueued."""
+    from src.api.routes.jobs import _MAX_BULK_JD_FILES
+
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    files = [
+        ("files", (f"jd_{i}.txt", ("Role. " + _JD).encode(), "text/plain"))
+        for i in range(_MAX_BULK_JD_FILES + 1)
+    ]
+    async with await _client(app) as client:
+        resp = await client.post("/jobs/bulk", files=files)
+    assert resp.status_code >= 400
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bulk_enqueues_only_for_created_jobs() -> None:
     conn = _mock_conn()
     arq = MagicMock(enqueue_job=AsyncMock())

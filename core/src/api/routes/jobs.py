@@ -16,6 +16,7 @@ from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
 from src.api.deps import get_arq, require_api_key, resolve_actor
+from src.errors import FileRejectedError
 from src.models.pool import Db
 from src.schemas.jobs import (
     BulkJobResult,
@@ -28,7 +29,7 @@ from src.schemas.jobs import (
     JobUpdate,
 )
 from src.services import bulk_ingest_service, jd_import_service, job_service
-from src.services.zip_upload import ZipRejected, expand_zip_entries
+from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
@@ -37,6 +38,9 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 # accepted. Passed explicitly to ``expand_zip_entries`` so the résumé call site
 # keeps its own default untouched.
 _BULK_JD_ZIP_EXTENSIONS: frozenset[str] = frozenset({"pdf", "docx", "txt", "json"})
+# Cap the raw multipart file count BEFORE any body is read (memory-exhaustion
+# guard) — parity with the résumé route's `_MAX_UPLOAD_FILES`.
+_MAX_BULK_JD_FILES = _MAX_ZIP_ENTRIES
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
@@ -88,6 +92,16 @@ async def bulk_create_jobs(
     ``ManifestError`` (422); a hostile zip raises 400 — nothing is inserted in
     either case.
     """
+    # Reject an oversized batch on COUNT FIRST — before any body is read into
+    # memory or expanded — so a flood of files cannot exhaust memory (mirrors
+    # the résumé upload route's guard).
+    if len(files) > _MAX_BULK_JD_FILES:
+        raise FileRejectedError(
+            f"upload has {len(files)} files; the per-request cap is "
+            f"{_MAX_BULK_JD_FILES}",
+            count=len(files),
+        )
+
     expanded: list[tuple[str, bytes]] = []
     for f in files:
         filename = f.filename or "upload"
