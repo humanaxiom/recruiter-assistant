@@ -156,6 +156,9 @@ def test_resumes_table_has_indicator_while_pending(
 def test_shortlist_list_has_buttons(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsed"}])
+    )
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
     assert "btn" in body
     assert "htmx-indicator" in body

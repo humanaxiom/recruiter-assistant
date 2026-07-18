@@ -392,6 +392,9 @@ def test_shortlist_list_page_shows_generate_button_and_export_link(
 ) -> None:
     job_id = uuid4()
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsed"}])
+    )
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
     # Generate button posts to the generate route.
     assert f"/jobs/{job_id}/shortlist" in body
@@ -407,6 +410,7 @@ def test_shortlist_list_page_read_carries_no_reveal_kwarg(
     job_id = uuid4()
     spy = MagicMock(return_value=[])
     monkeypatch.setattr(api_client, "list_shortlist", spy)
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
     client.get(f"/jobs/{job_id}/shortlist")
     spy.assert_called_once()
     assert "reveal" not in spy.call_args.kwargs

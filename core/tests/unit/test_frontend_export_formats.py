@@ -33,6 +33,9 @@ def client() -> Any:
 def test_all_three_export_formats_are_linked(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsed"}])
+    )
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
     base = f"/jobs/{job_id}/shortlist/export"
     assert f"{base}?format=csv" in body
@@ -43,6 +46,9 @@ def test_all_three_export_formats_are_linked(monkeypatch: Any, client: Any) -> N
 def test_export_links_never_carry_a_reveal_param(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsed"}])
+    )
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
     assert "reveal" not in body.lower()
 
