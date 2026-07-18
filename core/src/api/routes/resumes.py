@@ -27,7 +27,7 @@ from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
-from src.services import resume_service, shortlist_service
+from src.services import resume_service, reveal_service, shortlist_service
 from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 from src.storage.blob_store import BlobStore, get_blob_store
 
@@ -121,9 +121,31 @@ async def get_resume(
     return await resume_service.get_one(db, resume_id, reveal=reveal)
 
 
-# ── reverse-match subresource ────────────────────────────────────────────────
-
 _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
+
+
+@router.post("/resumes/{resume_id}/reveal")
+async def reveal_resume(
+    resume_id: UUID,
+    db: Db,
+    actor: Annotated[str, Depends(resolve_actor)],
+    context: Annotated[str | None, Query(max_length=64)] = None,
+) -> ResumeOut:
+    """AUDITED de-anonymization. Records exactly one ``reveal_audit`` row, then
+    returns the UN-blinded résumé. Existence is probed FIRST so a missing id
+    404s WITHOUT writing an audit row. This is the audited reveal path the UI
+    uses; ``GET /resumes/{id}?reveal=true`` stays for direct API callers but
+    writes no audit — so the browser reveal button routes here, not there."""
+    exists = await db.fetchval(_EXISTS_SQL, resume_id)
+    if exists is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+    await reveal_service.record_reveal(
+        db, resume_id=resume_id, actor=actor, context=context
+    )
+    return await resume_service.get_one(db, resume_id, reveal=True)
+
+
+# ── reverse-match subresource ────────────────────────────────────────────────
 
 
 @router.post("/resumes/{resume_id}/match-jobs", status_code=status.HTTP_202_ACCEPTED)
