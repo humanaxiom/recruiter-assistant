@@ -368,8 +368,18 @@ def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
     # Every candidate.* reference must fall strictly inside the reveal-only span
     # (between the `revealed` gate and the `elif blinded` branch), so no
     # non-reveal render can reach it. Robust to the nested per-field ifs.
-    for banned in ("candidate.name", "candidate.email", "candidate.phone"):
-        idx = template.find(banned)
+    banned = (
+        "candidate.name",
+        "candidate.email",
+        "candidate.phone",
+        "candidate.location",
+        "candidate['name']",
+        "candidate['email']",
+        "candidate['phone']",
+        "candidate['location']",
+    )
+    for token in banned:
+        idx = template.find(token)
         while idx != -1:
-            assert gate < idx < elif_marker, f"{banned} outside the reveal block"
-            idx = template.find(banned, idx + 1)
+            assert gate < idx < elif_marker, f"{token} outside the reveal block"
+            idx = template.find(token, idx + 1)

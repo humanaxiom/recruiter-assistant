@@ -68,3 +68,10 @@ reveal) was mandated in the early system design but never implemented; it is a *
 - **R4 — FU-2 `source_context` on reveal.** The evidence source-text expansion (ADR-015) is redacted
   on the blind read path; when a résumé is revealed, its `source_context` should carry *unredacted*
   chunk text. Wiring the revealed résumé/shortlist read to populate it unredacted is a follow-up.
+- **R5 — no CSRF token on the reveal POST.** The Flask viewer has no CSRF protection, so a cross-site
+  auto-submitting form could force `POST /resumes/<id>/reveal` — writing a spurious `reveal_audit`
+  row and un-blinding in the victim's own browser. Same-origin policy blocks the attacker from
+  *reading* the response, so there is **no identity exfiltration**; the impact is audit-log noise / a
+  forced local reveal, further bounded by the local, single-API-key deployment. Accepted for now; add
+  a CSRF token (or `SameSite=Strict` session + origin check) when the viewer gains multi-user auth
+  (FU-4).
