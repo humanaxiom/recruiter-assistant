@@ -219,9 +219,9 @@ def test_match_cards_below_cap_increments_attempt(
     monkeypatch.setattr(
         api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
     )
-    body = client.get(
-        f"/resumes/{resume_id}/match-results-cards?attempt=5"
-    ).get_data(as_text=True)
+    body = client.get(f"/resumes/{resume_id}/match-results-cards?attempt=5").get_data(
+        as_text=True
+    )
     assert "hx-trigger" in body
     assert "attempt=6" in body
 
@@ -246,9 +246,7 @@ def test_match_cards_stops_once_entries_exist(monkeypatch: Any, client: Any) -> 
     assert _JOB_TITLE in body
 
 
-def test_match_cards_gives_up_at_the_attempt_cap(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_match_cards_gives_up_at_the_attempt_cap(monkeypatch: Any, client: Any) -> None:
     """At the cap, still empty and not done, it STOPS (drops hx-trigger) and
     shows a give-up message instead of polling forever."""
     from frontend.app import _MAX_MATCH_POLL_ATTEMPTS
@@ -286,9 +284,7 @@ def test_match_cards_empty_done_is_distinct_from_still_finding(
     assert "No matching" in body
 
 
-def test_match_cards_clamps_out_of_range_attempt(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_match_cards_clamps_out_of_range_attempt(monkeypatch: Any, client: Any) -> None:
     """A hand-edited/garbage ``attempt`` must never crash or unbound the loop."""
     resume_id = uuid4()
     monkeypatch.setattr(

@@ -51,9 +51,27 @@
   <p class="hint">{{ parsed.total_years_experience }}+ years total experience.</p>
   {% endif %}
 
-  <p><a class="btn btn-secondary btn-sm"
-        href="{{ url_for('resume_match_results', resume_id=resume.id) }}">Match
-     results</a></p>
+  {# Candidate→jobs (FU-3 S5). "Find matching jobs" is a POST form (a
+     side-effecting trigger that enqueues reverse_match_job must never be a
+     prefetchable GET), swapping the pollable results fragment into the
+     container below. A plain GET link to VIEW already-computed results is kept
+     alongside (a read is a safe GET). #}
+  <p class="match-actions">
+    <form method="post"
+          action="{{ url_for('resume_match_jobs', resume_id=resume.id) }}"
+          hx-post="{{ url_for('resume_match_jobs', resume_id=resume.id) }}"
+          hx-target="#match-results-cards"
+          hx-swap="outerHTML"
+          style="display:inline">
+      <button type="submit" class="btn btn-primary btn-sm">Find matching jobs</button>
+    </form>
+    <a class="btn btn-secondary btn-sm"
+       href="{{ url_for('resume_match_results', resume_id=resume.id) }}">View match
+       results</a>
+  </p>
+  {# HTMX swap target for the "Find matching jobs" trigger — the returned
+     fragment polls itself until the ranked jobs land. #}
+  <div id="match-results-cards"></div>
 </div>
 
 {% if parsed %}

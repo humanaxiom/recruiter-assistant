@@ -333,6 +333,20 @@ def reveal_resume(
     return response.json()
 
 
+def trigger_reverse_match(
+    resume_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """POST /resumes/{id}/match-jobs — enqueues the reverse-match job. Returns
+    the 202 enqueue ack ``{resume_id, status: "enqueued"}`` (results appear
+    asynchronously; the caller polls ``get_match_results`` for them). This path
+    has NO redaction concept (ADR-012 §4 — the caller owns the résumé, and jobs
+    are not personal data), so it takes no ``reveal`` kwarg. A backend 404
+    surfaces as ``NotFound``; a 5xx (or ``ConnectError``) as
+    ``BackendUnavailable``."""
+    response = _request("POST", f"/resumes/{resume_id}/match-jobs", client=client)
+    return response.json()
+
+
 def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/resumes/{resume_id}/match-results", client=client)
     return response.json()
@@ -376,6 +390,7 @@ __all__ = [
     "get_shortlist_entry",
     "get_resume",
     "reveal_resume",
+    "trigger_reverse_match",
     "get_match_results",
     "export_shortlist",
 ]

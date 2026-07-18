@@ -233,6 +233,11 @@ _MAX_COVER_LETTER_CHARS = 20000
 # (e.g. Generate clicked before any résumé parsed) stops after ~20 min at 3s/poll
 # with a give-up message, instead of polling forever. Matches hris's safety valve.
 _MAX_SHORTLIST_POLL_ATTEMPTS = 400
+# Bound the reverse-match "Finding matching jobs…" poll with the same safety
+# valve/cap as the shortlist poll: reverse_match_job runs asynchronously, so a
+# résumé whose run never lands (or a stack with no worker) stops after the cap
+# with a give-up message instead of polling forever.
+_MAX_MATCH_POLL_ATTEMPTS = 400
 
 
 def _any_resume_pending(resumes: list[dict[str, Any]]) -> bool:
@@ -570,13 +575,72 @@ def resume_reveal(resume_id: UUID) -> Any:
 
 @app.get("/resumes/<uuid:resume_id>/match-results")
 def resume_match_results(resume_id: UUID) -> Any:
+    # Full-page view of the (candidate→jobs) reverse match. No redaction on this
+    # path (ADR-012 §4 — the caller owns the résumé; jobs are not PII), so no
+    # `reveal` kwarg is ever passed. Renders the pollable cards fragment so an
+    # in-flight run keeps filling in as ranked jobs land.
     try:
         results = api_client.get_match_results(resume_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("match_results.html", results=results)
+    return render_template(
+        "match_results.html",
+        resume_id=resume_id,
+        results=results,
+        attempt=0,
+        max_attempts=_MAX_MATCH_POLL_ATTEMPTS,
+    )
+
+
+@app.post("/resumes/<uuid:resume_id>/match-jobs")
+def resume_match_jobs(resume_id: UUID) -> Any:
+    """Enqueue the reverse-match job, then return the pollable match-results
+    fragment. POST-only: a side-effecting trigger must never be a prefetchable
+    GET. ``reverse_match_job`` runs asynchronously on the backend, so the
+    fragment comes back empty → it shows "Finding matching jobs…" and keeps its
+    ``hx-trigger`` until the ranked jobs appear (mirrors ``generate_shortlist``)."""
+    try:
+        api_client.trigger_reverse_match(resume_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _render_match_cards(resume_id)
+
+
+@app.get("/resumes/<uuid:resume_id>/match-results-cards")
+def resume_match_results_cards(resume_id: UUID) -> Any:
+    """HTMX poll fragment (mirrors ``shortlist_cards``). While the reverse-match
+    read is still empty AND the run is not yet done it renders "Finding matching
+    jobs…" AND keeps its ``hx-trigger`` so the browser re-polls every 3s; once
+    ranked jobs exist it renders them WITHOUT the trigger, so polling stops. A
+    bounded ``attempt`` counter (clamped server-side) stops the poll after
+    ``_MAX_MATCH_POLL_ATTEMPTS`` with a give-up message, so a run that never
+    lands doesn't poll forever."""
+    attempt = request.args.get("attempt", default=0, type=int) or 0
+    attempt = max(0, min(attempt, _MAX_MATCH_POLL_ATTEMPTS))
+    return _render_match_cards(resume_id, attempt=attempt)
+
+
+def _render_match_cards(resume_id: UUID, *, attempt: int = 0) -> Any:
+    # No redaction on this path (ADR-012 §4): the caller owns the résumé and
+    # jobs are not PII, so real job titles/departments are shown here — this is
+    # correct, unlike the blind shortlist. No `reveal` kwarg is ever passed.
+    try:
+        results = api_client.get_match_results(resume_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "match_results_cards.html",
+        resume_id=resume_id,
+        results=results,
+        attempt=attempt,
+        max_attempts=_MAX_MATCH_POLL_ATTEMPTS,
+    )
 
 
 _EXPORT_FORMATS: tuple[api_client.ExportFormat, ...] = ("csv", "evidence-csv", "json")
