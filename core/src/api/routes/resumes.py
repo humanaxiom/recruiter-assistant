@@ -50,6 +50,7 @@ async def upload_resumes(
     files: Annotated[list[UploadFile], File()],
     consent_acknowledged: Annotated[str, Form()],
     cover_letter_text: Annotated[str | None, Form()] = None,
+    cover_letter_file: Annotated[UploadFile | None, File()] = None,
 ) -> list[ResumeUploadResult]:
     """Multipart upload: one or more résumé files, OR one entry ending
     ``.zip`` which is expanded and merged into the same accepted/rejected
@@ -79,6 +80,13 @@ async def upload_resumes(
         else:
             expanded.append((filename, data))
 
+    cover_file: tuple[str, bytes] | None = None
+    if cover_letter_file is not None:
+        cover_file = (
+            cover_letter_file.filename or "cover_letter",
+            await cover_letter_file.read(),
+        )
+
     consent = consent_acknowledged.strip().lower() == "true"
     try:
         results = await resume_service.upload_resumes(
@@ -89,6 +97,7 @@ async def upload_resumes(
             consent_acknowledged=consent,
             uploaded_by=actor,
             cover_letter_text=cover_letter_text,
+            cover_letter_file=cover_file,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

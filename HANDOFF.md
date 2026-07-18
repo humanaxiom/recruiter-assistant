@@ -776,6 +776,14 @@ These three are **explicitly requested** (not a generic options list) while PR #
      `upload_resumes` today takes a single `cover_letter_text` → extend to a pairing map. **hris prior
      art:** `C:\repos\hris\apps\api\src\api\services\bulk_ingest_service.py`
      (`pair_applicants`/`parse_pairing_manifest`).
+     - **Cover letter must be uploadable as a FILE, not just pasted text** (user request 2026-07-18).
+       Today only the pasted `cover_letter_text` textarea is wired end-to-end. IMPORTANT: the service
+       layer `resume_service.upload_resumes` **already accepts a `cover_letter_file: tuple[str, bytes]
+       | None` param** (currently unwired) — so the SINGLE-résumé cover-letter-file case is a small
+       wire-through: add a `cover_letter_file: UploadFile` Form field to the API route
+       (`routes/resumes.py::upload_resumes`) + a file input to the job-detail upload form +
+       `api_client.upload_resumes` passthrough. This is the natural FIRST slice of FU-3 and can ship
+       ahead of the full bulk/pairing work.
   2. **Bulk JD upload** — multiple JD files (individual OR a `.zip`) → parse each into its own job;
      optional CSV manifest mapping filename → job metadata (title/dept/…). Backend has single
      `jd-extract` + `POST /jobs`; NEW: a bulk endpoint that expands files/zip, extracts JD text per file,

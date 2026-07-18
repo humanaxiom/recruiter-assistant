@@ -234,12 +234,22 @@ def upload_resumes(job_id: UUID) -> Any:
     cover_letter_text: str | None = None
     if cover_letter_raw:
         cover_letter_text = cover_letter_raw[:_MAX_COVER_LETTER_CHARS]
+
+    cover_upload = request.files.get("cover_letter_file")
+    cover_letter_file: tuple[str, bytes, str] | None = None
+    if cover_upload is not None and cover_upload.filename:
+        cover_letter_file = (
+            cover_upload.filename,
+            cover_upload.read(),
+            cover_upload.content_type or "application/octet-stream",
+        )
     try:
         api_client.upload_resumes(
             job_id,
             files,
             consent_acknowledged=True,
             cover_letter_text=cover_letter_text,
+            cover_letter_file=cover_letter_file,
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(

@@ -223,6 +223,7 @@ def upload_resumes(
     *,
     consent_acknowledged: bool,
     cover_letter_text: str | None = None,
+    cover_letter_file: tuple[str, bytes, str] | None = None,
     client: httpx.Client | None = None,
 ) -> Any:
     """POST /jobs/{id}/resumes (multipart).
@@ -232,11 +233,15 @@ def upload_resumes(
     — we only forward the raw bytes, never expand it here). ``consent_acknowledged``
     is sent as the string ``"true"``/``"false"`` form field the backend expects
     (it accepts iff ``.strip().lower() == "true"``). An optional
-    ``cover_letter_text`` form field is included only when provided. A backend
-    4xx surfaces as ``BadRequest`` so the route can re-render with a message."""
+    ``cover_letter_text`` form field is included only when provided; an optional
+    ``cover_letter_file`` (filename, content, content_type) is forwarded as a
+    ``cover_letter_file`` part (the backend stores it as a blob and parses it at
+    parse time). A backend 4xx surfaces as ``BadRequest``."""
     multipart = [
         ("files", (filename, content, ctype)) for filename, content, ctype in files
     ]
+    if cover_letter_file is not None:
+        multipart.append(("cover_letter_file", cover_letter_file))
     form: dict[str, Any] = {
         "consent_acknowledged": "true" if consent_acknowledged else "false"
     }
