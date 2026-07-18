@@ -523,6 +523,9 @@ def test_shortlist_evidence_csv_header_fields() -> None:
         "confidence",
         "quote",
         "evidence_chunk_ids",
+        # FU-2: the resolved source text behind the cited chunk ids. The ids
+        # column is kept alongside it for traceability.
+        "evidence_context",
     }
 
 
