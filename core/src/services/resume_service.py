@@ -239,7 +239,14 @@ async def upload_resumes(
     # résumé parse. Validated + size-capped here so a bad cover letter fails
     # loud at upload rather than silently later. Symmetric with the résumé
     # files: reject an oversize or unsupported-mime cover letter.
+    # Validate the cover-letter file up front (fail fast, before opening a
+    # transaction), but defer the blob write to INSIDE the transaction below so
+    # its orphan-on-rollback window matches the résumé blobs' (a rollback can't
+    # un-write a filesystem blob either way; keeping the same scope avoids a
+    # WIDER pre-transaction window — the residual orphan-blob cleanup is shared
+    # with the résumé path and left to a future reaper).
     cover_blob_key: str | None = None
+    cover_blob_payload: tuple[str, bytes, str] | None = None
     if cover_letter_file is not None:
         cl_name, cl_bytes = cover_letter_file
         if len(cl_bytes) == 0:
@@ -254,11 +261,14 @@ async def upload_resumes(
         except UnsupportedMimeError as exc:
             raise ValueError(f"unsupported cover letter file: {exc}") from exc
         cover_blob_key = f"cover_letters/{uuid4()}.{_MIME_EXT[cl_mime]}"
-        await blob_store.put(cover_blob_key, cl_bytes, content_type=cl_mime)
+        cover_blob_payload = (cover_blob_key, cl_bytes, cl_mime)
 
     results: list[ResumeUploadResult] = []
 
     async with conn.transaction():
+        if cover_blob_payload is not None:
+            k, b, m = cover_blob_payload
+            await blob_store.put(k, b, content_type=m)
         encrypted_cover: bytes | None = None
         if cover_letter_text is not None:
             await pii_service.set_pii_key(conn)
