@@ -339,6 +339,28 @@ def test_resume_reveal_shows_identity_and_audit_notice(
     assert "audit log" in raw.lower()
 
 
+def test_resume_reveal_forwards_context_from_form(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A reveal triggered from the shortlist card posts ``context=shortlist``;
+    the route forwards it so the audit row records the true origin."""
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", spy)
+    client.post(f"/resumes/{resume_id}/reveal", data={"context": "shortlist"})
+    assert spy.call_args.kwargs["context"] == "shortlist"
+
+
+def test_resume_reveal_context_defaults_to_resume_detail(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", spy)
+    client.post(f"/resumes/{resume_id}/reveal")
+    assert spy.call_args.kwargs["context"] == "resume_detail"
+
+
 def test_resume_reveal_uses_audited_endpoint_not_raw_reveal(
     monkeypatch: Any, client: Any
 ) -> None:

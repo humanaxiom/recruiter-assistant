@@ -426,8 +426,11 @@ def resume_reveal(resume_id: UUID) -> Any:
     backend's audited reveal endpoint (which records who/what/when), then
     re-renders the résumé UN-blinded in place. Blind stays the default; this is
     the only path that surfaces identity."""
+    # `context` records WHERE the reveal was triggered (shortlist card vs the
+    # résumé page) in the audit row; defaults to the résumé page.
+    context = (request.form.get("context") or "resume_detail").strip()[:64]
     try:
-        resume = api_client.reveal_resume(resume_id, context="resume_detail")
+        resume = api_client.reveal_resume(resume_id, context=context)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:

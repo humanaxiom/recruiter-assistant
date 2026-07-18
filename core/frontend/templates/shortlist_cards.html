@@ -27,11 +27,21 @@
     <div class="card-header">
       <span class="rank">#{{ entry.rank }}</span>
       <h3 style="margin:0">
-        {# Label links to the résumé, where an audited reveal is one click
-           (FU-1). The shortlist read itself stays blind — no reveal here. #}
+        {# Label links to the (blind) résumé detail. The shortlist read itself
+           stays blind — no PII in the list. #}
         <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
            >{{ entry.display_label }}</a>
       </h3>
+      {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
+         deliberate, logged act); it records who/what/when and opens the résumé
+         un-blinded. `context=shortlist` so the audit shows where it came from. #}
+      <form method="post"
+            action="{{ url_for('resume_reveal', resume_id=entry.resume_id) }}"
+            style="display:inline">
+        <input type="hidden" name="context" value="shortlist">
+        <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
+          (audited)</button>
+      </form>
       <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
     </div>
 
