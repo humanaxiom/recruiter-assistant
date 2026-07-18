@@ -33,7 +33,7 @@ from typing import Any
 from uuid import UUID
 
 from src.errors import NotFoundError
-from src.schemas.jobs import JDExtracted, JobCreate, JobListItem, JobOut
+from src.schemas.jobs import JDExtracted, JobCreate, JobListItem, JobOut, JobUpdate
 from src.services import DbConn
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,25 @@ _FORWARD_TRANSITIONS: dict[str, str] = {
     "open": "closed",
     "closed": "archived",
 }
+
+# Columns PATCH /jobs/{id} is allowed to touch. ``JobUpdate`` (src/schemas/
+# jobs.py) has no ``status`` field at all — status changes are exclusively
+# the job of ``transition_status``'s state-machine guard — so this allowlist
+# is a defensive belt-and-suspenders filter in case a future field is ever
+# added to ``JobUpdate`` without updating this set.
+_UPDATABLE_JOB_COLUMNS: frozenset[str] = frozenset(
+    {
+        "title",
+        "department",
+        "location",
+        "employment_type",
+        "seniority",
+        "min_years",
+        "description_raw",
+        "retention_days",
+        "blind_review",
+    }
+)
 
 
 def _row_to_jobout(row: Any) -> JobOut:
@@ -241,4 +260,47 @@ async def transition_status(conn: DbConn, job_id: UUID, to: str) -> JobOut:
     if _FORWARD_TRANSITIONS.get(current) != to:
         raise ValueError(f"invalid status transition: {current!r} -> {to!r}")
     row = await conn.fetchrow(_UPDATE_STATUS_SQL, job_id, to)
+    return _row_to_jobout(row)
+
+
+async def update_job(conn: DbConn, job_id: UUID, payload: JobUpdate) -> JobOut:
+    """General partial update for ``PATCH /jobs/{id}``.
+
+    Builds the SQL SET clause from ``payload.model_dump(exclude_unset=True)``
+    — NOT from the model's full field set — because a PATCH omit must mean
+    "unchanged", not "set to null". This matters most for ``blind_review``:
+    it is a plain ``bool``, so ``False`` is a legitimate value a client sends
+    on purpose and must stay distinguishable from "the client didn't send
+    this field at all".
+
+    ``status`` is deliberately never writable here — ``JobUpdate`` carries no
+    ``status`` field (status has its own state-machine-guarded transition
+    endpoint, ``transition_status``) and ``_UPDATABLE_JOB_COLUMNS`` filters
+    anything outside the known-safe column set as a defensive second layer.
+
+    Raises ``NotFoundError`` when the job id does not resolve. An empty
+    payload (nothing sent, or everything filtered out) is a no-op that still
+    returns the current row — it never issues an UPDATE with an empty SET
+    clause, which is invalid SQL.
+    """
+    fields = {
+        col: val
+        for col, val in payload.model_dump(exclude_unset=True).items()
+        if col in _UPDATABLE_JOB_COLUMNS
+    }
+    if not fields:
+        return await get_job(conn, job_id)
+
+    set_clauses = []
+    args: list[Any] = [job_id]
+    for col, val in fields.items():
+        args.append(val)
+        set_clauses.append(f"{col} = ${len(args)}")
+    query = (
+        f"UPDATE jobs SET {', '.join(set_clauses)}, updated_at = now() "
+        f"WHERE id = $1 RETURNING {_JOB_COLS}"
+    )
+    row = await conn.fetchrow(query, *args)
+    if row is None:
+        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
     return _row_to_jobout(row)

@@ -655,26 +655,162 @@ is host-only by design"). Corrected everywhere it appeared in this file and in
 passed, reproduced twice. `docs/EXTRACTION_PLAN.md`'s phase table ends at Phase 7, and it is now fully
 merged: **the extraction plan's v1 scope (as locked in the plan's four decisions) is complete.**
 
+### Workflow UI status — DONE, gates green — a post-v1 feature, NOT "Phase 8"
+
+`core/frontend/app.py` (extended with 9 new write-capable routes: résumé upload, job status transitions,
+blind-review toggle, shortlist generation, and three 3-second HTMX poll fragments — `parse-status`,
+`resumes-table`, `shortlist-cards`), `core/frontend/templates/*.html` (rewritten as a full recruiter
+workflow — create job → upload → generate shortlist → review → export — replacing Phase 7's read-only
+pages), `core/frontend/static/app.css` (new, hand-authored) + `core/frontend/static/vendor/htmx.min.js`
+(new, vendored htmx 2.0.4 + `htmx.LICENSE`), `core/src/services/job_service.py`
+(`update_job`, new) + `core/src/api/routes/jobs.py` (`PATCH /jobs/{id}`, new) were built on branch
+`feat/workflow-ui`. It reproduces the recruiter workflow that exists in the source `hris` Next.js
+frontend, scoped strictly to **job → résumé → shortlist** — the review/decision workflow, JD-Harmonizer,
+comment threads, admin console, and CAS auth all stay cut, per the plan's original keep/cut boundary.
+Full detail: [ADR-014](docs/adr/014-workflow-ui.md).
+
+**This is a new post-v1 feature, not a numbered phase.** `docs/EXTRACTION_PLAN.md`'s phase table still
+ends at Phase 7 and stays closed — do not call this "Phase 8" anywhere.
+
+**Stack decision (ADR-014 §1):** Flask + HTMX (vendored, served locally, no CDN) + a hand-authored
+`app.css` utility stylesheet. Deliberately **not** a Tailwind/Node build — there is no Node toolchain in
+the container, and CLAUDE.md locks the frontend stack at Flask. No `tailwind.config.js` exists; a future
+contributor should not look for one. This keeps the app offline/air-gapped and keeps every redacted
+response assembled server-side in Python — HTMX only ever swaps in Jinja2-rendered fragments, never raw
+JSON assembled client-side.
+
+**Blind-only, by construction, carried forward from ADR-013 (§2):** the Flask layer never forwards
+`reveal` to the backend, even though this is now a write-enabled surface. `get_resume` stays hardcoded
+`reveal=False`; `list_shortlist`/`get_shortlist_entry` take no `reveal` parameter at all; the three export
+formats (csv/evidence-csv/json) proxy the backend's `reveal=False` default without exposing a browser-side
+way to flip it. `resume_detail.html` still has no template branch capable of rendering candidate name/
+email/phone/location — proven by structural byte-scan tests, not merely gated on the backend's `blinded`
+flag.
+
+**One backend addition — the only `core/src/` change in this feature:** `PATCH /jobs/{id}`
+(`job_service.update_job`), needed for the blind-review toggle. Allowlist-guarded partial update built
+from `payload.model_dump(exclude_unset=True)` (an omitted field means "unchanged," not "set to null" —
+matters for `blind_review: bool | None`, since `False` is a legitimate deliberate value); `status` remains
+unwritable through this route (`JobUpdate` carries no `status` field, `extra="forbid"` 422s a client that
+tries) — every status change still goes through the Phase 6 state-machine-guarded
+`PATCH /jobs/{id}/status`. `stages.py`/`orchestrator.py` and every other Phase 6 route are byte-unchanged.
+
+**Screens:** jobs list (create-job form with JD-file auto-extract + blind-review checkbox +
+status-filter pills) → job detail (3s-polled "parsing…" badge, status-transition buttons with draft→open
+disabled until parsed, blind-review toggle, consent-gated résumé upload + 3s-polled status-pill résumé
+table) → résumé detail (blind banner, recency-coloured skill chips, experience/education/cover letter, no
+PII code path) → shortlist (Generate/Regenerate button that polls until ranked, per-candidate cards with
+rank/`score_final × 100`/five sub-score tiles/matched-missing skill chips/evidence panel with cited
+quotes, three anonymized export formats).
+
+**Gate outcome:** GREEN — ruff/black/`mypy --strict` clean; **2364 unit tests @ 91.30% coverage**; all
+screens live-verified end-to-end against the real running stack (create job → LLM parse → upload →
+shortlist → ranked cards, confirmed blind throughout). Reviewer **APPROVE** (after fixing one Major: the
+export route had silently dropped the `?format=` query parameter, always exporting csv — now reads and
+validates it against the allowed set); security **PASS** after two fixes: `MAX_CONTENT_LENGTH` (210 MiB,
+sized off the backend's 10 MB/file × 20-file caps) added so an oversized multipart request 413s before
+Flask buffers it into process memory, and an explicit `httpx.Timeout` (30s/5s connect) added to the
+`api_client` build so outbound calls never rely on `httpx`'s implicit no-timeout default.
+
+**Accepted LOW residual (ADR-014, documented not fixed):** the create/upload error paths render the
+backend's 4xx `detail` verbatim (Jinja2-autoescaped). Today the backend only ever puts field-level
+validation text there — no PII, no raw upload content — accepted for v1. If a future backend change ever
+surfaces something PII-bearing or attacker-controlled in `detail`, map it to fixed friendly messages
+instead of rendering verbatim.
+
+**Deferred, not built — the reverse-match UI is now a concrete follow-up.** A "find matching jobs"
+trigger button on the résumé-detail screen was scoped as an optional slice (S9) and cut for time. The
+backend endpoints already exist and are unchanged (`POST /resumes/{id}/match-jobs`,
+`GET /resumes/{id}/match-results`, both Phase 6), and the old `match_results.html` view remains, already
+wired to `app.py::resume_match_results`. Wiring a trigger button that calls the existing
+`api_client.get_match_results`/a thin new POST wrapper is a clean, low-risk follow-up needing no backend
+change.
+
+**Pre-existing, out of scope:** weak/empty `flask_secret_key`/`api_key` defaults (env-overridable) —
+hardening backlog, inherited from Phase 6/7, not introduced or worsened by this feature.
+
 ## Next session
 
-**The v1 extraction plan is fully delivered.** All seven phases (0–7) are merged to `main`, CI green:
-Phase 0 (PR #1, `8b2b47c`), Phase 1 (PR #2, `f7e7cbe`), Phase 2 (PR #3, `cefd545`), Phase 3 (PR #6,
-`49196d7`), Phase 4a–4d (PR #8/#10/#11/#12/#13), Phase 5 (PR #14, `6deade3`), Phase 6 (PR #15, `e910669`),
-Phase 7 (PR #16, `1039e5c`). **There is no Phase 8** — `docs/EXTRACTION_PLAN.md`'s phase table intentionally
-ends at Phase 7, and nothing in this file should be read as auto-starting further build work.
+**The v1 extraction plan is fully delivered, and the post-v1 Workflow UI feature has now shipped on top of
+it.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0 (PR #1, `8b2b47c`), Phase 1
+(PR #2, `f7e7cbe`), Phase 2 (PR #3, `cefd545`), Phase 3 (PR #6, `49196d7`), Phase 4a–4d
+(PR #8/#10/#11/#12/#13), Phase 5 (PR #14, `6deade3`), Phase 6 (PR #15, `e910669`), Phase 7 (PR #16,
+`1039e5c`). **There is no Phase 8** — `docs/EXTRACTION_PLAN.md`'s phase table intentionally ends at Phase
+7, and nothing in this file should be read as auto-starting further numbered-phase work. The Workflow UI
+(above) is tracked as a named feature, not a phase.
+
+### Planned follow-ups — user-requested Workflow-UI enhancements (added 2026-07-17)
+
+These three are **explicitly requested** (not a generic options list) while PR #18 is under review — build after #18 merges (they build on #18's code). **User-confirmed build order (2026-07-17): FU-2 → FU-1 → FU-3.** They expand/supersede the generic "reverse-match UI" and "deferred connectors" bullets below.
+
+**Blind-review model (user-confirmed 2026-07-17, matches hris):** blind is ON at every step by default; identity is exposed only through an explicit, **audited** reveal (FU-1). **RBAC is a SEPARATE task** (FU-4 below) — it was mandated in the early system design but never implemented; FU-1's reveal ships with the audit log first, and RBAC (who is *permitted* to reveal) layers on top afterward.
+
+- **FU-1 — Full résumé reveal from the shortlist (AUDITED).** Clicking the candidate label
+  ("Candidate A") on a shortlist card reveals the full, un-blinded résumé (name/email/phone/employers/
+  schools/grad years). **This deliberately reverses the blind-only frontend posture** locked in
+  ADR-013/014 — the user reversed that decision on 2026-07-17. Backend already supports it:
+  `GET /resumes/{id}?reveal=true` decrypts PII (the frontend currently hardcodes `reveal=False` and
+  never forwards reveal). Build: a reveal action on the card/entry (shortlist entry → `resume_id` is the
+  link) that calls `get_resume(reveal=True)` and renders the un-blinded record; **blind stays the
+  default, reveal is opt-in.** MUST be **audited** (log actor + `resume_id` + timestamp on every reveal —
+  hris did this; recruiter-assistant has no reveal-audit sink yet, so add an append-only audit table/log).
+  Record the reversal + the audit control in a new ADR (015). Keep the blind byte-scan tests on the
+  default (non-reveal) paths.
+
+- **FU-2 — Evidence: expand chunk ids to actual content.** The evidence export (`shortlist_evidence_csv`)
+  and the UI evidence `<details>` panel show opaque `evidence_chunk_ids` (`c_001`). Resolve each id → its
+  real chunk text from `resumes.parsed.chunks[]` (`id → {section, text}`) and show that instead of / next
+  to the id. **Redaction-aware**: under anonymized export / blind view the expanded chunk text runs
+  through the same display redaction as everything else; under reveal it's full text. Backend: the export
+  path (`shortlist_service.export_rows` / `shortlist_evidence_csv`) needs the résumé chunks joined in to
+  resolve ids — today it likely doesn't; add a chunk-id→text resolver with redaction applied.
+
+- **FU-3 — Bulk ingest (local, offline): many résumés + per-résumé cover letters + bulk JDs.** The
+  clarified shape of the "connectors" ask. Model: **candidates apply to a job** (résumé tied to a job);
+  the **cover letter is optional** and counts as bonus intention/motivation (feeds the motivation
+  sub-score). Three parts:
+  1. **Bulk résumé upload** — many résumés in one action, loose files OR a `.zip` (backend already
+     multi-file + zip-expands per Phase 6). NEW: **per-résumé cover-letter pairing** — match each résumé
+     to its own cover letter via a `manifest.json` or a filename convention (`<base>_resume` ↔
+     `<base>_cover_letter`); not all résumés have one; unmatched cover files demote to standalone/ignore.
+     `upload_resumes` today takes a single `cover_letter_text` → extend to a pairing map. **hris prior
+     art:** `C:\repos\hris\apps\api\src\api\services\bulk_ingest_service.py`
+     (`pair_applicants`/`parse_pairing_manifest`).
+  2. **Bulk JD upload** — multiple JD files (individual OR a `.zip`) → parse each into its own job;
+     optional CSV manifest mapping filename → job metadata (title/dept/…). Backend has single
+     `jd-extract` + `POST /jobs`; NEW: a bulk endpoint that expands files/zip, extracts JD text per file,
+     and creates + enqueues a `parse_job` per file. **hris prior art:** bulk-JD create in its `jobs.py` +
+     `bulk_ingest_service.parse_csv_manifest`.
+  3. **Many-to-many views** — a candidate can be shortlisted across multiple jobs; navigate candidate↔job
+     both ways ("which jobs is this candidate matched to" = reverse-match; "candidates for this job" =
+     shortlist). Ties to the reverse-match UI (FU adjacent).
+  Security: forward `.zip` bytes verbatim (never client-expand — preserves the backend zip-bomb/
+  path-traversal guards); consent gate per résumé; blind posture unchanged. This is the **offline** half
+  of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
+  thing (see the connectors bullet below).
+
+- **FU-4 — RBAC (its own task; mandated in early system design, never implemented).** Role-based access
+  control across the app — the original design mandated it (roles such as admin / recruiter /
+  hiring-manager / auditor), but nothing in recruiter-assistant enforces roles today (auth is a single
+  optional API key; every authenticated caller can do everything). Scope when picked up: a role model +
+  per-route authorization, with the **audited reveal (FU-1) as the first gated action** (only
+  recruiter/admin may reveal; auditor/hiring-manager may not). Decoupled from FU-1 on purpose so reveal +
+  its audit log can ship first and RBAC can be layered on without reworking it. Needs its own ADR.
 
 What a **human** could scope next — options, not a queued to-do list:
 
+- **Wire the reverse-match UI** — now a concrete, scoped follow-up (see "Workflow UI status" above): the
+  backend is ready and unchanged, only a trigger button + route wiring on `resume_detail.html` is missing.
 - **The open `jd.education.fields` decision** (ADR-009 §7, restated through ADR-013) — `score_education`
   ignores `jd.education.fields` entirely, so JD field-relevance is decorative. Either extend the scorer to
-  read `fields`, or drop `fields` from the JD contract. Still unresolved after 4c/4d/5/6/7 all touched no
-  scoring code.
+  read `fields`, or drop `fields` from the JD contract. Still unresolved after 4c/4d/5/6/7/Workflow UI all
+  touched no scoring code.
 - **The deferred connectors feature** (Taleo/CSV-manifest upload) — explicitly cut in Phase 6 (ADR-012 §2),
   the user's own framing was "Taleo was a shortcut to get sample data … will add more connectors in the
-  future." Upload today only accepts local multi-file or `.zip`.
-- **No advisory lock on concurrent shortlist/reverse-match regenerate** (ADR-010 §1) — now live, not
-  hypothetical, since Phase 6 shipped user-facing regenerate routes (`POST /jobs/{id}/shortlist`,
-  `POST /resumes/{id}/match-jobs`). Last-committer-wins today.
+  future." Upload today only accepts local multi-file or `.zip`, from the browser or the API directly.
+- **No advisory lock on concurrent shortlist/reverse-match regenerate** (ADR-010 §1) — now live and
+  reachable from the browser (the Workflow UI's Generate/Regenerate button calls
+  `POST /jobs/{id}/shortlist` directly). Last-committer-wins today.
 - **`reverse_match_job`'s `allowed_job_ids` filter** is still `description_parsed IS NOT NULL`, not
   `status = 'open'`, even though Phase 6 added the first code path that ever transitions `jobs.status`
   (ADR-012 §3 revisits, does not resolve).
@@ -690,6 +826,8 @@ What a **human** could scope next — options, not a queued to-do list:
   `shortlist_entries`/`reverse_match_entries`'s evidence quotes, and structured experience/education/skills
   fields are all cleartext at rest in Postgres (protected by pgcrypto only on the four dedicated PII
   columns). Accepted for v1; revisit before any multi-tenant deploy.
+- **Weak/empty `flask_secret_key`/`api_key` defaults** — env-overridable, but weak-by-default; harden
+  before any non-local deployment (Workflow UI status, above).
 
 **Re-running the live eval, if a future session needs to:**
 

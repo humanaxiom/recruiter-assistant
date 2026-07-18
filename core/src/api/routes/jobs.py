@@ -24,6 +24,7 @@ from src.schemas.jobs import (
     JobOut,
     JobStatus,
     JobTransition,
+    JobUpdate,
 )
 from src.services import jd_import_service, job_service
 
@@ -73,6 +74,18 @@ async def list_jobs(
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: UUID, db: Db) -> JobOut:
     return await job_service.get_job(db, job_id)
+
+
+@router.patch("/jobs/{job_id}")
+async def update_job(job_id: UUID, payload: JobUpdate, db: Db) -> JobOut:
+    """General partial update. ``status`` is NOT settable here — ``JobUpdate``
+    has no ``status`` field (``extra="forbid"`` 422s a client that tries), and
+    status changes must go through ``PATCH /jobs/{job_id}/status`` so the
+    forward-only state-machine guard always applies. Fields the client omits
+    are left unchanged (see ``job_service.update_job`` for the merge
+    semantics); 404 (via the global ``AppError`` handler) when the id does
+    not resolve."""
+    return await job_service.update_job(db, job_id, payload)
 
 
 @router.patch("/jobs/{job_id}/status")

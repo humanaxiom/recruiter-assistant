@@ -27,7 +27,7 @@ graph TB
         subgraph AppTier["App Tier"]
             API[FastAPI<br/>:8000]
             WK[arq Worker<br/>parse · rank · reverse-match]
-            FE[Flask Viewer<br/>:5000 · read-only]
+            FE[Flask Workflow UI<br/>:5000 · HTMX, blind-only]
         end
         subgraph DataTier["Data Tier"]
             PG[(PostgreSQL 16<br/>asyncpg · pgcrypto PII)]
@@ -180,14 +180,14 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 ## API layer (Phase 6)
 
-`core/src/api/routes/{jobs,resumes,shortlist}.py` — eleven routes over the service layer Phases 3–5
-built, plus `core/src/api/deps.py`'s configurable auth switch. **Merged to `main`** — see "Status &
-roadmap" below.
+`core/src/api/routes/{jobs,resumes,shortlist}.py` — twelve routes (Phase 6 shipped eleven; the Workflow
+UI feature added `PATCH /jobs/{id}`, below) over the service layer Phases 3–5 built, plus
+`core/src/api/deps.py`'s configurable auth switch. **Merged to `main`** — see "Status & roadmap" below.
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST / GET | `/jobs` | Create a draft job (enqueues `parse_job`) / list |
-| GET / PATCH | `/jobs/{id}` | Get one / update |
+| GET / PATCH | `/jobs/{id}` | Get one / general partial update (allowlist-guarded; `status` not settable here — Workflow UI feature) |
 | PATCH | `/jobs/{id}/status` | The only status-mutating route — forward-only, 409 on an invalid transition |
 | POST | `/jobs/jd-extract` | Pre-fill helper — extract JD text from an upload, no DB write |
 | POST / GET | `/jobs/{id}/resumes` | Upload résumés (multi-file or `.zip`) / list |
@@ -215,39 +215,68 @@ Full decisions + residuals: [ADR-012](docs/adr/012-api-routes-auth-upload-scope.
 
 ---
 
-## Viewer (Phase 7)
+## Evals (Phase 7)
 
-`core/frontend/{api_client.py,app.py,templates/}` — a minimal, read-only Flask viewer over the Phase 6
-API. `api_client.py` is a thin sync `httpx` wrapper (one function per consumed route,
-`build_client()`/`BackendError`/`NotFound`/`BackendUnavailable`); `app.py` serves `/`, `/jobs/<uuid>`,
-`/jobs/<uuid>/shortlist`, `/shortlist/<uuid>`, `/resumes/<uuid>`, `/resumes/<uuid>/match-results`,
-`/jobs/<uuid>/shortlist/export`, and `/health`, all server-side Jinja2 with no client-side JS.
+Phase 7 also shipped the last v1-scope evals item: no new fixtures (Phase 4a's corpus + 4c's live
+orchestrator wiring already satisfied "ranking-quality fixtures"), plus a **live end-to-end eval**
+(`core/tests/evals/run_evals_live.py`) that seeds the pre-parsed corpus at the post-parse boundary, drives
+the real `project_to_graph`/`shortlist_job`, reads persisted rows, and re-checks every `thresholds.toml`
+gate against a real Ollama-backed stack. It has been run and passed, reproduced identically twice — a
+manual/local harness, never part of CI. Full detail: [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5;
+activity report: [docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md).
 
-**Blind-only by construction, not by default.** The viewer never sends `reveal` to the backend — the
-shortlist list/detail functions (`list_shortlist`/`get_shortlist_entry`) take no `reveal` parameter at
-all, and the résumé route hardcodes `reveal=False`, ignoring any browser-supplied `?reveal=` query
-string. The résumé-detail template goes one step further than flag-gating: it has no branch capable of
-rendering `candidate.name`/`email`/`phone`/`location` at all, so even a future backend regression that
-served unredacted data couldn't leak it through this page. Reveal/reveal-export remains an audited,
-non-viewer backend surface (ADR-011/012).
+---
 
-The plan's Phase 7 evals-fixtures line item (precision@k, evidence-verification rate) was already
-satisfied by Phase 4a (corpus) + 4c (live orchestrator wiring) — Phase 7 shipped no new evals code beyond
-the live end-to-end eval below. A live run of the eval corpus through the real pipeline — seeded at the
-post-parse boundary, driving the real `project_to_graph`/`shortlist_job`, reading persisted rows — was
-originally deferred (it needs a reachable host Ollama and cannot run in CI by design), then reversed and
-made a merge prerequisite: `core/tests/evals/run_evals_live.py` was built, run, and reproduced an
-identical PASS twice against a real stack. It is a manual/local harness (never CI). Full detail:
-[ADR-013](docs/adr/013-phase7-evals-viewer.md) §5.
+## Workflow UI
 
-Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); activity report:
-[docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-evals-viewer.md).
+`core/frontend/{api_client.py,app.py,templates/,static/}` — a full recruiter **workflow UI**: create a
+job, upload résumés, generate a shortlist, review ranked candidates, and export, all from the browser at
+`:5000`. This is a **post-v1 feature** (not "Phase 8" — the extraction plan's phase table ends at Phase 7
+and stays closed) that replaces Phase 7's minimal read-only viewer. It reproduces the recruiter workflow
+from the source `hris` Next.js frontend, scoped strictly to **job → résumé → shortlist** — the
+review/decision workflow, JD-Harmonizer, comment threads, admin console, and CAS auth all stay cut.
+
+**Stack: Flask + HTMX + a hand-authored `app.css`, not a Node/Tailwind build.** HTMX is vendored
+(`static/vendor/htmx.min.js`, 2.0.4, served locally — no CDN) and drives 3-second polling
+(job-parse status, résumé-table status, shortlist generation) and partial-page swaps; `app.css` is a
+small hand-authored utility/component stylesheet — there is no `tailwind.config.js` or Node toolchain
+anywhere in the repo. Every HTMX-swapped fragment is rendered server-side by Jinja2; no client-side JS
+assembles a response from raw JSON. `api_client.py` is the same thin sync `httpx` wrapper Phase 7 built
+(one function per consumed backend route, `build_client()`/`BackendError`/`NotFound`/
+`BackendUnavailable`/`Conflict`), extended with write calls (`create_job`, `patch_job`,
+`transition_status`, `upload_resumes`, `generate_shortlist`).
+
+**Screens:** jobs list (`/`, create-job form with JD-file auto-extract + blind-review checkbox +
+status-filter pills) → job detail (`/jobs/<uuid>`, 3s-polled "parsing…" badge, status-transition buttons,
+blind-review toggle, consent-gated résumé upload + 3s-polled résumé status table) → résumé detail
+(`/resumes/<uuid>`, always blind) → shortlist (`/jobs/<uuid>/shortlist`, Generate/Regenerate button that
+polls until ranked, per-candidate cards with rank/score/sub-score tiles/skill chips/evidence, three
+anonymized export formats).
+
+**Blind-only by construction, carried forward from Phase 7.** The workflow UI never sends `reveal` to the
+backend, even though it is now write-enabled — `get_resume` stays hardcoded `reveal=False`;
+`list_shortlist`/`get_shortlist_entry` take no `reveal` parameter at all; export proxies the backend's
+`reveal=False` default without a browser-side way to flip it. `resume_detail.html` still has no template
+branch capable of rendering `candidate.name`/`email`/`phone`/`location` at all. Reveal/reveal-export
+remains an audited, non-viewer backend surface (ADR-011/012).
+
+**One backend addition:** `PATCH /jobs/{id}` (`job_service.update_job`) — an allowlist-guarded partial
+update needed for the blind-review toggle; `status` stays unwritable through it (every status change still
+goes through the Phase 6 `PATCH /jobs/{id}/status` state machine). The only `core/src/` change in this
+feature — the ranking engine and every other Phase 6 route are byte-unchanged.
+
+**Not built:** a reverse-match trigger on the résumé-detail page — the backend endpoints
+(`POST /resumes/{id}/match-jobs`, `GET /resumes/{id}/match-results`) already exist and the old
+`match_results.html` view remains wired; only the trigger button is missing (a scoped follow-up, see
+[HANDOFF.md](HANDOFF.md)).
+
+Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 
 ---
 
 ## Status & roadmap
 
-**Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and **Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17)** are all merged. There is no Phase 8. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state and what a human could scope next. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the eleven job/résumé/shortlist/reverse-match HTTP routes, and **the read-only Flask viewer (above)** — the first human-facing surface over any of this — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
+**Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17) are all merged. There is no Phase 8. **A post-v1 Workflow UI feature has since shipped** (see "Workflow UI" above and [ADR-014](docs/adr/014-workflow-ui.md)) — Phase 7's read-only viewer is now a full create/upload/generate workflow, tracked as a named feature, not a numbered phase. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state and what a human could scope next. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the eleven-plus job/résumé/shortlist/reverse-match HTTP routes, and **the Flask Workflow UI (above)** — a full job → résumé → shortlist recruiter workflow, blind-only by construction — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -261,7 +290,8 @@ Full decisions + residuals: [ADR-013](docs/adr/013-phase7-evals-viewer.md); acti
 | **4d · Shortlist + reverse-match write path** | `shortlist_job`/`reverse_match_job` arq tasks, `persist_shortlist`/`persist_reverse_match`, `matching_context_from_settings` | **done, merged** |
 | **5 · Persist + anonymize + export** | `list_for_job`/`get_one`/`export_rows`, `redaction.py`, csv/evidence-csv/json export with `reveal` | **done, merged (PR #14)** |
 | **6 · API** | job/resume/shortlist/reverse-match routes (above), configurable auth | **done, merged (PR #15)** |
-| **7 · Evals + viewer** | precision@k / evidence-verification fixtures (already satisfied by 4a/4c, no new fixtures this phase); read-only Flask viewer (blind-only, above); live end-to-end eval against a real stack | **done, merged (PR #16, squash `1039e5c`)** |
+| **7 · Evals + viewer** | precision@k / evidence-verification fixtures (already satisfied by 4a/4c, no new fixtures this phase); read-only Flask viewer (blind-only); live end-to-end eval against a real stack | **done, merged (PR #16, squash `1039e5c`)** |
+| **Workflow UI** (post-v1 feature) | Flask + HTMX recruiter workflow (create job → upload → generate shortlist → review → export), blind-only carried forward, `PATCH /jobs/{id}` backend addition | **done** |
 
 Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture decisions: [docs/adr/](docs/adr/).
 
@@ -317,11 +347,11 @@ recruiter-assistant/
 │   │   ├── pipeline/    # extract/chunk, LLM client+cache, skills scan (Phase 3); matching/{stages,orchestrator} 4-stage ranking engine (Phase 4c/4d)
 │   │   ├── prompts/     # Jinja prompt templates: jd_extract/resume_core/resume_skills/cover_letter (Phase 3)
 │   │   ├── schemas/     # pydantic contract layer: jobs/resumes/matching (Phase 2)
-│   │   ├── services/    # pii, job/resume/outbox services (Phase 3); shortlist_service persist (Phase 4d) + list/get/export (Phase 5); redaction.py, errors.py (Phase 5); zip_upload.py, jd_import_service.py (Phase 6)
+│   │   ├── services/    # pii, job/resume/outbox services (Phase 3); shortlist_service persist (Phase 4d) + list/get/export (Phase 5); redaction.py, errors.py (Phase 5); zip_upload.py, jd_import_service.py (Phase 6); job_service.update_job (Workflow UI)
 │   │   ├── storage/     # filesystem BlobStore (Phase 1)
 │   │   ├── worker/      # arq worker + Neo4j bootstrap; parse_job/parse_resume (Phase 3); shortlist_job/reverse_match_job (Phase 4d)
 │   │   └── settings.py  # single source of truth (pydantic-settings)
-│   ├── frontend/        # Flask viewer — api_client.py + app.py + templates/ (Phase 7, read-only, blind-only)
+│   ├── frontend/        # Flask + HTMX workflow UI — api_client.py + app.py + templates/ + static/{app.css,vendor/htmx.min.js} (Phase 7 read-only viewer, superseded by the post-v1 Workflow UI feature; blind-only throughout)
 │   └── tests/{unit,integration}/
 ├── CLAUDE.md            # Claude Code instruction layer (auto-read)
 ├── .claude/            # build subagents + commands

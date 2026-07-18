@@ -1,16 +1,89 @@
 {% extends "base.html" %}
 {% block title %}{{ job.title }}{% endblock %}
 {% block content %}
-<h2>{{ job.title }}</h2>
-<p>{{ job.department }} — {{ job.status }}</p>
-<p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">Shortlist</a></p>
 
-<h3>Resumes</h3>
-<ul>
-  {% for resume in resumes %}
-  <li><a href="{{ url_for('resume_detail', resume_id=resume.id) }}">{{ resume.original_filename }}</a></li>
-  {% else %}
-  <li>No resumes uploaded yet.</li>
-  {% endfor %}
-</ul>
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <h1 style="margin:0">{{ job.title }}</h1>
+    <span class="pill pill-{{ job.status }}">{{ job.status }}</span>
+    {% if job.status == 'draft' and job.parsed_at is none %}
+    <span class="badge-parsing">parsing…</span>
+    {% endif %}
+  </div>
+  <p class="muted">
+    {{ job.department or '—' }}
+    {% if job.location %} · {{ job.location }}{% endif %}
+    {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
+  </p>
+
+  <h3>Parsed requirements</h3>
+  {% include "parse_status.html" %}
+
+  <h3>Status</h3>
+  <div class="filter-row">
+    {% for to in next_states %}
+    <form action="{{ url_for('transition_status', job_id=job.id) }}"
+          method="post" style="display:inline">
+      <input type="hidden" name="to" value="{{ to }}">
+      <button class="btn btn-secondary btn-sm" type="submit"
+        {%- if to == 'open' and job.parsed_at is none %} disabled
+        title="Wait for the LLM to finish parsing the JD."{% endif %}>
+        {{ transition_labels.get(to, to) }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+  {% if 'open' in next_states and job.parsed_at is none %}
+  <p class="hint">Wait for the LLM to finish parsing the JD before opening for
+    applicants.</p>
+  {% endif %}
+
+  <h3>Blind review</h3>
+  <p class="muted">Currently
+    <strong>{{ 'on' if job.blind_review else 'off' }}</strong>.</p>
+  <form action="{{ url_for('blind_review', job_id=job.id) }}" method="post">
+    <input type="hidden" name="blind_review"
+           value="{{ 'false' if job.blind_review else 'true' }}">
+    <button class="btn btn-secondary btn-sm" type="submit">
+      {{ 'Turn off blind review' if job.blind_review else 'Turn on blind review' }}
+    </button>
+  </form>
+</div>
+
+<div class="card">
+  <p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a></p>
+
+  {% if job.status == 'open' %}
+  <h3>Upload résumés</h3>
+  <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
+        enctype="multipart/form-data" hx-encoding="multipart/form-data">
+    <div class="form-group">
+      <label class="label" for="resume-files">Résumé file(s) — PDF/DOCX, or a
+        .zip of many</label>
+      <input class="input" id="resume-files" name="files" type="file" multiple>
+    </div>
+    <div class="form-group">
+      <label class="label" for="cover_letter_text">Cover letter (optional)</label>
+      <textarea class="textarea" id="cover_letter_text" name="cover_letter_text"
+                placeholder="Paste an optional cover letter…"></textarea>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="consent_acknowledged" name="consent_acknowledged"
+             value="true" required>
+      <label class="label" for="consent_acknowledged" style="margin:0">
+        I confirm the candidate consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">Upload</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <h3>Résumés</h3>
+  {% include "resumes_table.html" %}
+</div>
 {% endblock %}

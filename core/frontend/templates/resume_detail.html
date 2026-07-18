@@ -1,8 +1,165 @@
 {% extends "base.html" %}
 {% block title %}Résumé{% endblock %}
+{#
+  Blind-only résumé detail (ADR-011/012/013). Renders ONLY the redacted,
+  non-PII structured fields from `resume.parsed` (a `ResumeParsed`). There is
+  deliberately NO branch that prints the identity fields — even if the backend
+  payload carried them (a reveal response would), this template has no path
+  that emits them, which the structural byte-scan test pins.
+#}
+{% set parsed = resume.parsed %}
 {% block content %}
-<h2>{{ resume.original_filename }}</h2>
-<p>Status: {{ resume.status }}</p>
-<p><em>Blind review — candidate identity is redacted.</em></p>
-<p><a href="{{ url_for('resume_match_results', resume_id=resume.id) }}">Match results</a></p>
+<div class="card">
+  <div class="card-header">
+    <h1 style="margin:0">{{ resume.original_filename }}</h1>
+    <span class="pill pill-{{ resume.status }}">{{ resume.status }}</span>
+  </div>
+
+  {% if resume.blinded %}
+  <p class="blind-banner">
+    Identity hidden for blind review — employers/schools shown as generic
+    labels.
+  </p>
+  {% endif %}
+
+  {% if parsed and parsed.summary %}
+  <p class="muted">{{ parsed.summary }}</p>
+  {% endif %}
+  {% if parsed and parsed.total_years_experience %}
+  <p class="hint">{{ parsed.total_years_experience }}+ years total experience.</p>
+  {% endif %}
+
+  <p><a class="btn btn-secondary btn-sm"
+        href="{{ url_for('resume_match_results', resume_id=resume.id) }}">Match
+     results</a></p>
+</div>
+
+{% if parsed %}
+{# ── skills ─────────────────────────────────────────────────────────── #}
+<div class="card">
+  <h2>Skills</h2>
+  {% if parsed.skills %}
+  <p class="recency-legend hint">
+    Recency:
+    <span class="chip chip-recency-current">current</span>
+    <span class="chip chip-recency-aging">aging</span>
+    <span class="chip chip-recency-stale">stale</span>
+  </p>
+  <div class="chips">
+    {% for skill in parsed.skills %}
+    {% set ly = skill.last_used_year %}
+    {% if ly %}
+    {% set age = current_year - ly %}
+    {% if age <= 2 %}{% set bucket = 'current' %}
+    {% elif age <= 5 %}{% set bucket = 'aging' %}
+    {% else %}{% set bucket = 'stale' %}{% endif %}
+    <span class="chip chip-recency-{{ bucket }}">{{ skill.name }}
+      <span class="chip-year">· {{ ly }}</span></span>
+    {% else %}
+    <span class="chip chip-plain">{{ skill.name }}</span>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">No skills extracted.</p>
+  {% endif %}
+</div>
+
+{# ── experience ─────────────────────────────────────────────────────── #}
+<div class="card">
+  <h2>Experience</h2>
+  {% if parsed.experience %}
+  <ul class="list">
+    {% for exp in parsed.experience %}
+    <li>
+      <div><strong>{{ exp.title }}</strong> · {{ exp.company }}</div>
+      <div class="muted">
+        {{ exp.start or '—' }}{% if exp.end or exp.is_current %} –
+        {{ 'present' if exp.is_current else exp.end }}{% endif %}
+      </div>
+      {% if exp.bullets %}
+      <ul class="bullets">
+        {% for b in exp.bullets %}
+        <li>{{ b.text }}
+          {% if b.chunk_id %}
+          <span class="muted chunks">[{{ b.chunk_id }}]</span>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No experience extracted.</p>
+  {% endif %}
+</div>
+
+{# ── education ──────────────────────────────────────────────────────── #}
+<div class="card">
+  <h2>Education</h2>
+  {% if parsed.education %}
+  <ul class="list">
+    {% for ed in parsed.education %}
+    <li>
+      <strong>{{ ed.degree }}</strong> · {{ ed.institution }}
+      {% if ed.field %} · {{ ed.field }}{% endif %}
+      {% if ed.year %} <span class="muted">({{ ed.year }})</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No education extracted.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── cover letter ───────────────────────────────────────────────────── #}
+{% if resume.cover_letter_text or resume.cover_letter_parsed %}
+{% set cl = resume.cover_letter_parsed %}
+<div class="card">
+  <h2>Cover letter</h2>
+  {% if cl %}
+  {% if cl.sentiment %}
+  <p><span class="pill pill-gray">sentiment: {{ cl.sentiment }}</span></p>
+  {% endif %}
+  {% if cl.themes %}
+  <div class="chips">
+    {% for theme in cl.themes %}
+    <span class="chip chip-plain">{{ theme }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if cl.key_claims %}
+  <ul class="list">
+    {% for claim in cl.key_claims %}
+    <li>{{ claim }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+  {% if resume.cover_letter_text %}
+  <p class="cover-text">{{ resume.cover_letter_text }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── source chunks (already redacted server-side) ───────────────────── #}
+{% if parsed and parsed.chunks %}
+<div class="card">
+  <details class="evidence">
+    <summary>Source chunks</summary>
+    <ul class="list">
+      {% for chunk in parsed.chunks %}
+      <li>
+        <span class="muted chunks">{{ chunk.id }}
+          · {{ chunk.section }}</span>
+        <div>{{ chunk.text }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+</div>
+{% endif %}
 {% endblock %}

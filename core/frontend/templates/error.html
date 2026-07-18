@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Backend unavailable{% endblock %}
 {% block content %}
-<h2>Backend unavailable</h2>
-<p>The recruiter-assistant API could not be reached. Please try again shortly.</p>
+<div class="card">
+  <h2>Backend unavailable</h2>
+  <p class="muted">The recruiter-assistant API could not be reached. Please try
+    again shortly.</p>
+  <p><a class="btn btn-secondary btn-sm" href="{{ url_for('index') }}">Back to
+     jobs</a></p>
+</div>
 {% endblock %}
