@@ -42,6 +42,7 @@ from src.schemas.resumes import (
 )
 from src.services import DbConn
 from src.services import pii as pii_service
+from src.services.bulk_ingest_service import basename_lower
 from src.services.pii import set_pii_key
 from src.services.redaction import (
     blind_label_map,
@@ -200,6 +201,29 @@ INSERT INTO resumes (
 """
 
 
+def _validate_cover_letter_file(
+    cover_letter_file: tuple[str, bytes],
+) -> tuple[str, bytes, str]:
+    """Validate a cover-letter file (empty / oversize / mime) and mint its
+    server-generated ``cover_letters/{uuid4()}.{ext}`` blob key. Raises
+    ``ValueError`` on any rejection so the caller fails loud (never swallowed
+    into a "rejected" résumé row). Returns ``(blob_key, bytes, mime)`` — the
+    blob write itself is deferred to INSIDE the caller's transaction."""
+    cl_name, cl_bytes = cover_letter_file
+    if len(cl_bytes) == 0:
+        raise ValueError("cover letter file is empty")
+    if len(cl_bytes) > _MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"cover letter file is {len(cl_bytes)} bytes; the cap is "
+            f"{_MAX_UPLOAD_BYTES}"
+        )
+    try:
+        cl_mime = detect_mime(cl_name, cl_bytes)
+    except UnsupportedMimeError as exc:
+        raise ValueError(f"unsupported cover letter file: {exc}") from exc
+    return f"cover_letters/{uuid4()}.{_MIME_EXT[cl_mime]}", cl_bytes, cl_mime
+
+
 async def upload_resumes(
     conn: DbConn,
     blob_store: BlobStore,
@@ -210,6 +234,8 @@ async def upload_resumes(
     uploaded_by: str | None = None,
     cover_letter_file: tuple[str, bytes] | None = None,
     cover_letter_text: str | None = None,
+    cover_letter_map: dict[str, tuple[str, bytes]] | None = None,
+    warnings_map: dict[str, list[str]] | None = None,
 ) -> list[ResumeUploadResult]:
     """Validate + persist a batch of résumé files.
 
@@ -227,60 +253,58 @@ async def upload_resumes(
     object so it stays monkeypatchable) inside the SAME transaction as the
     résumé row insert(s) — a failure there (e.g. an unset PII_KEY) propagates
     uncaught, never swallowed into a "rejected" row.
+
+    ``cover_letter_map`` (FU-3 Slice 2, ADDITIVE) maps ``basename_lower(résumé
+    filename)`` → the cover ``(filename, bytes)`` paired to THAT résumé; each
+    such cover is validated + stored as its OWN distinct ``cover_letters/``
+    blob keyed on that résumé's row (inside the transaction, per SEC#7). When
+    the map is empty the singular ``cover_letter_file`` path applies unchanged.
+    ``warnings_map`` (same key) carries non-fatal pairing notes surfaced on the
+    result row.
     """
     if not consent_acknowledged:
         raise ValueError(
             "consent_acknowledged must be true before any résumé upload I/O"
         )
+    cover_map = cover_letter_map or {}
+    warn_map = warnings_map or {}
+
     # A file-attached cover letter is stored as a blob (like the résumé itself)
     # and its key set on the row; the worker's `_parse_cover_letter` extracts +
     # LLM-parses it at parse time from `cover_letter_blob_key` — the same
     # deferred path a pasted `cover_letter_text` takes, and non-fatal to the
     # résumé parse. Validated + size-capped here so a bad cover letter fails
-    # loud at upload rather than silently later. Symmetric with the résumé
-    # files: reject an oversize or unsupported-mime cover letter.
-    # Validate the cover-letter file up front (fail fast, before opening a
-    # transaction), but defer the blob write to INSIDE the transaction below so
-    # its orphan-on-rollback window matches the résumé blobs' (a rollback can't
-    # un-write a filesystem blob either way; keeping the same scope avoids a
-    # WIDER pre-transaction window — the residual orphan-blob cleanup is shared
-    # with the résumé path and left to a future reaper).
-    cover_blob_key: str | None = None
-    cover_blob_payload: tuple[str, bytes, str] | None = None
+    # loud at upload rather than silently later. Validate up front (fail fast,
+    # before opening a transaction), but defer the blob write to INSIDE the
+    # transaction below so its orphan-on-rollback window matches the résumé
+    # blobs'.
+    singular_cover_payload: tuple[str, bytes, str] | None = None
     if cover_letter_file is not None:
-        cl_name, cl_bytes = cover_letter_file
-        if len(cl_bytes) == 0:
-            raise ValueError("cover letter file is empty")
-        if len(cl_bytes) > _MAX_UPLOAD_BYTES:
-            raise ValueError(
-                f"cover letter file is {len(cl_bytes)} bytes; the cap is "
-                f"{_MAX_UPLOAD_BYTES}"
-            )
-        try:
-            cl_mime = detect_mime(cl_name, cl_bytes)
-        except UnsupportedMimeError as exc:
-            raise ValueError(f"unsupported cover letter file: {exc}") from exc
-        cover_blob_key = f"cover_letters/{uuid4()}.{_MIME_EXT[cl_mime]}"
-        cover_blob_payload = (cover_blob_key, cl_bytes, cl_mime)
+        singular_cover_payload = _validate_cover_letter_file(cover_letter_file)
 
     results: list[ResumeUploadResult] = []
 
     async with conn.transaction():
-        if cover_blob_payload is not None:
-            k, b, m = cover_blob_payload
+        singular_cover_key: str | None = None
+        if singular_cover_payload is not None:
+            k, b, m = singular_cover_payload
             await blob_store.put(k, b, content_type=m)
+            singular_cover_key = k
         encrypted_cover: bytes | None = None
         if cover_letter_text is not None:
             await pii_service.set_pii_key(conn)
             encrypted_cover = await pii_service.encrypt(conn, cover_letter_text)
 
         for filename, data in files:
+            row_key = basename_lower(filename)
+            row_warnings = list(warn_map.get(row_key, []))
             if len(data) == 0:
                 results.append(
                     ResumeUploadResult(
                         original_filename=filename,
                         outcome="rejected",
                         reason="file is empty",
+                        warnings=row_warnings,
                     )
                 )
                 continue
@@ -293,6 +317,7 @@ async def upload_resumes(
                             f"file is {len(data)} bytes; the cap is "
                             f"{_MAX_UPLOAD_BYTES}"
                         ),
+                        warnings=row_warnings,
                     )
                 )
                 continue
@@ -305,6 +330,7 @@ async def upload_resumes(
                         original_filename=filename,
                         outcome="rejected",
                         reason=str(exc),
+                        warnings=row_warnings,
                     )
                 )
                 continue
@@ -317,9 +343,21 @@ async def upload_resumes(
                         original_filename=filename,
                         outcome="duplicate",
                         resume_id=dup_id,
+                        warnings=row_warnings,
                     )
                 )
                 continue
+
+            # A per-résumé paired cover (FU-3) takes precedence over the batch
+            # singular cover; each gets its OWN distinct blob key on THIS row.
+            row_cover_key = singular_cover_key
+            cover_letter_filename: str | None = None
+            paired_cover = cover_map.get(row_key)
+            if paired_cover is not None:
+                cb_key, cb_bytes, cb_mime = _validate_cover_letter_file(paired_cover)
+                await blob_store.put(cb_key, cb_bytes, content_type=cb_mime)
+                row_cover_key = cb_key
+                cover_letter_filename = paired_cover[0]
 
             resume_id = uuid4()
             blob_key = f"resumes/{resume_id}.{_MIME_EXT[mime]}"
@@ -336,13 +374,15 @@ async def upload_resumes(
                 consent_acknowledged,
                 uploaded_by,
                 encrypted_cover,
-                cover_blob_key,
+                row_cover_key,
             )
             results.append(
                 ResumeUploadResult(
                     original_filename=filename,
                     outcome="accepted",
                     resume_id=resume_id,
+                    cover_letter_filename=cover_letter_filename,
+                    warnings=row_warnings,
                 )
             )
 

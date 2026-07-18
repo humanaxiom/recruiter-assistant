@@ -21,6 +21,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    flash,
     redirect,
     render_template,
     request,
@@ -252,7 +253,7 @@ def upload_resumes(job_id: UUID) -> Any:
             cover_upload.content_type or "application/octet-stream",
         )
     try:
-        api_client.upload_resumes(
+        results = api_client.upload_resumes(
             job_id,
             files,
             consent_acknowledged=True,
@@ -267,7 +268,40 @@ def upload_resumes(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    # Post-upload results summary (flash-style): the recruiter sees what
+    # happened per-file — counts + any pairing warnings — on the job-detail
+    # page they're redirected to. Warnings are the backend's STATIC English
+    # strings, never filename-derived candidate PII.
+    for message in _summarise_upload(results):
+        flash(message)
     return redirect(url_for("job_detail", job_id=job_id))
+
+
+def _summarise_upload(results: Any) -> list[str]:
+    """Build a short human summary from the ``ResumeUploadResult[]`` the backend
+    returns: an accepted/with-cover/duplicate/rejected count line, one line per
+    rejection, and any per-file pairing warnings."""
+    rows = results if isinstance(results, list) else []
+    accepted = [r for r in rows if r.get("outcome") == "accepted"]
+    with_cover = [r for r in accepted if r.get("cover_letter_filename")]
+    duplicate = [r for r in rows if r.get("outcome") == "duplicate"]
+    rejected = [r for r in rows if r.get("outcome") == "rejected"]
+
+    summary = f"{len(accepted)} accepted"
+    if with_cover:
+        summary += f" ({len(with_cover)} with a cover letter)"
+    if duplicate:
+        summary += f", {len(duplicate)} duplicate"
+    if rejected:
+        summary += f", {len(rejected)} rejected"
+    messages = [summary]
+    for r in rejected:
+        reason = r.get("reason") or "rejected"
+        messages.append(f"Rejected {r.get('original_filename')}: {reason}")
+    for r in rows:
+        for warning in r.get("warnings") or []:
+            messages.append(warning)
+    return messages
 
 
 @app.get("/jobs/<uuid:job_id>/resumes-table")
