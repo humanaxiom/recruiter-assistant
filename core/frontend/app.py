@@ -30,9 +30,18 @@ from flask import (
 from frontend import api_client
 from src.settings import get_settings
 
+# The backend caps résumé uploads at ~10 MB/file and up to 20 files per
+# request (`src.api.routes.resumes`), plus the (much smaller) JD-extract
+# upload. This is a defensive total-body cap so an oversized multipart
+# request is rejected by Werkzeug with 413 BEFORE it is buffered into Flask
+# process memory, rather than after the backend's own per-file/file-count
+# limits have a chance to run.
+MAX_UPLOAD_BYTES = 210 * 1024 * 1024  # 20 files * 10 MB + headroom
+
 _settings = get_settings()
 app = Flask(__name__)
 app.secret_key = _settings.flask_secret_key
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 API = _settings.api_base_url
 
 
@@ -410,15 +419,33 @@ def resume_match_results(resume_id: UUID) -> Any:
     return render_template("match_results.html", results=results)
 
 
+_EXPORT_FORMATS: tuple[api_client.ExportFormat, ...] = ("csv", "evidence-csv", "json")
+
+
+def _validated_export_format(raw: str | None) -> api_client.ExportFormat:
+    """Validate a browser-supplied ``?format=`` against the allowed set,
+    falling back to ``"csv"`` for a missing/unknown value. Never raises."""
+    for candidate in _EXPORT_FORMATS:
+        if raw == candidate:
+            return candidate
+    return "csv"
+
+
 @app.get("/jobs/<uuid:job_id>/shortlist/export")
 def shortlist_export(job_id: UUID) -> Any:
     """Server-side export proxy. Streams the backend response body straight
     through and preserves ``Content-Disposition``, without ever exposing the
     backend ``X-API-Key`` (attached only on the outbound leg by
     ``api_client.build_client``) to the browser — only the content type,
-    disposition and body are copied onto the Flask response."""
+    disposition and body are copied onto the Flask response.
+
+    Reads ``?format=`` from the query string and validates it against the
+    allowed set, falling back to ``"csv"`` for a missing/unknown value
+    (never raises). A browser-supplied ``?reveal=`` is deliberately never
+    read or forwarded — exports stay anonymized (``reveal=False`` default)."""
+    export_format = _validated_export_format(request.args.get("format"))
     try:
-        backend_resp = api_client.export_shortlist(job_id)
+        backend_resp = api_client.export_shortlist(job_id, format=export_format)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:

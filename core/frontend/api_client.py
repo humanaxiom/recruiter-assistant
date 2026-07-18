@@ -33,6 +33,10 @@ from src.settings import get_settings
 
 ExportFormat = Literal["csv", "evidence-csv", "json"]
 
+# Explicit timeout so the client never relies on httpx's implicit default:
+# 5s to establish a connection, 30s overall for connect/read/write/pool.
+_HTTP_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+
 
 class BackendError(Exception):
     """Base class for all typed backend-communication failures."""
@@ -93,6 +97,7 @@ def build_client() -> httpx.Client:
     return httpx.Client(
         base_url=settings.api_base_url,
         headers=httpx.Headers(headers, encoding="utf-8"),
+        timeout=_HTTP_TIMEOUT,
     )
 
 
