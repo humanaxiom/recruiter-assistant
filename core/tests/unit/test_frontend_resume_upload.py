@@ -303,6 +303,88 @@ def test_upload_route_with_consent_calls_backend_and_redirects(
     assert spy.call_args.kwargs["consent_acknowledged"] is True
 
 
+def test_upload_route_renders_results_summary_after_redirect(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The upload route surfaces a post-upload results summary (flash-style)
+    built from the returned ``ResumeUploadResult`` rows — visible on the
+    job-detail page the upload redirects to."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            return_value=[
+                {
+                    "original_filename": "jane_resume.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": "jane_cover_letter.pdf",
+                    "warnings": [],
+                },
+                {
+                    "original_filename": "bob_resume.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": None,
+                    "warnings": [],
+                },
+                {
+                    "original_filename": "dup.pdf",
+                    "outcome": "duplicate",
+                    "warnings": [],
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "jane_resume.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    # Summary counts (accepted / with-cover / duplicate) appear.
+    assert "2 accepted" in body
+    assert "1 with a cover letter" in body
+    assert "1 duplicate" in body
+
+
+def test_upload_route_surfaces_pairing_warnings(monkeypatch: Any, client: Any) -> None:
+    job_id = uuid4()
+    warning = "looked like a cover letter but had no matching résumé"
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            return_value=[
+                {
+                    "original_filename": "stray_cover.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": None,
+                    "warnings": [warning],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "stray_cover.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert warning in resp.get_data(as_text=True)
+
+
 def test_upload_route_forwards_cover_letter_text(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     spy = MagicMock(return_value=[])
