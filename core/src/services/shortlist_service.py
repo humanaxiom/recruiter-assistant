@@ -39,6 +39,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -380,7 +381,7 @@ def _attach_source_context_model(
     ev: EvidenceObject | None,
     *,
     raw_parsed: Any,
-    redactor: Any | None,
+    redactor: Callable[[str], str] | None,
 ) -> EvidenceObject | None:
     """FU-2 (read path): populate each requirement's ``source_context`` by
     resolving its ``evidence_chunk_ids`` against ``raw_parsed`` chunk text.
