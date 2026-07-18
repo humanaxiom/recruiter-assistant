@@ -324,6 +324,89 @@ async def test_upload_resumes_plain_upload_with_singular_cover_is_not_ambiguous(
     assert resp.status_code == 202
 
 
+# ── upload: manifest.json-driven pairing (FU-3 Slice 3) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_manifest_field_pairs_by_name() -> None:
+    """A ``pairing_manifest`` multipart field pairs ``jane_resume`` ↔
+    ``jane_cover`` by name even without the ``_cover_letter`` convention
+    suffix — manifest takes precedence over convention."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    manifest = json.dumps(
+        {
+            "applicants": [
+                {
+                    "resume_file": "jane_resume.pdf",
+                    "cover_letter_file": "jane_cover.pdf",
+                    "cover_letter_flag": "Yes",
+                }
+            ]
+        }
+    ).encode("utf-8")
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("jane_cover.pdf", _PDF_MAGIC, "application/pdf")),
+                ("pairing_manifest", ("manifest.json", manifest, "application/json")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    accepted = [r for r in resp.json() if r["outcome"] == "accepted"]
+    assert len(accepted) == 1
+    assert accepted[0]["original_filename"] == "jane_resume.pdf"
+    assert accepted[0]["cover_letter_filename"] == "jane_cover.pdf"
+    assert arq.enqueue_job.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_manifest_in_zip_rejected_with_guidance() -> None:
+    """A ``manifest.json`` zipped WITH the résumés hits the zip allowlist (no
+    json) → 400 with clear guidance to upload it as its own field."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    archive = _zip_bytes(
+        [("jane_resume.pdf", _PDF_MAGIC), ("manifest.json", b'{"applicants": []}')]
+    )
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("batch.zip", archive, "application/zip"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"].lower()
+    assert "own field" in detail
+    arq.enqueue_job.assert_not_awaited()
+    store.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_malformed_manifest_is_422() -> None:
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("pairing_manifest", ("manifest.json", b"{not json", "application/json")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 422
+    store.put.assert_not_called()
+
+
 # ── upload: file-count cap (SEC-2, memory-exhaustion DoS) ────────────────
 
 

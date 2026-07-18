@@ -23,12 +23,19 @@ fails at collection.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from src.errors import AppError
 from src.services.bulk_ingest_service import (
     ApplicantFiles,
+    ManifestError,
     PairingResult,
     _classify,
     basename_lower,
     pair_applicants,
+    parse_pairing_manifest,
 )
 
 _PDF = b"%PDF-1.4 body"
@@ -213,3 +220,176 @@ def test_manifest_names_a_missing_cover_adds_a_static_note() -> None:
     pair = result.pairs[0]
     assert pair.cover_letter is None
     assert pair.note == "a cover letter named in the manifest wasn't in the upload"
+
+
+# ── parse_pairing_manifest (FU-3 Slice 3) ────────────────────────────────
+
+
+def _manifest_bytes(payload: object) -> bytes:
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_parse_manifest_valid_returns_resume_to_cover_map() -> None:
+    blob = _manifest_bytes(
+        {
+            "applicants": [
+                {
+                    "resume_file": "jane_resume.pdf",
+                    "cover_letter_file": "jane_cover.pdf",
+                    "cover_letter_flag": "Yes",
+                }
+            ]
+        }
+    )
+    assert parse_pairing_manifest(blob) == {"jane_resume.pdf": "jane_cover.pdf"}
+
+
+def test_parse_manifest_falsy_flag_forces_no_cover_even_if_named() -> None:
+    blob = _manifest_bytes(
+        {
+            "applicants": [
+                {
+                    "resume_file": "jane_resume.pdf",
+                    "cover_letter_file": "jane_cover.pdf",
+                    "cover_letter_flag": "No",
+                }
+            ]
+        }
+    )
+    assert parse_pairing_manifest(blob) == {"jane_resume.pdf": None}
+
+
+def test_parse_manifest_missing_flag_defaults_to_using_named_cover() -> None:
+    blob = _manifest_bytes(
+        {
+            "applicants": [
+                {
+                    "resume_file": "jane_resume.pdf",
+                    "cover_letter_file": "jane_cover.pdf",
+                }
+            ]
+        }
+    )
+    assert parse_pairing_manifest(blob) == {"jane_resume.pdf": "jane_cover.pdf"}
+
+
+def test_parse_manifest_applicant_without_resume_file_is_skipped() -> None:
+    blob = _manifest_bytes(
+        {
+            "applicants": [
+                {"cover_letter_file": "orphan_cover.pdf", "cover_letter_flag": "Yes"},
+                {"resume_file": "  ", "cover_letter_flag": "Yes"},
+                {"resume_file": "kept_resume.pdf"},
+            ]
+        }
+    )
+    assert parse_pairing_manifest(blob) == {"kept_resume.pdf": None}
+
+
+def test_parse_manifest_keys_are_basename_lower() -> None:
+    blob = _manifest_bytes(
+        {
+            "applicants": [
+                {
+                    "resume_file": "Some/Folder\\Jane_Resume.PDF",
+                    "cover_letter_file": "Some/Folder\\Jane_Cover.PDF",
+                    "cover_letter_flag": "yes",
+                }
+            ]
+        }
+    )
+    assert parse_pairing_manifest(blob) == {"jane_resume.pdf": "jane_cover.pdf"}
+
+
+def test_parse_manifest_malformed_json_raises_manifest_error() -> None:
+    with pytest.raises(ManifestError):
+        parse_pairing_manifest(b"{not valid json")
+
+
+def test_parse_manifest_non_dict_raises_manifest_error() -> None:
+    with pytest.raises(ManifestError):
+        parse_pairing_manifest(b"[1, 2, 3]")
+
+
+def test_parse_manifest_missing_applicants_array_raises_manifest_error() -> None:
+    with pytest.raises(ManifestError):
+        parse_pairing_manifest(_manifest_bytes({"not_applicants": []}))
+
+
+def test_parse_manifest_oversize_raises_manifest_error() -> None:
+    oversize = b'{"applicants": []}' + b" " * (1024 * 1024 + 1)
+    with pytest.raises(ManifestError):
+        parse_pairing_manifest(oversize)
+
+
+def test_manifest_error_is_an_app_error_with_status_422() -> None:
+    err = ManifestError("bad manifest")
+    assert isinstance(err, AppError)
+    assert err.status == 422
+
+
+# ── pair_applicants(..., manifest=parsed) integration ────────────────────
+
+
+def test_manifest_pairs_without_convention_suffix() -> None:
+    """The manifest pairs ``jane_resume`` ↔ ``jane_cover`` even though the cover
+    lacks the ``_cover_letter`` convention suffix."""
+    files = [_f("jane_resume.pdf"), _f("jane_cover.pdf")]
+    manifest = parse_pairing_manifest(
+        _manifest_bytes(
+            {
+                "applicants": [
+                    {
+                        "resume_file": "jane_resume.pdf",
+                        "cover_letter_file": "jane_cover.pdf",
+                        "cover_letter_flag": "Yes",
+                    }
+                ]
+            }
+        )
+    )
+    result = pair_applicants(files, manifest=manifest)
+    assert len(result.pairs) == 1
+    assert result.pairs[0].resume[0] == "jane_resume.pdf"
+    assert result.pairs[0].cover_letter is not None
+    assert result.pairs[0].cover_letter[0] == "jane_cover.pdf"
+
+
+def test_manifest_named_absent_resume_is_rejected_row() -> None:
+    manifest = parse_pairing_manifest(
+        _manifest_bytes(
+            {"applicants": [{"resume_file": "ghost.pdf", "cover_letter_flag": "No"}]}
+        )
+    )
+    result = pair_applicants([_f("present.pdf")], manifest=manifest)
+    assert any(name == "ghost.pdf" for name, _ in result.rejected)
+
+
+def test_files_not_named_in_manifest_fall_back_to_convention() -> None:
+    """A manifest that only names jane still lets bob pair by convention."""
+    files = [
+        _f("jane_resume.pdf"),
+        _f("jane_cover.pdf"),
+        _f("bob_resume.pdf"),
+        _f("bob_cover_letter.pdf"),
+    ]
+    manifest = parse_pairing_manifest(
+        _manifest_bytes(
+            {
+                "applicants": [
+                    {
+                        "resume_file": "jane_resume.pdf",
+                        "cover_letter_file": "jane_cover.pdf",
+                        "cover_letter_flag": "Yes",
+                    }
+                ]
+            }
+        )
+    )
+    result = pair_applicants(files, manifest=manifest)
+    by_resume = {p.resume[0]: p for p in result.pairs}
+    assert by_resume["jane_resume.pdf"].cover_letter is not None
+    assert by_resume["jane_resume.pdf"].cover_letter[0] == "jane_cover.pdf"
+    # bob was not in the manifest → paired by the filename convention.
+    assert by_resume["bob_resume.pdf"].cover_letter is not None
+    assert by_resume["bob_resume.pdf"].cover_letter[0] == "bob_cover_letter.pdf"
