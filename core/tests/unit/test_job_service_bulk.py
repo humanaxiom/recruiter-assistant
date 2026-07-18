@@ -110,8 +110,9 @@ async def test_manifest_title_overrides_filename_stem() -> None:
     assert len(results) == 1
     assert results[0].outcome == "created"
     assert results[0].title == "Staff Backend Engineer"
-    # The INSERT was called with the manifest title as the first bound arg.
-    assert conn.fetchrow.await_args.args[0] == "Staff Backend Engineer"
+    # The INSERT was called with the manifest title as the first bound arg
+    # (args[0] is the SQL string; args[1] is ``title``).
+    assert conn.fetchrow.await_args.args[1] == "Staff Backend Engineer"
 
 
 @pytest.mark.asyncio

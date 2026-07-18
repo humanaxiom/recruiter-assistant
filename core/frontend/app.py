@@ -145,6 +145,58 @@ def create_job() -> Any:
     return redirect(url_for("job_detail", job_id=job["id"]))
 
 
+@app.post("/jobs/bulk")
+def bulk_create_jobs() -> Any:
+    """Bulk-JD upload: many JD files (or a ``.zip``) plus an optional CSV
+    metadata manifest, forwarded to the backend which creates ONE draft job per
+    file. Renders a created/duplicate/failed summary with a link back to the
+    jobs list. The ``.zip`` is expanded SERVER-side by the backend — we only
+    forward the raw parts, never expand here."""
+    uploads = request.files.getlist("files")
+    files: list[tuple[str, bytes, str]] = [
+        (
+            upload.filename or "upload",
+            upload.read(),
+            upload.content_type or "application/octet-stream",
+        )
+        for upload in uploads
+        if upload.filename
+    ]
+    manifest_upload = request.files.get("manifest")
+    manifest: tuple[str, bytes, str] | None = None
+    if manifest_upload is not None and manifest_upload.filename:
+        manifest = (
+            manifest_upload.filename,
+            manifest_upload.read(),
+            manifest_upload.content_type or "text/csv",
+        )
+    try:
+        results = api_client.bulk_create_jobs(files, manifest=manifest)
+    except api_client.BadRequest as exc:
+        return (
+            render_template(
+                "jobs_bulk.html", results=[], error=_format_error(exc.detail)
+            ),
+            200,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "jobs_bulk.html", results=results, summary=_summarise_bulk(results), error=None
+    )
+
+
+def _summarise_bulk(results: Any) -> dict[str, int]:
+    """Created/duplicate/failed counts for the bulk-JD result summary — mirrors
+    the résumé-upload ``_summarise_upload`` counting pattern."""
+    rows = results if isinstance(results, list) else []
+    return {
+        "created": sum(1 for r in rows if r.get("outcome") == "created"),
+        "duplicate": sum(1 for r in rows if r.get("outcome") == "duplicate"),
+        "failed": sum(1 for r in rows if r.get("outcome") == "failed"),
+    }
+
+
 def _format_error(detail: Any) -> str:
     """Render a backend validation ``detail`` into a short human message."""
     if detail is None:

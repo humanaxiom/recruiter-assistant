@@ -22,12 +22,16 @@ pairing half). DEVIATIONS from the hris source:
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import Final, get_args
 
 from src.errors import AppError
+from src.schemas.jobs import EmploymentType, Seniority
 
 # An uploaded file as this repo models it: ``(filename, content)``.
 UploadedFile = tuple[str, bytes]
@@ -245,12 +249,147 @@ def pair_applicants(
     return result
 
 
+# ── bulk-JD CSV manifest (FU-3 Slice 4) ──────────────────────────────────
+#
+# A bulk-JD upload (many .txt/.json/.pdf/.docx, or a .zip of them) creates ONE
+# draft job per file. An OPTIONAL sidecar CSV manifest maps a filename to job
+# metadata (title/department/…) so the recruiter can pin fields up front instead
+# of editing each created job afterwards. Ported from hris
+# ``apps/api/src/api/services/bulk_ingest_service.py`` (``JobManifestRow`` /
+# ``title_from_filename`` / ``parse_csv_manifest``), retargeted to THIS repo's
+# ``src.schemas.jobs.EmploymentType``/``Seniority`` for enum validation and
+# reusing this module's ``_decode`` / ``_MAX_MANIFEST_BYTES`` trust boundary.
+
+
+@dataclass(frozen=True)
+class JobManifestRow:
+    """One CSV-manifest row: optional job metadata keyed by filename.
+
+    A present ``title`` pins the created job's title (the filename-stem fallback
+    is used only when it is absent). Every field is optional so a manifest with
+    just a ``filename`` column is valid.
+    """
+
+    title: str | None = None
+    department: str | None = None
+    location: str | None = None
+    employment_type: str | None = None
+    seniority: str | None = None
+    min_years: int | None = None
+    retention_days: int | None = None
+    blind_review: bool | None = None
+
+
+def title_from_filename(filename: str) -> str:
+    """Derive a job title from a filename stem.
+
+    Replaces ``-``/``_``/whitespace runs with single spaces; PRESERVES the
+    recruiter's casing (so ``Senior_DevOps_Engineer`` stays mixed-case rather
+    than being title-cased into ``Senior Devops Engineer``). Clamped to
+    JobCreate's 2-200 char bounds, with a safe fallback for a too-short stem.
+    """
+    # Strip folder(s) first (keeping case), then the extension.
+    stem = Path(PurePosixPath(filename.replace("\\", "/")).name).stem
+    cleaned = re.sub(r"[\s_-]+", " ", stem).strip()
+    if len(cleaned) < 2:
+        return "Untitled job"
+    return cleaned[:200]
+
+
+def _int_cell(value: str | None, field_name: str, line_no: int) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ManifestError(
+            f"row {line_no}: {field_name} must be an integer, got {value!r}",
+            row=line_no,
+        ) from exc
+
+
+def _bool_cell(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.strip().lower() in _COVER_FLAG_TRUE
+
+
+def parse_csv_manifest(blob: bytes) -> dict[str, JobManifestRow]:
+    """Parse an optional bulk-JD CSV manifest into ``{basename_lower: row}``.
+
+    Required header column: ``filename``. Optional: ``title``, ``department``,
+    ``location``, ``employment_type``, ``seniority``, ``min_years``,
+    ``retention_days``, ``blind_review``. Header names are matched
+    case/space-insensitively; keys are the lowercased basename (folder stripped)
+    so a manifest path and an uploaded file line up regardless of folder or case.
+    Raises :class:`ManifestError` (422) on oversize bytes, an empty file, a
+    missing ``filename`` column, or an invalid enum/integer cell value.
+    """
+    if len(blob) > _MAX_MANIFEST_BYTES:
+        raise ManifestError(
+            f"manifest is {len(blob)} bytes; the cap is {_MAX_MANIFEST_BYTES}"
+        )
+    reader = csv.DictReader(io.StringIO(_decode(blob)))
+    if reader.fieldnames is None:
+        raise ManifestError("the manifest is empty")
+
+    headers = {(h or "").strip().lower(): (h or "") for h in reader.fieldnames}
+    if "filename" not in headers:
+        raise ManifestError("manifest is missing a required 'filename' column")
+
+    def cell(row: dict[str, str], key: str) -> str | None:
+        if key not in headers:
+            return None
+        raw = row.get(headers[key])
+        if raw is None:
+            return None
+        return raw.strip() or None
+
+    employment_values = set(get_args(EmploymentType))
+    seniority_values = set(get_args(Seniority))
+
+    out: dict[str, JobManifestRow] = {}
+    for line_no, row in enumerate(reader, start=2):  # row 1 is the header
+        filename = cell(row, "filename")
+        if filename is None:
+            continue  # blank line / no filename → skip
+
+        employment_type = cell(row, "employment_type")
+        if employment_type is not None and employment_type not in employment_values:
+            raise ManifestError(
+                f"row {line_no}: invalid employment_type {employment_type!r}",
+                row=line_no,
+            )
+        seniority = cell(row, "seniority")
+        if seniority is not None and seniority not in seniority_values:
+            raise ManifestError(
+                f"row {line_no}: invalid seniority {seniority!r}", row=line_no
+            )
+
+        out[basename_lower(filename)] = JobManifestRow(
+            title=cell(row, "title"),
+            department=cell(row, "department"),
+            location=cell(row, "location"),
+            employment_type=employment_type,
+            seniority=seniority,
+            min_years=_int_cell(cell(row, "min_years"), "min_years", line_no),
+            retention_days=_int_cell(
+                cell(row, "retention_days"), "retention_days", line_no
+            ),
+            blind_review=_bool_cell(cell(row, "blind_review")),
+        )
+    return out
+
+
 __all__ = [
     "ApplicantFiles",
+    "JobManifestRow",
     "ManifestError",
     "PairingResult",
     "UploadedFile",
     "basename_lower",
     "pair_applicants",
+    "parse_csv_manifest",
     "parse_pairing_manifest",
+    "title_from_filename",
 ]

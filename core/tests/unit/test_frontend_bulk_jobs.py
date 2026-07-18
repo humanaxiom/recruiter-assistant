@@ -198,9 +198,7 @@ def test_bulk_route_renders_created_duplicate_failed_summary(
     assert 'href="/"' in body
 
 
-def test_bulk_route_maps_bad_request_without_500(
-    monkeypatch: Any, client: Any
-) -> None:
+def test_bulk_route_maps_bad_request_without_500(monkeypatch: Any, client: Any) -> None:
     monkeypatch.setattr(
         api_client,
         "bulk_create_jobs",

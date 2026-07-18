@@ -274,9 +274,7 @@ def test_jobs_uses_the_job_status_enum() -> None:
 
 def test_jobs_description_sha256_in_create_table() -> None:
     """FU-3 Slice 4 dedup key — the column is declared in the CREATE TABLE."""
-    assert re.search(
-        r"description_sha256\s+TEXT", _table_sql("jobs"), re.IGNORECASE
-    )
+    assert re.search(r"description_sha256\s+TEXT", _table_sql("jobs"), re.IGNORECASE)
 
 
 def test_jobs_description_sha256_has_an_idempotent_alter() -> None:

@@ -215,7 +215,9 @@ async def test_bulk_route_is_declared_before_job_id_route() -> None:
     reaches the bulk handler (202), never a 422 uuid-parse error."""
     conn = _mock_conn()
     app = _build_app(conn)
-    files = [("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))]
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
     async with await _client(app) as client:
         resp = await client.post("/jobs/bulk", files=files)
     assert resp.status_code == 202

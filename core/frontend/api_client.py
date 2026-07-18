@@ -187,6 +187,29 @@ def extract_jd(
     return response.json()
 
 
+def bulk_create_jobs(
+    files: list[tuple[str, bytes, str]],
+    *,
+    manifest: tuple[str, bytes, str] | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/bulk (multipart) → ``list[BulkJobResult]``.
+
+    ``files`` is a list of ``(filename, content, content_type)`` tuples,
+    forwarded as repeated ``files=`` parts (a ``.zip`` is expanded *server*-side
+    — we only forward the raw bytes, never expand it here). An optional
+    ``manifest`` (filename, content, content_type) is forwarded as its OWN
+    ``manifest`` part (the CSV metadata sidecar). A backend 4xx (e.g. a 422 for
+    a malformed manifest) surfaces as ``BadRequest``."""
+    multipart = [
+        ("files", (filename, content, ctype)) for filename, content, ctype in files
+    ]
+    if manifest is not None:
+        multipart.append(("manifest", manifest))
+    response = _request("POST", "/jobs/bulk", files=multipart, client=client)
+    return response.json()
+
+
 def get_job(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/jobs/{job_id}", client=client)
     return response.json()
@@ -342,6 +365,7 @@ __all__ = [
     "list_jobs",
     "create_job",
     "extract_jd",
+    "bulk_create_jobs",
     "get_job",
     "transition_status",
     "patch_job",

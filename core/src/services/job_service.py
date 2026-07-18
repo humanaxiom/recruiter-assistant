@@ -27,18 +27,38 @@ graph.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from src.errors import NotFoundError
-from src.schemas.jobs import JDExtracted, JobCreate, JobListItem, JobOut, JobUpdate
+from src.schemas.jobs import (
+    BulkJobResult,
+    JDExtracted,
+    JobCreate,
+    JobListItem,
+    JobOut,
+    JobUpdate,
+)
 from src.services import DbConn
+from src.services.bulk_ingest_service import (
+    JobManifestRow,
+    basename_lower,
+    title_from_filename,
+)
+from src.services.jd_import_service import JDImportError, extract_jd_text
 
 logger = logging.getLogger(__name__)
 
 _MAX_REASON_CHARS = 1000
+
+# JobCreate's ``description_raw`` floor — a JD shorter than this can't create a
+# job, so it becomes a per-file ``failed`` outcome rather than aborting the batch.
+_MIN_DESCRIPTION_CHARS = 50
 
 _RECORD_PARSED_SQL = """
 UPDATE jobs SET
@@ -99,10 +119,46 @@ _JOB_COLS = (
 _INSERT_JOB_SQL = f"""
 INSERT INTO jobs (
     title, department, location, employment_type, seniority, min_years,
-    description_raw, retention_days, blind_review, created_by
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    description_raw, retention_days, blind_review, created_by, description_sha256
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING {_JOB_COLS}
 """
+
+# Dedup probe for bulk create: is there already a job with this exact JD text?
+# GLOBAL scope — jobs have no parent aggregate to scope a duplicate to.
+_JOB_BY_SHA_SQL = "SELECT id FROM jobs WHERE description_sha256 = $1 LIMIT 1"
+
+
+def _description_sha256(description_raw: str) -> str:
+    """The dedup key: SHA-256 of the JD text, hex. Two jobs with byte-identical
+    ``description_raw`` share a hash (and are treated as duplicates)."""
+    return hashlib.sha256(description_raw.encode("utf-8")).hexdigest()
+
+
+async def _insert_job(
+    conn: DbConn,
+    payload: JobCreate,
+    *,
+    created_by: str | None,
+    description_sha256: str,
+) -> Any:
+    """THE single INSERT both ``create_job`` and ``create_jobs_bulk`` write
+    through, so the column list stays in one place."""
+    return await conn.fetchrow(
+        _INSERT_JOB_SQL,
+        payload.title,
+        payload.department,
+        payload.location,
+        payload.employment_type,
+        payload.seniority,
+        payload.min_years,
+        payload.description_raw,
+        payload.retention_days,
+        payload.blind_review,
+        created_by,
+        description_sha256,
+    )
+
 
 _GET_JOB_SQL = f"SELECT {_JOB_COLS} FROM jobs WHERE id = $1"
 
@@ -188,20 +244,145 @@ async def create_job(
 ) -> JobOut:
     """Insert a new job row (status='draft', the DDL default) and return the
     full ``JobOut`` built from the inserted row."""
-    row = await conn.fetchrow(
-        _INSERT_JOB_SQL,
-        payload.title,
-        payload.department,
-        payload.location,
-        payload.employment_type,
-        payload.seniority,
-        payload.min_years,
-        payload.description_raw,
-        payload.retention_days,
-        payload.blind_review,
-        created_by,
+    row = await _insert_job(
+        conn,
+        payload,
+        created_by=created_by,
+        description_sha256=_description_sha256(payload.description_raw),
     )
     return _row_to_jobout(row)
+
+
+def _payload_from_manifest(
+    *, description_raw: str, title: str, row: JobManifestRow | None
+) -> JobCreate:
+    """Build a ``JobCreate`` for one bulk file: a manifest row's non-empty
+    metadata overrides the derived title and fills the optional columns; absent
+    fields fall back to ``JobCreate``'s own defaults. May raise
+    ``pydantic.ValidationError`` (e.g. a too-short JD, or an out-of-range
+    manifest ``retention_days``) — the caller turns that into a ``failed`` row."""
+    kwargs: dict[str, Any] = {"title": title, "description_raw": description_raw}
+    if row is not None:
+        if row.title:
+            kwargs["title"] = row.title
+        if row.department is not None:
+            kwargs["department"] = row.department
+        if row.location is not None:
+            kwargs["location"] = row.location
+        if row.employment_type is not None:
+            kwargs["employment_type"] = row.employment_type
+        if row.seniority is not None:
+            kwargs["seniority"] = row.seniority
+        if row.min_years is not None:
+            kwargs["min_years"] = row.min_years
+        if row.retention_days is not None:
+            kwargs["retention_days"] = row.retention_days
+        if row.blind_review is not None:
+            kwargs["blind_review"] = row.blind_review
+    return JobCreate(**kwargs)
+
+
+async def create_jobs_bulk(
+    conn: DbConn,
+    *,
+    files: list[tuple[str, bytes]],
+    manifest: dict[str, JobManifestRow] | None,
+    created_by: str | None,
+) -> list[BulkJobResult]:
+    """Create ONE draft job per uploaded JD file, returning a ``BulkJobResult``
+    per file so the caller can enqueue ``parse_job`` once per *created* job.
+
+    Per file: extract JD text (an unreadable/empty file → ``failed``), dedup on
+    ``description_sha256`` (an identical JD already in ``jobs`` — or earlier in
+    THIS batch — → ``duplicate``, no insert), apply the manifest row's overrides
+    (or the filename-stem title), then insert. A JD below the 50-char floor (or
+    any other ``JobCreate`` validation failure) becomes a ``failed`` row WITHOUT
+    aborting the rest of the batch. Dedup scope is GLOBAL — jobs have no parent
+    aggregate to scope a duplicate to.
+
+    Transaction scoping is the caller's job (mirrors the rest of this module);
+    each inserted row is visible to the next file's dedup probe via the in-batch
+    ``created_in_batch`` map, so two identical JDs in one request don't both
+    insert even before the first commits.
+    """
+    results: list[BulkJobResult] = []
+    created_in_batch: dict[str, UUID] = {}  # sha -> job id created this batch
+
+    for filename, content in files:
+        try:
+            description_raw = extract_jd_text(content, filename=filename)
+        except JDImportError as exc:
+            results.append(
+                BulkJobResult(
+                    original_filename=filename,
+                    outcome="failed",
+                    reason=exc.message[:_MAX_REASON_CHARS],
+                )
+            )
+            continue
+
+        sha = _description_sha256(description_raw)
+        existing = await conn.fetchval(_JOB_BY_SHA_SQL, sha) or created_in_batch.get(
+            sha
+        )
+        if existing is not None:
+            results.append(
+                BulkJobResult(
+                    original_filename=filename,
+                    outcome="duplicate",
+                    job_id=(
+                        existing if isinstance(existing, UUID) else UUID(str(existing))
+                    ),
+                    reason="a job with an identical description already exists",
+                )
+            )
+            continue
+
+        if len(description_raw) < _MIN_DESCRIPTION_CHARS:
+            results.append(
+                BulkJobResult(
+                    original_filename=filename,
+                    outcome="failed",
+                    reason=(
+                        f"extracted description is too short "
+                        f"({len(description_raw)} chars; min "
+                        f"{_MIN_DESCRIPTION_CHARS})"
+                    ),
+                )
+            )
+            continue
+
+        row = manifest.get(basename_lower(filename)) if manifest else None
+        try:
+            payload = _payload_from_manifest(
+                description_raw=description_raw,
+                title=title_from_filename(filename),
+                row=row,
+            )
+        except ValidationError as exc:
+            results.append(
+                BulkJobResult(
+                    original_filename=filename,
+                    outcome="failed",
+                    reason=str(exc)[:_MAX_REASON_CHARS],
+                )
+            )
+            continue
+
+        inserted = await _insert_job(
+            conn, payload, created_by=created_by, description_sha256=sha
+        )
+        job = _row_to_jobout(inserted)
+        created_in_batch[sha] = job.id
+        results.append(
+            BulkJobResult(
+                original_filename=filename,
+                outcome="created",
+                job_id=job.id,
+                title=job.title,
+            )
+        )
+    return results
 
 
 async def get_job(conn: DbConn, job_id: UUID) -> JobOut:
