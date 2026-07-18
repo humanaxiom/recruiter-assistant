@@ -68,6 +68,14 @@
         {% if req.evidence_chunk_ids %}
         <span class="muted chunks">chunks: {{ req.evidence_chunk_ids|join(', ') }}</span>
         {% endif %}
+        {# FU-2: the resolved source text behind those chunk ids, already
+           blind-redacted server-side. Collapsible so the panel stays compact. #}
+        {% if req.source_context %}
+        <details class="source-context">
+          <summary class="muted">source text</summary>
+          <blockquote class="chunk-text">{{ req.source_context }}</blockquote>
+        </details>
+        {% endif %}
       </div>
       {% endfor %}
       {% if ev.get('overall_summary') %}

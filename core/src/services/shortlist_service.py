@@ -376,6 +376,30 @@ def _redact_evidence(
     )
 
 
+def _attach_source_context_model(
+    ev: EvidenceObject | None,
+    *,
+    raw_parsed: Any,
+    redactor: Any | None,
+) -> EvidenceObject | None:
+    """FU-2 (read path): populate each requirement's ``source_context`` by
+    resolving its ``evidence_chunk_ids`` against ``raw_parsed`` chunk text.
+
+    ``redactor`` is an optional ``str -> str`` callable applied to the resolved
+    text; under blind review it is the SAME scrub used for the evidence quote,
+    so a header/summary chunk carrying the candidate's name never leaks. Empty
+    resolutions leave the field ``None``."""
+    if ev is None:
+        return None
+    reqs = []
+    for r in ev.requirements:
+        text = _resolve_chunk_context(raw_parsed, r.evidence_chunk_ids)
+        if text and redactor is not None:
+            text = redactor(text)
+        reqs.append(r.model_copy(update={"source_context": text or None}))
+    return ev.model_copy(update={"requirements": reqs})
+
+
 def labels_from_parsed(raw_parsed: Any) -> dict[str, str]:
     """Employer/school label map from a résumé's stored parse JSON, so evidence
     quotes that name an employer/school get the same labels as the résumé
@@ -401,6 +425,55 @@ def location_from_parsed(raw_parsed: Any) -> str | None:
     return ResumeParsed.model_validate(raw_parsed).candidate.location
 
 
+def _resolve_chunk_context(raw_parsed: Any, chunk_ids: list[str]) -> str:
+    """FU-2 pure resolver: expand a requirement's ``evidence_chunk_ids`` to the
+    ACTUAL source text behind them, drawn from the résumé's stored parse.
+
+    Chunk text lives in ``parsed["chunks"]`` (``c_NNN`` ids) and
+    ``parsed["cover_letter_chunks"]`` (``cl_NNN`` ids, a parallel id space). The
+    two are merged into one ``{id: text}`` map, then the requested ids are
+    joined IN ORDER, deduped, skipping any id with no matching chunk. Returns
+    ``""`` when there is nothing to resolve (no ids / no parse / no matches).
+
+    RAW text only — this helper does NO redaction; every call site is
+    responsible for scrubbing the result to match its ``reveal`` state (see
+    ``_attach_export_context`` / ``_row_to_blind_entry``)."""
+    if not chunk_ids or raw_parsed is None:
+        return ""
+    if isinstance(raw_parsed, str):
+        try:
+            raw_parsed = json.loads(raw_parsed)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(raw_parsed, dict):
+        return ""
+    text_by_id: dict[str, str] = {}
+    for key in ("chunks", "cover_letter_chunks"):
+        items = raw_parsed.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("id")
+            ctext = item.get("text")
+            if not (isinstance(cid, str) and isinstance(ctext, str)):
+                continue
+            if cid not in text_by_id:
+                text_by_id[cid] = ctext
+    seen: set[str] = set()
+    parts: list[str] = []
+    for raw_id in chunk_ids:
+        cid = str(raw_id)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        txt = text_by_id.get(cid)
+        if txt:
+            parts.append(txt)
+    return "\n\n".join(parts)
+
+
 def _row_to_blind_entry(row: Any) -> ShortlistEntry:
     raw = dict(row)
     name = raw.pop("_c_name", None)
@@ -420,6 +493,25 @@ def _row_to_blind_entry(row: Any) -> ShortlistEntry:
         term_map=labels,
         location=location,
         redact_locations=True,
+    )
+
+    # FU-2: expand each requirement's cited chunk ids to their source text. The
+    # read path IS blind, so the resolved text is scrubbed with the SAME
+    # name/label/location redaction just applied to the evidence quote — a chunk
+    # can carry the candidate's own name/email/phone.
+    def _blind_redactor(text: str) -> str:
+        return redact_text(
+            text,
+            name=name,
+            email=email,
+            phone=phone,
+            term_map=labels,
+            location=location,
+            redact_locations=True,
+        )
+
+    raw["evidence"] = _attach_source_context_model(
+        raw["evidence"], raw_parsed=parsed_raw, redactor=_blind_redactor
     )
     raw["blinded"] = True
     raw["display_label"] = pseudonym(int(raw["rank"]))
@@ -502,6 +594,46 @@ def _redact_evidence_dict(
     return obj
 
 
+def _attach_export_context(rows: list[dict[str, Any]], *, reveal: bool) -> None:
+    """FU-2 (export path): for each requirement, resolve ``evidence_chunk_ids``
+    to the actual source text and stash it on ``req["source_context"]``.
+
+    Mutates the evidence dicts in place and MUST run while ``candidate_parsed``
+    and the REAL ``candidate_name`` are still present (i.e. BEFORE
+    ``_apply_reveal`` swaps in the pseudonym). Under ``reveal=False`` the
+    resolved text is scrubbed with the same name / employer-school labels /
+    foreign-location redaction ``_apply_reveal`` applies to the evidence quote,
+    so no chunk-borne PII escapes the anonymized export."""
+    for r in rows:
+        ev = r.get("evidence")
+        if not isinstance(ev, dict):
+            continue
+        reqs = ev.get("requirements")
+        if not isinstance(reqs, list):
+            continue
+        parsed = r.get("candidate_parsed")
+        # Redaction params are the SAME ones _apply_reveal derives for the quote
+        # (real name still present at this point); unused when reveal=True.
+        name = r.get("candidate_name")
+        labels = labels_from_parsed(parsed)
+        location = location_from_parsed(parsed)
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            ids = req.get("evidence_chunk_ids")
+            id_list = [str(c) for c in ids] if isinstance(ids, list) else []
+            text = _resolve_chunk_context(parsed, id_list)
+            if text and not reveal:
+                text = redact_text(
+                    text,
+                    name=name,
+                    term_map=labels,
+                    location=location,
+                    redact_locations=True,
+                )
+            req["source_context"] = text
+
+
 def _apply_reveal(rows: list[dict[str, Any]], *, reveal: bool) -> None:
     """When ``reveal`` is False, strip decrypted identity and substitute the
     rank-based pseudonym, mask the identifying résumé filename, and scrub
@@ -542,6 +674,9 @@ async def export_rows(
         d["evidence"] = _as_obj(d.get("evidence"))
         d["pipeline_meta"] = _as_obj(d.get("pipeline_meta"))
         out.append(d)
+    # FU-2: resolve cited chunk ids -> source text BEFORE _apply_reveal swaps
+    # the real name for a pseudonym, so blind redaction uses the real identity.
+    _attach_export_context(out, reveal=reveal)
     _apply_reveal(out, reveal=reveal)
     # candidate_parsed was only needed to derive labels/location for redaction;
     # it carries the raw name and must never reach the exported payload.
@@ -714,6 +849,9 @@ _EVIDENCE_CSV_FIELDS = [
     "confidence",
     "quote",
     "evidence_chunk_ids",
+    # FU-2: the resolved source text behind the cited chunk ids (redacted under
+    # a blind/anonymized export). The ids column is kept for traceability.
+    "evidence_context",
 ]
 
 
@@ -752,6 +890,9 @@ def shortlist_evidence_csv(rows: list[dict[str, Any]]) -> str:
                         "; ".join(str(c) for c in chunks)
                         if isinstance(chunks, list)
                         else ""
+                    ),
+                    "evidence_context": str(req.get("source_context") or "").replace(
+                        "\n", " "
                     ),
                 }
             )
