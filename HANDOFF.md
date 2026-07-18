@@ -741,7 +741,9 @@ it.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0 (PR 
 
 ### Planned follow-ups — user-requested Workflow-UI enhancements (added 2026-07-17)
 
-These three are **explicitly requested** (not a generic options list) while PR #18 is under review — build after #18 merges. They expand/supersede the generic "reverse-match UI" and "deferred connectors" bullets below.
+These three are **explicitly requested** (not a generic options list) while PR #18 is under review — build after #18 merges (they build on #18's code). **User-confirmed build order (2026-07-17): FU-2 → FU-1 → FU-3.** They expand/supersede the generic "reverse-match UI" and "deferred connectors" bullets below.
+
+**Blind-review model (user-confirmed 2026-07-17, matches hris):** blind is ON at every step by default; identity is exposed only through an explicit, **audited** reveal (FU-1). **RBAC is a SEPARATE task** (FU-4 below) — it was mandated in the early system design but never implemented; FU-1's reveal ships with the audit log first, and RBAC (who is *permitted* to reveal) layers on top afterward.
 
 - **FU-1 — Full résumé reveal from the shortlist (AUDITED).** Clicking the candidate label
   ("Candidate A") on a shortlist card reveals the full, un-blinded résumé (name/email/phone/employers/
@@ -786,6 +788,14 @@ These three are **explicitly requested** (not a generic options list) while PR #
   path-traversal guards); consent gate per résumé; blind posture unchanged. This is the **offline** half
   of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
   thing (see the connectors bullet below).
+
+- **FU-4 — RBAC (its own task; mandated in early system design, never implemented).** Role-based access
+  control across the app — the original design mandated it (roles such as admin / recruiter /
+  hiring-manager / auditor), but nothing in recruiter-assistant enforces roles today (auth is a single
+  optional API key; every authenticated caller can do everything). Scope when picked up: a role model +
+  per-route authorization, with the **audited reveal (FU-1) as the first gated action** (only
+  recruiter/admin may reveal; auditor/hiring-manager may not). Decoupled from FU-1 on purpose so reveal +
+  its audit log can ship first and RBAC can be layered on without reworking it. Needs its own ADR.
 
 What a **human** could scope next — options, not a queued to-do list:
 
