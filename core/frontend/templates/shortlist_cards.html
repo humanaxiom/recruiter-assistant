@@ -26,7 +26,12 @@
   <div class="card candidate-card">
     <div class="card-header">
       <span class="rank">#{{ entry.rank }}</span>
-      <h3 style="margin:0">{{ entry.display_label }}</h3>
+      <h3 style="margin:0">
+        {# Label links to the résumé, where an audited reveal is one click
+           (FU-1). The shortlist read itself stays blind — no reveal here. #}
+        <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
+           >{{ entry.display_label }}</a>
+      </h3>
       <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
     </div>
 

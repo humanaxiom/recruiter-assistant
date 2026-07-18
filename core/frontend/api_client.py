@@ -282,6 +282,23 @@ def get_resume(
     return response.json()
 
 
+def reveal_resume(
+    resume_id: UUID,
+    *,
+    context: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """AUDITED de-anonymization. ``POST /resumes/{id}/reveal`` records a reveal
+    audit row server-side and returns the UN-blinded ``ResumeOut``. This is the
+    ONLY path the viewer reveals through — ``GET ?reveal=true`` would skip the
+    audit, so it is never used here."""
+    params = {"context": context} if context is not None else None
+    response = _request(
+        "POST", f"/resumes/{resume_id}/reveal", params=params, client=client
+    )
+    return response.json()
+
+
 def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/resumes/{resume_id}/match-results", client=client)
     return response.json()
@@ -323,6 +340,7 @@ __all__ = [
     "list_shortlist",
     "get_shortlist_entry",
     "get_resume",
+    "reveal_resume",
     "get_match_results",
     "export_shortlist",
 ]

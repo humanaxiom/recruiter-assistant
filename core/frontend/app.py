@@ -405,6 +405,28 @@ def resume_detail(resume_id: UUID) -> Any:
         "resume_detail.html",
         resume=resume,
         current_year=dt.date.today().year,
+        revealed=False,
+    )
+
+
+@app.post("/resumes/<uuid:resume_id>/reveal")
+def resume_reveal(resume_id: UUID) -> Any:
+    """AUDITED de-anonymization (FU-1). Deliberately POST-only — a GET could be
+    prefetched/link-crawled, but a reveal must be an explicit act. Calls the
+    backend's audited reveal endpoint (which records who/what/when), then
+    re-renders the résumé UN-blinded in place. Blind stays the default; this is
+    the only path that surfaces identity."""
+    try:
+        resume = api_client.reveal_resume(resume_id, context="resume_detail")
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "resume_detail.html",
+        resume=resume,
+        current_year=dt.date.today().year,
+        revealed=True,
     )
 
 

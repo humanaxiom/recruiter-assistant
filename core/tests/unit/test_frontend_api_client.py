@@ -252,6 +252,35 @@ def test_get_resume_explicit_reveal_true_is_forwarded_to_the_backend() -> None:
     assert captured["url"].params.get("reveal") in ("true", "True")
 
 
+def test_reveal_resume_posts_to_reveal_and_returns_unblinded_json() -> None:
+    captured: dict[str, Any] = {}
+    resume_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        return httpx.Response(200, json={"candidate": {"name": "Casey Rivera"}})
+
+    result = api_client.reveal_resume(
+        resume_id, context="shortlist", client=_client_with(handler)
+    )
+    assert captured["method"] == "POST"
+    assert captured["url"].path == f"/resumes/{resume_id}/reveal"
+    assert captured["url"].params.get("context") == "shortlist"
+    assert result == {"candidate": {"name": "Casey Rivera"}}
+
+
+def test_reveal_resume_omits_context_param_when_none() -> None:
+    captured: dict[str, httpx.URL] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(200, json={})
+
+    api_client.reveal_resume(uuid4(), client=_client_with(handler))
+    assert "context" not in captured["url"].params
+
+
 # ── route wiring: each function hits the expected path ──────────────────
 
 
