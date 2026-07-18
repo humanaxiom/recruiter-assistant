@@ -127,6 +127,12 @@ class RequirementEvidence(BaseModel):
     evidence: str = ""
     evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=0.0, ge=0, le=1)
+    # FU-2 (display-only): the resolved source text behind ``evidence_chunk_ids``,
+    # expanded from ``resumes.parsed`` at read/export time. Redacted under blind
+    # review, exactly like ``evidence``. Populated only on the display paths; the
+    # LLM never emits it, so at write time it is always ``None`` and persists as
+    # JSONB ``null`` — a pure display expansion, never a stored value.
+    source_context: str | None = None
 
 
 CoverLetterTheme = Literal["motivation", "role_alignment", "cultural_fit", "growth"]
