@@ -30,12 +30,15 @@ import pytest
 from src.errors import AppError
 from src.services.bulk_ingest_service import (
     ApplicantFiles,
+    JobManifestRow,
     ManifestError,
     PairingResult,
     _classify,
     basename_lower,
     pair_applicants,
+    parse_csv_manifest,
     parse_pairing_manifest,
+    title_from_filename,
 )
 
 _PDF = b"%PDF-1.4 body"
@@ -393,3 +396,128 @@ def test_files_not_named_in_manifest_fall_back_to_convention() -> None:
     # bob was not in the manifest → paired by the filename convention.
     assert by_resume["bob_resume.pdf"].cover_letter is not None
     assert by_resume["bob_resume.pdf"].cover_letter[0] == "bob_cover_letter.pdf"
+
+
+# ── title_from_filename (FU-3 Slice 4 — bulk JD) ─────────────────────────
+
+
+def test_title_from_filename_replaces_separators_and_strips_extension() -> None:
+    assert title_from_filename("Senior_DevOps_Engineer.pdf") == "Senior DevOps Engineer"
+
+
+def test_title_from_filename_preserves_recruiter_casing() -> None:
+    # Not title-cased — ``DevOps`` stays mixed-case, not ``Devops``.
+    assert title_from_filename("Staff-iOS-Engineer.docx") == "Staff iOS Engineer"
+
+
+def test_title_from_filename_strips_folder() -> None:
+    assert title_from_filename("jobs/Backend Engineer.txt") == "Backend Engineer"
+
+
+def test_title_from_filename_collapses_whitespace() -> None:
+    assert title_from_filename("Data___Scientist.txt") == "Data Scientist"
+
+
+def test_title_from_filename_falls_back_when_too_short() -> None:
+    # A one-char stem is below JobCreate's 2-char floor → a safe fallback.
+    assert title_from_filename("x.pdf") == "Untitled job"
+
+
+def test_title_from_filename_clamps_to_200_chars() -> None:
+    assert len(title_from_filename("A" * 500 + ".pdf")) == 200
+
+
+# ── parse_csv_manifest (FU-3 Slice 4 — bulk JD) ──────────────────────────
+
+
+def _csv_bytes(text: str) -> bytes:
+    return text.encode("utf-8")
+
+
+def test_parse_csv_manifest_valid_returns_rows_keyed_by_basename_lower() -> None:
+    blob = _csv_bytes(
+        "filename,title,department,location,employment_type,seniority,"
+        "min_years,retention_days,blind_review\n"
+        "Some/Folder/Backend.PDF,Senior Backend Engineer,Engineering,Remote,"
+        "full_time,senior,5,365,true\n"
+    )
+    out = parse_csv_manifest(blob)
+    assert set(out) == {"backend.pdf"}
+    row = out["backend.pdf"]
+    assert isinstance(row, JobManifestRow)
+    assert row.title == "Senior Backend Engineer"
+    assert row.department == "Engineering"
+    assert row.location == "Remote"
+    assert row.employment_type == "full_time"
+    assert row.seniority == "senior"
+    assert row.min_years == 5
+    assert row.retention_days == 365
+    assert row.blind_review is True
+
+
+def test_parse_csv_manifest_only_filename_column_is_enough() -> None:
+    out = parse_csv_manifest(_csv_bytes("filename\nbackend.pdf\n"))
+    assert set(out) == {"backend.pdf"}
+    row = out["backend.pdf"]
+    assert row.title is None
+    assert row.employment_type is None
+    assert row.blind_review is None
+
+
+def test_parse_csv_manifest_blank_filename_rows_are_skipped() -> None:
+    out = parse_csv_manifest(_csv_bytes("filename,title\n,ignored\nkept.pdf,Kept\n"))
+    assert set(out) == {"kept.pdf"}
+
+
+def test_parse_csv_manifest_missing_filename_column_raises() -> None:
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(_csv_bytes("title,department\nBackend,Engineering\n"))
+
+
+def test_parse_csv_manifest_empty_blob_raises() -> None:
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(b"")
+
+
+def test_parse_csv_manifest_invalid_employment_type_raises() -> None:
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(
+            _csv_bytes("filename,employment_type\nbackend.pdf,perma_temp\n")
+        )
+
+
+def test_parse_csv_manifest_invalid_seniority_raises() -> None:
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(_csv_bytes("filename,seniority\nbackend.pdf,grandmaster\n"))
+
+
+def test_parse_csv_manifest_valid_enum_values_are_accepted() -> None:
+    out = parse_csv_manifest(
+        _csv_bytes("filename,employment_type,seniority\nb.pdf,contract,staff\n")
+    )
+    assert out["b.pdf"].employment_type == "contract"
+    assert out["b.pdf"].seniority == "staff"
+
+
+def test_parse_csv_manifest_non_integer_min_years_raises() -> None:
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(_csv_bytes("filename,min_years\nbackend.pdf,lots\n"))
+
+
+def test_parse_csv_manifest_oversize_raises() -> None:
+    oversize = b"filename\n" + b"a.pdf\n" * (1024 * 1024)
+    with pytest.raises(ManifestError):
+        parse_csv_manifest(oversize)
+
+
+def test_parse_csv_manifest_headers_are_case_and_space_insensitive() -> None:
+    out = parse_csv_manifest(_csv_bytes(" Filename , Title \nbackend.pdf,Backend\n"))
+    assert out["backend.pdf"].title == "Backend"
+
+
+def test_job_manifest_row_is_frozen() -> None:
+    import dataclasses
+
+    row = JobManifestRow(title="X")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        row.title = "Y"  # type: ignore[misc]
