@@ -222,6 +222,31 @@ async def test_upload_resumes_multi_file_returns_202_and_enqueues_per_file() -> 
         assert call.args[0] == "parse_resume"
 
 
+@pytest.mark.asyncio
+async def test_upload_resumes_cover_letter_file_is_read_and_stored() -> None:
+    """The route reads the optional ``cover_letter_file`` part and forwards it;
+    the service stores it under a server-generated ``cover_letters/`` blob key."""
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("a.pdf", _PDF_MAGIC, "application/pdf")),
+                ("cover_letter_file", ("cover.pdf", _PDF_MAGIC, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    cover_keys = [
+        c.args[0]
+        for c in store.put.await_args_list
+        if c.args[0].startswith("cover_letters/")
+    ]
+    assert len(cover_keys) == 1
+
+
 # ── upload: file-count cap (SEC-2, memory-exhaustion DoS) ────────────────
 
 

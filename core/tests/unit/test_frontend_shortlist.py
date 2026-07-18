@@ -203,6 +203,24 @@ def test_shortlist_cards_call_carries_no_reveal_kwarg(
     assert "reveal" not in spy.call_args.kwargs
 
 
+def test_shortlist_card_has_audited_reveal_button(
+    monkeypatch: Any, client: Any
+) -> None:
+    """FU-1: each card carries an audited-reveal button — a POST form to the
+    reveal route with ``context=shortlist`` — so identity can be revealed
+    straight from the shortlist (not only from the résumé page)."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert f"/resumes/{resume_id}/reveal" in body
+    assert 'method="post"' in body.lower()
+    assert 'value="shortlist"' in body
+    assert "Reveal identity" in body
+
+
 def test_shortlist_cards_404s_when_job_missing(monkeypatch: Any, client: Any) -> None:
     monkeypatch.setattr(
         api_client,

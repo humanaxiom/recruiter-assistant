@@ -193,6 +193,25 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS outbox_aggregate_idx
         ON outbox (aggregate, aggregate_id)
     """,
+    # FU-1 (audited reveal): an append-only audit sink. Revealing a candidate's
+    # identity is the de-anonymization action, so every reveal writes one row
+    # here. Never UPDATEd or DELETEd by app code. `actor` is best-effort today
+    # (the optional X-Actor-Name header); real per-user identity arrives with
+    # RBAC (FU-4).
+    """
+    CREATE TABLE IF NOT EXISTS reveal_audit (
+        id          UUID PRIMARY KEY,
+        resume_id   UUID NOT NULL,
+        job_id      UUID,
+        actor       TEXT,
+        context     TEXT,
+        revealed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS reveal_audit_resume_idx
+        ON reveal_audit (resume_id, revealed_at DESC)
+    """,
 )
 
 

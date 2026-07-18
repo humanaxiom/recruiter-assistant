@@ -239,6 +239,79 @@ async def test_upload_resumes_non_duplicate_file_calls_blob_store_put() -> None:
     store.put.assert_awaited_once()
 
 
+# ── upload_resumes: cover-letter FILE (stored as a blob) ────────────────
+
+
+def _insert_call_args(conn: MagicMock) -> tuple[object, ...]:
+    """The positional args of the résumé INSERT execute() call."""
+    for call in conn.execute.await_args_list:
+        if call.args and "INSERT INTO resumes" in str(call.args[0]):
+            return call.args
+    raise AssertionError("no résumé INSERT execute() call was made")
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_cover_letter_file_stored_as_blob_and_keyed_on_row() -> (
+    None
+):
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+        cover_letter_file=("cover.pdf", _PDF_MAGIC),
+    )
+    # A server-generated cover-letter blob key (never derived from the filename)
+    # was stored...
+    put_keys = [c.args[0] for c in store.put.await_args_list]
+    cover_keys = [k for k in put_keys if k.startswith("cover_letters/")]
+    assert len(cover_keys) == 1
+    assert cover_keys[0].endswith(".pdf")
+    # ...and it is the last positional arg of the résumé INSERT (cover_letter_blob_key).
+    assert _insert_call_args(conn)[-1] == cover_keys[0]
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_no_cover_letter_file_leaves_blob_key_null() -> None:
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+    )
+    assert _insert_call_args(conn)[-1] is None
+    assert not any(
+        c.args[0].startswith("cover_letters/") for c in store.put.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_unsupported_cover_letter_file_raises() -> None:
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    with pytest.raises(ValueError, match="cover letter"):
+        await upload_resumes(
+            conn,
+            store,
+            job_id=uuid4(),
+            files=[("resume.pdf", _PDF_MAGIC)],
+            consent_acknowledged=True,
+            cover_letter_file=("cover.xyz", b"not a known file type at all"),
+        )
+
+
 # ── upload_resumes: server-generated blob key ───────────────────────────
 
 

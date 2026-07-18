@@ -526,6 +526,42 @@ details.newjob summary {
   margin: 0 0 16px;
   font-size: 13px;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* FU-1 audited reveal — identity block shown only after an explicit reveal. */
+.reveal-block {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 0 0 16px;
+}
+
+.reveal-notice {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #065f46;
+}
+
+.identity {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 16px;
+  margin: 0;
+}
+
+.identity dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.identity dd {
+  margin: 0;
 }
 
 .recency-legend {

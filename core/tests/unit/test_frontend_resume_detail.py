@@ -288,9 +288,11 @@ def test_resume_detail_calls_get_resume_with_reveal_false(
 def test_resume_detail_structural_no_pii_byte_scan(
     monkeypatch: Any, client: Any
 ) -> None:
-    """Even fed a payload that CONTAINS the candidate's real identity (as a
-    reveal=True response would), the rendered HTML must not contain those
-    bytes — the template has no branch that prints candidate.* fields."""
+    """The DEFAULT (blind, non-reveal) GET must never print identity, even fed a
+    payload that CONTAINS the candidate's real name/email/phone: the default
+    render passes ``revealed=False`` so the identity block (the ONE place
+    ``candidate.*`` is rendered) is never emitted. Identity is exposed only via
+    the audited reveal POST — see ``test_resume_reveal_*`` below (FU-1)."""
     resume_id = uuid4()
     monkeypatch.setattr(
         api_client,
@@ -304,13 +306,91 @@ def test_resume_detail_structural_no_pii_byte_scan(
     assert _REAL_LOCATION not in raw
 
 
-def test_resume_detail_template_has_no_candidate_render_branch() -> None:
-    """Structural guard: the template source itself must never reference a
-    ``candidate.<pii>`` field — there is no code path capable of printing it."""
+def test_resume_detail_default_get_never_calls_reveal(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The blind default GET must never route through the audited reveal path —
+    a plain view is not a reveal (and must not write an audit row)."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_resume", MagicMock(return_value=_resume(resume_id))
+    )
+    reveal_spy = MagicMock()
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    client.get(f"/resumes/{resume_id}")
+    reveal_spy.assert_not_called()
+
+
+def test_resume_reveal_shows_identity_and_audit_notice(
+    monkeypatch: Any, client: Any
+) -> None:
+    """FU-1: POST /resumes/<id>/reveal renders the UN-blinded identity and the
+    audit notice. This is the ONE render path that surfaces ``candidate.*``."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "reveal_resume",
+        MagicMock(return_value=_resume(resume_id, with_pii=True)),
+    )
+    raw = client.post(f"/resumes/{resume_id}/reveal").get_data(as_text=True)
+    assert _REAL_NAME in raw
+    assert _REAL_EMAIL in raw
+    assert _REAL_PHONE in raw
+    assert "audit log" in raw.lower()
+
+
+def test_resume_reveal_forwards_context_from_form(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A reveal triggered from the shortlist card posts ``context=shortlist``;
+    the route forwards it so the audit row records the true origin."""
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", spy)
+    client.post(f"/resumes/{resume_id}/reveal", data={"context": "shortlist"})
+    assert spy.call_args.kwargs["context"] == "shortlist"
+
+
+def test_resume_reveal_context_defaults_to_resume_detail(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", spy)
+    client.post(f"/resumes/{resume_id}/reveal")
+    assert spy.call_args.kwargs["context"] == "resume_detail"
+
+
+def test_resume_reveal_uses_audited_endpoint_not_raw_reveal(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The reveal must go through ``reveal_resume`` (POST, which audits), NOT a
+    raw ``get_resume(reveal=True)`` that would skip the audit trail."""
+    resume_id = uuid4()
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    get_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    monkeypatch.setattr(api_client, "get_resume", get_spy)
+    client.post(f"/resumes/{resume_id}/reveal")
+    reveal_spy.assert_called_once()
+    get_spy.assert_not_called()
+
+
+def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
+    """Structural guard (updated for FU-1): the template MAY reference
+    ``candidate.*`` — but every such reference must sit inside the single
+    ``{% if revealed %}`` block, so no non-reveal render can reach it."""
     template = (Path(app.root_path) / "templates" / "resume_detail.html").read_text(
         encoding="utf-8"
     )
-    for banned in (
+    gate = template.find("{% if revealed %}")
+    elif_marker = template.find("{% elif resume.blinded %}")
+    assert gate != -1, "expected an `{% if revealed %}` gate in resume_detail.html"
+    assert elif_marker > gate, "expected the reveal block to end at `{% elif %}`"
+    # Every candidate.* reference must fall strictly inside the reveal-only span
+    # (between the `revealed` gate and the `elif blinded` branch), so no
+    # non-reveal render can reach it. Robust to the nested per-field ifs.
+    banned = (
         "candidate.name",
         "candidate.email",
         "candidate.phone",
@@ -319,5 +399,9 @@ def test_resume_detail_template_has_no_candidate_render_branch() -> None:
         "candidate['email']",
         "candidate['phone']",
         "candidate['location']",
-    ):
-        assert banned not in template, banned
+    )
+    for token in banned:
+        idx = template.find(token)
+        while idx != -1:
+            assert gate < idx < elif_marker, f"{token} outside the reveal block"
+            idx = template.find(token, idx + 1)

@@ -194,8 +194,9 @@ _DEDUP_SQL = "SELECT id FROM resumes WHERE job_id = $1 AND sha256 = $2"
 _INSERT_UPLOADED_SQL = """
 INSERT INTO resumes (
     id, job_id, blob_key, original_filename, mime_type, file_size_bytes,
-    sha256, consent_acknowledged, uploaded_by, cover_letter_text
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    sha256, consent_acknowledged, uploaded_by, cover_letter_text,
+    cover_letter_blob_key
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 """
 
 
@@ -231,14 +232,43 @@ async def upload_resumes(
         raise ValueError(
             "consent_acknowledged must be true before any résumé upload I/O"
         )
-    # cover_letter_file is accepted for signature parity with the documented
-    # contract (a file-attached cover letter, distinct from the pasted-text
-    # case) — no upload path in this phase wires it in yet.
-    del cover_letter_file
+    # A file-attached cover letter is stored as a blob (like the résumé itself)
+    # and its key set on the row; the worker's `_parse_cover_letter` extracts +
+    # LLM-parses it at parse time from `cover_letter_blob_key` — the same
+    # deferred path a pasted `cover_letter_text` takes, and non-fatal to the
+    # résumé parse. Validated + size-capped here so a bad cover letter fails
+    # loud at upload rather than silently later. Symmetric with the résumé
+    # files: reject an oversize or unsupported-mime cover letter.
+    # Validate the cover-letter file up front (fail fast, before opening a
+    # transaction), but defer the blob write to INSIDE the transaction below so
+    # its orphan-on-rollback window matches the résumé blobs' (a rollback can't
+    # un-write a filesystem blob either way; keeping the same scope avoids a
+    # WIDER pre-transaction window — the residual orphan-blob cleanup is shared
+    # with the résumé path and left to a future reaper).
+    cover_blob_key: str | None = None
+    cover_blob_payload: tuple[str, bytes, str] | None = None
+    if cover_letter_file is not None:
+        cl_name, cl_bytes = cover_letter_file
+        if len(cl_bytes) == 0:
+            raise ValueError("cover letter file is empty")
+        if len(cl_bytes) > _MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"cover letter file is {len(cl_bytes)} bytes; the cap is "
+                f"{_MAX_UPLOAD_BYTES}"
+            )
+        try:
+            cl_mime = detect_mime(cl_name, cl_bytes)
+        except UnsupportedMimeError as exc:
+            raise ValueError(f"unsupported cover letter file: {exc}") from exc
+        cover_blob_key = f"cover_letters/{uuid4()}.{_MIME_EXT[cl_mime]}"
+        cover_blob_payload = (cover_blob_key, cl_bytes, cl_mime)
 
     results: list[ResumeUploadResult] = []
 
     async with conn.transaction():
+        if cover_blob_payload is not None:
+            k, b, m = cover_blob_payload
+            await blob_store.put(k, b, content_type=m)
         encrypted_cover: bytes | None = None
         if cover_letter_text is not None:
             await pii_service.set_pii_key(conn)
@@ -306,6 +336,7 @@ async def upload_resumes(
                 consent_acknowledged,
                 uploaded_by,
                 encrypted_cover,
+                cover_blob_key,
             )
             results.append(
                 ResumeUploadResult(

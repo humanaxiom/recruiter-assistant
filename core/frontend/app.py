@@ -234,12 +234,22 @@ def upload_resumes(job_id: UUID) -> Any:
     cover_letter_text: str | None = None
     if cover_letter_raw:
         cover_letter_text = cover_letter_raw[:_MAX_COVER_LETTER_CHARS]
+
+    cover_upload = request.files.get("cover_letter_file")
+    cover_letter_file: tuple[str, bytes, str] | None = None
+    if cover_upload is not None and cover_upload.filename:
+        cover_letter_file = (
+            cover_upload.filename,
+            cover_upload.read(),
+            cover_upload.content_type or "application/octet-stream",
+        )
     try:
         api_client.upload_resumes(
             job_id,
             files,
             consent_acknowledged=True,
             cover_letter_text=cover_letter_text,
+            cover_letter_file=cover_letter_file,
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(
@@ -405,6 +415,31 @@ def resume_detail(resume_id: UUID) -> Any:
         "resume_detail.html",
         resume=resume,
         current_year=dt.date.today().year,
+        revealed=False,
+    )
+
+
+@app.post("/resumes/<uuid:resume_id>/reveal")
+def resume_reveal(resume_id: UUID) -> Any:
+    """AUDITED de-anonymization (FU-1). Deliberately POST-only — a GET could be
+    prefetched/link-crawled, but a reveal must be an explicit act. Calls the
+    backend's audited reveal endpoint (which records who/what/when), then
+    re-renders the résumé UN-blinded in place. Blind stays the default; this is
+    the only path that surfaces identity."""
+    # `context` records WHERE the reveal was triggered (shortlist card vs the
+    # résumé page) in the audit row; defaults to the résumé page.
+    context = (request.form.get("context") or "resume_detail").strip()[:64]
+    try:
+        resume = api_client.reveal_resume(resume_id, context=context)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "resume_detail.html",
+        resume=resume,
+        current_year=dt.date.today().year,
+        revealed=True,
     )
 
 

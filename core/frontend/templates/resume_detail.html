@@ -1,11 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Résumé{% endblock %}
 {#
-  Blind-only résumé detail (ADR-011/012/013). Renders ONLY the redacted,
-  non-PII structured fields from `resume.parsed` (a `ResumeParsed`). There is
-  deliberately NO branch that prints the identity fields — even if the backend
-  payload carried them (a reveal response would), this template has no path
-  that emits them, which the structural byte-scan test pins.
+  Résumé detail (ADR-011/012/013/016). BLIND IS THE DEFAULT: the non-reveal
+  render (`revealed` is false/absent) prints ONLY redacted, non-PII structured
+  fields from `resume.parsed` — no `candidate.*`. Identity fields render in
+  EXACTLY ONE place: the `{% if revealed %}` block below, reached only via the
+  audited `POST /resumes/<id>/reveal` action (FU-1). The default GET never sets
+  `revealed`, so a URL edit or prefetch can never surface identity.
 #}
 {% set parsed = resume.parsed %}
 {% block content %}
@@ -15,11 +16,32 @@
     <span class="pill pill-{{ resume.status }}">{{ resume.status }}</span>
   </div>
 
-  {% if resume.blinded %}
-  <p class="blind-banner">
-    Identity hidden for blind review — employers/schools shown as generic
-    labels.
-  </p>
+  {% if revealed %}
+  {# The ONE place identity is rendered — reached only via the audited reveal. #}
+  <div class="reveal-block">
+    <p class="reveal-notice">Identity revealed — recorded in the audit log.</p>
+    <dl class="identity">
+      {% if resume.candidate.name %}
+      <dt>Name</dt><dd>{{ resume.candidate.name }}</dd>{% endif %}
+      {% if resume.candidate.email %}
+      <dt>Email</dt><dd>{{ resume.candidate.email }}</dd>{% endif %}
+      {% if resume.candidate.phone %}
+      <dt>Phone</dt><dd>{{ resume.candidate.phone }}</dd>{% endif %}
+      {% if resume.candidate.location %}
+      <dt>Location</dt><dd>{{ resume.candidate.location }}</dd>{% endif %}
+    </dl>
+  </div>
+  {% elif resume.blinded %}
+  <div class="blind-banner">
+    <span>Identity hidden for blind review — employers/schools shown as generic
+      labels.</span>
+    <form method="post"
+          action="{{ url_for('resume_reveal', resume_id=resume.id) }}"
+          style="display:inline">
+      <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
+        (audited)</button>
+    </form>
+  </div>
   {% endif %}
 
   {% if parsed and parsed.summary %}

@@ -33,6 +33,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "shortlist_entries",
         "reverse_match_entries",
         "outbox",
+        "reveal_audit",
     }
 )
 
@@ -86,6 +87,7 @@ EXPECTED_INDEXES: tuple[str, ...] = (
     "reverse_match_entries_resume_idx",
     "outbox_undelivered_idx",
     "outbox_aggregate_idx",
+    "reveal_audit_resume_idx",
 )
 
 
