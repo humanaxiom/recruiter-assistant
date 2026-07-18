@@ -190,6 +190,73 @@ def test_shortlist_cards_stops_polling_once_entries_exist(
     assert "hx-trigger" not in body  # polling stopped
 
 
+def test_shortlist_cards_gives_up_at_the_attempt_cap(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The bounded poll: at the cap, with still no entries, it STOPS (drops
+    hx-trigger) and shows a give-up message instead of polling forever."""
+    from frontend.app import _MAX_SHORTLIST_POLL_ATTEMPTS
+
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(
+        f"/jobs/{job_id}/shortlist-cards?attempt={_MAX_SHORTLIST_POLL_ATTEMPTS}"
+    ).get_data(as_text=True)
+    assert "hx-trigger" not in body
+    assert "No ranked candidates yet" in body
+
+
+def test_shortlist_cards_below_cap_polls_and_increments_attempt(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards?attempt=5").get_data(
+        as_text=True
+    )
+    assert "hx-trigger" in body
+    assert "attempt=6" in body  # the next poll carries an incremented counter
+
+
+def test_shortlist_cards_clamps_out_of_range_attempt(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A hand-edited/garbage ``attempt`` must never crash or unbound the loop."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    assert client.get(f"/jobs/{job_id}/shortlist-cards?attempt=-9").status_code == 200
+    assert client.get(f"/jobs/{job_id}/shortlist-cards?attempt=abc").status_code == 200
+    huge = client.get(f"/jobs/{job_id}/shortlist-cards?attempt=999999").get_data(
+        as_text=True
+    )
+    assert "hx-trigger" not in huge  # clamped to the cap → gives up, no runaway
+
+
+def test_generate_button_disabled_until_a_resume_is_parsed(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsing"}])
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
+    assert "disabled" in body
+    assert "hx-post" not in body  # the disabled button cannot enqueue a ranking
+
+
+def test_generate_button_enabled_when_a_resume_is_parsed(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[{"status": "parsed"}])
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
+    assert "hx-post" in body  # Generate is wired once a résumé is parsed
+
+
 def test_shortlist_cards_call_carries_no_reveal_kwarg(
     monkeypatch: Any, client: Any
 ) -> None:

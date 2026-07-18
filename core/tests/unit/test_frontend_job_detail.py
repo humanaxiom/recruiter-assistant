@@ -209,6 +209,20 @@ def test_job_detail_open_button_enabled_once_parsed(
     assert "disabled" not in body
 
 
+def test_open_job_upload_form_shows_parse_time_hint(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The upload form warns that parsing on the local model takes a minute or
+    two per large PDF, so the wait isn't mistaken for a hang."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_job", MagicMock(return_value=_job(job_id, status="open"))
+    )
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert "minute" in body.lower()
+
+
 def test_job_detail_only_shows_legal_next_states(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     monkeypatch.setattr(

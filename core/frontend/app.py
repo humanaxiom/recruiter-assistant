@@ -176,10 +176,18 @@ _TRANSITION_LABELS: dict[str, str] = {
 _TERMINAL_RESUME_STATUSES = ("parsed", "failed")
 # Defensive cap on the free-text cover letter before it ever hits the network.
 _MAX_COVER_LETTER_CHARS = 20000
+# Bound the shortlist "Generating…" poll so a job that never yields ranked rows
+# (e.g. Generate clicked before any résumé parsed) stops after ~20 min at 3s/poll
+# with a give-up message, instead of polling forever. Matches hris's safety valve.
+_MAX_SHORTLIST_POLL_ATTEMPTS = 400
 
 
 def _any_resume_pending(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") not in _TERMINAL_RESUME_STATUSES for r in resumes)
+
+
+def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
+    return any(r.get("status") == "parsed" for r in resumes)
 
 
 def _render_job_detail(
@@ -342,11 +350,22 @@ def job_shortlist(job_id: UUID) -> Any:
     # `shortlist_service.list_for_job` accepting no such parameter either.
     try:
         entries = api_client.list_shortlist(job_id)
+        # Gate "Generate": ranking a job with no parsed résumé yields an empty
+        # shortlist and an endless "Generating…" poll — so disable the button
+        # until at least one résumé has finished parsing.
+        resumes = api_client.list_resumes(job_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("shortlist_list.html", job_id=job_id, entries=entries)
+    return render_template(
+        "shortlist_list.html",
+        job_id=job_id,
+        entries=entries,
+        any_resume_parsed=_any_resume_parsed(resumes),
+        attempt=0,
+        max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+    )
 
 
 @app.post("/jobs/<uuid:job_id>/shortlist")
@@ -369,11 +388,15 @@ def shortlist_cards(job_id: UUID) -> Any:
     """HTMX poll fragment. While the (blind) shortlist read is still empty it
     renders "Generating…" AND keeps its ``hx-trigger`` so the browser re-polls
     every 3s; once ranked entries exist it renders the cards WITHOUT the
-    trigger, so polling stops."""
-    return _render_shortlist_cards(job_id)
+    trigger, so polling stops. A bounded ``attempt`` counter (clamped
+    server-side) stops the poll after ``_MAX_SHORTLIST_POLL_ATTEMPTS`` with a
+    give-up message, so a job that never produces entries doesn't poll forever."""
+    attempt = request.args.get("attempt", default=0, type=int) or 0
+    attempt = max(0, min(attempt, _MAX_SHORTLIST_POLL_ATTEMPTS))
+    return _render_shortlist_cards(job_id, attempt=attempt)
 
 
-def _render_shortlist_cards(job_id: UUID) -> Any:
+def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the card-render
     # read is unconditionally redacted, exactly like the list read above.
     try:
@@ -382,7 +405,13 @@ def _render_shortlist_cards(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("shortlist_cards.html", job_id=job_id, entries=entries)
+    return render_template(
+        "shortlist_cards.html",
+        job_id=job_id,
+        entries=entries,
+        attempt=attempt,
+        max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+    )
 
 
 @app.get("/shortlist/<uuid:entry_id>")
