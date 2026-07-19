@@ -27,13 +27,20 @@ mirroring the established pattern in ``test_route_shortlist.py`` /
     ``shortlist_service.list_for_job`` takes no ``reveal`` kwarg either).
   - ``get_shortlist_entry(entry_id, *, client=None)`` — same, **no
     ``reveal``**.
-  - ``get_resume(resume_id, *, reveal=False, client=None)`` — ``reveal``
-    IS accepted here (mirrors ``resume_service.get_one(reveal=...)``) but
-    MUST default to ``False``.
+  - ``get_resume(resume_id, *, client=None)`` — **FU-4/D3: NO ``reveal``
+    parameter at all.** The backend route dropped ``reveal`` entirely (the
+    audited ``POST /resumes/{id}/reveal`` is the only un-blinding path — see
+    ``reveal_resume`` below); accepting a ``reveal`` kwarg here would be an
+    inert argument that reads like it works but is silently ignored
+    backend-side, so the client itself must reject it, exactly like
+    ``list_shortlist``/``get_shortlist_entry`` above.
   - ``get_match_results(resume_id, *, client=None)`` — reverse-match read,
     no redaction on the backend (ADR-012 §4) and no ``reveal`` concept here.
-  - ``export_shortlist(job_id, *, format="csv", reveal=False, client=None)``
-    — returns the raw ``httpx.Response`` so the Flask route can proxy
+  - ``export_shortlist(job_id, *, format="csv", client=None)`` — **FU-4/D3:
+    NO ``reveal`` parameter either** (dropped from the backend export route
+    too — this was an UNAUDITED bulk de-anonymization across a whole
+    shortlist; exports are unconditionally blind now). Returns the raw
+    ``httpx.Response`` so the Flask route can proxy
     ``Content-Disposition``/body straight through.
 * Typed error mapping: a backend 404 raises ``NotFound``; a backend 5xx OR
   ``httpx.ConnectError`` raises ``BackendUnavailable``. Both subclass a common
@@ -232,16 +239,26 @@ def test_get_shortlist_entry_never_sends_a_reveal_query_param() -> None:
     assert "reveal" not in captured["url"].params
 
 
-# ── redaction-boundary contract: résumé reads default reveal=False ───────
+# ── redaction-boundary contract: résumé reads take NO reveal param (D3) ──
+#
+# FU-4/D3 removed `reveal` from the BACKEND route entirely — the audited
+# `POST /resumes/{id}/reveal` (see `reveal_resume` below) is the ONLY
+# un-blinding path. A `reveal` kwarg accepted here (and silently ignored by
+# the backend either way) would be an inert argument that reads like it
+# works. It must not exist on the client either.
 
 
-def test_get_resume_reveal_parameter_defaults_to_false() -> None:
+def test_get_resume_signature_has_no_reveal_parameter() -> None:
     sig = inspect.signature(api_client.get_resume)
-    assert "reveal" in sig.parameters
-    assert sig.parameters["reveal"].default is False
+    assert "reveal" not in sig.parameters
 
 
-def test_get_resume_default_call_does_not_request_reveal_true() -> None:
+def test_get_resume_rejects_a_reveal_kwarg_at_call_time() -> None:
+    with pytest.raises(TypeError):
+        api_client.get_resume(uuid4(), reveal=True)  # type: ignore[call-arg]
+
+
+def test_get_resume_never_sends_a_reveal_query_param() -> None:
     captured: dict[str, httpx.URL] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -249,18 +266,7 @@ def test_get_resume_default_call_does_not_request_reveal_true() -> None:
         return httpx.Response(200, json={})
 
     api_client.get_resume(uuid4(), client=_client_with(handler))
-    assert captured["url"].params.get("reveal") in (None, "false", "False")
-
-
-def test_get_resume_explicit_reveal_true_is_forwarded_to_the_backend() -> None:
-    captured: dict[str, httpx.URL] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = request.url
-        return httpx.Response(200, json={})
-
-    api_client.get_resume(uuid4(), reveal=True, client=_client_with(handler))
-    assert captured["url"].params.get("reveal") in ("true", "True")
+    assert "reveal" not in captured["url"].params
 
 
 def test_reveal_resume_posts_to_reveal_and_returns_unblinded_json() -> None:
@@ -397,9 +403,37 @@ def test_get_match_results_hits_the_expected_path() -> None:
 
 
 # ── export proxy ───────────────────────────────────────────────────────
+#
+# FU-4/D3: `reveal` is gone from `export_shortlist` too (see the module
+# docstring and the redaction-boundary section above) — the same contract
+# as `get_resume`.
 
 
-def test_export_shortlist_hits_the_expected_path_with_format_and_reveal() -> None:
+def test_export_shortlist_signature_has_no_reveal_parameter() -> None:
+    sig = inspect.signature(api_client.export_shortlist)
+    assert "reveal" not in sig.parameters
+
+
+def test_export_shortlist_rejects_a_reveal_kwarg_at_call_time() -> None:
+    with pytest.raises(TypeError):
+        api_client.export_shortlist(uuid4(), reveal=True)  # type: ignore[call-arg]
+
+
+def test_export_shortlist_never_sends_a_reveal_query_param() -> None:
+    job_id = uuid4()
+    captured: dict[str, httpx.URL] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(
+            200, content=b"data", headers={"content-type": "text/csv"}
+        )
+
+    api_client.export_shortlist(job_id, client=_client_with(handler))
+    assert "reveal" not in captured["url"].params
+
+
+def test_export_shortlist_hits_the_expected_path_with_format() -> None:
     job_id = uuid4()
     captured: dict[str, httpx.URL] = {}
 
@@ -415,11 +449,10 @@ def test_export_shortlist_hits_the_expected_path_with_format_and_reveal() -> Non
         )
 
     resp = api_client.export_shortlist(
-        job_id, format="evidence-csv", reveal=True, client=_client_with(handler)
+        job_id, format="evidence-csv", client=_client_with(handler)
     )
     assert captured["url"].path == f"/jobs/{job_id}/shortlist/export"
     assert captured["url"].params.get("format") == "evidence-csv"
-    assert captured["url"].params.get("reveal") in ("true", "True")
     assert isinstance(resp, httpx.Response)
     assert resp.content == b"rank,score\n1,0.9\n"
     assert resp.headers["content-disposition"] == (
@@ -427,7 +460,7 @@ def test_export_shortlist_hits_the_expected_path_with_format_and_reveal() -> Non
     )
 
 
-def test_export_shortlist_defaults_to_csv_format_and_reveal_false() -> None:
+def test_export_shortlist_defaults_to_csv_format() -> None:
     job_id = uuid4()
     captured: dict[str, httpx.URL] = {}
 
@@ -439,7 +472,6 @@ def test_export_shortlist_defaults_to_csv_format_and_reveal_false() -> None:
 
     api_client.export_shortlist(job_id, client=_client_with(handler))
     assert captured["url"].params.get("format") == "csv"
-    assert captured["url"].params.get("reveal") in (None, "false", "False")
 
 
 def test_export_shortlist_raises_backend_unavailable_on_5xx() -> None:

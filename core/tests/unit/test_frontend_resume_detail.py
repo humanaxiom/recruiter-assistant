@@ -13,11 +13,22 @@ résumé-detail template has NO code branch capable of rendering
 real name/email/phone (as a reveal=True response would), the rendered HTML must
 not contain those bytes — because the template simply has no path that prints
 them. ``get_resume`` is always called with ``reveal=False``.
+
+**FU-4/D4 — CSRF on the reveal form.** ``POST /resumes/<id>/reveal`` now
+requires a session-bound, one-shot anti-forgery token (``frontend.csrf``,
+tested directly in ``test_frontend_csrf.py``): the preceding ``GET
+/resumes/<id>`` mints a token and renders it into the reveal form as a hidden
+``csrf_token`` input; the POST route rejects (403) a missing/wrong/replayed
+token, or a request tagged with a cross-origin ``Origin`` header, WITHOUT ever
+calling ``api_client.reveal_resume`` — no reveal audit row is implied by a
+rejected forgery attempt. Every reveal-POST test below that predates FU-4 now
+mints a real token via ``_mint_csrf_token`` before posting.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -137,6 +148,34 @@ def _resume(
             "sentiment": "positive",
         }
     return payload
+
+
+# ── FU-4/D4 CSRF helpers ─────────────────────────────────────────────────
+
+_CSRF_INPUT_RE = re.compile(
+    r'<input[^>]*name="csrf_token"[^>]*value="([^"]+)"'
+    r'|<input[^>]*value="([^"]+)"[^>]*name="csrf_token"'
+)
+
+
+def _extract_csrf_token(html: str) -> str:
+    match = _CSRF_INPUT_RE.search(html)
+    assert match is not None, "expected a hidden csrf_token input in the reveal form"
+    return match.group(1) or match.group(2)
+
+
+def _mint_csrf_token(monkeypatch: Any, client: Any, resume_id: Any) -> str:
+    """GET the résumé-detail page (which must be blinded, so the reveal form —
+    and its token — is rendered) and pull the freshly-minted ``csrf_token``
+    hidden-input value out of the response body. Mints the token bound to
+    whichever session ``client`` is carrying cookies for."""
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    return _extract_csrf_token(body)
 
 
 # ── section rendering ────────────────────────────────────────────────────
@@ -325,14 +364,19 @@ def test_resume_reveal_shows_identity_and_audit_notice(
     monkeypatch: Any, client: Any
 ) -> None:
     """FU-1: POST /resumes/<id>/reveal renders the UN-blinded identity and the
-    audit notice. This is the ONE render path that surfaces ``candidate.*``."""
+    audit notice. This is the ONE render path that surfaces ``candidate.*``.
+    FU-4/D4: requires a valid one-shot CSRF token, minted by the preceding
+    GET."""
     resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
     monkeypatch.setattr(
         api_client,
         "reveal_resume",
         MagicMock(return_value=_resume(resume_id, with_pii=True)),
     )
-    raw = client.post(f"/resumes/{resume_id}/reveal").get_data(as_text=True)
+    raw = client.post(
+        f"/resumes/{resume_id}/reveal", data={"csrf_token": token}
+    ).get_data(as_text=True)
     assert _REAL_NAME in raw
     assert _REAL_EMAIL in raw
     assert _REAL_PHONE in raw
@@ -343,11 +387,17 @@ def test_resume_reveal_forwards_context_from_form(
     monkeypatch: Any, client: Any
 ) -> None:
     """A reveal triggered from the shortlist card posts ``context=shortlist``;
-    the route forwards it so the audit row records the true origin."""
+    the route forwards it so the audit row records the true origin. FU-4/D4:
+    also requires a valid CSRF token alongside ``context``."""
     resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
     spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
     monkeypatch.setattr(api_client, "reveal_resume", spy)
-    client.post(f"/resumes/{resume_id}/reveal", data={"context": "shortlist"})
+    client.post(
+        f"/resumes/{resume_id}/reveal",
+        data={"context": "shortlist", "csrf_token": token},
+    )
+    spy.assert_called_once()
     assert spy.call_args.kwargs["context"] == "shortlist"
 
 
@@ -355,9 +405,11 @@ def test_resume_reveal_context_defaults_to_resume_detail(
     monkeypatch: Any, client: Any
 ) -> None:
     resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
     spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
     monkeypatch.setattr(api_client, "reveal_resume", spy)
-    client.post(f"/resumes/{resume_id}/reveal")
+    client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
+    spy.assert_called_once()
     assert spy.call_args.kwargs["context"] == "resume_detail"
 
 
@@ -365,13 +417,20 @@ def test_resume_reveal_uses_audited_endpoint_not_raw_reveal(
     monkeypatch: Any, client: Any
 ) -> None:
     """The reveal must go through ``reveal_resume`` (POST, which audits), NOT a
-    raw ``get_resume(reveal=True)`` that would skip the audit trail."""
+    raw ``get_resume(reveal=True)`` that would skip the audit trail. FU-4/D4:
+    the token-minting GET legitimately calls ``get_resume`` once — reset the
+    spy before the assertion-relevant POST so that call doesn't get
+    conflated with a (forbidden) reveal-time ``get_resume`` call."""
     resume_id = uuid4()
-    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
-    get_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
-    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    get_spy = MagicMock(return_value=_resume(resume_id, with_pii=True, blinded=True))
     monkeypatch.setattr(api_client, "get_resume", get_spy)
-    client.post(f"/resumes/{resume_id}/reveal")
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    token = _extract_csrf_token(body)
+    get_spy.reset_mock()
+
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
     reveal_spy.assert_called_once()
     get_spy.assert_not_called()
 
@@ -405,3 +464,110 @@ def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
         while idx != -1:
             assert gate < idx < elif_marker, f"{token} outside the reveal block"
             idx = template.find(token, idx + 1)
+
+
+# ── FU-4/D4 — CSRF on the reveal form ─────────────────────────────────────
+
+
+def test_resume_detail_get_renders_a_csrf_token_hidden_input(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    token = _extract_csrf_token(body)
+    assert len(token) >= 16
+
+
+def test_resume_reveal_without_a_token_is_rejected_and_backend_never_called(
+    monkeypatch: Any, client: Any
+) -> None:
+    """No token at all (e.g. a cross-site auto-submitting form, which supplies
+    no session cookie's token) → 403, and CRITICALLY the audited reveal call
+    never happens — no reveal_audit row is implied by a rejected forgery."""
+    resume_id = uuid4()
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    resp = client.post(f"/resumes/{resume_id}/reveal")
+    assert resp.status_code == 403
+    reveal_spy.assert_not_called()
+
+
+def test_resume_reveal_with_a_garbage_token_is_rejected_and_backend_never_called(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    _mint_csrf_token(monkeypatch, client, resume_id)  # a real token now exists…
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    # …but we submit a different, made-up value instead of it.
+    resp = client.post(
+        f"/resumes/{resume_id}/reveal", data={"csrf_token": "not-the-real-token"}
+    )
+    assert resp.status_code == 403
+    reveal_spy.assert_not_called()
+
+
+def test_resume_reveal_with_a_token_from_a_different_session_is_rejected(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A token minted for one browser session must not validate a POST arriving
+    with a different session's cookie — the token is session-bound."""
+    resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
+    other_client = app.test_client()
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    resp = other_client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
+    assert resp.status_code == 403
+    reveal_spy.assert_not_called()
+
+
+def test_resume_reveal_with_a_valid_token_succeeds(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    resp = client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
+    assert resp.status_code == 200
+    reveal_spy.assert_called_once()
+    assert _REAL_NAME in resp.get_data(as_text=True)
+
+
+def test_resume_reveal_token_is_single_use(monkeypatch: Any, client: Any) -> None:
+    resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+
+    first = client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
+    assert first.status_code == 200
+
+    second = client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
+    assert second.status_code == 403
+    reveal_spy.assert_called_once()  # still just the one successful call
+
+
+def test_resume_reveal_cross_origin_request_is_rejected_even_with_a_valid_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The Origin/Referer same-origin check is layered ON TOP of the token, not
+    instead of it: a cross-origin Origin header must reject the request even
+    when the (correct, unconsumed) token is present."""
+    resume_id = uuid4()
+    token = _mint_csrf_token(monkeypatch, client, resume_id)
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    resp = client.post(
+        f"/resumes/{resume_id}/reveal",
+        data={"csrf_token": token},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    reveal_spy.assert_not_called()
