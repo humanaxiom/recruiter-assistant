@@ -1,10 +1,10 @@
 # ADR-018: RBAC — Keyed Roles (FU-4)
 
 **Status:** Accepted (closes ADR-016's R1, R2, R5 — R2's closure goes further than ADR-016 recorded,
-see §6; the Flask-side R5 fix, §8, is design-locked but not yet landed on this branch — see the note
-at the end of §8. Touches no ranking/scoring code (`pipeline/matching/*`, `stages.py`,
-`orchestrator.py`, `matching_tasks.py` are byte-unchanged) and does not change the at-rest PII
-posture — ADR-007 §6/§7 and ADR-010 §6 stand exactly as recorded.)
+see §6; the Flask-side R5 fix, §8, has landed (`core/frontend/csrf.py`, `08a6edf`) and was amended
+twice post-landing (`b0634bd`, `ea31123`) — see §8. Touches no ranking/scoring code
+(`pipeline/matching/*`, `stages.py`, `orchestrator.py`, `matching_tasks.py` are byte-unchanged) and
+does not change the at-rest PII posture — ADR-007 §6/§7 and ADR-010 §6 stand exactly as recorded.)
 **Date:** 2026-07-19
 
 ## Context
@@ -165,25 +165,76 @@ The real exposure is the **Flask hop**. The browser supplies no credential of it
 /resumes/<id>/reveal` (`core/frontend/app.py`) — Flask attaches its own server-held recruiter key on
 the *outbound* leg to the backend (`api_client.build_client`, §9) — so Flask itself cannot
 distinguish a forged cross-site auto-submitting form from a real click; both arrive at the Flask
-route as an ordinary authenticated-by-Flask POST. The fix is a **session-bound, one-shot
-anti-forgery token**: `secrets.token_urlsafe`, stored in Flask's existing signed session (already in
-use for `flash()`), issued on `GET /resumes/<id>` and rendered as a hidden `csrf_token` input in the
-reveal form, and consumed exactly once (popped from the session unconditionally, whether or not it
-matched) via `secrets.compare_digest` on `POST /resumes/<id>/reveal`. An `Origin`/`Referer`
-same-origin check is layered on top as defense-in-depth, evaluated independently and checked first —
-not as the primary control, since the token alone is sufficient. The token **carries no identity** —
-it is not a login, not an authorization input, and does not touch the backend's role model at all; it
-only proves the POST originated from a page the same Flask session actually rendered.
+route as an ordinary authenticated-by-Flask POST. The fix, `core/frontend/csrf.py`, is a
+**session-bound, one-shot anti-forgery token, scoped per résumé id**, stored in Flask's existing
+signed session (already in use for `flash()`), issued on `GET /resumes/<id>` (and on each shortlist
+card render) and rendered as a hidden `csrf_token` input in the reveal form, checked on `POST
+/resumes/<id>/reveal` before `api_client.reveal_resume` is ever called. The token carries no
+identity — it is not a login, not an authorization input, and does not touch the backend's role model
+at all; it only proves the POST originated from a page the same Flask session actually rendered. It
+landed in `08a6edf` and was amended twice on the same branch before merge, both amendments driven by
+defects the first cut didn't anticipate.
 
-**Implementation status at the time of writing:** this design is locked (it is fully specified,
-field-name-and-all, by the test contract in `core/tests/unit/test_frontend_csrf.py` and the
-route-level assertions in `core/tests/unit/test_frontend_resume_detail.py`), but as of this ADR only
-the RED half of that TDD cycle exists on `feat/fu4-rbac` — `core/frontend/csrf.py` has not yet been
-created, `core/frontend/app.py`'s `resume_reveal` route does not yet call `same_origin` or
-`verify_and_consume`, and `resume_detail.html`'s reveal `<form>` does not yet render the hidden
-`csrf_token` input. The GREEN implementation is expected as a fast-follow commit on this same branch;
-this ADR is not evidence that it has landed. Do not treat §8 as closed until `frontend/csrf.py`
-exists and the route/template wiring above is in place.
+**Per-résumé scoping (`b0634bd`), not per-session.** The first cut stored one bare token under a
+single session key. The FU-1 reveal button appears on *every* shortlist card, all posting to the same
+`resume_reveal` route: minting a token for one card silently invalidated every other card's
+already-rendered token (only the most-recently-issued token was ever valid, session-wide), so only
+the first reveal a recruiter clicked worked — every other card 403'd until a full page reload
+re-minted a fresh single token. This was a functional regression on the primary FU-1 workflow, not a
+cosmetic one, and the HTMX poll that would otherwise mint a fresh token stops once ranked shortlist
+entries exist — exactly the point at which users start clicking reveal. The fix scopes the session
+mapping by résumé id: `SESSION_KEY` now holds a `<mapping-key> -> <token>` dict, one entry per résumé,
+each independently one-shot. `verify_and_consume` pops *only* that résumé's entry unconditionally
+(matched or not) — an anti-oracle property: a wrong-token guess burns that résumé's slot exactly like
+a correct one, so a forged attempt cannot be replayed against a still-live slot, and a misdirected
+attempt (résumé A's token posted against résumé B) fails without disturbing A's own entry.
+
+**The cookie byte budget (`ea31123`).** Amendment 1's first cut keyed the per-résumé mapping by the
+raw ~36-char résumé UUID and used a full `secrets.token_urlsafe(32)` (43-char) token — measured
+against the real itsdangerous-signed session serializer, ~85 bytes/entry. Random tokens do not
+compress (itsdangerous' zlib step buys nothing on high-entropy bytes, and base64 adds a third on top
+of the raw 32 bytes), so a full `MAX_TOKENS_PER_SESSION = 64` mapping serialized to ~5.2 KB — over the
+~4093-byte ceiling most browsers silently enforce on a single cookie (measured: ~4,090 B already at 49
+entries, over at 50). **Browsers do not error on an oversized cookie — they silently drop it**, which
+empties the whole session and 403s every subsequent reveal: the exact per-session-single-token
+regression Amendment 1 exists to fix, re-triggered at full shortlist size, since shortlist rows are
+structurally capped at the stage-1 `k=50` oversample (ADR-012 SEC-3) and a full shortlist render was
+exactly the scenario that overflowed. The original cap was chosen by reasoning about entropy, not by
+measuring the serialized cookie — that reasoning was correct about the security property (128 bits is
+ample) and silently wrong about the size budget. **The lesson for the next person who changes the
+token size or the cap: measure the actual signed cookie, don't re-derive an estimate.**
+
+The fix shrinks each entry instead of the cap: the token is `secrets.token_urlsafe(16)` (22 chars,
+still 128 bits — unchanged entropy, half the bytes), and the mapping key is the first 12 hex
+characters of `hashlib.sha256(str(resume_id).encode()).hexdigest()` (48 bits) instead of the raw UUID
+string. This drops each entry to ~38 bytes; **measured at `MAX_TOKENS_PER_SESSION = 64` the real
+signed cookie now serializes to ~2,440 B**, comfortably under the ~4093-byte ceiling. A regression
+test, `test_serialized_session_cookie_stays_under_the_4093_byte_ceiling_at_cap`
+(`core/tests/unit/test_frontend_csrf.py`), fills the mapping to the cap via the real `issue_token` and
+measures the actual itsdangerous-signed cookie value Flask would emit — not a re-derived estimate —
+and pins it under 4093 B (with a tighter 3500 B check that would catch a partial shrink, e.g. only the
+token or only the key shrinking).
+
+Truncating the mapping key to 12 hex characters (48 bits) introduces an accepted collision surface: at
+`MAX_TOKENS_PER_SESSION = 64` concurrent entries the birthday-bound collision probability is
+~4.5×10⁻¹³. Not defended against — doing so would require a reverse mapping back to the original
+résumé id, defeating the point of hashing at all — but pinned by test
+(`test_forced_key_collision_does_not_duplicate_the_mapping_entry`,
+`test_forced_key_collision_invalidates_the_earlier_resumes_stale_token`) to degrade gracefully: a
+collision silently overwrites the earlier entry, exactly as if that résumé's own token had been
+re-issued, never duplicates an entry or grows the mapping unboundedly, and never corrupts other
+entries.
+
+`MAX_TOKENS_PER_SESSION = 64`, unchanged by either amendment — 50 clears a full shortlist render with
+headroom for a couple of other open résumé tabs in the same browser session. Eviction on overflow is
+strict FIFO by issue order (the oldest entry is dropped first; re-issuing an existing résumé's token
+keeps that résumé's original position rather than promoting it).
+
+An `Origin`/`Referer` `same_origin` check is layered on top as defense-in-depth, evaluated
+independently of the token (checked first in the route, `abort(403)` before `verify_and_consume` is
+even called) — never the primary control, since the token alone is sufficient. It prefers `Origin`
+over `Referer` when both are present, and blocks only when a cross-origin header is actually present;
+an absent `Origin`/`Referer` is not a block.
 
 ## Consequences
 
@@ -240,6 +291,13 @@ exists and the route/template wiring above is in place.
   there is no third party to protect), which means it is the one read path in the API that is not
   blind-review-aware — keeping it behind the narrower writer set is the compensating control for that
   standing decision, not a new restriction invented here.
+- **CSRF tokens live in a client-side signed cookie, capping concurrent reveal targets per session at
+  `MAX_TOKENS_PER_SESSION = 64`** (§8). A user with more than 64 résumés' reveal forms open at once
+  across tabs in one browser session loses the oldest tokens to FIFO eviction and must re-render that
+  page to reveal it — a full shortlist render (≤50 rows, ADR-012 SEC-3) always fits with headroom, so
+  this only bites a user deliberately keeping many résumé-detail tabs open simultaneously. A
+  server-side (Redis-backed) token store was considered as the alternative that removes the cap
+  entirely and deferred as out of FU-4's scope (see Alternatives Considered).
 
 ### ADR-016 residuals closed by this feature
 
@@ -249,9 +307,9 @@ exists and the route/template wiring above is in place.
   ADR-016 described**: ADR-016's R2 named only the résumé-detail GET; building this feature also
   found and closed the same defect, at a larger blast radius, on `GET
   /jobs/{id}/shortlist/export` (§6).
-- **R5 — no CSRF token on the reveal POST.** Closed by design (§8); the backend half is closed as a
-  structural consequence of enabling keyed-role auth, the Flask half by the session-bound token —
-  but see §8's implementation-status note: the Flask-side fix has not landed on this branch yet.
+- **R5 — no CSRF token on the reveal POST.** Closed (§8): the backend half is closed as a structural
+  consequence of enabling keyed-role auth, the Flask half by the per-résumé, session-bound one-shot
+  token in `core/frontend/csrf.py` (`08a6edf`, amended `b0634bd`/`ea31123`).
 
 Still open, unchanged by this feature: ADR-016's **R3** (no reveal-audit viewer — the `auditor` role
 this ADR adds has nothing to view yet) and **R4** (unredacted `source_context` on reveal).
@@ -287,3 +345,10 @@ this ADR adds has nothing to view yet) and **R4** (unredacted `source_context` o
   `recruiter` role key presented for every browser — rejected for this feature: there is no Postgres
   user table anywhere in this codebase to authenticate against, and building one is out of scope for
   route-level RBAC. Recorded as an accepted residual, not solved here.
+- **A server-side (Redis-backed) CSRF token store** instead of storing per-résumé tokens in the
+  signed Flask session cookie (§8) — considered, deferred: it would remove the 64-token-per-session
+  cap and the cookie-byte-budget constraint entirely, but the codebase's only existing Redis usage is
+  the arq broker (per CLAUDE.md, "Redis only as arq broker"), so this would be a new use of the
+  dependency for a problem the session-scoped shrink (`ea31123`) already solves at the realistic
+  scale (a ≤50-row shortlist render). Left as a follow-up if the 64-entry cap is ever actually hit in
+  practice, not built speculatively here.
