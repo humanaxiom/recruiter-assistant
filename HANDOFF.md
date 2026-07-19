@@ -731,21 +731,39 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-**The v1 extraction plan is fully delivered, and the post-v1 Workflow UI feature has now shipped on top of
-it.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0 (PR #1, `8b2b47c`), Phase 1
-(PR #2, `f7e7cbe`), Phase 2 (PR #3, `cefd545`), Phase 3 (PR #6, `49196d7`), Phase 4a–4d
-(PR #8/#10/#11/#12/#13), Phase 5 (PR #14, `6deade3`), Phase 6 (PR #15, `e910669`), Phase 7 (PR #16,
-`1039e5c`). **There is no Phase 8** — `docs/EXTRACTION_PLAN.md`'s phase table intentionally ends at Phase
-7, and nothing in this file should be read as auto-starting further numbered-phase work. The Workflow UI
-(above) is tracked as a named feature, not a phase.
+**The v1 extraction plan is fully delivered, and FIVE post-v1 features have shipped on top of it: the
+Workflow UI, then FU-1/FU-2/FU-3.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0
+(PR #1, `8b2b47c`), Phase 1 (PR #2, `f7e7cbe`), Phase 2 (PR #3, `cefd545`), Phase 3 (PR #6, `49196d7`),
+Phase 4a–4d (PR #8/#10/#11/#12/#13), Phase 5 (PR #14, `6deade3`), Phase 6 (PR #15, `e910669`), Phase 7
+(PR #16, `1039e5c`). **There is no Phase 8** — `docs/EXTRACTION_PLAN.md`'s phase table intentionally ends
+at Phase 7. **Post-v1, all merged to `main`, CI green:** the **Workflow UI** (PR #18, `3eba9cf`, ADR-014),
+**FU-2** evidence chunk expansion (PR #19, `8d7ce0b`, ADR-015), **FU-1** audited reveal + cover-letter file
+upload (PR #20, `bc055f4`, ADR-016), and **FU-3** bulk ingest (PR #21, `e033d31`, ADR-017). **The single
+remaining planned item is FU-4 — RBAC** (see "Workflow-UI enhancements" and the FU-4 bullet below). Each
+post-v1 feature is a named feature, not a numbered phase.
 
-### Planned follow-ups — user-requested Workflow-UI enhancements (added 2026-07-17)
+### Workflow-UI enhancements — FU-1, FU-2, FU-3 ✅ ALL MERGED (FU-4 remains)
 
-These three are **explicitly requested** (not a generic options list) while PR #18 is under review — build after #18 merges (they build on #18's code). **User-confirmed build order (2026-07-17): FU-2 → FU-1 → FU-3.** They expand/supersede the generic "reverse-match UI" and "deferred connectors" bullets below.
+The three user-requested enhancements (built order FU-2 → FU-1 → FU-3) are **all merged to `main`, CI
+green**: **FU-2** evidence chunk-id expansion (PR #19, merge `8d7ce0b`, ADR-015), **FU-1** audited reveal +
+cover-letter file upload + reveal-on-shortlist-card (PR #20, merge `bc055f4`, ADR-016), **FU-3** bulk ingest
+(PR #21, merge `e033d31`, ADR-017). **The only remaining planned item is FU-4 — RBAC** (below). The
+original per-FU detail is retained below for history; each is now DONE.
 
-**Blind-review model (user-confirmed 2026-07-17, matches hris):** blind is ON at every step by default; identity is exposed only through an explicit, **audited** reveal (FU-1). **RBAC is a SEPARATE task** (FU-4 below) — it was mandated in the early system design but never implemented; FU-1's reveal ships with the audit log first, and RBAC (who is *permitted* to reveal) layers on top afterward.
+**Blind-review model (user-confirmed 2026-07-17, matches hris) — now LIVE:** blind is ON at every step by
+default; identity is exposed only through an explicit, **audited** reveal (FU-1, shipped: `reveal_audit`
+sink + `POST /resumes/{id}/reveal` + a "Reveal identity (audited)" button on the résumé page AND each
+shortlist card). **RBAC is a SEPARATE task** (FU-4 below) — mandated in the early design, still not
+implemented; FU-1's reveal shipped audited-first, and RBAC (who is *permitted* to reveal, closing FU-1
+residuals R1/R2/R5 in ADR-016) layers on top.
 
-- **FU-1 — Full résumé reveal from the shortlist (AUDITED).** Clicking the candidate label
+- **FU-1 — Audited reveal — ✅ MERGED (PR #20, merge `bc055f4`, ADR-016).** Shipped: `reveal_audit`
+  append-only sink + `POST /resumes/{id}/reveal` (records actor/resume/timestamp, returns the un-blinded
+  résumé) + a "Reveal identity (audited)" button on the résumé detail AND each shortlist card (`context`
+  distinguishes origin). Also folded into #20: cover-letter **file** upload (blob-stored, worker-parsed).
+  Residuals R1 (no RBAC), R2 (unaudited `GET ?reveal=true` still exists), R5 (no CSRF token) are closed by
+  FU-4. Original spec below (now delivered):
+  Clicking the candidate label
   ("Candidate A") on a shortlist card reveals the full, un-blinded résumé (name/email/phone/employers/
   schools/grad years). **This deliberately reverses the blind-only frontend posture** locked in
   ADR-013/014 — the user reversed that decision on 2026-07-17. Backend already supports it:
@@ -757,7 +775,11 @@ These three are **explicitly requested** (not a generic options list) while PR #
   Record the reversal + the audit control in a new ADR (015). Keep the blind byte-scan tests on the
   default (non-reveal) paths.
 
-- **FU-2 — Evidence: expand chunk ids to actual content.** The evidence export (`shortlist_evidence_csv`)
+- **FU-2 — Evidence chunk expansion — ✅ MERGED (PR #19, merge `8d7ce0b`, ADR-015).** Shipped: a pure
+  `_resolve_chunk_context` resolver + an `evidence_context` CSV column + a source-text collapsible in the
+  shortlist cards, redacted under blind/anon (resolve-before-pseudonym ordering) and full under reveal.
+  Original spec below (now delivered):
+  The evidence export (`shortlist_evidence_csv`)
   and the UI evidence `<details>` panel show opaque `evidence_chunk_ids` (`c_001`). Resolve each id → its
   real chunk text from `resumes.parsed.chunks[]` (`id → {section, text}`) and show that instead of / next
   to the id. **Redaction-aware**: under anonymized export / blind view the expanded chunk text runs
@@ -765,7 +787,8 @@ These three are **explicitly requested** (not a generic options list) while PR #
   path (`shortlist_service.export_rows` / `shortlist_evidence_csv`) needs the résumé chunks joined in to
   resolve ids — today it likely doesn't; add a chunk-id→text resolver with redaction applied.
 
-- **FU-3 — Bulk ingest — ✅ BUILT (2026-07-18), on `feat/fu3-bulk-ingest`, all gates green, PR pending.**
+- **FU-3 — Bulk ingest — ✅ MERGED (PR #21, merge `e033d31`, ADR-017).** All gates green (reviewer APPROVE,
+  security PASS, ranking-evals PASS), live-verified against the `hris/fixtures/llm_split` sample PDFs.
   Five slices shipped: (1) shortlist "Generating… forever" fix + Generate-gated-until-parsed + parse hint;
   (2) per-résumé cover-letter pairing by filename convention (new pure `bulk_ingest_service.py`) + results
   summary; (3) `manifest.json` pairing (precedence over convention); (4) bulk JD upload (`POST /jobs/bulk`,
