@@ -225,7 +225,7 @@ collision silently overwrites the earlier entry, exactly as if that résumé's o
 re-issued, never duplicates an entry or grows the mapping unboundedly, and never corrupts other
 entries.
 
-`MAX_TOKENS_PER_SESSION = 64`, unchanged by either amendment — 50 clears a full shortlist render with
+`MAX_TOKENS_PER_SESSION = 64`, unchanged by either amendment — 64 clears a full shortlist render with
 headroom for a couple of other open résumé tabs in the same browser session. Eviction on overflow is
 strict FIFO by issue order (the oldest entry is dropped first; re-issuing an existing résumé's token
 keeps that résumé's original position rather than promoting it).
@@ -309,6 +309,13 @@ an absent `Origin`/`Referer` is not a block.
   and a new token is minted. This fails **closed**: the forged request never reveals anything itself
   and cannot forge a valid token for the attacker to replay, it can only deny a legitimate reveal the
   victim was about to make.
+- **`shortlist_service.export_rows`'s `reveal=True` branch (and the `reveal=True` branches it feeds
+  in `_apply_reveal`/`_attach_export_context`) has no production caller.** §6's route-level removal of
+  the export route's `reveal` query param (bulk exports are now blind-only, hardcoded `reveal=False`)
+  left the service-layer parameter and its un-blind code paths reachable only from unit tests. The
+  parameter is deliberately kept, not deleted — it is the un-exercised capability a future audited
+  bulk-export route (its own POST route with its own reveal-audit trail, per the note in §6) would call
+  into — so this is retained-but-currently-dead production capability, not dead code to be pruned.
 
 ### ADR-016 residuals closed by this feature
 

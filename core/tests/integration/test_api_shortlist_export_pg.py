@@ -212,6 +212,11 @@ async def test_export_csv_reads_a_row_actually_written_by_persist_shortlist(
     assert len(rows) == 1
     # FU-4/D3: exports are blind-only; reveal parameter is retired
     assert "Jane Smith" not in resp.text
+    # The row round-tripped through persist_shortlist with its real name
+    # ("Jane Smith") intact, then got blind-redacted to the rank-1 pseudonym
+    # by the export route — proving the round trip on candidate_name itself,
+    # not just on score_final.
+    assert rows[0]["candidate_name"] == "Candidate A"
     assert float(rows[0]["score_final"]) == pytest.approx(0.91)
 
 

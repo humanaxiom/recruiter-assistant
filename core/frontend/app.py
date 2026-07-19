@@ -444,7 +444,7 @@ def blind_review(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
-def _mint_card_tokens(entries: Any) -> dict[str, str]:
+def _mint_card_tokens(entries: list[dict[str, Any]] | None) -> dict[str, str]:
     """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
 
     Returns a ``str(resume_id) -> token`` mapping the card template indexes by

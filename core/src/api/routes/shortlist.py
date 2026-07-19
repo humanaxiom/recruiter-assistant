@@ -71,18 +71,17 @@ async def export_shortlist(
         await set_pii_key(db)
         rows = await shortlist_service.export_rows(db, job_id=job_id, reveal=False)
 
-    anon_suffix = "-anon"
     if format == "csv":
         content = shortlist_service.shortlist_csv(rows)
-        filename = f"shortlist-{job_id}{anon_suffix}.csv"
+        filename = f"shortlist-{job_id}-anon.csv"
         media_type = "text/csv"
     elif format == "evidence-csv":
         content = shortlist_service.shortlist_evidence_csv(rows)
-        filename = f"shortlist-{job_id}-evidence{anon_suffix}.csv"
+        filename = f"shortlist-{job_id}-evidence-anon.csv"
         media_type = "text/csv"
     else:
         content = shortlist_service.shortlist_json(rows)
-        filename = f"shortlist-{job_id}{anon_suffix}.json"
+        filename = f"shortlist-{job_id}-anon.json"
         media_type = "application/json"
 
     return Response(
