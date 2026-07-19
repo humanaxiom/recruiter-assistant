@@ -29,13 +29,14 @@ actually present, and stays silent when neither header exists.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from typing import Any
 from urllib.parse import urlsplit
 
 import flask
 
-#: Flask-session key holding the ``resume_id -> token`` mapping.
+#: Flask-session key holding the ``hashed resume_id -> token`` mapping.
 SESSION_KEY = "_csrf_token"
 
 #: Form field name rendered as a hidden input and read from ``request.form``.
@@ -48,12 +49,32 @@ FORM_FIELD = "csrf_token"
 #: still bounding the signed session cookie well inside the ~4KB ceiling.
 MAX_TOKENS_PER_SESSION = 64
 
-#: Entropy of a minted token, in bytes (URL-safe base64 expands this ~1.3x).
-_TOKEN_BYTES = 32
+#: Entropy of a minted token, in bytes (URL-safe base64 expands this ~1.3x, so
+#: 16 bytes -> a 22-char token). 128 bits is ample for a one-shot anti-forgery
+#: value, and the byte count is load-bearing for the cookie budget below.
+_TOKEN_BYTES = 16
+
+#: Hex characters of the sha256 digest kept as the mapping key. 12 hex chars is
+#: 48 bits; at :data:`MAX_TOKENS_PER_SESSION` concurrent entries the birthday
+#: bound puts a collision at ~4.5e-13, an accepted residual risk (a collision
+#: degrades exactly like re-issuing the same résumé's token: the later mint
+#: overwrites the earlier slot).
+_KEY_HEX_CHARS = 12
+
+
+def _session_key_for(resume_id: Any) -> str:
+    """Derive the mapping key for ``resume_id``.
+
+    Hashing keeps each entry ~12 bytes instead of a raw ~36-char UUID string:
+    the signed session cookie must stay inside the ~4093-byte ceiling browsers
+    silently enforce, and an oversized cookie is DROPPED rather than rejected —
+    which would empty the session and 403 every reveal.
+    """
+    return hashlib.sha256(str(resume_id).encode("utf-8")).hexdigest()[:_KEY_HEX_CHARS]
 
 
 def _mapping() -> dict[str, str]:
-    """Return the session's ``resume_id -> token`` mapping, coercing junk.
+    """Return the session's ``hashed resume_id -> token`` mapping, coercing junk.
 
     A session written by the previous per-session design held a bare token
     string under ``SESSION_KEY``; anything that is not a ``str -> str`` mapping
@@ -79,7 +100,7 @@ def issue_token(resume_id: Any) -> str:
     that résumé's original position rather than promoting it). Must be called
     inside an active Flask request context.
     """
-    key = str(resume_id)
+    key = _session_key_for(resume_id)
     mapping = _mapping()
     if key not in mapping:
         while len(mapping) >= MAX_TOKENS_PER_SESSION:
@@ -103,7 +124,7 @@ def verify_and_consume(resume_id: Any, submitted: str | None) -> bool:
     burning A's rightful slot. Never raises: a missing, empty or non-ASCII
     submission is simply ``False``.
     """
-    key = str(resume_id)
+    key = _session_key_for(resume_id)
     mapping = _mapping()
     stored = mapping.pop(key, None)
     flask.session[SESSION_KEY] = mapping
