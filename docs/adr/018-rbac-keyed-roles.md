@@ -281,6 +281,10 @@ an absent `Origin`/`Referer` is not a block.
   effectively a single-role client, and a browser-side user has no distinct identity at the backend
   at all. Recruiter was chosen as that one role because it is the narrowest role that still supports
   every workflow the viewer exposes (job/résumé writes, the audited reveal) without granting admin.
+  This also degrades reveal-audit attribution: Flask never sends `X-Actor-Name` on its outbound
+  requests, so every browser-originated reveal writes `reveal_audit.actor = "api"`, identifying
+  neither the human who clicked reveal nor even a distinct client. Pre-existing from ADR-016, not
+  worsened by this feature, but previously unmentioned as a residual.
 - **`auditor` has no capability of its own yet.** It receives exactly the same blind reads as
   `hiring_manager` — read-only, no reveal, no writes. Revisit once a `reveal_audit`-viewing endpoint
   exists (ADR-016's own R3, still open) for the auditor role to actually audit against.
@@ -298,6 +302,13 @@ an absent `Origin`/`Referer` is not a block.
   this only bites a user deliberately keeping many résumé-detail tabs open simultaneously. A
   server-side (Redis-backed) token store was considered as the alternative that removes the cap
   entirely and deferred as out of FU-4's scope (see Alternatives Considered).
+- **CSRF's FIFO eviction is a targetable nuisance, not a bypass.** A cross-site `<img>`/iframe GET
+  forced against `/resumes/<id>` mints a fresh per-résumé token in the victim's own session (token
+  issuance has no side effect beyond that) and, at the 64-entry cap, evicts the victim's oldest live
+  token to make room — which can 403 a subsequent genuine reveal attempt until the page is reloaded
+  and a new token is minted. This fails **closed**: the forged request never reveals anything itself
+  and cannot forge a valid token for the attacker to replay, it can only deny a legitimate reveal the
+  victim was about to make.
 
 ### ADR-016 residuals closed by this feature
 

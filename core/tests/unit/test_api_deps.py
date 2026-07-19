@@ -257,6 +257,44 @@ async def test_resolve_role_compares_via_secrets_compare_digest_not_eq(
             assert isinstance(arg, bytes)
 
 
+@pytest.mark.asyncio
+async def test_resolve_role_does_not_short_circuit_after_the_first_match(
+    monkeypatch: Any,
+) -> None:
+    """``resolve_role`` must compare EVERY configured role key on every
+    request, even after it has already found a match — never stop early.
+
+    All four role keys are configured, and the presented key is
+    ``api_key_admin``'s value: the FIRST candidate ``_configured_role_keys``
+    yields. A short-circuit (``break``/early ``return`` right after the
+    match) would stop the loop after exactly one ``secrets.compare_digest``
+    call. Comparing all four regardless of where the match falls is what
+    keeps neither response timing nor comparison count from leaking which
+    role a near-miss guess was closest to (see ADR-018 §5)."""
+    import secrets as real_secrets
+
+    from src.api import deps
+
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: _settings(
+            api_key_admin="admin-secret",
+            api_key_recruiter="recruiter-secret",
+            api_key_hiring_manager="hiring-manager-secret",
+            api_key_auditor="auditor-secret",
+        ),
+    )
+    spy = MagicMock(wraps=real_secrets.compare_digest)
+    monkeypatch.setattr(deps.secrets, "compare_digest", spy)
+    result = await deps.resolve_role(x_api_key="admin-secret")
+    assert result == deps.Role.ADMIN
+    assert spy.call_count == 4, (
+        "expected resolve_role to compare all four configured role keys "
+        "even after matching the first one (no short-circuit)"
+    )
+
+
 # ── require_role: per-route allowed-role check ──────────────────────────
 
 
