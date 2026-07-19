@@ -50,9 +50,12 @@
             action="{{ url_for('resume_reveal', resume_id=entry.resume_id) }}"
             style="display:inline">
         <input type="hidden" name="context" value="shortlist">
-        {# FU-4/D4: same one-shot anti-forgery token as the résumé-detail form —
-           this card posts to the SAME guarded `resume_reveal` route. #}
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {# FU-4/D4: this card posts to the SAME guarded `resume_reveal` route as
+           the résumé-detail form, so it carries its OWN one-shot token, minted
+           for THIS card's résumé id — revealing one card cannot invalidate any
+           other card's token. #}
+        <input type="hidden" name="csrf_token"
+               value="{{ (csrf_tokens or {}).get(entry.resume_id|string, '') }}">
         <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
           (audited)</button>
       </form>

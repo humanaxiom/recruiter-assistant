@@ -444,6 +444,23 @@ def blind_review(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+def _mint_card_tokens(entries: Any) -> dict[str, str]:
+    """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
+
+    Returns a ``str(resume_id) -> token`` mapping the card template indexes by
+    its own entry's résumé id, so every card on one render carries an
+    independently valid, independently one-shot token. Entries without a usable
+    ``resume_id`` are skipped rather than minting an unusable slot.
+    """
+    tokens: dict[str, str] = {}
+    for entry in entries or []:
+        resume_id = entry.get("resume_id") if isinstance(entry, dict) else None
+        if resume_id is None:
+            continue
+        tokens[str(resume_id)] = csrf.issue_token(resume_id)
+    return tokens
+
+
 @app.get("/jobs/<uuid:job_id>/shortlist")
 def job_shortlist(job_id: UUID) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the shortlist
@@ -466,9 +483,10 @@ def job_shortlist(job_id: UUID) -> Any:
         any_resume_parsed=_any_resume_parsed(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
-        # The included `shortlist_cards.html` carries a reveal form posting to
-        # the SAME guarded route, so it needs a token too (FU-4/D4).
-        csrf_token=csrf.issue_token(),
+        # The included `shortlist_cards.html` carries one reveal form per card,
+        # all posting to the SAME guarded route, so each card needs its OWN
+        # token keyed by its own résumé id (FU-4/D4).
+        csrf_tokens=_mint_card_tokens(entries),
     )
 
 
@@ -515,9 +533,11 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         entries=entries,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
-        # Each poll re-renders the cards, so re-minting here keeps the token in
-        # the swapped-in DOM in sync with the session's single live slot.
-        csrf_token=csrf.issue_token(),
+        # Each poll re-renders the cards, so re-minting here keeps every card's
+        # token in the swapped-in DOM in sync with its session slot. Re-minting
+        # for a résumé already present overwrites that résumé's slot in place,
+        # so repeated polls cannot grow the mapping or evict unrelated tokens.
+        csrf_tokens=_mint_card_tokens(entries),
     )
 
 
@@ -553,8 +573,9 @@ def resume_detail(resume_id: UUID) -> Any:
         current_year=dt.date.today().year,
         revealed=False,
         # FU-4/D4: mint the one-shot anti-forgery token the reveal form posts
-        # back, so a cross-site auto-submit cannot manufacture an audit row.
-        csrf_token=csrf.issue_token(),
+        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
+        # manufacture an audit row.
+        csrf_token=csrf.issue_token(resume_id),
     )
 
 
@@ -572,7 +593,7 @@ def resume_reveal(resume_id: UUID) -> Any:
     ``reveal_audit`` row."""
     if not csrf.same_origin(request):
         abort(403)
-    if not csrf.verify_and_consume(request.form.get(csrf.FORM_FIELD)):
+    if not csrf.verify_and_consume(resume_id, request.form.get(csrf.FORM_FIELD)):
         abort(403)
     # `context` records WHERE the reveal was triggered (shortlist card vs the
     # résumé page) in the audit row; defaults to the résumé page.
