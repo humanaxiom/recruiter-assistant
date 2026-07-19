@@ -16,8 +16,10 @@ from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
 from src.api.deps import get_arq, require_api_key, resolve_actor
+from src.errors import FileRejectedError
 from src.models.pool import Db
 from src.schemas.jobs import (
+    BulkJobResult,
     JDExtractText,
     JobCreate,
     JobListItem,
@@ -26,9 +28,19 @@ from src.schemas.jobs import (
     JobTransition,
     JobUpdate,
 )
-from src.services import jd_import_service, job_service
+from src.services import bulk_ingest_service, jd_import_service, job_service
+from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+# The bulk-JD extension allowlist for a ``.zip`` of job descriptions — WIDER
+# than the résumé allowlist (adds ``json``), so a JD exported as JSON is
+# accepted. Passed explicitly to ``expand_zip_entries`` so the résumé call site
+# keeps its own default untouched.
+_BULK_JD_ZIP_EXTENSIONS: frozenset[str] = frozenset({"pdf", "docx", "txt", "json"})
+# Cap the raw multipart file count BEFORE any body is read (memory-exhaustion
+# guard) — parity with the résumé route's `_MAX_UPLOAD_FILES`.
+_MAX_BULK_JD_FILES = _MAX_ZIP_ENTRIES
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
@@ -57,6 +69,64 @@ async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
         blob, filename=filename, content_type=file.content_type
     )
     return JDExtractText(filename=filename, text=text, chars=len(text))
+
+
+# Declared BEFORE /jobs/{job_id} so "bulk" never matches as a job id (same
+# reason jd-extract is declared before it).
+@router.post("/jobs/bulk", status_code=status.HTTP_202_ACCEPTED)
+async def bulk_create_jobs(
+    db: Db,
+    arq: Annotated[ArqRedis, Depends(get_arq)],
+    actor: Annotated[str, Depends(resolve_actor)],
+    files: Annotated[list[UploadFile], File()],
+    manifest: Annotated[UploadFile | None, File()] = None,
+) -> list[BulkJobResult]:
+    """Create one draft job per uploaded JD file (txt/json/pdf/docx), OR one
+    entry ending ``.zip`` which is expanded server-side (never client-side)
+    through the hardened ``expand_zip_entries`` and merged into the same batch.
+    An optional CSV ``manifest`` pins per-file metadata (title/department/…).
+
+    Returns **202** with one ``BulkJobResult`` per expanded file
+    (created/duplicate/failed); ``parse_job`` is enqueued ONCE PER CREATED job,
+    mirroring the single-create path. A malformed manifest raises
+    ``ManifestError`` (422); a hostile zip raises 400 — nothing is inserted in
+    either case.
+    """
+    # Reject an oversized batch on COUNT FIRST — before any body is read into
+    # memory or expanded — so a flood of files cannot exhaust memory (mirrors
+    # the résumé upload route's guard).
+    if len(files) > _MAX_BULK_JD_FILES:
+        raise FileRejectedError(
+            f"upload has {len(files)} files; the per-request cap is "
+            f"{_MAX_BULK_JD_FILES}",
+            count=len(files),
+        )
+
+    expanded: list[tuple[str, bytes]] = []
+    for f in files:
+        filename = f.filename or "upload"
+        data = await f.read()
+        if filename.lower().endswith(".zip"):
+            try:
+                expanded.extend(
+                    expand_zip_entries(data, allowed_extensions=_BULK_JD_ZIP_EXTENSIONS)
+                )
+            except ZipRejected as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            expanded.append((filename, data))
+
+    parsed_manifest = None
+    if manifest is not None:
+        parsed_manifest = bulk_ingest_service.parse_csv_manifest(await manifest.read())
+
+    results = await job_service.create_jobs_bulk(
+        db, files=expanded, manifest=parsed_manifest, created_by=actor
+    )
+    for r in results:
+        if r.outcome == "created" and r.job_id is not None:
+            await arq.enqueue_job("parse_job", str(r.job_id))
+    return results
 
 
 @router.get("/jobs")

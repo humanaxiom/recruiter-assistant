@@ -78,6 +78,7 @@ JSONB_PAYLOAD_COLUMNS: tuple[str, ...] = (
 EXPECTED_INDEXES: tuple[str, ...] = (
     "jobs_status_open_idx",
     "jobs_created_at_idx",
+    "jobs_description_sha256_idx",
     "resumes_job_status_idx",
     "resumes_email_hash_idx",
     "resumes_uploaded_at_idx",
@@ -267,6 +268,56 @@ def test_jobs_uses_the_job_status_enum() -> None:
     assert re.search(
         r"status\s+job_status\s+NOT\s+NULL\s+DEFAULT\s+'draft'",
         _table_sql("jobs"),
+        re.IGNORECASE,
+    )
+
+
+def test_jobs_description_sha256_in_create_table() -> None:
+    """FU-3 Slice 4 dedup key — the column is declared in the CREATE TABLE."""
+    assert re.search(r"description_sha256\s+TEXT", _table_sql("jobs"), re.IGNORECASE)
+
+
+def test_jobs_description_sha256_has_an_idempotent_alter() -> None:
+    """RISK 3 — ``CREATE TABLE IF NOT EXISTS`` is a NO-OP against an existing
+    dev/CI volume, so the new column would never appear. A separate, idempotent
+    ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` guarantees it lands. This is a
+    new convention (the port has never used ALTER before)."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"description_sha256\s+TEXT",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one idempotent ALTER for the column"
+
+
+def test_jobs_description_sha256_alter_runs_after_the_create_table() -> None:
+    """The ALTER (and its dependent partial index) must come AFTER the jobs
+    CREATE TABLE so the column exists when they run."""
+    alter_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"description_sha256",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    assert _statement_index("jobs") < alter_idx
+
+
+def test_jobs_description_sha256_index_is_partial() -> None:
+    """The dedup-lookup index skips NULLs (rows predating the backfill)."""
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+jobs_description_sha256_idx\s+"
+        r"ON\s+jobs\s*\(\s*description_sha256\s*\)\s+"
+        r"WHERE\s+description_sha256\s+IS\s+NOT\s+NULL",
+        _all_sql(),
         re.IGNORECASE,
     )
 

@@ -9,18 +9,29 @@
   Blind-boundary: every card surfaces `entry.display_label` ("Candidate A") —
   NEVER a real candidate name/email/phone. No other candidate field is read.
 #}
+{% set a = attempt|default(0) %}
+{% set m = max_attempts|default(400) %}
+{% set polling = (not entries) and (a < m) %}
 <div id="shortlist-cards"
-  {%- if not entries %}
-     hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}"
+  {%- if polling %}
+     hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
-  {% if not entries %}
+  {% if entries %}{# fall through to the cards below #}
+  {% elif polling %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Generating… ranked candidates will appear here.
+    Generating… ranked candidates will appear here (large PDFs can take a minute
+    or two to parse on the local model).
   </p>
   {% else %}
+  <p class="muted">
+    No ranked candidates yet. Make sure the résumés below show
+    <strong>parsed</strong>, then click <strong>Generate</strong> again.
+  </p>
+  {% endif %}
+  {% if entries %}
   {% for entry in entries %}
   {% set sb = entry.score_breakdown or {} %}
   <div class="card candidate-card">

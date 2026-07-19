@@ -21,6 +21,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    flash,
     redirect,
     render_template,
     request,
@@ -144,6 +145,58 @@ def create_job() -> Any:
     return redirect(url_for("job_detail", job_id=job["id"]))
 
 
+@app.post("/jobs/bulk")
+def bulk_create_jobs() -> Any:
+    """Bulk-JD upload: many JD files (or a ``.zip``) plus an optional CSV
+    metadata manifest, forwarded to the backend which creates ONE draft job per
+    file. Renders a created/duplicate/failed summary with a link back to the
+    jobs list. The ``.zip`` is expanded SERVER-side by the backend — we only
+    forward the raw parts, never expand here."""
+    uploads = request.files.getlist("files")
+    files: list[tuple[str, bytes, str]] = [
+        (
+            upload.filename or "upload",
+            upload.read(),
+            upload.content_type or "application/octet-stream",
+        )
+        for upload in uploads
+        if upload.filename
+    ]
+    manifest_upload = request.files.get("manifest")
+    manifest: tuple[str, bytes, str] | None = None
+    if manifest_upload is not None and manifest_upload.filename:
+        manifest = (
+            manifest_upload.filename,
+            manifest_upload.read(),
+            manifest_upload.content_type or "text/csv",
+        )
+    try:
+        results = api_client.bulk_create_jobs(files, manifest=manifest)
+    except api_client.BadRequest as exc:
+        return (
+            render_template(
+                "jobs_bulk.html", results=[], error=_format_error(exc.detail)
+            ),
+            200,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "jobs_bulk.html", results=results, summary=_summarise_bulk(results), error=None
+    )
+
+
+def _summarise_bulk(results: Any) -> dict[str, int]:
+    """Created/duplicate/failed counts for the bulk-JD result summary — mirrors
+    the résumé-upload ``_summarise_upload`` counting pattern."""
+    rows = results if isinstance(results, list) else []
+    return {
+        "created": sum(1 for r in rows if r.get("outcome") == "created"),
+        "duplicate": sum(1 for r in rows if r.get("outcome") == "duplicate"),
+        "failed": sum(1 for r in rows if r.get("outcome") == "failed"),
+    }
+
+
 def _format_error(detail: Any) -> str:
     """Render a backend validation ``detail`` into a short human message."""
     if detail is None:
@@ -176,10 +229,23 @@ _TRANSITION_LABELS: dict[str, str] = {
 _TERMINAL_RESUME_STATUSES = ("parsed", "failed")
 # Defensive cap on the free-text cover letter before it ever hits the network.
 _MAX_COVER_LETTER_CHARS = 20000
+# Bound the shortlist "Generating…" poll so a job that never yields ranked rows
+# (e.g. Generate clicked before any résumé parsed) stops after ~20 min at 3s/poll
+# with a give-up message, instead of polling forever. Matches hris's safety valve.
+_MAX_SHORTLIST_POLL_ATTEMPTS = 400
+# Bound the reverse-match "Finding matching jobs…" poll with the same safety
+# valve/cap as the shortlist poll: reverse_match_job runs asynchronously, so a
+# résumé whose run never lands (or a stack with no worker) stops after the cap
+# with a give-up message instead of polling forever.
+_MAX_MATCH_POLL_ATTEMPTS = 400
 
 
 def _any_resume_pending(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") not in _TERMINAL_RESUME_STATUSES for r in resumes)
+
+
+def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
+    return any(r.get("status") == "parsed" for r in resumes)
 
 
 def _render_job_detail(
@@ -243,13 +309,23 @@ def upload_resumes(job_id: UUID) -> Any:
             cover_upload.read(),
             cover_upload.content_type or "application/octet-stream",
         )
+
+    manifest_upload = request.files.get("pairing_manifest")
+    pairing_manifest: tuple[str, bytes, str] | None = None
+    if manifest_upload is not None and manifest_upload.filename:
+        pairing_manifest = (
+            manifest_upload.filename,
+            manifest_upload.read(),
+            manifest_upload.content_type or "application/json",
+        )
     try:
-        api_client.upload_resumes(
+        results = api_client.upload_resumes(
             job_id,
             files,
             consent_acknowledged=True,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_letter_file,
+            pairing_manifest=pairing_manifest,
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(
@@ -259,7 +335,40 @@ def upload_resumes(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    # Post-upload results summary (flash-style): the recruiter sees what
+    # happened per-file — counts + any pairing warnings — on the job-detail
+    # page they're redirected to. Warnings are the backend's STATIC English
+    # strings, never filename-derived candidate PII.
+    for message in _summarise_upload(results):
+        flash(message)
     return redirect(url_for("job_detail", job_id=job_id))
+
+
+def _summarise_upload(results: Any) -> list[str]:
+    """Build a short human summary from the ``ResumeUploadResult[]`` the backend
+    returns: an accepted/with-cover/duplicate/rejected count line, one line per
+    rejection, and any per-file pairing warnings."""
+    rows = results if isinstance(results, list) else []
+    accepted = [r for r in rows if r.get("outcome") == "accepted"]
+    with_cover = [r for r in accepted if r.get("cover_letter_filename")]
+    duplicate = [r for r in rows if r.get("outcome") == "duplicate"]
+    rejected = [r for r in rows if r.get("outcome") == "rejected"]
+
+    summary = f"{len(accepted)} accepted"
+    if with_cover:
+        summary += f" ({len(with_cover)} with a cover letter)"
+    if duplicate:
+        summary += f", {len(duplicate)} duplicate"
+    if rejected:
+        summary += f", {len(rejected)} rejected"
+    messages = [summary]
+    for r in rejected:
+        reason = r.get("reason") or "rejected"
+        messages.append(f"Rejected {r.get('original_filename')}: {reason}")
+    for r in rows:
+        for warning in r.get("warnings") or []:
+            messages.append(warning)
+    return messages
 
 
 @app.get("/jobs/<uuid:job_id>/resumes-table")
@@ -342,11 +451,22 @@ def job_shortlist(job_id: UUID) -> Any:
     # `shortlist_service.list_for_job` accepting no such parameter either.
     try:
         entries = api_client.list_shortlist(job_id)
+        # Gate "Generate": ranking a job with no parsed résumé yields an empty
+        # shortlist and an endless "Generating…" poll — so disable the button
+        # until at least one résumé has finished parsing.
+        resumes = api_client.list_resumes(job_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("shortlist_list.html", job_id=job_id, entries=entries)
+    return render_template(
+        "shortlist_list.html",
+        job_id=job_id,
+        entries=entries,
+        any_resume_parsed=_any_resume_parsed(resumes),
+        attempt=0,
+        max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+    )
 
 
 @app.post("/jobs/<uuid:job_id>/shortlist")
@@ -369,11 +489,15 @@ def shortlist_cards(job_id: UUID) -> Any:
     """HTMX poll fragment. While the (blind) shortlist read is still empty it
     renders "Generating…" AND keeps its ``hx-trigger`` so the browser re-polls
     every 3s; once ranked entries exist it renders the cards WITHOUT the
-    trigger, so polling stops."""
-    return _render_shortlist_cards(job_id)
+    trigger, so polling stops. A bounded ``attempt`` counter (clamped
+    server-side) stops the poll after ``_MAX_SHORTLIST_POLL_ATTEMPTS`` with a
+    give-up message, so a job that never produces entries doesn't poll forever."""
+    attempt = request.args.get("attempt", default=0, type=int) or 0
+    attempt = max(0, min(attempt, _MAX_SHORTLIST_POLL_ATTEMPTS))
+    return _render_shortlist_cards(job_id, attempt=attempt)
 
 
-def _render_shortlist_cards(job_id: UUID) -> Any:
+def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the card-render
     # read is unconditionally redacted, exactly like the list read above.
     try:
@@ -382,7 +506,13 @@ def _render_shortlist_cards(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("shortlist_cards.html", job_id=job_id, entries=entries)
+    return render_template(
+        "shortlist_cards.html",
+        job_id=job_id,
+        entries=entries,
+        attempt=attempt,
+        max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+    )
 
 
 @app.get("/shortlist/<uuid:entry_id>")
@@ -445,13 +575,72 @@ def resume_reveal(resume_id: UUID) -> Any:
 
 @app.get("/resumes/<uuid:resume_id>/match-results")
 def resume_match_results(resume_id: UUID) -> Any:
+    # Full-page view of the (candidate→jobs) reverse match. No redaction on this
+    # path (ADR-012 §4 — the caller owns the résumé; jobs are not PII), so no
+    # `reveal` kwarg is ever passed. Renders the pollable cards fragment so an
+    # in-flight run keeps filling in as ranked jobs land.
     try:
         results = api_client.get_match_results(resume_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("match_results.html", results=results)
+    return render_template(
+        "match_results.html",
+        resume_id=resume_id,
+        results=results,
+        attempt=0,
+        max_attempts=_MAX_MATCH_POLL_ATTEMPTS,
+    )
+
+
+@app.post("/resumes/<uuid:resume_id>/match-jobs")
+def resume_match_jobs(resume_id: UUID) -> Any:
+    """Enqueue the reverse-match job, then return the pollable match-results
+    fragment. POST-only: a side-effecting trigger must never be a prefetchable
+    GET. ``reverse_match_job`` runs asynchronously on the backend, so the
+    fragment comes back empty → it shows "Finding matching jobs…" and keeps its
+    ``hx-trigger`` until the ranked jobs appear (mirrors ``generate_shortlist``)."""
+    try:
+        api_client.trigger_reverse_match(resume_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _render_match_cards(resume_id)
+
+
+@app.get("/resumes/<uuid:resume_id>/match-results-cards")
+def resume_match_results_cards(resume_id: UUID) -> Any:
+    """HTMX poll fragment (mirrors ``shortlist_cards``). While the reverse-match
+    read is still empty AND the run is not yet done it renders "Finding matching
+    jobs…" AND keeps its ``hx-trigger`` so the browser re-polls every 3s; once
+    ranked jobs exist it renders them WITHOUT the trigger, so polling stops. A
+    bounded ``attempt`` counter (clamped server-side) stops the poll after
+    ``_MAX_MATCH_POLL_ATTEMPTS`` with a give-up message, so a run that never
+    lands doesn't poll forever."""
+    attempt = request.args.get("attempt", default=0, type=int) or 0
+    attempt = max(0, min(attempt, _MAX_MATCH_POLL_ATTEMPTS))
+    return _render_match_cards(resume_id, attempt=attempt)
+
+
+def _render_match_cards(resume_id: UUID, *, attempt: int = 0) -> Any:
+    # No redaction on this path (ADR-012 §4): the caller owns the résumé and
+    # jobs are not PII, so real job titles/departments are shown here — this is
+    # correct, unlike the blind shortlist. No `reveal` kwarg is ever passed.
+    try:
+        results = api_client.get_match_results(resume_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "match_results_cards.html",
+        resume_id=resume_id,
+        results=results,
+        attempt=attempt,
+        max_attempts=_MAX_MATCH_POLL_ATTEMPTS,
+    )
 
 
 _EXPORT_FORMATS: tuple[api_client.ExportFormat, ...] = ("csv", "evidence-csv", "json")

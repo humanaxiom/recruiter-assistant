@@ -161,6 +161,8 @@ def test_job_shortlist_renders_entries(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     spy = MagicMock(return_value=[_shortlist_entry(uuid4())])
     monkeypatch.setattr(api_client, "list_shortlist", spy)
+    # The shortlist route also reads résumés to gate the Generate button.
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
     resp = client.get(f"/jobs/{job_id}/shortlist")
     assert resp.status_code == 200
     assert b"Candidate A" in resp.data
@@ -176,6 +178,7 @@ def test_job_shortlist_call_carries_no_reveal_kwarg(
     job_id = uuid4()
     spy = MagicMock(return_value=[])
     monkeypatch.setattr(api_client, "list_shortlist", spy)
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
     client.get(f"/jobs/{job_id}/shortlist")
     spy.assert_called_once()
     assert "reveal" not in spy.call_args.kwargs

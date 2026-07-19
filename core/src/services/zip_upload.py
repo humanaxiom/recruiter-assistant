@@ -22,8 +22,10 @@ from io import BytesIO
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 # Résumé-file allowlist — non-résumé entries are rejected HERE, not deferred
-# to detect_mime.
-_ALLOWED_EXTENSIONS = {"pdf", "docx", "rtf", "txt"}
+# to detect_mime. A ``frozenset`` so it is safe as a function default argument.
+# The bulk-JD call site (``routes/jobs.py``) passes its OWN allowlist
+# (``{pdf,docx,txt,json}``); the résumé call site keeps this default verbatim.
+_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({"pdf", "docx", "rtf", "txt"})
 
 # Matches extract.py's per-document cap.
 _MAX_ENTRY_UNCOMPRESSED_BYTES = 10 * 1024 * 1024
@@ -57,11 +59,16 @@ def _extension(name: str) -> str:
     return name.rsplit(".", 1)[-1].lower()
 
 
-def expand_zip_entries(data: bytes) -> list[tuple[str, bytes]]:
-    """Expand a résumé-batch zip into ``(entry_name, entry_bytes)`` tuples, in
-    archive order.
+def expand_zip_entries(
+    data: bytes, *, allowed_extensions: frozenset[str] = _ALLOWED_EXTENSIONS
+) -> list[tuple[str, bytes]]:
+    """Expand a batch zip into ``(entry_name, entry_bytes)`` tuples, in archive
+    order.
 
-    Raises :class:`ZipRejected`, BEFORE any entry bytes are returned, for a
+    ``allowed_extensions`` defaults to the résumé allowlist
+    (``{pdf,docx,rtf,txt}``) so the existing résumé call site is unchanged; the
+    bulk-JD call site passes ``{pdf,docx,txt,json}`` instead. Raises
+    :class:`ZipRejected`, BEFORE any entry bytes are returned, for a
     path-traversal name, a non-allowlisted extension, a per-entry or running
     total decompressed-size overage (streamed and summed — never the
     archive's declared size), too many entries, or a corrupt archive. One bad
@@ -80,7 +87,7 @@ def expand_zip_entries(data: bytes) -> list[tuple[str, bytes]]:
             for info in infos:
                 _validate_entry_name(info.filename)
                 ext = _extension(info.filename)
-                if ext not in _ALLOWED_EXTENSIONS:
+                if ext not in allowed_extensions:
                     raise ZipRejected(
                         f"zip entry {info.filename!r} has a disallowed extension"
                     )

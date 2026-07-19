@@ -247,6 +247,169 @@ async def test_upload_resumes_cover_letter_file_is_read_and_stored() -> None:
     assert len(cover_keys) == 1
 
 
+# ── upload: per-résumé cover pairing (FU-3 Slice 2) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_filename_pairing_attaches_cover_per_resume() -> None:
+    """``jane_resume`` + ``jane_cover_letter`` + ``bob_resume`` in one request:
+    two accepted résumé rows, only jane's carries ``cover_letter_filename``."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("jane_cover_letter.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("bob_resume.pdf", _PDF_MAGIC, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    assert len(accepted) == 2  # jane + bob résumés; the cover is NOT its own row
+    by_name = {r["original_filename"]: r for r in accepted}
+    assert (
+        by_name["jane_resume.pdf"]["cover_letter_filename"] == "jane_cover_letter.pdf"
+    )
+    assert by_name["bob_resume.pdf"]["cover_letter_filename"] is None
+    # One parse task per accepted résumé (the cover is not enqueued).
+    assert arq.enqueue_job.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_ambiguous_pairing_plus_singular_cover_is_422() -> None:
+    """Per-résumé pairing AND a singular batch cover letter together is
+    ambiguous — reject with 422 rather than silently picking one."""
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("jane_cover_letter.pdf", _PDF_MAGIC, "application/pdf")),
+                ("cover_letter_file", ("batch.pdf", _PDF_MAGIC, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 422
+    assert "ambiguous" in resp.json()["detail"].lower()
+    store.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_plain_upload_with_singular_cover_is_not_ambiguous() -> (
+    None
+):
+    """A plain no-suffix upload pairs no per-résumé cover, so the singular
+    ``cover_letter_file`` still works (backward compatible — no 422)."""
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("a.pdf", _PDF_MAGIC, "application/pdf")),
+                ("cover_letter_file", ("cover.pdf", _PDF_MAGIC, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+
+
+# ── upload: manifest.json-driven pairing (FU-3 Slice 3) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_manifest_field_pairs_by_name() -> None:
+    """A ``pairing_manifest`` multipart field pairs ``jane_resume`` ↔
+    ``jane_cover`` by name even without the ``_cover_letter`` convention
+    suffix — manifest takes precedence over convention."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    manifest = json.dumps(
+        {
+            "applicants": [
+                {
+                    "resume_file": "jane_resume.pdf",
+                    "cover_letter_file": "jane_cover.pdf",
+                    "cover_letter_flag": "Yes",
+                }
+            ]
+        }
+    ).encode("utf-8")
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("jane_cover.pdf", _PDF_MAGIC, "application/pdf")),
+                ("pairing_manifest", ("manifest.json", manifest, "application/json")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    accepted = [r for r in resp.json() if r["outcome"] == "accepted"]
+    assert len(accepted) == 1
+    assert accepted[0]["original_filename"] == "jane_resume.pdf"
+    assert accepted[0]["cover_letter_filename"] == "jane_cover.pdf"
+    assert arq.enqueue_job.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_manifest_in_zip_rejected_with_guidance() -> None:
+    """A ``manifest.json`` zipped WITH the résumés hits the zip allowlist (no
+    json) → 400 with clear guidance to upload it as its own field."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    archive = _zip_bytes(
+        [("jane_resume.pdf", _PDF_MAGIC), ("manifest.json", b'{"applicants": []}')]
+    )
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("batch.zip", archive, "application/zip"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"].lower()
+    assert "own field" in detail
+    arq.enqueue_job.assert_not_awaited()
+    store.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_malformed_manifest_is_422() -> None:
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("jane_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                (
+                    "pairing_manifest",
+                    ("manifest.json", b"{not json", "application/json"),
+                ),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 422
+    store.put.assert_not_called()
+
+
 # ── upload: file-count cap (SEC-2, memory-exhaustion DoS) ────────────────
 
 

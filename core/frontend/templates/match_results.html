@@ -1,18 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Match results{% endblock %}
+{% block title %}Matching jobs{% endblock %}
 {% block content %}
-<h2>Match results</h2>
-<table class="table">
-  <thead><tr><th>Job</th><th>Score</th></tr></thead>
-  <tbody>
-    {% for entry in results.entries %}
-    <tr>
-      <td>{{ entry.job_id }}</td>
-      <td>{{ entry.score_final }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="2" class="muted">No match results yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<h2>Matching jobs</h2>
+{#
+  The candidate→jobs direction of the many-to-many view. NO redaction here
+  (ADR-012 §4): jobs are not personal data, so real titles are shown — this is
+  correct, unlike the blind shortlist which hides candidate identity.
+#}
+<p class="hint">Open jobs this candidate ranks against, best match first. Click a
+  job to open its detail page.</p>
+{% include "match_results_cards.html" %}
 {% endblock %}

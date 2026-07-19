@@ -65,12 +65,23 @@
       <label class="label" for="resume-files">Résumé file(s) — PDF/DOCX, or a
         .zip of many</label>
       <input class="input" id="resume-files" name="files" type="file" multiple>
+      <p class="hint">Parsing runs on the local model — a large PDF can take
+        ~1–2 minutes each. The table below updates to <strong>parsed</strong>
+        when it's done.</p>
     </div>
     <div class="form-group">
       <label class="label" for="cover_letter_file">Cover letter file (optional)
         — PDF/DOCX/RTF/TXT</label>
       <input class="input" id="cover_letter_file" name="cover_letter_file"
              type="file">
+    </div>
+    <div class="form-group">
+      <label class="label" for="pairing_manifest">Pairing manifest
+        (manifest.json)</label>
+      <input class="input" id="pairing_manifest" name="pairing_manifest"
+             type="file" accept=".json,application/json">
+      <p class="hint">Optional — pairs each résumé with its cover letter by name.
+        Upload as its own file, NOT inside the résumé zip.</p>
     </div>
     <div class="form-group">
       <label class="label" for="cover_letter_text">…or paste cover letter text

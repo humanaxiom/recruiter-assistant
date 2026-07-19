@@ -27,7 +27,12 @@ from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
-from src.services import resume_service, reveal_service, shortlist_service
+from src.services import (
+    bulk_ingest_service,
+    resume_service,
+    reveal_service,
+    shortlist_service,
+)
 from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 from src.storage.blob_store import BlobStore, get_blob_store
 
@@ -51,6 +56,7 @@ async def upload_resumes(
     consent_acknowledged: Annotated[str, Form()],
     cover_letter_text: Annotated[str | None, Form()] = None,
     cover_letter_file: Annotated[UploadFile | None, File()] = None,
+    pairing_manifest: Annotated[UploadFile | None, File()] = None,
 ) -> list[ResumeUploadResult]:
     """Multipart upload: one or more résumé files, OR one entry ending
     ``.zip`` which is expanded and merged into the same accepted/rejected
@@ -76,9 +82,27 @@ async def upload_resumes(
             try:
                 expanded.extend(expand_zip_entries(data))
             except ZipRejected as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                # A ``manifest.json`` zipped WITH the résumés trips the zip
+                # allowlist (json isn't an accepted résumé extension). Surface
+                # the fix, not the generic "disallowed extension" message.
+                detail = str(exc)
+                if ".json" in detail.lower():
+                    detail = (
+                        "upload the pairing manifest as its own field, not "
+                        "inside the résumé zip"
+                    )
+                raise HTTPException(status_code=400, detail=detail) from exc
         else:
             expanded.append((filename, data))
+
+    # FU-3 Slice 3: an explicit résumé↔cover pairing manifest (its own field).
+    # A malformed manifest raises ``ManifestError`` (AppError, 422) → the global
+    # handler renders it before any body is persisted.
+    manifest: dict[str, str | None] | None = None
+    if pairing_manifest is not None:
+        manifest = bulk_ingest_service.parse_pairing_manifest(
+            await pairing_manifest.read()
+        )
 
     cover_file: tuple[str, bytes] | None = None
     if cover_letter_file is not None:
@@ -87,20 +111,61 @@ async def upload_resumes(
             await cover_letter_file.read(),
         )
 
+    # FU-3 Slice 2/3: pair each résumé with ITS OWN cover letter. The manifest
+    # (when supplied) takes precedence; everything it doesn't name falls back to
+    # the filename convention. A plain no-suffix upload with no manifest pairs
+    # no cover → empty maps → today's behaviour.
+    pairing = bulk_ingest_service.pair_applicants(expanded, manifest=manifest)
+    resume_files: list[tuple[str, bytes]] = []
+    cover_letter_map: dict[str, tuple[str, bytes]] = {}
+    warnings_map: dict[str, list[str]] = {}
+    for pair in pairing.pairs:
+        key = bulk_ingest_service.basename_lower(pair.resume[0])
+        resume_files.append(pair.resume)
+        if pair.cover_letter is not None:
+            cover_letter_map[key] = pair.cover_letter
+        if pair.note:
+            warnings_map.setdefault(key, []).append(pair.note)
+
+    # Ambiguity guard: per-résumé pairing AND a singular batch cover letter
+    # together is ambiguous — never silently pick one.
+    has_singular_cover = cover_file is not None or bool(
+        cover_letter_text and cover_letter_text.strip()
+    )
+    if cover_letter_map and has_singular_cover:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ambiguous: both per-résumé cover pairing and a single batch "
+                "cover letter were supplied"
+            ),
+        )
+
     consent = consent_acknowledged.strip().lower() == "true"
     try:
         results = await resume_service.upload_resumes(
             db,
             blob_store,
             job_id=job_id,
-            files=expanded,
+            files=resume_files,
             consent_acknowledged=consent,
             uploaded_by=actor,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_file,
+            cover_letter_map=cover_letter_map or None,
+            warnings_map=warnings_map or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Manifest references to files that weren't uploaded (Slice 3) surface as
+    # rejected rows so the operator sees what was dropped — never a silent loss.
+    for missing_name, reason in pairing.rejected:
+        results.append(
+            ResumeUploadResult(
+                original_filename=missing_name, outcome="rejected", reason=reason
+            )
+        )
 
     for r in results:
         if r.outcome == "accepted" and r.resume_id is not None:

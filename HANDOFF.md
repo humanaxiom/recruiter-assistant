@@ -765,7 +765,17 @@ These three are **explicitly requested** (not a generic options list) while PR #
   path (`shortlist_service.export_rows` / `shortlist_evidence_csv`) needs the résumé chunks joined in to
   resolve ids — today it likely doesn't; add a chunk-id→text resolver with redaction applied.
 
-- **FU-3 — Bulk ingest (local, offline): many résumés + per-résumé cover letters + bulk JDs.** The
+- **FU-3 — Bulk ingest — ✅ BUILT (2026-07-18), on `feat/fu3-bulk-ingest`, all gates green, PR pending.**
+  Five slices shipped: (1) shortlist "Generating… forever" fix + Generate-gated-until-parsed + parse hint;
+  (2) per-résumé cover-letter pairing by filename convention (new pure `bulk_ingest_service.py`) + results
+  summary; (3) `manifest.json` pairing (precedence over convention); (4) bulk JD upload (`POST /jobs/bulk`,
+  `create_jobs_bulk`, CSV manifest, `description_sha256` dedup via the repo's first idempotent `ALTER
+  TABLE`); (5) reverse-match UI (candidate→jobs, POST-only trigger + bounded poll + rows link to job).
+  Gates: reviewer APPROVE, security PASS (file-count-cap parity fixed), ranking-evals PASS (scoring
+  byte-unchanged); ~2528 unit @ 91.37%. Live-verified against the `hris/fixtures/llm_split` sample PDFs.
+  Decisions + accepted residuals: **ADR-017**. Everything below is the original plan detail, now delivered.
+
+- **FU-3 (original plan) — Bulk ingest (local, offline): many résumés + per-résumé cover letters + bulk JDs.** The
   clarified shape of the "connectors" ask. Model: **candidates apply to a job** (résumé tied to a job);
   the **cover letter is optional** and counts as bonus intention/motivation (feeds the motivation
   sub-score). Three parts:

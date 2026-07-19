@@ -238,6 +238,42 @@ def test_upload_resumes_omits_cover_letter_file_when_none() -> None:
     assert b"cover_letter_file" not in captured["body"]
 
 
+def test_upload_resumes_forwards_pairing_manifest_as_a_multipart_part() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(202, json=[])
+
+    api_client.upload_resumes(
+        uuid4(),
+        [("a.pdf", b"resume-bytes", "application/pdf")],
+        consent_acknowledged=True,
+        pairing_manifest=("manifest.json", b'{"applicants": []}', "application/json"),
+        client=_client_with(handler),
+    )
+    body = captured["body"]
+    assert b"pairing_manifest" in body
+    assert b"manifest.json" in body
+    assert b'{"applicants": []}' in body
+
+
+def test_upload_resumes_omits_pairing_manifest_when_none() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(202, json=[])
+
+    api_client.upload_resumes(
+        uuid4(),
+        [("a.pdf", b"x", "application/pdf")],
+        consent_acknowledged=True,
+        client=_client_with(handler),
+    )
+    assert b"pairing_manifest" not in captured["body"]
+
+
 def test_upload_resumes_maps_backend_4xx_to_bad_request() -> None:
     client = _client_with(_json_handler(422, {"detail": "unsupported file"}))
     with pytest.raises(api_client.BadRequest):
@@ -303,6 +339,88 @@ def test_upload_route_with_consent_calls_backend_and_redirects(
     assert spy.call_args.kwargs["consent_acknowledged"] is True
 
 
+def test_upload_route_renders_results_summary_after_redirect(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The upload route surfaces a post-upload results summary (flash-style)
+    built from the returned ``ResumeUploadResult`` rows — visible on the
+    job-detail page the upload redirects to."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            return_value=[
+                {
+                    "original_filename": "jane_resume.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": "jane_cover_letter.pdf",
+                    "warnings": [],
+                },
+                {
+                    "original_filename": "bob_resume.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": None,
+                    "warnings": [],
+                },
+                {
+                    "original_filename": "dup.pdf",
+                    "outcome": "duplicate",
+                    "warnings": [],
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "jane_resume.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    # Summary counts (accepted / with-cover / duplicate) appear.
+    assert "2 accepted" in body
+    assert "1 with a cover letter" in body
+    assert "1 duplicate" in body
+
+
+def test_upload_route_surfaces_pairing_warnings(monkeypatch: Any, client: Any) -> None:
+    job_id = uuid4()
+    warning = "looked like a cover letter but had no matching résumé"
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            return_value=[
+                {
+                    "original_filename": "stray_cover.pdf",
+                    "outcome": "accepted",
+                    "cover_letter_filename": None,
+                    "warnings": [warning],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "stray_cover.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert warning in resp.get_data(as_text=True)
+
+
 def test_upload_route_forwards_cover_letter_text(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     spy = MagicMock(return_value=[])
@@ -336,6 +454,42 @@ def test_upload_route_forwards_cover_letter_file(monkeypatch: Any, client: Any) 
     assert cover is not None
     assert cover[0] == "cover.pdf"
     assert cover[1] == b"cover-bytes"
+
+
+def test_upload_route_forwards_pairing_manifest(monkeypatch: Any, client: Any) -> None:
+    job_id = uuid4()
+    spy = MagicMock(return_value=[])
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "a.pdf"),
+            "pairing_manifest": (BytesIO(b'{"applicants": []}'), "manifest.json"),
+        },
+        content_type="multipart/form-data",
+    )
+    manifest = spy.call_args.kwargs["pairing_manifest"]
+    assert manifest is not None
+    assert manifest[0] == "manifest.json"
+    assert manifest[1] == b'{"applicants": []}'
+
+
+def test_upload_route_pairing_manifest_none_when_absent(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    spy = MagicMock(return_value=[])
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "a.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert spy.call_args.kwargs["pairing_manifest"] is None
 
 
 def test_upload_route_cover_letter_file_none_when_absent(

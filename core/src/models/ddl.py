@@ -67,6 +67,7 @@ _STATEMENTS: tuple[str, ...] = (
         seniority         TEXT,
         min_years         INTEGER,
         description_raw   TEXT NOT NULL,
+        description_sha256 TEXT,
         description_parsed JSONB,
         status            job_status NOT NULL DEFAULT 'draft',
         retention_days    INTEGER NOT NULL DEFAULT 180
@@ -85,6 +86,22 @@ _STATEMENTS: tuple[str, ...] = (
         WHERE status IN ('draft', 'open')
     """,
     "CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at DESC)",
+    # FU-3 Slice 4 (bulk-JD dedup): ``description_sha256`` is the dedup key. This
+    # is the FIRST use of ALTER in the port — ``CREATE TABLE IF NOT EXISTS`` is a
+    # NO-OP against an already-existing dev/CI Postgres volume, so the column
+    # added to the CREATE above would silently never appear on those volumes and
+    # the first dedup query would 500. A separate idempotent ALTER guarantees the
+    # column lands on both fresh and existing databases. New convention: when a
+    # column is added to an existing table, add BOTH the CREATE-TABLE column and a
+    # matching ``ADD COLUMN IF NOT EXISTS`` here.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description_sha256 TEXT",
+    # The dedup lookup (``WHERE description_sha256 = $1``). Partial so it skips
+    # rows predating the column (NULLs) — the ALTER back-fills nothing.
+    """
+    CREATE INDEX IF NOT EXISTS jobs_description_sha256_idx
+        ON jobs (description_sha256)
+        WHERE description_sha256 IS NOT NULL
+    """,
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (

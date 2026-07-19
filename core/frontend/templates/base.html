@@ -17,6 +17,15 @@
     </div>
   </header>
   <main class="container">
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    <ul class="flash-list" role="status">
+      {% for message in messages %}
+      <li class="flash">{{ message }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% endwith %}
     {% block content %}{% endblock %}
   </main>
 </body>

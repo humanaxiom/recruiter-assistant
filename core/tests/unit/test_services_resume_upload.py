@@ -490,3 +490,108 @@ async def test_upload_resumes_without_a_cover_letter_never_calls_encrypt() -> No
             consent_acknowledged=True,
         )
     encrypt.assert_not_awaited()
+
+
+# ── upload_resumes: per-résumé cover_letter_map (FU-3 Slice 2) ───────────
+
+
+def _all_insert_call_args(conn: MagicMock) -> list[tuple[object, ...]]:
+    """The positional args of EVERY résumé INSERT execute() call, in order."""
+    return [
+        call.args
+        for call in conn.execute.await_args_list
+        if call.args and "INSERT INTO resumes" in str(call.args[0])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_cover_map_stores_a_distinct_blob_key_per_resume() -> None:
+    """Each résumé in the map gets its OWN ``cover_letters/<uuid>`` blob key on
+    ITS row — never one key shared across the batch."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("jane_resume.pdf", _PDF_MAGIC), ("bob_resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+        cover_letter_map={
+            "jane_resume.pdf": ("jane_cover_letter.pdf", _PDF_MAGIC),
+            "bob_resume.pdf": ("bob_cover_letter.pdf", _PDF_MAGIC),
+        },
+    )
+    inserts = _all_insert_call_args(conn)
+    assert len(inserts) == 2
+    cover_keys = [ins[-1] for ins in inserts]
+    assert all(k is not None and k.startswith("cover_letters/") for k in cover_keys)
+    # DISTINCT — not one shared key.
+    assert cover_keys[0] != cover_keys[1]
+    stored_cover_keys = [
+        c.args[0]
+        for c in store.put.await_args_list
+        if c.args[0].startswith("cover_letters/")
+    ]
+    assert sorted(stored_cover_keys) == sorted(cover_keys)
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_cover_map_only_keys_the_matching_resume() -> None:
+    """A résumé absent from the map carries no cover blob key."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    results = await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("jane_resume.pdf", _PDF_MAGIC), ("bob_resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+        cover_letter_map={"jane_resume.pdf": ("jane_cover_letter.pdf", _PDF_MAGIC)},
+    )
+    by_name = {r.original_filename: r for r in results}
+    assert by_name["jane_resume.pdf"].cover_letter_filename == "jane_cover_letter.pdf"
+    assert by_name["bob_resume.pdf"].cover_letter_filename is None
+    # ins = (SQL, resume_id, job_id, blob_key, filename, ...) — key by filename.
+    inserts = {ins[4]: ins for ins in _all_insert_call_args(conn)}
+    assert inserts["jane_resume.pdf"][-1].startswith("cover_letters/")
+    assert inserts["bob_resume.pdf"][-1] is None
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_populates_warnings_from_warnings_map() -> None:
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    results = await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("stray_cover.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+        warnings_map={"stray_cover.pdf": ["ingested as a résumé"]},
+    )
+    assert results[0].warnings == ["ingested as a résumé"]
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_no_map_falls_back_to_singular_cover() -> None:
+    """With no map, the singular ``cover_letter_file`` still stores one shared
+    cover blob keyed on the (single) résumé row — today's behaviour."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+        cover_letter_file=("cover.pdf", _PDF_MAGIC),
+    )
+    assert _insert_call_args(conn)[-1].startswith("cover_letters/")

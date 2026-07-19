@@ -187,6 +187,29 @@ def extract_jd(
     return response.json()
 
 
+def bulk_create_jobs(
+    files: list[tuple[str, bytes, str]],
+    *,
+    manifest: tuple[str, bytes, str] | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/bulk (multipart) → ``list[BulkJobResult]``.
+
+    ``files`` is a list of ``(filename, content, content_type)`` tuples,
+    forwarded as repeated ``files=`` parts (a ``.zip`` is expanded *server*-side
+    — we only forward the raw bytes, never expand it here). An optional
+    ``manifest`` (filename, content, content_type) is forwarded as its OWN
+    ``manifest`` part (the CSV metadata sidecar). A backend 4xx (e.g. a 422 for
+    a malformed manifest) surfaces as ``BadRequest``."""
+    multipart = [
+        ("files", (filename, content, ctype)) for filename, content, ctype in files
+    ]
+    if manifest is not None:
+        multipart.append(("manifest", manifest))
+    response = _request("POST", "/jobs/bulk", files=multipart, client=client)
+    return response.json()
+
+
 def get_job(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/jobs/{job_id}", client=client)
     return response.json()
@@ -224,6 +247,7 @@ def upload_resumes(
     consent_acknowledged: bool,
     cover_letter_text: str | None = None,
     cover_letter_file: tuple[str, bytes, str] | None = None,
+    pairing_manifest: tuple[str, bytes, str] | None = None,
     client: httpx.Client | None = None,
 ) -> Any:
     """POST /jobs/{id}/resumes (multipart).
@@ -236,12 +260,17 @@ def upload_resumes(
     ``cover_letter_text`` form field is included only when provided; an optional
     ``cover_letter_file`` (filename, content, content_type) is forwarded as a
     ``cover_letter_file`` part (the backend stores it as a blob and parses it at
-    parse time). A backend 4xx surfaces as ``BadRequest``."""
+    parse time). An optional ``pairing_manifest`` (filename, content,
+    content_type) is forwarded as its OWN ``pairing_manifest`` part — the backend
+    pairs each résumé with its cover by name (never inside the résumé zip). A
+    backend 4xx surfaces as ``BadRequest``."""
     multipart = [
         ("files", (filename, content, ctype)) for filename, content, ctype in files
     ]
     if cover_letter_file is not None:
         multipart.append(("cover_letter_file", cover_letter_file))
+    if pairing_manifest is not None:
+        multipart.append(("pairing_manifest", pairing_manifest))
     form: dict[str, Any] = {
         "consent_acknowledged": "true" if consent_acknowledged else "false"
     }
@@ -304,6 +333,20 @@ def reveal_resume(
     return response.json()
 
 
+def trigger_reverse_match(
+    resume_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """POST /resumes/{id}/match-jobs — enqueues the reverse-match job. Returns
+    the 202 enqueue ack ``{resume_id, status: "enqueued"}`` (results appear
+    asynchronously; the caller polls ``get_match_results`` for them). This path
+    has NO redaction concept (ADR-012 §4 — the caller owns the résumé, and jobs
+    are not personal data), so it takes no ``reveal`` kwarg. A backend 404
+    surfaces as ``NotFound``; a 5xx (or ``ConnectError``) as
+    ``BackendUnavailable``."""
+    response = _request("POST", f"/resumes/{resume_id}/match-jobs", client=client)
+    return response.json()
+
+
 def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/resumes/{resume_id}/match-results", client=client)
     return response.json()
@@ -336,6 +379,7 @@ __all__ = [
     "list_jobs",
     "create_job",
     "extract_jd",
+    "bulk_create_jobs",
     "get_job",
     "transition_status",
     "patch_job",
@@ -346,6 +390,7 @@ __all__ = [
     "get_shortlist_entry",
     "get_resume",
     "reveal_resume",
+    "trigger_reverse_match",
     "get_match_results",
     "export_shortlist",
 ]
