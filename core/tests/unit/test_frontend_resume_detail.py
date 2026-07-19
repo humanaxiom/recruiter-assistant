@@ -14,15 +14,26 @@ real name/email/phone (as a reveal=True response would), the rendered HTML must
 not contain those bytes — because the template simply has no path that prints
 them. ``get_resume`` is always called with ``reveal=False``.
 
-**FU-4/D4 — CSRF on the reveal form.** ``POST /resumes/<id>/reveal`` now
-requires a session-bound, one-shot anti-forgery token (``frontend.csrf``,
-tested directly in ``test_frontend_csrf.py``): the preceding ``GET
-/resumes/<id>`` mints a token and renders it into the reveal form as a hidden
-``csrf_token`` input; the POST route rejects (403) a missing/wrong/replayed
-token, or a request tagged with a cross-origin ``Origin`` header, WITHOUT ever
-calling ``api_client.reveal_resume`` — no reveal audit row is implied by a
-rejected forgery attempt. Every reveal-POST test below that predates FU-4 now
-mints a real token via ``_mint_csrf_token`` before posting.
+**FU-4/D4 — CSRF on the reveal form (amended: per-résumé tokens).**
+``POST /resumes/<id>/reveal`` requires a session-bound, one-shot anti-forgery
+token (``frontend.csrf``, tested directly in ``test_frontend_csrf.py``): the
+preceding ``GET /resumes/<id>`` mints a token FOR THAT RÉSUMÉ ID and renders
+it into the reveal form as a hidden ``csrf_token`` input; the POST route
+rejects (403) a missing/wrong/replayed/cross-résumé token, or a request
+tagged with a cross-origin ``Origin`` header, WITHOUT ever calling
+``api_client.reveal_resume`` — no reveal audit row is implied by a rejected
+forgery attempt. Every reveal-POST test below mints a real token via
+``_mint_csrf_token`` (which mints for a SPECIFIC ``resume_id``) before
+posting.
+
+Tokens are scoped per résumé, not per Flask session: the shortlist page (not
+covered by this file) renders one reveal form per candidate card, all
+posting to this SAME route — under the old per-session single-token design,
+minting the second card's token silently invalidated the first card's, so
+only the first reveal a recruiter clicked ever worked. The tests in the
+"one-shot, now scoped per résumé" section below pin the fixed contract:
+revealing résumé A must not disturb résumé B's token, and a token minted for
+résumé A must never validate a reveal of résumé B.
 """
 
 from __future__ import annotations
@@ -165,10 +176,16 @@ def _extract_csrf_token(html: str) -> str:
 
 
 def _mint_csrf_token(monkeypatch: Any, client: Any, resume_id: Any) -> str:
-    """GET the résumé-detail page (which must be blinded, so the reveal form —
-    and its token — is rendered) and pull the freshly-minted ``csrf_token``
-    hidden-input value out of the response body. Mints the token bound to
-    whichever session ``client`` is carrying cookies for."""
+    """GET the résumé-detail page for ``resume_id`` (which must be blinded, so
+    the reveal form — and its token — is rendered) and pull the
+    freshly-minted ``csrf_token`` hidden-input value out of the response
+    body. Mints a token bound to BOTH whichever session ``client`` is
+    carrying cookies for AND this specific ``resume_id`` — a token minted via
+    a call for one résumé id is not interchangeable with one minted for
+    another (see the "one-shot, now scoped per résumé" tests below). Calling
+    this repeatedly with different ``resume_id``s against the SAME ``client``
+    (i.e. the same session) mints independent, simultaneously-valid tokens —
+    this is what a multi-card shortlist render does in practice."""
     monkeypatch.setattr(
         api_client,
         "get_resume",
@@ -365,8 +382,8 @@ def test_resume_reveal_shows_identity_and_audit_notice(
 ) -> None:
     """FU-1: POST /resumes/<id>/reveal renders the UN-blinded identity and the
     audit notice. This is the ONE render path that surfaces ``candidate.*``.
-    FU-4/D4: requires a valid one-shot CSRF token, minted by the preceding
-    GET."""
+    FU-4/D4: requires a valid one-shot CSRF token, minted for THIS résumé id
+    by the preceding GET."""
     resume_id = uuid4()
     token = _mint_csrf_token(monkeypatch, client, resume_id)
     monkeypatch.setattr(
@@ -540,20 +557,6 @@ def test_resume_reveal_with_a_valid_token_succeeds(
     assert _REAL_NAME in resp.get_data(as_text=True)
 
 
-def test_resume_reveal_token_is_single_use(monkeypatch: Any, client: Any) -> None:
-    resume_id = uuid4()
-    token = _mint_csrf_token(monkeypatch, client, resume_id)
-    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
-    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
-
-    first = client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
-    assert first.status_code == 200
-
-    second = client.post(f"/resumes/{resume_id}/reveal", data={"csrf_token": token})
-    assert second.status_code == 403
-    reveal_spy.assert_called_once()  # still just the one successful call
-
-
 def test_resume_reveal_cross_origin_request_is_rejected_even_with_a_valid_token(
     monkeypatch: Any, client: Any
 ) -> None:
@@ -571,3 +574,114 @@ def test_resume_reveal_cross_origin_request_is_rejected_even_with_a_valid_token(
     )
     assert resp.status_code == 403
     reveal_spy.assert_not_called()
+
+
+# ── FU-4/D4 amendment — one-shot is now scoped PER RÉSUMÉ, not per session ──
+#
+# WHY this section exists: the shipped design stored a single bare token in
+# the Flask session, so minting a SECOND résumé's token silently invalidated
+# the FIRST résumé's still-unused token. The reveal button appears on every
+# shortlist card, all posting to this SAME route — so only the first card a
+# recruiter clicked ever worked; every other card 403'd until a full page
+# reload re-minted a fresh single token. Reveal-from-shortlist is the primary
+# FU-1 workflow, so this was a functional regression. The tests below pin the
+# fixed contract.
+
+
+def test_resume_reveal_token_is_single_use_per_resume(
+    monkeypatch: Any, client: Any
+) -> None:
+    """One-shot is now per résumé, not per session: revealing résumé A must
+    NOT invalidate résumé B's token, but replaying A's (already-consumed)
+    token must still fail."""
+    resume_a, resume_b = uuid4(), uuid4()
+    token_a = _mint_csrf_token(monkeypatch, client, resume_a)
+    token_b = _mint_csrf_token(monkeypatch, client, resume_b)
+    reveal_spy = MagicMock(
+        side_effect=lambda rid, **kwargs: _resume(rid, with_pii=True)
+    )
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+
+    first = client.post(f"/resumes/{resume_a}/reveal", data={"csrf_token": token_a})
+    assert first.status_code == 200
+
+    # B's still-unused token is untouched by A's reveal.
+    second = client.post(f"/resumes/{resume_b}/reveal", data={"csrf_token": token_b})
+    assert second.status_code == 200
+
+    # Replaying A's already-consumed token still fails (one-shot preserved).
+    replay = client.post(f"/resumes/{resume_a}/reveal", data={"csrf_token": token_a})
+    assert replay.status_code == 403
+    assert reveal_spy.call_count == 2
+
+
+def test_resume_reveal_token_minted_for_a_different_resume_is_rejected(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The new cross-résumé confusion risk this amendment introduces: a token
+    minted for résumé A must NOT validate a reveal POST aimed at résumé B,
+    even though both tokens live in the same session simultaneously."""
+    resume_a, resume_b = uuid4(), uuid4()
+    token_a = _mint_csrf_token(monkeypatch, client, resume_a)
+    reveal_spy = MagicMock(return_value=_resume(resume_b, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+
+    resp = client.post(f"/resumes/{resume_b}/reveal", data={"csrf_token": token_a})
+    assert resp.status_code == 403
+    reveal_spy.assert_not_called()
+
+
+def test_resume_reveal_token_minted_for_a_different_resume_does_not_burn_its_own_slot(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A misdirected reveal attempt (résumé A's token posted against résumé
+    B's route) must not consume résumé A's real, rightful token slot — A must
+    still be revealable afterwards with its own token."""
+    resume_a, resume_b = uuid4(), uuid4()
+    token_a = _mint_csrf_token(monkeypatch, client, resume_a)
+    reveal_spy = MagicMock(
+        side_effect=lambda rid, **kwargs: _resume(rid, with_pii=True)
+    )
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+
+    misdirected = client.post(
+        f"/resumes/{resume_b}/reveal", data={"csrf_token": token_a}
+    )
+    assert misdirected.status_code == 403
+
+    correct = client.post(f"/resumes/{resume_a}/reveal", data={"csrf_token": token_a})
+    assert correct.status_code == 200
+    reveal_spy.assert_called_once()
+
+
+def test_two_resumes_on_one_shortlist_render_can_both_be_revealed_without_a_page_reload(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE regression test this amendment exists to fix. A shortlist render
+    mints one token per candidate card, all into the SAME Flask session (here
+    simulated as two back-to-back token-minting GETs against the same
+    ``client``, mirroring two cards rendered on one page). Under the old
+    per-SESSION single token, minting card B's token silently invalidated
+    card A's, so the second reveal always 403'd until the page re-rendered.
+    With per-résumé tokens, BOTH cards mint independently and BOTH reveals
+    succeed back-to-back — with NO intervening GET/page reload between the two
+    POSTs below."""
+    resume_a, resume_b = uuid4(), uuid4()
+    token_a = _mint_csrf_token(monkeypatch, client, resume_a)
+    token_b = _mint_csrf_token(monkeypatch, client, resume_b)
+    assert token_a != token_b
+
+    reveal_spy = MagicMock(
+        side_effect=lambda rid, **kwargs: _resume(rid, with_pii=True)
+    )
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+
+    # No page reload / re-mint between these two reveal POSTs.
+    resp_a = client.post(f"/resumes/{resume_a}/reveal", data={"csrf_token": token_a})
+    resp_b = client.post(f"/resumes/{resume_b}/reveal", data={"csrf_token": token_b})
+
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+    assert reveal_spy.call_count == 2
+    assert _REAL_NAME in resp_a.get_data(as_text=True)
+    assert _REAL_NAME in resp_b.get_data(as_text=True)
