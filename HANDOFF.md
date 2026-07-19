@@ -168,11 +168,14 @@ Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ing
   ```bash
   docker run --rm -v "C:\repos\recruiter-assistant:/w" -w /w/core python:3.11-slim bash -lc \
     "pip install -q -r requirements.txt -r requirements-dev.txt && \
-     ruff check --fix src tests && black src tests && \
-     ruff check src tests && black --check src tests && mypy src --strict && \
-     pytest tests/unit --cov=src --cov-fail-under=80 -q"
+     ruff check --fix src frontend tests && black src frontend tests && \
+     ruff check src frontend tests && black --check src frontend tests && mypy src frontend --strict && \
+     pytest tests/unit --cov=src --cov=frontend --cov-fail-under=80 -q"
   ```
-  (The `--fix` + `black` write pass auto-formats; the following `check`/`--check` then verify.)
+  (The `--fix` + `black` write pass auto-formats; the following `check`/`--check` then verify. **This must
+  match `Makefile:27`'s `mypy src frontend --strict` exactly** — an earlier version of this snippet only
+  ran `mypy src --strict`, which let a `core/frontend/` type error slip past a subagent's self-check
+  during the FU-4 session; the real gate has always covered both trees.)
 - **Docker is available.** Integration/e2e that need live Postgres/Neo4j/Redis run via Docker/testcontainers (CI does `gates-all`). For testcontainers in the container, mount the docker socket + install `docker.io` + set `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`.
 - **Two container gotchas:** (1) prefix `docker run` with `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` or Git Bash mangles `/w/core`→`W:/core`. (2) stale `__pycache__` on the Windows bind mount can mask source edits (coarse mtime → reused bytecode); when re-running pytest after editing source, add `PYTHONDONTWRITEBYTECODE=1` or clear `__pycache__`.
 - **No git identity configured** — commit with inline `git -c user.name='Adam Salah' -c user.email=<owner-email> commit …` (the real address is in the owner's git config / the owner knows it — kept as a placeholder here per the security-flagged chore above: this repo's own PII invariant bans real personal emails in committed text, and this file is committed text).
@@ -180,6 +183,11 @@ Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ing
 - **`gh` CLI** authed as `adamsalah13`, **admin on the `humanaxiom` org**. Pushing to `humanaxiom/recruiter-assistant` is authorized.
 - Template Python is **3.11**; hris is **3.12**. Keep 3.11 (the template's) and port hris code to it — nothing in the ranking core needs 3.12.
 - Model note: this is Claude Opus 4.8 (1M context); the latest models are the Claude 5 family / Opus 4.8 / Haiku 4.5.
+- **`core/requeue.py` is untracked stray operational scratch work**, found in the working tree during the
+  FU-4 session — a hardcoded job UUID, blocking `urllib` inside an async function, `localhost:8000`
+  instead of going through `settings`, and no tests. It is not part of any branch and was deliberately
+  left untracked. A resuming session should not mistake it for product code, and should not `git add` or
+  commit it without first rewriting it to the codebase's actual conventions.
 
 ## Subagent roster (`.claude/agents/`)
 
@@ -738,17 +746,21 @@ Phase 4a–4d (PR #8/#10/#11/#12/#13), Phase 5 (PR #14, `6deade3`), Phase 6 (PR 
 (PR #16, `1039e5c`). **There is no Phase 8** — `docs/EXTRACTION_PLAN.md`'s phase table intentionally ends
 at Phase 7. **Post-v1, all merged to `main`, CI green:** the **Workflow UI** (PR #18, `3eba9cf`, ADR-014),
 **FU-2** evidence chunk expansion (PR #19, `8d7ce0b`, ADR-015), **FU-1** audited reveal + cover-letter file
-upload (PR #20, `bc055f4`, ADR-016), and **FU-3** bulk ingest (PR #21, `e033d31`, ADR-017). **The single
-remaining planned item is FU-4 — RBAC** (see "Workflow-UI enhancements" and the FU-4 bullet below). Each
-post-v1 feature is a named feature, not a numbered phase.
+upload (PR #20, `bc055f4`, ADR-016), and **FU-3** bulk ingest (PR #21, `e033d31`, ADR-017). Also merged
+this session: **PR #22** (`chore/fu3-merged-docs`, squash merge `2fc3d4f`) — the docs-only PR marking
+FU-1/FU-2/FU-3 merged; `main` is now at `2fc3d4f`. **The single remaining planned item, FU-4 — RBAC, is
+built and is an OPEN, NOT-YET-MERGED pull request — PR #23** on branch `feat/fu4-rbac`, off `main` @
+`2fc3d4f` (see "Workflow-UI enhancements" and the FU-4 bullet below for full state — do not treat it as
+merged). Each post-v1 feature is a named feature, not a numbered phase.
 
-### Workflow-UI enhancements — FU-1, FU-2, FU-3 ✅ ALL MERGED (FU-4 remains)
+### Workflow-UI enhancements — FU-1, FU-2, FU-3 ✅ ALL MERGED; FU-4 built, PR #23 OPEN (not merged)
 
 The three user-requested enhancements (built order FU-2 → FU-1 → FU-3) are **all merged to `main`, CI
 green**: **FU-2** evidence chunk-id expansion (PR #19, merge `8d7ce0b`, ADR-015), **FU-1** audited reveal +
 cover-letter file upload + reveal-on-shortlist-card (PR #20, merge `bc055f4`, ADR-016), **FU-3** bulk ingest
-(PR #21, merge `e033d31`, ADR-017). **The only remaining planned item is FU-4 — RBAC** (below). The
-original per-FU detail is retained below for history; each is now DONE.
+(PR #21, merge `e033d31`, ADR-017). **The only remaining planned item, FU-4 — RBAC, is built but its PR
+(#23) is still OPEN — not merged** (below). The original per-FU detail is retained below for history; each
+of FU-1/FU-2/FU-3 is DONE, FU-4 is pending merge.
 
 **Blind-review model (user-confirmed 2026-07-17, matches hris) — now LIVE:** blind is ON at every step by
 default; identity is exposed only through an explicit, **audited** reveal (FU-1, shipped: `reveal_audit`
@@ -844,13 +856,71 @@ residuals R1/R2/R5 in ADR-016) layers on top.
   of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
   thing (see the connectors bullet below).
 
-- **FU-4 — RBAC (its own task; mandated in early system design, never implemented).** Role-based access
-  control across the app — the original design mandated it (roles such as admin / recruiter /
-  hiring-manager / auditor), but nothing in recruiter-assistant enforces roles today (auth is a single
-  optional API key; every authenticated caller can do everything). Scope when picked up: a role model +
-  per-route authorization, with the **audited reveal (FU-1) as the first gated action** (only
-  recruiter/admin may reveal; auditor/hiring-manager may not). Decoupled from FU-1 on purpose so reveal +
-  its audit log can ship first and RBAC can be layered on without reworking it. Needs its own ADR.
+- **FU-4 — RBAC — built, PR OPEN, NOT MERGED.** Branch `feat/fu4-rbac`, off `main` @ `2fc3d4f`, 13 commits,
+  opened as **PR #23** (https://github.com/humanaxiom/recruiter-assistant/pull/23). Do not treat this as
+  merged — CI's `gates-all` had not yet been confirmed green as of this session's handoff. Decisions +
+  full detail: **ADR-018** (`docs/adr/018-rbac-keyed-roles.md`).
+  - **CI IS BLOCKED ON BILLING, NOT ON CODE — read this before debugging the red check.** The
+    `Gate: branch-name` check on PR #23 shows FAILURE and every downstream gate shows SKIPPED, but the
+    job never actually ran. The annotation on check-run `88231227215` reads: *"The job was not started
+    because recent account payments have failed or your spending limit needs to be increased."*
+    GitHub Actions is disabled for the `humanaxiom` org. `feat/fu4-rbac` matches the branch-name regex
+    fine (verified against both `Makefile:18-22` and `.github/workflows/ci.yml:20-27`), and PR #22 ran
+    fully green earlier the same day, so this lapsed mid-session. **Fix billing in the org's
+    Billing & plans settings, then `gh run rerun 29701511226`.** Do NOT merge PR #23 on local gates
+    alone — every prior PR in this repo cleared CI `gates-all` first, and lowering that bar silently is
+    exactly what CLAUDE.md's review-iterate rule prohibits.
+  - **The model:** four `Role(StrEnum)` values (`admin`, `recruiter`, `hiring_manager`, `auditor`) and
+    four flat settings fields (`api_key_admin`, `api_key_recruiter`, `api_key_hiring_manager`,
+    `api_key_auditor`) replace the old single `api_key` switch. `resolve_role` (reads `X-API-Key`,
+    401s on no/unmatched key) and a new `require_role(*allowed)` dependency factory (403s an
+    authenticated-but-not-allowed role) split Phase 6's old single-boolean `require_api_key` into real
+    authentication-vs-authorization. Auth-disabled (all four keys empty) still resolves every caller to
+    `Role.ADMIN`, unchanged fail-open-by-explicit-configuration posture from ADR-012. Two fail-closed
+    startup refusals in `validate_startup_auth_config`: a stale legacy `API_KEY` env var hard-fails boot
+    (a WARNING was rejected — indistinguishable in the log stream from the legitimate disabled-auth
+    WARNING), and two configured role keys being byte-identical also hard-fails boot (silent role
+    collapse otherwise).
+  - **The `PATCH /jobs/{id}` finding (§7 of ADR-018) — the widest blast-radius item found, not recorded
+    in ADR-016.** `JobUpdate` can flip `blind_review: false`, and every redaction key in the service
+    layer gates off `jobs.blind_review`, not off any per-request `reveal` flag — before this feature,
+    any authenticated caller could PATCH one job and permanently un-blind every résumé and shortlist
+    entry under it, for every future reader, with **no audit row written anywhere**. Now restricted to
+    admin/recruiter (`_JOB_WRITERS`). The authorization gap is closed; an audit row on a `blind_review`
+    flip is still not added (deferred, see ADR-018 Consequences).
+  - **R2 (ADR-016) closed further than ADR-016 described.** `reveal` is removed entirely from both
+    `GET /resumes/{id}` and `GET /jobs/{id}/shortlist/export` — the export case was an unaudited **bulk**
+    de-anonymization (every résumé on a shortlist in one response) never recorded in ADR-016 at all.
+    `POST /resumes/{id}/reveal` (admin/recruiter only) is now the only un-blinding path in the system.
+  - **R5/CSRF — closed, with two load-bearing amendments worth remembering if this area is touched
+    again.** (a) The first cut stored one bare token per Flask session; since the FU-1 reveal button
+    appears on every shortlist card posting to the same route, minting a token for one card invalidated
+    every other card's token — only the first reveal click on a page worked. Fixed by scoping the token
+    map per résumé id. (b) That fix then overflowed the ~4093-byte browser cookie ceiling at the
+    `MAX_TOKENS_PER_SESSION = 64` cap (~5.2 KB measured) — browsers **silently drop** an oversized cookie
+    rather than error, which re-triggered the exact same regression at full shortlist size (a 50-row
+    shortlist was precisely the scenario that overflowed). Fixed with `secrets.token_urlsafe(16)` +
+    a 12-hex-char SHA-256 mapping key (~2,440 B measured at cap), now pinned by a regression test that
+    measures the real signed cookie, not a re-derived estimate. **The lesson stated plainly in ADR-018:
+    the original 64-token cap was reasoned about entropy, never measured against the serialized cookie
+    — measure, don't re-derive an estimate, if this size or cap changes again.**
+  - **Two honest limitations a resuming session must not miss (both accepted residuals, ADR-018).** (1)
+    The Flask viewer attaches one fixed `recruiter` role key outbound for every browser it serves —
+    backend RBAC is largely decorative against frontend-originated traffic (every browser gets the same
+    role regardless of who's sitting at it), and every browser-originated reveal audits as the same
+    actor (`reveal_audit.actor = "api"`); RBAC's real enforcement is against direct API callers. (2)
+    Roles are role-level, not row-level — there is no owner/company scoping, so a single
+    `hiring_manager` or `auditor` key reads every job, résumé, and shortlist company-wide.
+  - **Gate state at handoff:** both merge-blocking gates green — reviewer **APPROVE** (0 critical, 0
+    major; 5 minor findings, all closed in `6da32ee`), security **PASS** (16 mutations, 15 killed; the
+    one survivor — an unpinned no-short-circuit invariant on `resolve_role`'s comparison loop — closed
+    in `a826d97`). `ranking-evals` is **not** a required gate for this branch (no scoring code touched:
+    `pipeline/matching/*`, `stages.py`, `orchestrator.py`, `matching_tasks.py` byte-unchanged). Offline:
+    ruff/black/`mypy src frontend --strict` clean; **2703 unit tests @ 91.57% coverage**; **123
+    integration tests** passed live against real Postgres+Neo4j.
+  - **`a826d97` is a `test:`-prefixed commit, a declared TDD-order deviation, not sloppiness** — it pins
+    already-correct behavior (the no-short-circuit comparison loop) that could only be shown RED by
+    mutation testing, not by a normal failing-test-first cycle; same precedent as Phase 4a.
 
 What a **human** could scope next — options, not a queued to-do list:
 
