@@ -193,19 +193,29 @@ features added `PATCH /jobs/{id}` (Workflow UI), `POST /resumes/{id}/reveal` (FU
 | PATCH | `/jobs/{id}/status` | The only status-mutating route — forward-only, 409 on an invalid transition |
 | POST | `/jobs/jd-extract` | Pre-fill helper — extract JD text from an upload, no DB write |
 | POST / GET | `/jobs/{id}/resumes` | Upload résumés (multi-file / `.zip`; **FU-1** cover-letter file; **FU-2/3** per-résumé cover-letter pairing via filename convention or a `pairing_manifest`) / list |
-| GET | `/resumes/{id}` | Get one résumé (redacted under blind review) |
-| POST | `/resumes/{id}/reveal` | **FU-1** — AUDITED de-anonymization: writes a `reveal_audit` row, returns the un-blinded résumé |
+| GET | `/resumes/{id}` | Get one résumé (redacted under blind review; **FU-4** — no `reveal` query param any more, blind-only) |
+| POST | `/resumes/{id}/reveal` | **FU-1** — AUDITED de-anonymization: writes a `reveal_audit` row, returns the un-blinded résumé (**FU-4** — admin/recruiter only, and now the ONLY un-blinding path in the API) |
 | POST | `/resumes/{id}/match-jobs` | Trigger reverse-match (enqueues `reverse_match_job`) |
 | GET | `/resumes/{id}/match-results` | Read reverse-match result — **no redaction** (the caller owns the résumé) |
 | GET / PATCH | `/jobs/{id}/shortlist` | List / (schema-level) |
-| GET | `/jobs/{id}/shortlist/export` | Export csv / evidence-csv / json, `reveal` query param |
+| GET | `/jobs/{id}/shortlist/export` | Export csv / evidence-csv / json (**FU-4** — blind-only, `reveal` query param removed; it was an unaudited bulk de-anonymization across the whole shortlist) |
 | GET | `/shortlist/{id}` | Get one shortlist entry |
 
-**Auth** is one settings flag, `Settings.api_key`: empty (default) disables auth entirely — every route
-unauthenticated, correct for local-only offline dev, with a loud startup `WARNING`; non-empty enables
-fail-closed 401 via a constant-time (`secrets.compare_digest`, UTF-8 bytes) `X-API-Key` header check. An
-optional `X-Actor-Name` header (capped at 128 chars) populates the nullable `created_by`/`uploaded_by`
-audit columns.
+**Auth (FU-4 — keyed roles)** replaces Phase 6's single `Settings.api_key` switch with four flat role
+keys — `api_key_admin`/`api_key_recruiter`/`api_key_hiring_manager`/`api_key_auditor`. Auth is disabled
+iff all four are empty (local-dev default, a loud startup `WARNING`, every caller resolves to `admin`);
+enabled iff any is non-empty. `resolve_role` matches the presented `X-API-Key` against all four
+configured keys, constant-time (`secrets.compare_digest`, UTF-8 bytes, no short-circuit) — an unknown or
+missing key is 401, a valid key whose role isn't in a route's allowed set is 403. `require_role(*roles)`
+is applied per route, not router-wide, since different routes on the same router allow different role
+sets (e.g. `PATCH /jobs/{id}` is admin/recruiter-only while `GET /jobs/{id}` is open to all four — see
+the table above). A stale legacy `API_KEY` env var refuses to boot (`RuntimeError`) rather than silently
+falling back to auth-disabled; two role keys configured to the same value also refuses to boot, rather
+than silently collapsing two roles into one. An optional `X-Actor-Name` header (capped at 128 chars,
+never an authorization input) populates the nullable `created_by`/`uploaded_by` audit columns.
+Roles are role-level, not row-level — a `hiring_manager`/`auditor` key reads every job company-wide, and
+the Flask viewer presents one fixed `recruiter` key outbound for every browser it serves. Full decisions:
+[ADR-018](docs/adr/018-rbac-keyed-roles.md).
 
 **Upload** accepts local multi-file or a single `.zip` (expanded, one entry = one résumé) — the
 Taleo/CSV-manifest connector is explicitly cut and deferred to a future connectors feature. The zip guard
