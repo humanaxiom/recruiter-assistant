@@ -57,9 +57,7 @@ from src.settings import Settings
 def _settings(
     *, api_key_recruiter: str = "", api_base_url: str = "http://api:8000"
 ) -> Settings:
-    return Settings(
-        api_key_recruiter=api_key_recruiter, api_base_url=api_base_url
-    )
+    return Settings(api_key_recruiter=api_key_recruiter, api_base_url=api_base_url)
 
 
 def _client_with(
@@ -120,7 +118,9 @@ def test_build_client_survives_a_non_ascii_api_key_without_crashing(
     not crash client construction (the server-side fix compares UTF-8 bytes
     for the same reason)."""
     monkeypatch.setattr(
-        api_client, "get_settings", lambda: _settings(api_key_recruiter="clé-secrète-café")
+        api_client,
+        "get_settings",
+        lambda: _settings(api_key_recruiter="clé-secrète-café"),
     )
     client = api_client.build_client()
     assert client is not None

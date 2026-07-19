@@ -1,20 +1,42 @@
-"""Cross-cutting API dependencies — auth switch, actor resolution, arq dep.
+"""Cross-cutting API dependencies — RBAC, actor resolution, arq dep.
 
-**The configurable auth switch (decision 1).** ``Settings.api_key`` is the ONE
-switch: empty string = auth DISABLED (local dev, fail-open by EXPLICIT
-configuration, never by omission-in-code); non-empty = auth ENABLED
-(fail-closed — a missing/wrong ``X-API-Key`` header raises 401).
-``log_auth_mode`` logs a loud WARNING at API startup when the switch is off,
-so a misconfigured deploy is impossible to miss in the logs.
+**Keyed roles (FU-4).** Phase 6's single ``require_api_key`` switch is retired:
+the route→role table needs DIFFERENT allowed-role sets on different routes of
+the same router (``PATCH /jobs/{id}`` is admin/recruiter-only while ``GET
+/jobs/{id}`` is open to all four roles), which one boolean pass/fail dependency
+cannot express. Two primitives replace it:
+
+* :func:`resolve_role` — the KEY→ROLE step. Auth DISABLED (all four
+  ``settings.api_key_*`` empty) always resolves :attr:`Role.ADMIN`, whatever
+  the header carries — today's fail-open-by-EXPLICIT-configuration local-dev
+  mode, preserved verbatim. Auth ENABLED: the ``X-API-Key`` header must match
+  exactly one configured role key (constant-time, over UTF-8 bytes) or the
+  request is rejected with 401.
+* :func:`require_role` — a dependency FACTORY producing a per-route check that
+  403s a resolved role outside its allowed set. It composes ``resolve_role`` as
+  a sub-dependency rather than re-parsing the header, so ``resolve_role`` stays
+  the ONE shared function object an ``app.dependency_overrides`` entry can
+  target to bypass auth uniformly across every route in a test.
+
+``log_auth_mode`` logs a loud WARNING at API startup when the switch is off, so
+a misconfigured deploy is impossible to miss in the logs. No role key value is
+ever logged, here or anywhere else.
+
+``X-Actor-Name`` (:func:`resolve_actor`) stays an unverified display label for
+audit rows — it is NEVER an authorization input, and neither auth function
+above accepts it.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
+from enum import StrEnum
+from typing import Annotated
 
 from arq.connections import ArqRedis
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from src.settings import Settings, get_settings
 
@@ -25,39 +47,95 @@ logger = logging.getLogger(__name__)
 _MAX_ACTOR_NAME_CHARS = 128
 
 
-async def require_api_key(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> None:
-    """FastAPI dependency guarding every business route.
+class Role(StrEnum):
+    """The four keyed roles (``StrEnum``, so each member IS its wire string —
+    ``Role.ADMIN == "admin"``).
 
-    Disabled (``settings.api_key == ""``) ALWAYS passes, regardless of what
-    ``x_api_key`` carries. Enabled: the header must match exactly, else 401.
+    Role-level, NOT row-level (FU-4/D6): there is no
+    per-job owner column, so a hiring-manager or auditor key grants its read
+    access across every job company-wide."""
+
+    ADMIN = "admin"
+    RECRUITER = "recruiter"
+    HIRING_MANAGER = "hiring_manager"
+    AUDITOR = "auditor"
+
+
+def _configured_role_keys(settings: Settings) -> tuple[tuple[Role, str], ...]:
+    return (
+        (Role.ADMIN, settings.api_key_admin),
+        (Role.RECRUITER, settings.api_key_recruiter),
+        (Role.HIRING_MANAGER, settings.api_key_hiring_manager),
+        (Role.AUDITOR, settings.api_key_auditor),
+    )
+
+
+async def resolve_role(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> Role:
+    """Resolve the presented ``X-API-Key`` to exactly one :class:`Role`.
+
+    Auth disabled (all four role keys empty) ALWAYS resolves ``Role.ADMIN``,
+    regardless of what ``x_api_key`` carries. Enabled: a missing key, or one
+    matching no configured role, raises 401.
     """
     settings = get_settings()
-    if not settings.api_key:
-        return None
-    # Constant-time compare — never short-circuit on the first differing byte,
-    # so response timing cannot be used to recover the key byte-by-byte.
-    # Compare on UTF-8 bytes, not ``str``: ``secrets.compare_digest`` requires
+    if not settings.auth_enabled:
+        return Role.ADMIN
+
+    # Compare on UTF-8 BYTES, not ``str``: ``secrets.compare_digest`` requires
     # ASCII-only strings and raises ``TypeError`` otherwise — Starlette
     # latin-1-decodes header bytes, so a non-ASCII ``X-API-Key`` header is a
-    # valid (non-ASCII) ``str`` that would otherwise crash this dependency
-    # into an unhandled 500 instead of failing closed with 401.
-    if not (
-        x_api_key
-        and secrets.compare_digest(
-            x_api_key.encode("utf-8"), settings.api_key.encode("utf-8")
-        )
-    ):
+    # valid (non-ASCII) ``str`` that would otherwise crash this dependency into
+    # an unhandled 500 instead of failing closed with 401 (SEC-1).
+    presented = (x_api_key or "").encode("utf-8")
+    matched: Role | None = None
+    for role, configured in _configured_role_keys(settings):
+        if not configured:
+            continue
+        # Constant-time, and deliberately NOT short-circuited on the first
+        # match: every configured key is compared on every request, so neither
+        # response timing nor the number of comparisons leaks which role a
+        # near-miss guess was closest to.
+        if secrets.compare_digest(presented, configured.encode("utf-8")):
+            matched = role
+
+    if matched is None:
+        # Never log the presented value or any configured key.
+        logger.warning("auth.rejected — X-API-Key matched no configured role")
         raise HTTPException(status_code=401, detail="invalid or missing API key")
-    return None
+    return matched
+
+
+def require_role(*allowed: Role) -> Callable[..., Awaitable[Role]]:
+    """Build the per-route authorization dependency for ``allowed``.
+
+    Each call returns a DISTINCT closure (so ``dependency_overrides`` cannot
+    target "every ``require_role(...)`` call" as one entry — override the
+    shared :func:`resolve_role` instead). A role outside ``allowed`` raises
+    403, which is distinct from ``resolve_role``'s 401: authenticated but not
+    authorized.
+    """
+    allowed_roles = frozenset(allowed)
+
+    async def _check(role: Annotated[Role, Depends(resolve_role)]) -> Role:
+        if role not in allowed_roles:
+            raise HTTPException(
+                status_code=403, detail="role not permitted for this route"
+            )
+        return role
+
+    return _check
 
 
 def resolve_actor(
     x_actor_name: str | None = Header(default=None, alias="X-Actor-Name"),
 ) -> str:
     """The optional ``X-Actor-Name`` header (truncated to
-    ``_MAX_ACTOR_NAME_CHARS``), or the fixed default ``"api"``."""
+    ``_MAX_ACTOR_NAME_CHARS``), or the fixed default ``"api"``.
+
+    An UNVERIFIED display label for audit rows only — never an authorization
+    input (see this module's docstring)."""
     if x_actor_name:
         return x_actor_name[:_MAX_ACTOR_NAME_CHARS]
     return "api"
@@ -77,11 +155,13 @@ def get_arq(request: Request) -> ArqRedis:
 
 def log_auth_mode(settings: Settings) -> None:
     """Called ONCE at API startup. Loud WARNING when auth is disabled, an
-    informational line otherwise."""
-    if not settings.api_key:
+    informational line otherwise. Never logs a key value."""
+    if not settings.auth_enabled:
         logger.warning(
-            "AUTH DISABLED — api_key is empty; every route is unauthenticated. "
-            "Set API_KEY to enable auth."
+            "AUTH DISABLED — all four role keys are empty; every route is "
+            "unauthenticated and resolves to the admin role. Set "
+            "API_KEY_ADMIN / API_KEY_RECRUITER / API_KEY_HIRING_MANAGER / "
+            "API_KEY_AUDITOR to enable auth."
         )
     else:
         logger.info("auth.enabled")

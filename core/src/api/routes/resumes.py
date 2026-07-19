@@ -3,6 +3,12 @@
 Reverse-match (``POST /resumes/{id}/match-jobs`` / ``GET
 /resumes/{id}/match-results``) lives here as a subresource of this module
 (the plan-of-record default), not a standalone ``routes/matching.py``.
+
+**FU-4 (RBAC).** Authorization is PER ROUTE. Blind reads (list + get one) are
+open to all four roles; upload and the reverse-match subresource are
+admin/recruiter. ``POST /resumes/{id}/reveal`` is admin/recruiter ONLY and
+deliberately NARROWER than ``GET /resumes/{id}``: an auditor may read a résumé
+in blind form (D2) but may never un-blind one.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from fastapi import (
     status,
 )
 
-from src.api.deps import get_arq, require_api_key, resolve_actor
+from src.api.deps import Role, get_arq, require_role, resolve_actor
 from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
 from src.schemas.matching import JobMatchResultOut
@@ -36,7 +42,18 @@ from src.services import (
 from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 from src.storage.blob_store import BlobStore, get_blob_store
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
+
+# Résumé writes + the reverse-match subresource (a recruiter-workflow action
+# that fans out LLM work, not a read).
+_RESUME_WRITERS: tuple[Role, ...] = (Role.ADMIN, Role.RECRUITER)
+# Blind reads — every role (D2: an auditor gets the same blind reads as a
+# hiring manager).
+_RESUME_READERS: tuple[Role, ...] = tuple(Role)
+# The audited un-blind. Named separately from ``_RESUME_WRITERS`` even though
+# the members currently coincide: this set must never be widened by a
+# copy-paste from the read set on the sibling routes around it.
+_REVEALERS: tuple[Role, ...] = (Role.ADMIN, Role.RECRUITER)
 
 # Cap the number of files in a single multipart batch (memory-exhaustion
 # guard): each accepted file is read fully into memory, so an unbounded batch
@@ -45,7 +62,11 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 _MAX_UPLOAD_FILES = _MAX_ZIP_ENTRIES
 
 
-@router.post("/jobs/{job_id}/resumes", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs/{job_id}/resumes",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+)
 async def upload_resumes(
     job_id: UUID,
     db: Db,
@@ -174,7 +195,9 @@ async def upload_resumes(
     return results
 
 
-@router.get("/jobs/{job_id}/resumes")
+@router.get(
+    "/jobs/{job_id}/resumes", dependencies=[Depends(require_role(*_RESUME_READERS))]
+)
 async def list_resumes(
     job_id: UUID,
     db: Db,
@@ -186,19 +209,29 @@ async def list_resumes(
     )
 
 
-@router.get("/resumes/{resume_id}")
-async def get_resume(
-    resume_id: UUID, db: Db, reveal: bool = Query(default=False)
-) -> ResumeOut:
+@router.get(
+    "/resumes/{resume_id}", dependencies=[Depends(require_role(*_RESUME_READERS))]
+)
+async def get_resume(resume_id: UUID, db: Db) -> ResumeOut:
     """Redaction happens INSIDE ``resume_service.get_one`` (ADR-006 §4) — the
-    route never re-queries raw, so the blind-review boundary always applies."""
-    return await resume_service.get_one(db, resume_id, reveal=reveal)
+    route never re-queries raw, so the blind-review boundary always applies.
+
+    FU-4/D3: there is NO ``reveal`` query parameter here any more, per ADR-016's
+    own decision that "reveal is an explicit, POST-only, audited action". A
+    caller appending ``?reveal=true`` gets FastAPI's ordinary ignore-unknown-
+    query-params behaviour and a fully blind response — this route has no code
+    path left capable of un-blinding. ``POST /resumes/{id}/reveal`` is the only
+    un-blinding path.
+    """
+    return await resume_service.get_one(db, resume_id)
 
 
 _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
 
 
-@router.post("/resumes/{resume_id}/reveal")
+@router.post(
+    "/resumes/{resume_id}/reveal", dependencies=[Depends(require_role(*_REVEALERS))]
+)
 async def reveal_resume(
     resume_id: UUID,
     db: Db,
@@ -207,9 +240,11 @@ async def reveal_resume(
 ) -> ResumeOut:
     """AUDITED de-anonymization. Records exactly one ``reveal_audit`` row, then
     returns the UN-blinded résumé. Existence is probed FIRST so a missing id
-    404s WITHOUT writing an audit row. This is the audited reveal path the UI
-    uses; ``GET /resumes/{id}?reveal=true`` stays for direct API callers but
-    writes no audit — so the browser reveal button routes here, not there."""
+    404s WITHOUT writing an audit row. Since FU-4/D3 removed the ``reveal``
+    query parameter from ``GET /resumes/{id}``, this is the ONLY un-blinding
+    path in the API — restricted to admin/recruiter, and the role check runs
+    as a dependency so a disallowed caller is rejected BEFORE the existence
+    probe, the audit write, or any decryption."""
     exists = await db.fetchval(_EXISTS_SQL, resume_id)
     if exists is None:
         raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
@@ -222,7 +257,11 @@ async def reveal_resume(
 # ── reverse-match subresource ────────────────────────────────────────────────
 
 
-@router.post("/resumes/{resume_id}/match-jobs", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/resumes/{resume_id}/match-jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+)
 async def trigger_reverse_match(
     resume_id: UUID,
     db: Db,
@@ -238,7 +277,10 @@ async def trigger_reverse_match(
     return {"resume_id": str(resume_id), "status": "enqueued"}
 
 
-@router.get("/resumes/{resume_id}/match-results")
+@router.get(
+    "/resumes/{resume_id}/match-results",
+    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+)
 async def get_match_results(resume_id: UUID, db: Db) -> JobMatchResultOut:
     """No redaction on this path — the caller already owns the résumé, so
     there is no blind-review boundary to enforce here (unlike ``GET

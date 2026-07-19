@@ -31,7 +31,12 @@ résumé, so there is no blind-review boundary to enforce on this path (unlike
 | Route                              | Method | Allowed roles |
 |--------------------------------------|--------|-----------------|
 | ``/resumes/{id}/match-jobs``         | POST   | admin, recruiter |
-| ``/resumes/{id}/match-results``      | GET    | admin, recruiter — **NOT all four**; hiring_manager/auditor get 403 here even though they can read the blind résumé itself (this route is narrower than the general résumé-read route, so it is NOT reasonable to assume it inherits the "all four" pattern the way most GETs in this router do). |
+| ``/resumes/{id}/match-results``      | GET    | admin, recruiter |
+
+``GET /resumes/{id}/match-results`` is **NOT all four**: hiring_manager and
+auditor get 403 here even though they can read the blind résumé itself. This
+route is narrower than the general résumé-read route, so it is NOT reasonable
+to assume it inherits the "all four" pattern most GETs in this router follow.
 """
 
 from __future__ import annotations

@@ -33,7 +33,8 @@ allowed-role tuple — so ``app.dependency_overrides`` cannot target "every
 require_role(...) call" as one entry. ``resolve_role`` is the single shared
 function object every one of those closures depends on, so overriding IT
 propagates through every route's role check uniformly. This is proved
-directly below (``test_require_role_composes_with_resolve_role_via_dependency_override``)
+directly below, by
+``test_require_role_composes_with_resolve_role_via_dependency_override``,
 and is the exact mechanism every ``test_route_*.py`` file's ``_build_app``
 helper now relies on in place of the old
 ``app.dependency_overrides[require_api_key] = lambda: None`` bypass.
@@ -119,9 +120,7 @@ async def test_resolve_role_maps_the_recruiter_key_to_recruiter(
     monkeypatch.setattr(
         deps, "get_settings", lambda: _settings(api_key_recruiter="recruiter-secret")
     )
-    assert (
-        await deps.resolve_role(x_api_key="recruiter-secret") == deps.Role.RECRUITER
-    )
+    assert await deps.resolve_role(x_api_key="recruiter-secret") == deps.Role.RECRUITER
 
 
 @pytest.mark.asyncio
@@ -133,9 +132,7 @@ async def test_resolve_role_maps_the_hiring_manager_key_to_hiring_manager(
     monkeypatch.setattr(
         deps, "get_settings", lambda: _settings(api_key_hiring_manager="hm-secret")
     )
-    assert (
-        await deps.resolve_role(x_api_key="hm-secret") == deps.Role.HIRING_MANAGER
-    )
+    assert await deps.resolve_role(x_api_key="hm-secret") == deps.Role.HIRING_MANAGER
 
 
 @pytest.mark.asyncio
@@ -302,9 +299,7 @@ async def test_require_role_403s_hiring_manager_too_when_not_allowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_require_role_with_a_single_allowed_role_admits_only_that_role() -> (
-    None
-):
+async def test_require_role_with_a_single_allowed_role_admits_only_that_role() -> None:
     from src.api import deps
 
     checker = deps.require_role(deps.Role.ADMIN)

@@ -22,7 +22,7 @@ from src.api.routes import jobs, resumes, shortlist
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
-from src.settings import get_settings
+from src.settings import get_settings, validate_startup_auth_config
 from src.storage.blob_store import BlobStore
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
@@ -43,7 +43,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "non-vocab Skill nodes would be keyed by an unsalted (dictionary-"
             "attackable) hash. Set SKILL_HASH_SALT."
         )
-    # Phase 6 — the configurable auth switch. A loud WARNING when disabled, an
+    # FU-4 — refuse to boot on an auth config that would fail open (a stale
+    # legacy API_KEY, D1) or silently collapse two roles into one (two
+    # byte-identical role keys). Same discipline as the salt check above:
+    # loud RuntimeError, before any pool/schema/graph work begins.
+    validate_startup_auth_config(s)
+    # The configurable auth switch. A loud WARNING when disabled, an
     # informational line otherwise; called once, here, at startup.
     log_auth_mode(s)
     pool = await init_pool(app, s)

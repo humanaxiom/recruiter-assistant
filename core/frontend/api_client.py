@@ -82,18 +82,25 @@ class Conflict(BadRequest):  # noqa: N818 — same naming convention as the
 def build_client() -> httpx.Client:
     """Build an ``httpx.Client`` bound to ``settings.api_base_url``.
 
-    Attaches an ``X-API-Key`` header IFF ``settings.api_key`` is non-empty,
-    mirroring ``src.api.deps.require_api_key``'s empty-disables-auth
-    semantics. Must not crash on a non-ASCII key (client-side mirror of
+    **FU-4/D6 — the viewer presents ONE FIXED role key outbound for every
+    browser it serves: ``recruiter``.** The browser supplies no credential of
+    its own; Flask attaches its own server-held key, so every viewer user has
+    identical backend authority. Recruiter is the role the viewer's workflows
+    actually need (job/résumé writes, audited reveal) without being admin.
+
+    Attaches an ``X-API-Key`` header IFF ``settings.api_key_recruiter`` is
+    non-empty — the client-side mirror of ``src.api.deps.resolve_role``'s
+    auth-disabled-when-all-four-empty semantics, reduced to the ONE key Flask
+    ever presents. Must not crash on a non-ASCII key (client-side mirror of
     ADR-012 §1's SEC-1 fix) — httpx's ``Headers`` defaults to ASCII-only
     encoding for ``str`` values and raises ``UnicodeEncodeError`` on a
     non-ASCII one, so the header value is explicitly UTF-8-encoded here
-    (mirroring ``require_api_key`` comparing UTF-8 bytes server-side).
+    (mirroring ``resolve_role`` comparing UTF-8 bytes server-side).
     """
     settings = get_settings()
     headers: dict[str, str] = {}
-    if settings.api_key:
-        headers["X-API-Key"] = settings.api_key
+    if settings.api_key_recruiter:
+        headers["X-API-Key"] = settings.api_key_recruiter
     return httpx.Client(
         base_url=settings.api_base_url,
         headers=httpx.Headers(headers, encoding="utf-8"),
@@ -310,6 +317,14 @@ def get_resume(
     reveal: bool = False,
     client: httpx.Client | None = None,
 ) -> Any:
+    """GET /resumes/{id} — always blind.
+
+    FU-4/D3 removed ``reveal`` from the BACKEND route, so the parameter sent
+    here is inert: the backend ignores it and answers blind either way. It is
+    retained (defaulting to ``False``) purely as the viewer-side contract
+    ``frontend.app`` asserts against — see :func:`reveal_resume` for the only
+    path that actually un-blinds.
+    """
     response = _request(
         "GET", f"/resumes/{resume_id}", params={"reveal": reveal}, client=client
     )
@@ -360,7 +375,11 @@ def export_shortlist(
     client: httpx.Client | None = None,
 ) -> httpx.Response:
     """Returns the raw ``httpx.Response`` so the Flask route can proxy
-    ``Content-Disposition``/body straight through without re-encoding it."""
+    ``Content-Disposition``/body straight through without re-encoding it.
+
+    ``reveal`` is inert as of FU-4/D3 — the backend export route dropped the
+    parameter and is now unconditionally blind, so exports are anonymized
+    whatever is passed here."""
     return _request(
         "GET",
         f"/jobs/{job_id}/shortlist/export",

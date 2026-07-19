@@ -51,11 +51,16 @@ mocked ``asyncpg`` connection (no service-internals monkeypatching).
 |-------------------------------|--------|---------------------------------|
 | ``/jobs``                     | POST   | admin, recruiter                |
 | ``/jobs/jd-extract``          | POST   | admin, recruiter                |
-| ``/jobs/bulk``                | POST   | admin, recruiter (see ``test_route_jobs_bulk.py``) |
+| ``/jobs/bulk``                | POST   | admin, recruiter (see below)    |
 | ``/jobs``                     | GET    | all four                        |
 | ``/jobs/{id}``                | GET    | all four                        |
-| ``/jobs/{id}``                | PATCH  | admin, recruiter ONLY (D5 — the most explicit coverage: this PATCH can set ``blind_review: false``, permanently un-blinding every résumé/shortlist under the job with NO audit row) |
+| ``/jobs/{id}``                | PATCH  | admin, recruiter ONLY (D5)      |
 | ``/jobs/{id}/status``         | PATCH  | admin, recruiter                |
+
+``/jobs/bulk`` is covered in ``test_route_jobs_bulk.py``. ``PATCH
+/jobs/{id}`` gets the most explicit coverage in this file (D5): that PATCH can
+set ``blind_review: false``, permanently un-blinding every résumé/shortlist
+under the job with NO audit row.
 
 Every route now goes through a per-route ``Depends(require_role(...))``
 (replacing the Phase-6 uniform router-level ``require_api_key``), which in
@@ -360,7 +365,9 @@ async def test_patch_job_status_403s_for_hiring_manager_and_auditor(
     role: Role,
 ) -> None:
     job_id = uuid4()
-    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, status="draft"), fetchval="draft")
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, status="draft"), fetchval="draft"
+    )
     app = _build_app(conn, role=role)
     async with await _client(app) as client:
         resp = await client.patch(f"/jobs/{job_id}/status", json={"to": "open"})
@@ -456,9 +463,7 @@ async def test_patch_job_admin_can_flip_blind_review_off() -> None:
     conn = _mock_conn(fetchrow=_job_row(job_id=job_id, blind_review=False))
     app = _build_app(conn, role=Role.ADMIN)
     async with await _client(app) as client:
-        resp = await client.patch(
-            f"/jobs/{job_id}", json={"blind_review": False}
-        )
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
     assert resp.status_code == 200
     assert resp.json()["blind_review"] is False
 
@@ -469,9 +474,7 @@ async def test_patch_job_recruiter_can_flip_blind_review_off() -> None:
     conn = _mock_conn(fetchrow=_job_row(job_id=job_id, blind_review=False))
     app = _build_app(conn, role=Role.RECRUITER)
     async with await _client(app) as client:
-        resp = await client.patch(
-            f"/jobs/{job_id}", json={"blind_review": False}
-        )
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
     assert resp.status_code == 200
 
 
@@ -486,9 +489,7 @@ async def test_patch_job_403s_for_hiring_manager_and_auditor_d5(role: Role) -> N
     conn = _mock_conn(fetchrow=_job_row(job_id=job_id))
     app = _build_app(conn, role=role)
     async with await _client(app) as client:
-        resp = await client.patch(
-            f"/jobs/{job_id}", json={"blind_review": False}
-        )
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
     assert resp.status_code == 403
 
 
@@ -518,9 +519,7 @@ async def test_patch_job_403_happens_before_any_db_write(role: Role) -> None:
     conn = _mock_conn(fetchrow=_job_row(job_id=job_id))
     app = _build_app(conn, role=role)
     async with await _client(app) as client:
-        resp = await client.patch(
-            f"/jobs/{job_id}", json={"blind_review": False}
-        )
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
     assert resp.status_code == 403
     conn.execute.assert_not_called()
 

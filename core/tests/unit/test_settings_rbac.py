@@ -128,7 +128,7 @@ def test_validate_startup_auth_config_raises_on_a_set_legacy_api_key() -> None:
         assert var in message
 
 
-def test_validate_startup_auth_config_raises_on_legacy_key_even_with_new_fields_set() -> (
+def test_validate_startup_auth_config_raises_on_legacy_key_even_with_new_fields_set() -> (  # noqa: E501
     None
 ):
     """A stale API_KEY alongside correctly-configured new fields is STILL a
@@ -178,7 +178,7 @@ def test_validate_startup_auth_config_raises_on_any_colliding_pair(
         validate_startup_auth_config(s)
 
 
-def test_validate_startup_auth_config_passes_when_all_configured_keys_are_distinct() -> (
+def test_validate_startup_auth_config_passes_when_all_configured_keys_are_distinct() -> (  # noqa: E501
     None
 ):
     s = Settings(
