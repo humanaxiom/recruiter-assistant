@@ -180,18 +180,21 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 
 ## API layer (Phase 6)
 
-`core/src/api/routes/{jobs,resumes,shortlist}.py` — twelve routes (Phase 6 shipped eleven; the Workflow
-UI feature added `PATCH /jobs/{id}`, below) over the service layer Phases 3–5 built, plus
-`core/src/api/deps.py`'s configurable auth switch. **Merged to `main`** — see "Status & roadmap" below.
+`core/src/api/routes/{jobs,resumes,shortlist}.py` — the HTTP surface over the service layer Phases 3–5
+built, plus `core/src/api/deps.py`'s configurable auth switch. Phase 6 shipped eleven routes; post-v1
+features added `PATCH /jobs/{id}` (Workflow UI), `POST /resumes/{id}/reveal` (FU-1 audited reveal), and
+`POST /jobs/bulk` (FU-3 bulk JD upload). **Merged to `main`** — see "Status & roadmap" below.
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST / GET | `/jobs` | Create a draft job (enqueues `parse_job`) / list |
-| GET / PATCH | `/jobs/{id}` | Get one / general partial update (allowlist-guarded; `status` not settable here — Workflow UI feature) |
+| POST | `/jobs/bulk` | **FU-3** — bulk-create one job per uploaded JD file (loose or `.zip`) + optional CSV metadata manifest; dedup by `description_sha256` |
+| GET / PATCH | `/jobs/{id}` | Get one / general partial update (allowlist-guarded; `status` not settable here) |
 | PATCH | `/jobs/{id}/status` | The only status-mutating route — forward-only, 409 on an invalid transition |
 | POST | `/jobs/jd-extract` | Pre-fill helper — extract JD text from an upload, no DB write |
-| POST / GET | `/jobs/{id}/resumes` | Upload résumés (multi-file or `.zip`) / list |
+| POST / GET | `/jobs/{id}/resumes` | Upload résumés (multi-file / `.zip`; **FU-1** cover-letter file; **FU-2/3** per-résumé cover-letter pairing via filename convention or a `pairing_manifest`) / list |
 | GET | `/resumes/{id}` | Get one résumé (redacted under blind review) |
+| POST | `/resumes/{id}/reveal` | **FU-1** — AUDITED de-anonymization: writes a `reveal_audit` row, returns the un-blinded résumé |
 | POST | `/resumes/{id}/match-jobs` | Trigger reverse-match (enqueues `reverse_match_job`) |
 | GET | `/resumes/{id}/match-results` | Read reverse-match result — **no redaction** (the caller owns the résumé) |
 | GET / PATCH | `/jobs/{id}/shortlist` | List / (schema-level) |
@@ -276,7 +279,20 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 
 ## Status & roadmap
 
-**Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17) are all merged. There is no Phase 8. **A post-v1 Workflow UI feature has since shipped** (see "Workflow UI" above and [ADR-014](docs/adr/014-workflow-ui.md)) — Phase 7's read-only viewer is now a full create/upload/generate workflow, tracked as a named feature, not a numbered phase. See [HANDOFF.md](HANDOFF.md) for exact commit/PR state and what a human could scope next. What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the eleven-plus job/résumé/shortlist/reverse-match HTTP routes, and **the Flask Workflow UI (above)** — a full job → résumé → shortlist recruiter workflow, blind-only by construction — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
+**Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17) are all merged. There is no Phase 8.
+
+**Five post-v1 features have since shipped, all merged to `main`, CI green** (named features, not numbered phases):
+
+| Feature | PR / merge | ADR | What it added |
+|---|---|---|---|
+| **Workflow UI** | #18 `3eba9cf` | [014](docs/adr/014-workflow-ui.md) | Phase 7's read-only viewer → a full create/upload/generate job → résumé → shortlist workflow (Flask + HTMX, blind-only) |
+| **FU-2 — evidence chunk expansion** | #19 `8d7ce0b` | [015](docs/adr/015-evidence-chunk-expansion.md) | Evidence `evidence_chunk_ids` expanded to redacted source text in the CSV export + card panel |
+| **FU-1 — audited reveal** | #20 `bc055f4` | [016](docs/adr/016-audited-reveal.md) | Blind stays default; identity exposed only via an **audited** `POST /resumes/{id}/reveal` (`reveal_audit` sink + a button on the résumé page and each shortlist card). Also: cover-letter **file** upload |
+| **FU-3 — bulk ingest** | #21 `e033d31` | [017](docs/adr/017-bulk-ingest-pairing.md) | Bulk résumé upload with per-résumé cover-letter pairing (filename convention or `manifest.json`), bulk JD upload (`POST /jobs/bulk` + CSV manifest + dedup), reverse-match UI, and the shortlist-poll fix |
+
+**The one remaining planned item is FU-4 — RBAC** (role-based access control; gates *who* may reveal, closing FU-1's residuals R1/R2/R5). See [HANDOFF.md](HANDOFF.md) for exact state.
+
+What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the job/résumé/shortlist/reverse-match/reveal/bulk HTTP routes, and **the Flask Workflow UI** — a full job → résumé → shortlist recruiter workflow with audited reveal and bulk ingest, blind-only by construction — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
 
 | Phase | Deliverable | State |
 |---|---|---|
