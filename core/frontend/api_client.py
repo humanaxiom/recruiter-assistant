@@ -11,8 +11,9 @@ One function per consumed backend route (Phase 6's ``jobs``/``resumes``/
 * ``list_shortlist``/``get_shortlist_entry`` take NO ``reveal`` parameter at
   all — shortlist reads are unconditionally blind, matching
   ``shortlist_service.list_for_job``/``get_one`` taking no such kwarg either.
-* ``get_resume``'s ``reveal`` defaults to ``False`` — callers must opt in
-  explicitly.
+* ``get_resume``/``export_shortlist`` take NO ``reveal`` parameter either
+  (FU-4/D3 removed it from both backend routes) — the audited
+  ``reveal_resume`` is the only un-blinding path.
 * ``get_match_results`` has no redaction concept (ADR-012 §4 — the backend
   applies none here either).
 
@@ -311,23 +312,15 @@ def get_shortlist_entry(entry_id: UUID, *, client: httpx.Client | None = None) -
     return response.json()
 
 
-def get_resume(
-    resume_id: UUID,
-    *,
-    reveal: bool = False,
-    client: httpx.Client | None = None,
-) -> Any:
-    """GET /resumes/{id} — always blind.
+def get_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /resumes/{id} — unconditionally blind.
 
-    FU-4/D3 removed ``reveal`` from the BACKEND route, so the parameter sent
-    here is inert: the backend ignores it and answers blind either way. It is
-    retained (defaulting to ``False``) purely as the viewer-side contract
-    ``frontend.app`` asserts against — see :func:`reveal_resume` for the only
-    path that actually un-blinds.
+    FU-4/D3 removed ``reveal`` from the BACKEND route entirely, so this client
+    takes no such kwarg either: an accepted-but-ignored parameter would read
+    like it works. The audited :func:`reveal_resume` is the only un-blinding
+    path.
     """
-    response = _request(
-        "GET", f"/resumes/{resume_id}", params={"reveal": reveal}, client=client
-    )
+    response = _request("GET", f"/resumes/{resume_id}", client=client)
     return response.json()
 
 
@@ -371,19 +364,18 @@ def export_shortlist(
     job_id: UUID,
     *,
     format: ExportFormat = "csv",
-    reveal: bool = False,
     client: httpx.Client | None = None,
 ) -> httpx.Response:
     """Returns the raw ``httpx.Response`` so the Flask route can proxy
     ``Content-Disposition``/body straight through without re-encoding it.
 
-    ``reveal`` is inert as of FU-4/D3 — the backend export route dropped the
-    parameter and is now unconditionally blind, so exports are anonymized
-    whatever is passed here."""
+    FU-4/D3 dropped ``reveal`` from the backend export route — that was an
+    UNAUDITED bulk de-anonymization across a whole shortlist — so exports are
+    unconditionally blind and this client takes no such kwarg."""
     return _request(
         "GET",
         f"/jobs/{job_id}/shortlist/export",
-        params={"format": format, "reveal": reveal},
+        params={"format": format},
         client=client,
     )
 

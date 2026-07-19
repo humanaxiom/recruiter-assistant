@@ -28,7 +28,7 @@ from flask import (
     url_for,
 )
 
-from frontend import api_client
+from frontend import api_client, csrf
 from src.settings import get_settings
 
 # The backend caps résumé uploads at ~10 MB/file and up to 20 files per
@@ -466,6 +466,9 @@ def job_shortlist(job_id: UUID) -> Any:
         any_resume_parsed=_any_resume_parsed(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+        # The included `shortlist_cards.html` carries a reveal form posting to
+        # the SAME guarded route, so it needs a token too (FU-4/D4).
+        csrf_token=csrf.issue_token(),
     )
 
 
@@ -512,6 +515,9 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         entries=entries,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+        # Each poll re-renders the cards, so re-minting here keeps the token in
+        # the swapped-in DOM in sync with the session's single live slot.
+        csrf_token=csrf.issue_token(),
     )
 
 
@@ -533,7 +539,7 @@ def resume_detail(resume_id: UUID) -> Any:
     # False here, so a visitor cannot re-introduce de-anonymization by
     # editing the URL.
     try:
-        resume = api_client.get_resume(resume_id, reveal=False)
+        resume = api_client.get_resume(resume_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -546,6 +552,9 @@ def resume_detail(resume_id: UUID) -> Any:
         resume=resume,
         current_year=dt.date.today().year,
         revealed=False,
+        # FU-4/D4: mint the one-shot anti-forgery token the reveal form posts
+        # back, so a cross-site auto-submit cannot manufacture an audit row.
+        csrf_token=csrf.issue_token(),
     )
 
 
@@ -555,7 +564,16 @@ def resume_reveal(resume_id: UUID) -> Any:
     prefetched/link-crawled, but a reveal must be an explicit act. Calls the
     backend's audited reveal endpoint (which records who/what/when), then
     re-renders the résumé UN-blinded in place. Blind stays the default; this is
-    the only path that surfaces identity."""
+    the only path that surfaces identity.
+
+    FU-4/D4: guarded by a session-bound one-shot CSRF token plus an
+    ``Origin``/``Referer`` same-origin check. BOTH are evaluated BEFORE any call
+    reaches the backend, so a rejected forgery attempt can never imply a
+    ``reveal_audit`` row."""
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(request.form.get(csrf.FORM_FIELD)):
+        abort(403)
     # `context` records WHERE the reveal was triggered (shortlist card vs the
     # résumé page) in the audit row; defaults to the résumé page.
     context = (request.form.get("context") or "resume_detail").strip()[:64]

@@ -205,9 +205,7 @@ async def test_export_csv_reads_a_row_actually_written_by_persist_shortlist(
 
     app = _build_app(pg_pool)
     async with await _client(app) as client:
-        resp = await client.get(
-            f"/jobs/{job_id}/shortlist/export?format=csv"
-        )
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
     assert resp.status_code == 200
     reader = csv.DictReader(io.StringIO(resp.text))
     rows = list(reader)
