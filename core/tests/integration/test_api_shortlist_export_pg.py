@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from testcontainers.postgres import PostgresContainer
 
-from src.api.deps import require_api_key
+from src.api.deps import Role, resolve_role
 from src.api.routes import shortlist as shortlist_routes
 from src.errors import AppError
 from src.models.ddl import init_schema
@@ -156,7 +156,7 @@ def _build_app(pool: asyncpg.Pool) -> FastAPI:
             yield conn
 
     app.dependency_overrides[get_db] = _get_db_override
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[resolve_role] = lambda: Role.ADMIN
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
@@ -206,13 +206,14 @@ async def test_export_csv_reads_a_row_actually_written_by_persist_shortlist(
     app = _build_app(pg_pool)
     async with await _client(app) as client:
         resp = await client.get(
-            f"/jobs/{job_id}/shortlist/export?format=csv&reveal=true"
+            f"/jobs/{job_id}/shortlist/export?format=csv"
         )
     assert resp.status_code == 200
     reader = csv.DictReader(io.StringIO(resp.text))
     rows = list(reader)
     assert len(rows) == 1
-    assert rows[0]["candidate_name"] == "Jane Smith"
+    # FU-4/D3: exports are blind-only; reveal parameter is retired
+    assert "Jane Smith" not in resp.text
     assert float(rows[0]["score_final"]) == pytest.approx(0.91)
 
 
