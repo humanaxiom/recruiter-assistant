@@ -5,13 +5,15 @@ fails at collection (``ModuleNotFoundError``) — RED half of the TDD cycle.
 Reverse-match subresource routes (``POST /resumes/{id}/match-jobs`` /
 ``GET /resumes/{id}/match-results``) are exercised separately in
 ``test_route_reverse_match.py`` — this file covers upload + list + get only.
+The audited ``POST /resumes/{id}/reveal`` is exercised in
+``test_route_reveal.py``.
 
 **Ambiguities this file locks:**
 
 * ``src.api.routes.resumes`` exposes ``router: APIRouter`` (absolute paths,
   no router-level prefix): ``POST /jobs/{job_id}/resumes`` (upload),
   ``GET /jobs/{job_id}/resumes`` (list), ``GET /resumes/{resume_id}``
-  (get one, optional ``?reveal=true`` query param, default ``false``).
+  (get one — **no ``reveal`` query param at all as of FU-4/D3; see below**).
 * Upload is ``multipart/form-data``: a REPEATED ``files`` field (one or more
   résumé files, individually OR one entry ending ``.zip`` which is expanded
   via ``src.services.zip_upload.expand_zip_entries`` and merged into the
@@ -40,6 +42,25 @@ Reverse-match subresource routes (``POST /resumes/{id}/match-jobs`` /
   NON-blind job, at least the email is present verbatim — proving the route
   actually goes through ``resume_service.get_one``'s redaction, not a
   raw re-query.
+
+**FU-4/D3 — the ``reveal`` query param is REMOVED from this route entirely**
+(ADR-016's own decision: "reveal is an explicit, POST-only, audited action").
+The route now hardcodes ``reveal=False`` when calling
+``resume_service.get_one`` — a caller sending ``?reveal=true`` gets FastAPI's
+default "extra query params are silently ignored" behaviour, NOT an
+un-blinded response. This is asserted below on the ACTUAL SERIALIZED
+response bytes (the byte-scan style already established in this file for the
+default case), not merely on a field being ``None`` — a weaker assertion
+would pass even if the route accidentally still read the param and dropped
+it from the JSON shape while leaking it into an unrelated field.
+
+**FU-4 (RBAC) — route→role table for this file:**
+
+| Route                          | Method | Allowed roles |
+|----------------------------------|--------|-----------------|
+| ``/jobs/{id}/resumes`` (upload)  | POST   | admin, recruiter |
+| ``/jobs/{id}/resumes`` (list)    | GET    | all four |
+| ``/resumes/{id}``                | GET    | all four (blind only) |
 """
 
 from __future__ import annotations
@@ -58,7 +79,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import get_arq, require_api_key
+from src.api.deps import Role, get_arq, resolve_role
 from src.api.routes import resumes as resumes_routes
 from src.errors import AppError
 from src.models.pool import get_db
@@ -70,6 +91,9 @@ _PDF_MAGIC = b"%PDF-1.4\nresume content\n" + b"x" * 500
 _NAME = "Zzyzxqrst Wibblesworth"
 _EMAIL = "zzyzxqrst.wibblesworth@example.test"
 _PHONE = "604-555-0192"
+
+_NON_RESUME_WRITER_ROLES: tuple[Role, ...] = (Role.HIRING_MANAGER, Role.AUDITOR)
+_ALL_ROLES: tuple[Role, ...] = tuple(Role)
 
 
 class _Row(dict[str, Any]):
@@ -160,7 +184,11 @@ def _mock_blob_store() -> MagicMock:
 
 
 def _build_app(
-    conn: MagicMock, *, arq: MagicMock | None = None, store: MagicMock | None = None
+    conn: MagicMock,
+    *,
+    arq: MagicMock | None = None,
+    store: MagicMock | None = None,
+    role: Role = Role.ADMIN,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(resumes_routes.router)
@@ -173,7 +201,7 @@ def _build_app(
     app.dependency_overrides[get_arq] = lambda: arq or MagicMock(
         enqueue_job=AsyncMock()
     )
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[resolve_role] = lambda: role
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
@@ -613,6 +641,41 @@ async def test_upload_resumes_crafted_filename_blob_key_server_generated() -> No
     assert "confidential" not in key.lower()
 
 
+# ── FU-4 (RBAC): POST /jobs/{id}/resumes is admin/recruiter ONLY ────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_as_recruiter_succeeds() -> None:
+    conn = _mock_conn()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store, role=Role.RECRUITER)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+
+
+@pytest.mark.parametrize("role", _NON_RESUME_WRITER_ROLES)
+@pytest.mark.asyncio
+async def test_upload_resumes_403s_for_hiring_manager_and_auditor(role: Role) -> None:
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store, role=role)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 403
+    arq.enqueue_job.assert_not_awaited()
+    store.put.assert_not_called()
+
+
 # ── GET /jobs/{job_id}/resumes (list) ────────────────────────────────────
 
 
@@ -624,6 +687,16 @@ async def test_list_resumes_returns_200() -> None:
         resp = await client.get(f"/jobs/{uuid4()}/resumes")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+@pytest.mark.parametrize("role", _ALL_ROLES)
+@pytest.mark.asyncio
+async def test_list_resumes_is_readable_by_every_role(role: Role) -> None:
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=role)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/resumes")
+    assert resp.status_code == 200
 
 
 # ── GET /resumes/{id} — 404 + redaction byte-scan ───────────────────────
@@ -677,3 +750,91 @@ async def test_get_resume_under_non_blind_job_reveals_pii() -> None:
         resp = await client.get(f"/resumes/{resume_id}")
     assert resp.status_code == 200
     assert _EMAIL in resp.text
+
+
+@pytest.mark.parametrize("role", _ALL_ROLES)
+@pytest.mark.asyncio
+async def test_get_resume_is_readable_by_every_role(role: Role) -> None:
+    resume_id = uuid4()
+    row = _get_row(resume_id=resume_id, parsed=None)
+    conn = _mock_conn(fetchrow=row, fetchval=True)
+    app = _build_app(conn, role=role)
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}")
+    assert resp.status_code == 200
+
+
+# ── FU-4/D3: ?reveal=true on the read route is a no-op ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_resume_reveal_true_query_param_is_ignored_under_a_blind_job() -> (
+    None
+):
+    """The whole point of D3: even a caller who explicitly appends
+    ``?reveal=true`` gets the BLIND response — this route has no code path
+    to un-blind at all any more. Asserted on the raw serialized response
+    bytes (the established byte-scan style), not merely a field being
+    ``None``, so a route that silently reads-and-drops the query param while
+    leaking identity into some OTHER field would still fail this test."""
+    resume_id = uuid4()
+    parsed = _full_parsed(name=_NAME, email=_EMAIL, phone=_PHONE)
+    row = _get_row(
+        resume_id=resume_id,
+        parsed=parsed,
+        candidate_name=_NAME,
+        candidate_email=_EMAIL,
+        candidate_phone=_PHONE,
+    )
+    conn = _mock_conn(fetchrow=row, fetchval=True)  # blind job
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}?reveal=true")
+    assert resp.status_code == 200
+    raw = resp.text
+    assert _NAME not in raw
+    assert _EMAIL not in raw
+    assert _PHONE not in raw
+
+
+@pytest.mark.asyncio
+async def test_get_resume_route_never_forwards_a_reveal_kwarg_to_the_service(
+    monkeypatch: Any,
+) -> None:
+    """Structural pin: the route must call
+    ``resume_service.get_one(db, resume_id)`` with no ``reveal`` kwarg AT ALL
+    (or an explicit ``reveal=False``) — never a value threaded through from
+    the query string, because the query string parameter no longer exists in
+    the route's own signature."""
+    from src.schemas.resumes import CandidateInfo, ResumeOut
+
+    resume_id = uuid4()
+    stub_out = ResumeOut(
+        id=resume_id,
+        job_id=uuid4(),
+        original_filename="resume.pdf",
+        mime_type="application/pdf",
+        file_size_bytes=1234,
+        sha256="a" * 64,
+        candidate=CandidateInfo(name=None, email=None, phone=None, location=None),
+        candidate_email_hash=None,
+        parsed=None,
+        status="parsed",
+        uploaded_by="api",
+        uploaded_at=_NOW,
+        parsed_at=_NOW,
+        failure_reason=None,
+        consent_acknowledged=True,
+        blinded=True,
+    )
+    spy = AsyncMock(return_value=stub_out)
+    row = _get_row(resume_id=resume_id, parsed=None)
+    conn = _mock_conn(fetchrow=row, fetchval=True)
+    app = _build_app(conn)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", spy)
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}?reveal=true")
+    assert resp.status_code == 200
+    spy.assert_awaited_once()
+    _, kwargs = spy.await_args
+    assert kwargs.get("reveal", False) is False

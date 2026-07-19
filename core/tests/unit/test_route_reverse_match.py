@@ -25,6 +25,13 @@ résumé, so there is no blind-review boundary to enforce on this path (unlike
   MAY 404 on a nonexistent résumé id here too, but that is not what "empty
   shape, not 404" pins: it pins that HAVING ZERO REVERSE-MATCH ROWS for a
   real résumé is not confused with "not found".)
+
+**FU-4 (RBAC) — route→role table for this file:**
+
+| Route                              | Method | Allowed roles |
+|--------------------------------------|--------|-----------------|
+| ``/resumes/{id}/match-jobs``         | POST   | admin, recruiter |
+| ``/resumes/{id}/match-results``      | GET    | admin, recruiter — **NOT all four**; hiring_manager/auditor get 403 here even though they can read the blind résumé itself (this route is narrower than the general résumé-read route, so it is NOT reasonable to assume it inherits the "all four" pattern the way most GETs in this router do). |
 """
 
 from __future__ import annotations
@@ -40,12 +47,14 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import get_arq, require_api_key
+from src.api.deps import Role, get_arq, resolve_role
 from src.api.routes import resumes as resumes_routes
 from src.errors import AppError
 from src.models.pool import get_db
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
+
+_NON_MATCH_ROLES: tuple[Role, ...] = (Role.HIRING_MANAGER, Role.AUDITOR)
 
 
 def _acm() -> MagicMock:
@@ -65,7 +74,9 @@ def _mock_conn(*, exists: bool, fetch: list[Any] | None = None) -> MagicMock:
     return conn
 
 
-def _build_app(conn: MagicMock, *, arq: MagicMock | None = None) -> FastAPI:
+def _build_app(
+    conn: MagicMock, *, arq: MagicMock | None = None, role: Role = Role.ADMIN
+) -> FastAPI:
     app = FastAPI()
     app.include_router(resumes_routes.router)
 
@@ -76,7 +87,7 @@ def _build_app(conn: MagicMock, *, arq: MagicMock | None = None) -> FastAPI:
     app.dependency_overrides[get_arq] = lambda: arq or MagicMock(
         enqueue_job=AsyncMock()
     )
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[resolve_role] = lambda: role
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
@@ -186,3 +197,57 @@ async def test_get_match_results_returns_persisted_entries() -> None:
     assert len(body["entries"]) == 1
     assert body["entries"][0]["job_id"] == str(job_id)
     assert body["entries"][0]["title"] == "Staff Engineer"
+
+
+# ── FU-4 (RBAC): admin/recruiter ONLY on BOTH routes ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_trigger_reverse_match_as_recruiter_succeeds() -> None:
+    resume_id = uuid4()
+    conn = _mock_conn(exists=True)
+    app = _build_app(conn, role=Role.RECRUITER)
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/match-jobs")
+    assert resp.status_code == 202
+
+
+@pytest.mark.parametrize("role", _NON_MATCH_ROLES)
+@pytest.mark.asyncio
+async def test_trigger_reverse_match_403s_for_hiring_manager_and_auditor(
+    role: Role,
+) -> None:
+    resume_id = uuid4()
+    conn = _mock_conn(exists=True)
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq, role=role)
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/match-jobs")
+    assert resp.status_code == 403
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_match_results_as_recruiter_succeeds() -> None:
+    resume_id = uuid4()
+    conn = _mock_conn(exists=True, fetch=[])
+    app = _build_app(conn, role=Role.RECRUITER)
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}/match-results")
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("role", _NON_MATCH_ROLES)
+@pytest.mark.asyncio
+async def test_get_match_results_403s_for_hiring_manager_and_auditor(
+    role: Role,
+) -> None:
+    """Narrower than the general "all four can GET" pattern elsewhere on this
+    router — asserted explicitly per the route→role table rather than
+    assumed from ``GET /resumes/{id}``'s own (wider) allowed set."""
+    resume_id = uuid4()
+    conn = _mock_conn(exists=True, fetch=[])
+    app = _build_app(conn, role=role)
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}/match-results")
+    assert resp.status_code == 403

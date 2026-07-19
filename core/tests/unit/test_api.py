@@ -258,3 +258,136 @@ def test_get_blob_store_raises_a_clear_error_when_absent() -> None:
     fresh = FastAPI()
     with pytest.raises(RuntimeError, match="(?i)blob"):
         get_blob_store(_request_for(fresh))
+
+
+# ── FU-4 (RBAC): startup refuses to boot on a bad auth config ────────────
+#
+# Mirrors the SKILL_HASH_SALT lifespan tests above exactly. The actual
+# validation logic lives in ``src.settings.validate_startup_auth_config``
+# (unit-tested directly in ``test_settings_rbac.py``); these tests pin that
+# the LIFESPAN actually calls it, at the same point the SKILL_HASH_SALT
+# check runs, before any pool/schema/graph work begins.
+
+
+@pytest.mark.asyncio
+async def test_lifespan_raises_when_a_legacy_api_key_is_configured(
+    tmp_path: Path,
+) -> None:
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        skill_hash_salt="a-real-salt",
+        api_key="a-stale-legacy-secret",
+    )
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch(
+            "src.api.main.init_pool", AsyncMock(return_value=MagicMock())
+        ) as init_pool,
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=MagicMock()),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=MagicMock())),
+    ):
+        with pytest.raises(RuntimeError, match="API_KEY_ADMIN"):
+            async with lifespan(fresh):
+                pass
+
+    init_pool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_raises_when_two_role_keys_are_byte_identical(
+    tmp_path: Path,
+) -> None:
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        skill_hash_salt="a-real-salt",
+        api_key_admin="collided-secret",
+        api_key_recruiter="collided-secret",
+    )
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch(
+            "src.api.main.init_pool", AsyncMock(return_value=MagicMock())
+        ) as init_pool,
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=MagicMock()),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=MagicMock())),
+    ):
+        with pytest.raises(RuntimeError):
+            async with lifespan(fresh):
+                pass
+
+    init_pool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_raise_with_a_valid_distinct_role_key_config(
+    tmp_path: Path,
+) -> None:
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    arq = MagicMock()
+    arq.close = AsyncMock()
+    driver = MagicMock()
+    driver.close = AsyncMock()
+    settings = Settings(
+        storage_dir=str(tmp_path),
+        skill_hash_salt="a-real-salt",
+        api_key_admin="admin-1",
+        api_key_recruiter="recruiter-2",
+        api_key_hiring_manager="hm-3",
+        api_key_auditor="auditor-4",
+    )
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch("src.api.main.init_pool", AsyncMock(return_value=MagicMock())),
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=driver),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=arq)),
+    ):
+        async with lifespan(fresh):
+            pass  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_raise_on_the_fully_disabled_default_auth_config(
+    tmp_path: Path,
+) -> None:
+    """Today's local-dev default (all four role keys empty, no legacy
+    ``api_key`` set) must keep booting exactly as it does before FU-4."""
+    from src.api.main import lifespan
+    from src.settings import Settings
+
+    fresh = FastAPI()
+    arq = MagicMock()
+    arq.close = AsyncMock()
+    driver = MagicMock()
+    driver.close = AsyncMock()
+    settings = Settings(storage_dir=str(tmp_path), skill_hash_salt="a-real-salt")
+
+    with (
+        patch("src.api.main.get_settings", return_value=settings),
+        patch("src.api.main.init_pool", AsyncMock(return_value=MagicMock())),
+        patch("src.api.main.init_schema", AsyncMock()),
+        patch("src.api.main.AsyncGraphDatabase.driver", return_value=driver),
+        patch("src.api.main.bootstrap_neo4j_schema", AsyncMock()),
+        patch("src.api.main.create_pool", AsyncMock(return_value=arq)),
+    ):
+        async with lifespan(fresh):
+            pass  # must not raise

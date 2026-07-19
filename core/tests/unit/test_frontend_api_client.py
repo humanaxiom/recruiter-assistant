@@ -7,10 +7,15 @@ mirroring the established pattern in ``test_route_shortlist.py`` /
 **The contract this file locks (the coder implements exactly this shape):**
 
 * ``build_client() -> httpx.Client`` — a thin ``httpx.Client(base_url=
-  settings.api_base_url)`` wrapper. Attaches an ``X-API-Key`` header IFF
-  ``settings.api_key`` is non-empty (mirroring ``src.api.deps.require_api_key``
-  ``Settings.api_key`` empty-disables-auth semantics) and must not crash on a
-  non-ASCII key (the client-side mirror of ADR-012 §1's SEC-1 fix).
+  settings.api_base_url)`` wrapper. FU-4/D6: the Flask viewer presents ONE
+  FIXED role key outbound for every browser it serves — ``recruiter`` (the
+  ADR-recommended role; recruiter is the router-writer role Flask exercises
+  most, and is never the reveal-restricted-to-admin-only case). Attaches an
+  ``X-API-Key`` header IFF ``settings.api_key_recruiter`` is non-empty
+  (mirroring ``src.api.deps.resolve_role``'s auth-disabled-when-all-four-
+  empty semantics — Flask only ever presents the recruiter key, so ITS
+  disabled check is simply that one field being empty) and must not crash on
+  a non-ASCII key (the client-side mirror of ADR-012 §1's SEC-1 fix).
 * One function per consumed backend route, EVERY function accepting an
   optional keyword-only ``client: httpx.Client | None = None`` so tests can
   inject an ``httpx.MockTransport``-backed client without any real network:
@@ -49,8 +54,12 @@ from frontend import api_client
 from src.settings import Settings
 
 
-def _settings(*, api_key: str = "", api_base_url: str = "http://api:8000") -> Settings:
-    return Settings(api_key=api_key, api_base_url=api_base_url)
+def _settings(
+    *, api_key_recruiter: str = "", api_base_url: str = "http://api:8000"
+) -> Settings:
+    return Settings(
+        api_key_recruiter=api_key_recruiter, api_base_url=api_base_url
+    )
 
 
 def _client_with(
@@ -90,14 +99,16 @@ def test_build_client_uses_the_configured_base_url(monkeypatch: Any) -> None:
 
 def test_build_client_attaches_api_key_header_when_configured(monkeypatch: Any) -> None:
     monkeypatch.setattr(
-        api_client, "get_settings", lambda: _settings(api_key="secret123")
+        api_client, "get_settings", lambda: _settings(api_key_recruiter="secret123")
     )
     client = api_client.build_client()
     assert client.headers.get("X-API-Key") == "secret123"
 
 
 def test_build_client_omits_api_key_header_when_empty(monkeypatch: Any) -> None:
-    monkeypatch.setattr(api_client, "get_settings", lambda: _settings(api_key=""))
+    monkeypatch.setattr(
+        api_client, "get_settings", lambda: _settings(api_key_recruiter="")
+    )
     client = api_client.build_client()
     assert "X-API-Key" not in client.headers
 
@@ -109,7 +120,7 @@ def test_build_client_survives_a_non_ascii_api_key_without_crashing(
     not crash client construction (the server-side fix compares UTF-8 bytes
     for the same reason)."""
     monkeypatch.setattr(
-        api_client, "get_settings", lambda: _settings(api_key="clé-secrète-café")
+        api_client, "get_settings", lambda: _settings(api_key_recruiter="clé-secrète-café")
     )
     client = api_client.build_client()
     assert client is not None

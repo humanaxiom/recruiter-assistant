@@ -1,7 +1,7 @@
 """Route-level tests for ``POST /jobs/bulk`` (FU-3 Slice 4 — bulk JD upload).
 
 Mirrors ``test_route_jobs.py``: a fresh ``FastAPI()`` with the real router and
-``dependency_overrides`` for ``get_db`` / ``get_arq`` / ``require_api_key``; the
+``dependency_overrides`` for ``get_db`` / ``get_arq`` / ``resolve_role``; the
 real service layer runs against a mocked asyncpg connection (no service-internals
 monkeypatching).
 
@@ -17,6 +17,10 @@ monkeypatching).
   (never for duplicate/failed rows).
 * The route never client-expands beyond ``expand_zip_entries`` — a ``.zip`` is
   forwarded verbatim to that hardened expander.
+
+**FU-4 (RBAC):** ``POST /jobs/bulk`` is admin/recruiter ONLY (same allowed
+set as ``POST /jobs``/``POST /jobs/jd-extract`` — see the route→role table in
+``test_route_jobs.py``'s module docstring).
 """
 
 from __future__ import annotations
@@ -34,13 +38,14 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import get_arq, require_api_key
+from src.api.deps import Role, get_arq, resolve_role
 from src.api.routes import jobs as jobs_routes
 from src.errors import AppError
 from src.models.pool import get_db
 
 _NOW = dt.datetime(2026, 7, 17, tzinfo=dt.UTC)
 _JD = "We are hiring a senior backend engineer with deep Python experience."
+_NON_JOB_WRITER_ROLES: tuple[Role, ...] = (Role.HIRING_MANAGER, Role.AUDITOR)
 
 
 class _Row(dict[str, Any]):
@@ -86,7 +91,9 @@ def _mock_conn() -> MagicMock:
     return conn
 
 
-def _build_app(conn: MagicMock, *, arq: MagicMock | None = None) -> FastAPI:
+def _build_app(
+    conn: MagicMock, *, arq: MagicMock | None = None, role: Role = Role.ADMIN
+) -> FastAPI:
     app = FastAPI()
     app.include_router(jobs_routes.router)
 
@@ -97,7 +104,7 @@ def _build_app(conn: MagicMock, *, arq: MagicMock | None = None) -> FastAPI:
     app.dependency_overrides[get_arq] = lambda: arq or MagicMock(
         enqueue_job=AsyncMock()
     )
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[resolve_role] = lambda: role
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
@@ -241,3 +248,33 @@ async def test_bulk_route_is_declared_before_job_id_route() -> None:
     async with await _client(app) as client:
         resp = await client.post("/jobs/bulk", files=files)
     assert resp.status_code == 202
+
+
+# ── FU-4 (RBAC): admin/recruiter ONLY ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bulk_as_recruiter_succeeds() -> None:
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.RECRUITER)
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
+    async with await _client(app) as client:
+        resp = await client.post("/jobs/bulk", files=files)
+    assert resp.status_code == 202
+
+
+@pytest.mark.parametrize("role", _NON_JOB_WRITER_ROLES)
+@pytest.mark.asyncio
+async def test_bulk_403s_for_hiring_manager_and_auditor(role: Role) -> None:
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq, role=role)
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
+    async with await _client(app) as client:
+        resp = await client.post("/jobs/bulk", files=files)
+    assert resp.status_code == 403
+    arq.enqueue_job.assert_not_awaited()
