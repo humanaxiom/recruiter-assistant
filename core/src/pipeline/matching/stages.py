@@ -289,9 +289,16 @@ def verify_evidence(
                     }
                 )
         elif new_req.evidence and not good_ids:
-            # Has a quote but no valid citation — downgrade.
+            # Has a quote but NO surviving citation — strictly less evidence
+            # than a bad citation, so it gets the same scrub, not a weaker one.
             new_req = new_req.model_copy(
-                update={"confidence": min(new_req.confidence, 0.3)}
+                update={
+                    "evidence": "",
+                    "status": (
+                        "missing" if new_req.status == "met" else new_req.status
+                    ),
+                    "confidence": min(new_req.confidence, 0.3),
+                }
             )
         cleaned.append(new_req)
 
@@ -314,7 +321,7 @@ def verify_evidence(
                 )
         elif new_cle.evidence and not good_ids:
             new_cle = new_cle.model_copy(
-                update={"confidence": min(new_cle.confidence, 0.3)}
+                update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
             )
         cleaned_cover.append(new_cle)
 

@@ -429,11 +429,12 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
         )
     # Every SURFACED quote across the whole ranking must verify against its
     # cited chunk (verification_rate_min = 1.0). Surfaced == survived the
-    # verifier (non-empty evidence with a citation).
+    # verifier: non-empty evidence, full stop. Conditioning on a citation as
+    # well used to exclude uncited quotes from this check entirely.
     for rid, s in scored.items():
         chunks_by_id = s.chunks_by_id
         for req in s.evidence.requirements if s.evidence else []:
-            if req.evidence and req.evidence_chunk_ids:
+            if req.evidence:
                 assert any(
                     _partial_ratio(req.evidence, chunks_by_id.get(cid, ""))
                     >= verify_fuzz
