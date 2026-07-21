@@ -748,18 +748,19 @@ at Phase 7. **Post-v1, all merged to `main`, CI green:** the **Workflow UI** (PR
 **FU-2** evidence chunk expansion (PR #19, `8d7ce0b`, ADR-015), **FU-1** audited reveal + cover-letter file
 upload (PR #20, `bc055f4`, ADR-016), and **FU-3** bulk ingest (PR #21, `e033d31`, ADR-017). Also merged
 this session: **PR #22** (`chore/fu3-merged-docs`, squash merge `2fc3d4f`) — the docs-only PR marking
-FU-1/FU-2/FU-3 merged; `main` is now at `2fc3d4f`. **The single remaining planned item, FU-4 — RBAC, is
-built and is an OPEN, NOT-YET-MERGED pull request — PR #23** on branch `feat/fu4-rbac`, off `main` @
-`2fc3d4f` (see "Workflow-UI enhancements" and the FU-4 bullet below for full state — do not treat it as
-merged). Each post-v1 feature is a named feature, not a numbered phase.
+FU-1/FU-2/FU-3 merged. **FU-4 — RBAC is MERGED to `main` via PR #23 (merge `961caab`, 2026-07-21),
+CI green on all five gates** — `main` is now at `961caab`. It was the last item planned as of
+2026-07-19; **FU-5/FU-6/FU-7 were scoped on 2026-07-20** (see "Queued next work"). Each post-v1 feature
+is a named feature, not a numbered phase.
 
-### Workflow-UI enhancements — FU-1, FU-2, FU-3 ✅ ALL MERGED; FU-4 built, PR #23 OPEN (not merged)
+### Workflow-UI enhancements — FU-1, FU-2, FU-3, FU-4 ✅ ALL MERGED
 
 The three user-requested enhancements (built order FU-2 → FU-1 → FU-3) are **all merged to `main`, CI
 green**: **FU-2** evidence chunk-id expansion (PR #19, merge `8d7ce0b`, ADR-015), **FU-1** audited reveal +
 cover-letter file upload + reveal-on-shortlist-card (PR #20, merge `bc055f4`, ADR-016), **FU-3** bulk ingest
-(PR #21, merge `e033d31`, ADR-017). **The only remaining planned item, FU-4 — RBAC, is built but its PR
-(#23) is still OPEN — not merged** (below). The original per-FU detail is retained below for history; each
+(PR #21, merge `e033d31`, ADR-017), **FU-4** RBAC (PR #23, merge `961caab`, ADR-018). FU-4 is no longer
+the last planned item: **FU-5/FU-6/FU-7 were scoped on 2026-07-20** — see "Queued next work" further
+down. The original per-FU detail is retained below for history; each
 of FU-1/FU-2/FU-3 is DONE, FU-4 is pending merge.
 
 **Blind-review model (user-confirmed 2026-07-17, matches hris) — now LIVE:** blind is ON at every step by
@@ -856,20 +857,26 @@ residuals R1/R2/R5 in ADR-016) layers on top.
   of the old "connectors" concept; the Taleo *job-source scraper* remains a separate, still-deferred
   thing (see the connectors bullet below).
 
-- **FU-4 — RBAC — built, PR OPEN, NOT MERGED.** Branch `feat/fu4-rbac`, off `main` @ `2fc3d4f`, 13 commits,
-  opened as **PR #23** (https://github.com/humanaxiom/recruiter-assistant/pull/23). Do not treat this as
-  merged — CI's `gates-all` had not yet been confirmed green as of this session's handoff. Decisions +
+- **FU-4 — RBAC — ✅ MERGED (PR #23, merge `961caab`, 2026-07-21, ADR-018).** Branch `feat/fu4-rbac`, off
+  `main` @ `2fc3d4f`, 13 commits, merged after the org billing block was cleared and CI ran green on all
+  five gates (its first real execution on this branch — see the billing bullet below). Decisions +
   full detail: **ADR-018** (`docs/adr/018-rbac-keyed-roles.md`).
-  - **CI IS BLOCKED ON BILLING, NOT ON CODE — read this before debugging the red check.** The
-    `Gate: branch-name` check on PR #23 shows FAILURE and every downstream gate shows SKIPPED, but the
-    job never actually ran. The annotation on check-run `88231227215` reads: *"The job was not started
-    because recent account payments have failed or your spending limit needs to be increased."*
-    GitHub Actions is disabled for the `humanaxiom` org. `feat/fu4-rbac` matches the branch-name regex
-    fine (verified against both `Makefile:18-22` and `.github/workflows/ci.yml:20-27`), and PR #22 ran
-    fully green earlier the same day, so this lapsed mid-session. **Fix billing in the org's
-    Billing & plans settings, then `gh run rerun 29701511226`.** Do NOT merge PR #23 on local gates
-    alone — every prior PR in this repo cleared CI `gates-all` first, and lowering that bar silently is
-    exactly what CLAUDE.md's review-iterate rule prohibits.
+  - **CI billing block — RESOLVED 2026-07-21. CI IS NOW GREEN.** For history: `Gate: branch-name` on
+    PR #23 showed FAILURE with every downstream gate SKIPPED, but the job never ran — the annotation
+    read *"The job was not started because recent account payments have failed or your spending limit
+    needs to be increased."* Actions was disabled for the `humanaxiom` org (a private org repo meters
+    Actions minutes to the org). `feat/fu4-rbac` always matched the branch-name regex fine (verified
+    against `Makefile:18-22` and `.github/workflows/ci.yml:20-27`); PR #22 ran green earlier the same
+    day, so this lapsed mid-session. **The human fixed org billing on 2026-07-21 and both runs were
+    re-run to full green** — run `29701584800` (pull_request) and `29701583639` (push):
+    `Gate: branch-name` ✅ · `Gates: ruff · black · mypy` ✅ · `Gates: unit · coverage ≥ 80%` ✅ ·
+    `Gate: integration (pg + neo4j + redis)` ✅ · `✅ ALL GATES GREEN` ✅. This was the **first time CI
+    ever executed on this branch** — everything before it was the never-started billing failure.
+    **Diagnostic note for a future block:** the real signal is `steps` on the job, not `conclusion`. A
+    billing-refused job reports `conclusion: failure` with `steps: 0`; a job that genuinely ran and
+    failed has `steps > 0`. Check with
+    `gh api repos/humanaxiom/recruiter-assistant/actions/runs/<id>/jobs --jq '.jobs[]|{name,conclusion,steps:(.steps|length)}'`.
+    PR #23 is now MERGEABLE with gates green; the merge decision itself was left to the human.
   - **The model:** four `Role(StrEnum)` values (`admin`, `recruiter`, `hiring_manager`, `auditor`) and
     four flat settings fields (`api_key_admin`, `api_key_recruiter`, `api_key_hiring_manager`,
     `api_key_auditor`) replace the old single `api_key` switch. `resolve_role` (reads `X-API-Key`,
@@ -922,10 +929,85 @@ residuals R1/R2/R5 in ADR-016) layers on top.
     already-correct behavior (the no-short-circuit comparison loop) that could only be shown RED by
     mutation testing, not by a normal failing-test-first cycle; same precedent as Phase 4a.
 
-What a **human** could scope next — options, not a queued to-do list:
+### Queued next work — FU-5, FU-6, FU-7 (user-scoped 2026-07-20)
 
-- **Wire the reverse-match UI** — now a concrete, scoped follow-up (see "Workflow UI status" above): the
-  backend is ready and unchanged, only a trigger button + route wiring on `resume_detail.html` is missing.
+> **⚠ FIRST: this planning work is UNCOMMITTED.** As of the 2026-07-20 session end, `git status` on
+> `feat/fu4-rbac` shows modified `HANDOFF.md`, `README.md`, `docs/EXTRACTION_PLAN.md`,
+> `docs/adr/{007,009,013,018}-*.md`, plus untracked `docs/adr/{019,020,021}-*.md` and `docs/process/`.
+> **None of it is committed and no branch was created for it.** The recommendation left on the table was
+> a separate `docs/fu5-7-plan` branch rather than growing PR #23, which is an RBAC code PR — but the
+> human had not decided. Do not assume this is merged, and do not commit it to `feat/fu4-rbac` without
+> asking. Everything below describes plans that exist only as working-tree files.
+>
+> Also uncommitted-by-design: `compose.live-eval.yml` is gitignored and now carries
+> `LLM_TIMEOUT_S: "300"` for the worker. A fresh clone will not have it and will hit the 120s parse
+> failure described in the incident below.
+
+**This is a queued plan, not an options list.** The user scoped it on 2026-07-20 after an operational
+incident (below) exposed the silent-failure class. Build order matters: **FU-5 → FU-6 → FU-7**, because
+FU-6's scoping predicates and FU-7's attributable failure states both key off FU-5's `users` table.
+Each is a named feature, not a numbered phase — `docs/EXTRACTION_PLAN.md`'s table stays closed at Phase 7.
+
+- **FU-5 — CAS identity, user records, attributable audit (ADR-019).** Adds the first real `users` table
+  (there is none today), authenticates humans via **CAS** rather than an API key, moves `role` onto the
+  user row so roles become data instead of a hardcoded `StrEnum`, and generalizes `reveal_audit` into an
+  `audit_log` that also captures **`blind_review` flips** (today's widest-blast-radius unaudited action).
+  Closes ADR-018's actor-attribution residual: a reveal will name a person instead of `"api"`.
+  **On CAS and offline-first:** CAS is **SFU-hosted internal infrastructure**, not a cloud API — it does
+  not breach CLAUDE.md's "NEVER add cloud API calls" constraint, and no data leaves the institution.
+  What it adds is a runtime dependency *outside the compose stack*: unlike Postgres and Neo4j, it is not
+  a container this project starts or can restart. ADR-019 §3 records that honestly — CAS unreachable =
+  fail closed on new logins only, existing sessions keep working, and local model inference is entirely
+  unaffected. Service-to-service API keys survive as a *separate* mechanism that can never satisfy an
+  action requiring an attributable human.
+- **FU-6 — Per-job assignment and row-level scoping (ADR-020).** A `job_assignees` table; hiring managers
+  and auditors see only assigned jobs. **Scoping is enforced in SQL, not in the handler** — a Python-side
+  filter after fetching is a leak waiting to happen. Unassigned reads return **404, not 403**, so the
+  existence of a requisition is not leaked. Closes ADR-018's role-level-not-row-level residual. One item
+  is deliberately left for ratification rather than silently decided: whether `auditor` should be scoped
+  at all, since scoping an auditor may defeat the role's purpose.
+- **FU-7 — LLM failover and fail-closed ranking (ADR-021).** An ordered provider chain (A → B) with
+  per-provider breakers, failover only on availability errors and never on schema-validation failures.
+  **The pipeline refuses to emit a ranking containing a silently-zeroed component** — a job blocks in an
+  `awaiting_llm` state and retries rather than publishing a degraded shortlist. Also makes parse status
+  honest: claim `uploaded → parsing` on start, write `failed` + `failure_reason` on retry exhaustion, and
+  surface partial-parse degradation instead of marking it `parsed`.
+- **HR-facing explainer (already written, untracked).** `docs/process/ranking-metrics-explainer.html` is
+  a plain-language explainer of the scoring model for HR/compliance, with Mermaid diagrams and a
+  **ratification register** of 15 policy decisions currently encoded as config defaults (weights, the
+  must-have penalty, education-field blindness, the top-15 evidence cliff, recency banding, over-qual
+  dampening, and the audit/scoping gaps). It has **not** had a `reviewer` pass; the weight table and
+  evals thresholds in it were relayed from explorer agents, not read line-by-line by the author. Get it
+  reviewed before it goes to HR.
+- **Chore — config plumbing and fail-closed auth.** No `MATCH_*` tunable and none of the four `API_KEY_*`
+  vars appear in `docker-compose.yml` or `compose.live-eval.yml`. Two consequences: the documented ranking
+  knobs are unreachable in the running containers, and since auth is disabled iff all four keys are empty,
+  **the shipped compose runs auth-disabled with every caller resolving to `admin`.** Fail-open is the
+  *shipped* default, not merely a possible misconfiguration. Also raise the `LLM_TIMEOUT_S` default off
+  120 (see incident below).
+
+**The 2026-07-20 incident that motivated FU-7 — read this before touching the LLM or parse path.**
+16 résumés sat at `uploaded` for ~18 hours. `gpt-oss:20b` on the calibrated peer generates at **~23.5
+tok/s** (measured: 1338 completion tokens in 56.8s from inside the worker container); `parse_resume`
+calls `chat_json(max_tokens=3072)`, so a full-length core extraction needs **~131s** against a
+`LLM_TIMEOUT_S` of **120**. The failure was **deterministic, not transient** — short generations
+succeeded, which disguised it as flaky infrastructure for two diagnostic rounds. Raising the timeout to
+300 in `compose.live-eval.yml` cleared all 16 (real parses measured 150–205s). **But 10 of the 16 then
+logged `parse_resume.skills_llm_failed` and were still marked `parsed`** — skills silently fell back to
+the deterministic vocabulary scan. Root cause of the empty content: `gpt-oss:20b` is a reasoning model
+that returns its chain in a separate `reasoning` field and can exhaust `max_tokens` before emitting any
+`content`. `reasoning_effort: "low"` is a large latency lever (~7x on a toy prompt) but changes
+extraction quality — **it must go through the `ranking-evals` gate, never be set unilaterally.**
+
+**Diagnostic lesson worth keeping:** do not exonerate the LLM endpoint with a small curl. A 10-token
+probe returns in ~4s and proves nothing. Measure `completion_tokens / elapsed` at realistic `max_tokens`
+from **inside the worker container**, then compare `max_tokens / tok_s` against `LLM_TIMEOUT_S`.
+
+The remaining backlog below is still **options, not a queued to-do list**:
+
+- **Wire the reverse-match UI** — ✅ **CLOSED (FU-3 slice 5, PR #21, merge `e033d31`).** Shipped as the
+  POST-only trigger + bounded poll + rows linking to the job. Listed here as an option long after it was
+  delivered; retained per the repo's record-closure-forward convention rather than deleted.
 - **The open `jd.education.fields` decision** (ADR-009 §7, restated through ADR-013) — `score_education`
   ignores `jd.education.fields` entirely, so JD field-relevance is decorative. Either extend the scorer to
   read `fields`, or drop `fields` from the JD contract. Still unresolved after 4c/4d/5/6/7/Workflow UI all
@@ -953,6 +1035,25 @@ What a **human** could scope next — options, not a queued to-do list:
   columns). Accepted for v1; revisit before any multi-tenant deploy.
 - **Weak/empty `flask_secret_key`/`api_key` defaults** — env-overridable, but weak-by-default; harden
   before any non-local deployment (Workflow UI status, above).
+- **Reverse-match ranking quality is entirely ungated** (ADR-013) — the `[reverse_match]` section of
+  `core/tests/evals/thresholds.toml` is a commented-out placeholder, so no precision, evidence-verification
+  or ordering bar applies to the résumé→jobs direction, while the forward direction is gated at 100%
+  precision@5. Revisit before reverse match informs any decision.
+- **Reverse-match scores are not comparable to forward-match scores** (ADR-009) — `rank_job_matches` omits
+  the motivation term, so reverse `score_final` maxes at 0.9 under default weights while forward maxes at
+  1.0. Nothing in the API, the export or the UI signals this. Must be documented wherever both numbers can
+  reach the same reader.
+- **Two ranking numbers are unreachable from settings** (ADR-009) — `_STRUCTURED_ONLY_WEIGHTS` and the
+  stage-1 3x oversample factor are in-code literals, while all 26 `MatchWeights` values and both k values
+  are env-configurable. Also: reverse match reuses `match_coarse_k`; there is no `match_reverse_coarse_k`.
+  Minor, but an inconsistency in an otherwise fully-tunable engine.
+- **The circuit breaker's half-open docstring contradicts its code** — `core/src/pipeline/llm/client.py`
+  claims a failing half-open trial "will re-open immediately", but the failure counter was reset on
+  cooldown expiry, so it takes another full `breaker_threshold` (10) consecutive failures to trip again.
+  Either the doc or the behaviour is wrong; decide which when FU-7 touches this file.
+- **ADR-016's R3 and R4 remain open** — R3 (no reveal-audit viewer: the `auditor` role added by FU-4 still
+  has nothing to view, so retrieval is a manual SQL query) and R4 (unredacted `source_context` on reveal).
+  FU-5's `audit_log` makes R3 actionable but does not itself ship a viewer.
 
 **Re-running the live eval, if a future session needs to:**
 
@@ -1193,8 +1294,27 @@ lock on concurrent shortlist/reverse-match runs (ADR-010 §1, still open, the
 viewer is read-only so Phase 7 didn't touch this either).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Phase 7's PR #16 is merged; v1 is complete. Any new work needs a human
-to scope it first — see HANDOFF.md's "Next session" section for options.
+HANDOFF.md. Phase 7's PR #16 is merged; v1 is complete.
+
+CURRENT STATE AS OF 2026-07-20 — read HANDOFF.md's "Queued next work" section
+before doing anything:
+- FU-4 (RBAC) is MERGED to main via PR #23 (merge 961caab, 2026-07-21). The
+  org billing block was fixed that morning and CI ran green on all five gates
+  including integration against real pg/neo4j/redis — its first real execution
+  on that branch. `main` is now at 961caab.
+- Work IS now scoped, contrary to the "needs a human to scope it" note above:
+  FU-5 (CAS identity + attributable audit, ADR-019), FU-6 (per-job assignment +
+  row-level scoping, ADR-020), FU-7 (LLM failover + fail-closed ranking,
+  ADR-021). Build order is FU-5 -> FU-6 -> FU-7; each depends on the previous.
+- THE PLANNING WORK IS UNCOMMITTED. ADRs 019/020/021 and docs/process/ are
+  untracked; HANDOFF/README/EXTRACTION_PLAN/ADR-007/009/013/018 are modified.
+  No branch was made for it. Ask the human before committing, and do not assume
+  it landed. A `docs/fu5-7-plan` branch was recommended but not created.
+- Operational: `compose.live-eval.yml` (gitignored) now sets LLM_TIMEOUT_S=300
+  for the worker. The 120s default is BELOW the real parse time on the
+  calibrated peer (~23.5 tok/s vs max_tokens=3072 => ~131s), so a fresh clone
+  will see resumes hang at status 'uploaded' forever with no error. This is
+  deterministic, not flaky. See the incident writeup in HANDOFF.md.
 
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.

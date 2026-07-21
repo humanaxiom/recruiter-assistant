@@ -170,6 +170,9 @@ Candidate identity exists in three places with three different postures:
     email into an achievement bullet — is accepted, symmetric with the §6/§7 at-rest cleartext
     decision. No code change.
 
+- **Parse status cannot distinguish "never started" from "running" from "dead".** Nothing ever writes `resume_status = 'parsing'`; the enum value at `core/src/models/ddl.py:52-54` is legal but unreachable (no claim-UPDATE exists). Combined with `LLMUnavailableError` escaping `parse_resume` for arq retry without any terminal `record_parse_failure` call on retry exhaustion (line 691-692 deliberately omits the catch), a résumé whose parse died stays `uploaded` indefinitely. Observed in production 2026-07-19: 16 résumés stuck ~18h, invisible to the shortlist, indistinguishable from a fresh upload. Deferred to FU-7 / ADR-021.
+- **A partially-degraded parse presents as a clean success.** When the skills LLM call fails at line 154-157 of `resume_tasks.py`, `parse_resume` still proceeds to build and record `parsed` status; skills fall back to the deterministic vocabulary scan with only a `log.warning`. Observed 2026-07-20: 10 of 16 résumés logged `parse_resume.skills_llm_failed` and were all marked `parsed`. Ranking then proceeds on silently-degraded skill data. Deferred to FU-7 / ADR-021.
+
 The split, stated plainly: **identity may live at rest behind the DB boundary (encrypted, and
 cleartext in `resumes.parsed`); identity must NOT ride the outbox into the graph — not as the
 structured block, not as chunk/summary text, and not encoded inside an embedding vector.**

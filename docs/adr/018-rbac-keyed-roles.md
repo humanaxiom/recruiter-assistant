@@ -316,6 +316,8 @@ an absent `Origin`/`Referer` is not a block.
   parameter is deliberately kept, not deleted — it is the un-exercised capability a future audited
   bulk-export route (its own POST route with its own reveal-audit trail, per the note in §6) would call
   into — so this is retained-but-currently-dead production capability, not dead code to be pruned.
+- **A `blind_review` flip is unaudited.** Noted in this ADR's §7 prose; filed here as a tracked residual so it is not lost. One PATCH permanently un-blinds every résumé and shortlist entry under that job for every future reader, with no audit row, while a single reveal writes one. Deferred to FU-5 / ADR-019's generalized `audit_log`.
+- **The shipped compose runs auth-disabled.** None of `API_KEY_ADMIN`/`API_KEY_RECRUITER`/`API_KEY_HIRING_MANAGER`/`API_KEY_AUDITOR` appear in `docker-compose.yml` or `compose.live-eval.yml`, and auth is disabled iff all four are empty (`core/src/settings.py:195-202`), in which case every caller resolves to `Role.ADMIN` (`core/src/api/deps.py:83-84`). The fail-open default is therefore the *shipped* default, not merely a possible misconfiguration. No `MATCH_*` tunable is plumbed into either compose file either, so the documented ranking knobs are unreachable in the running containers. Deferred to the FU-7 config-plumbing chore.
 
 ### ADR-016 residuals closed by this feature
 

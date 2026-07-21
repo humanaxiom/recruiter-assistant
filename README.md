@@ -291,7 +291,7 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 
 **Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17) are all merged. There is no Phase 8.
 
-**Five post-v1 features have since shipped, all merged to `main`, CI green** (named features, not numbered phases):
+**Six post-v1 features have since shipped, all merged to `main`, CI green** (named features, not numbered phases):
 
 | Feature | PR / merge | ADR | What it added |
 |---|---|---|---|
@@ -299,8 +299,17 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 | **FU-2 — evidence chunk expansion** | #19 `8d7ce0b` | [015](docs/adr/015-evidence-chunk-expansion.md) | Evidence `evidence_chunk_ids` expanded to redacted source text in the CSV export + card panel |
 | **FU-1 — audited reveal** | #20 `bc055f4` | [016](docs/adr/016-audited-reveal.md) | Blind stays default; identity exposed only via an **audited** `POST /resumes/{id}/reveal` (`reveal_audit` sink + a button on the résumé page and each shortlist card). Also: cover-letter **file** upload |
 | **FU-3 — bulk ingest** | #21 `e033d31` | [017](docs/adr/017-bulk-ingest-pairing.md) | Bulk résumé upload with per-résumé cover-letter pairing (filename convention or `manifest.json`), bulk JD upload (`POST /jobs/bulk` + CSV manifest + dedup), reverse-match UI, and the shortlist-poll fix |
+| **FU-4 — RBAC** | #23 `961caab` | [018](docs/adr/018-rbac-keyed-roles.md) | Four keyed roles (`admin`/`recruiter`/`hiring_manager`/`auditor`), per-route authorization, CSRF-per-résumé on reveal, and removal of two unaudited bulk-reveal paths. Closes FU-1's residuals R1/R2/R5 |
 
-**The one remaining planned item is FU-4 — RBAC** (role-based access control; gates *who* may reveal, closing FU-1's residuals R1/R2/R5). See [HANDOFF.md](HANDOFF.md) for exact state.
+**Three further features are planned and scoped (2026-07-20), not yet built** — build order matters, each depends on the one before it:
+
+| Feature | ADR | What it will add |
+|---|---|---|
+| **FU-5 — CAS identity + attributable audit** | [019](docs/adr/019-cas-identity-attributable-audit.md) | The first real `users` table, CAS authentication for humans, `role` as data rather than a hardcoded enum, and a generalized `audit_log` that also records `blind_review` flips. Makes a reveal name a person instead of `"api"` |
+| **FU-6 — Per-job assignment + row-level scoping** | [020](docs/adr/020-per-job-assignment-scoping.md) | A `job_assignees` table so hiring managers see only their assigned jobs; scoping enforced in SQL, unassigned reads return 404 rather than 403 |
+| **FU-7 — LLM failover + fail-closed ranking** | [021](docs/adr/021-llm-failover-fail-closed-ranking.md) | An ordered provider chain with per-provider breakers; the pipeline refuses to publish a ranking containing a silently-zeroed component, and résumé parse status stops reporting failures as `uploaded` |
+
+A plain-language explainer of the scoring model, written for HR and compliance review — including the fifteen policy decisions currently encoded as configuration defaults — is at [docs/process/ranking-metrics-explainer.html](docs/process/ranking-metrics-explainer.html).
 
 What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the job/résumé/shortlist/reverse-match/reveal/bulk HTTP routes, and **the Flask Workflow UI** — a full job → résumé → shortlist recruiter workflow with audited reveal and bulk ingest, blind-only by construction — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI.
 

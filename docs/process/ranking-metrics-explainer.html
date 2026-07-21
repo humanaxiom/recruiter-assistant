@@ -1,0 +1,731 @@
+<title>How Candidates Are Scored — An Explainer for HR</title>
+
+<style>
+  :root {
+    --paper:        #f4f5f2;
+    --raise:        #ffffff;
+    --ink:          #15191e;
+    --ink-soft:     #4d565f;
+    --ink-faint:    #79838c;
+    --rule:         #d9ddd7;
+    --accent:       #2f5468;
+    --accent-soft:  #e3ebef;
+    --ok:           #2c6344;
+    --ok-bg:        #e2ede6;
+    --ratify:       #85560f;
+    --ratify-bg:    #f5eada;
+    --gap:          #8a3030;
+    --gap-bg:       #f4e2e0;
+
+    --display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --data: ui-monospace, "Cascadia Code", "Consolas", "SF Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:       #14181c;
+      --raise:       #1b2126;
+      --ink:         #e2e6e4;
+      --ink-soft:    #a8b2b8;
+      --ink-faint:   #7d878e;
+      --rule:        #2c343a;
+      --accent:      #8fb8cc;
+      --accent-soft: #1e2b33;
+      --ok:          #7fbe9a;
+      --ok-bg:       #1a2a21;
+      --ratify:      #d8ab63;
+      --ratify-bg:   #2c2418;
+      --gap:         #d98b85;
+      --gap-bg:      #2e1d1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:       #14181c;
+    --raise:       #1b2126;
+    --ink:         #e2e6e4;
+    --ink-soft:    #a8b2b8;
+    --ink-faint:   #7d878e;
+    --rule:        #2c343a;
+    --accent:      #8fb8cc;
+    --accent-soft: #1e2b33;
+    --ok:          #7fbe9a;
+    --ok-bg:       #1a2a21;
+    --ratify:      #d8ab63;
+    --ratify-bg:   #2c2418;
+    --gap:         #d98b85;
+    --gap-bg:      #2e1d1c;
+  }
+  :root[data-theme="light"] {
+    --paper:       #f4f5f2;
+    --raise:       #ffffff;
+    --ink:         #15191e;
+    --ink-soft:    #4d565f;
+    --ink-faint:   #79838c;
+    --rule:        #d9ddd7;
+    --accent:      #2f5468;
+    --accent-soft: #e3ebef;
+    --ok:          #2c6344;
+    --ok-bg:       #e2ede6;
+    --ratify:      #85560f;
+    --ratify-bg:   #f5eada;
+    --gap:         #8a3030;
+    --gap-bg:      #f4e2e0;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 45rem; margin: 0 auto; }
+  .wide { max-width: 62rem; margin-left: auto; margin-right: auto; }
+
+  header.masthead {
+    max-width: 45rem;
+    margin: 0 auto;
+    padding: 4.5rem 0 2.25rem;
+    border-bottom: 2px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--data);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(2.1rem, 5vw, 3.05rem);
+    line-height: 1.1;
+    font-weight: 600;
+    text-wrap: balance;
+    margin: 0 0 1rem;
+    letter-spacing: -0.015em;
+  }
+  .standfirst {
+    font-size: 1.13rem;
+    color: var(--ink-soft);
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  h2 {
+    font-family: var(--display);
+    font-size: 1.72rem;
+    font-weight: 600;
+    line-height: 1.2;
+    margin: 4rem 0 0.5rem;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-family: var(--body);
+    font-size: 1.02rem;
+    font-weight: 650;
+    margin: 2.4rem 0 0.4rem;
+    letter-spacing: 0.005em;
+  }
+  h2 + .kicker {
+    color: var(--ink-faint);
+    font-size: 0.93rem;
+    margin: 0 0 1.5rem;
+  }
+  p { margin: 0 0 1.05rem; }
+  a { color: var(--accent); }
+
+  .stage-num {
+    font-family: var(--data);
+    font-size: 0.78rem;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+  }
+
+  ul, ol { padding-left: 1.25rem; margin: 0 0 1.05rem; }
+  li { margin-bottom: 0.45rem; }
+
+  code {
+    font-family: var(--data);
+    font-size: 0.87em;
+    background: var(--accent-soft);
+    padding: 0.1em 0.36em;
+    border-radius: 3px;
+  }
+
+  /* status chips */
+  .chip {
+    display: inline-block;
+    font-family: var(--data);
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.24em 0.62em;
+    border-radius: 2px;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .chip.ok     { background: var(--ok-bg);     color: var(--ok); }
+  .chip.ratify { background: var(--ratify-bg); color: var(--ratify); }
+  .chip.gap    { background: var(--gap-bg);    color: var(--gap); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.4rem;
+    background: var(--raise);
+    border: 1px solid var(--rule);
+    padding: 1.15rem 1.3rem;
+    margin: 2rem 0 0;
+  }
+  .legend div { flex: 1 1 12rem; font-size: 0.88rem; color: var(--ink-soft); }
+  .legend .chip { margin-bottom: 0.4rem; }
+
+  /* metric cards */
+  .metric {
+    background: var(--raise);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: 1.2rem 1.35rem;
+    margin: 0 0 0.9rem;
+  }
+  .metric-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+  .metric-name {
+    font-weight: 650;
+    font-size: 1.02rem;
+  }
+  .metric-weight {
+    font-family: var(--data);
+    font-size: 0.95rem;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .metric p { margin: 0 0 0.6rem; font-size: 0.95rem; color: var(--ink-soft); }
+  .metric p:last-child { margin-bottom: 0; }
+  .metric.flag { border-left-color: var(--ratify); }
+  .metric.flag .metric-weight { color: var(--ratify); }
+
+  /* tables */
+  .scroll { overflow-x: auto; margin: 1.4rem 0 1.8rem; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.9rem;
+    background: var(--raise);
+  }
+  th, td {
+    text-align: left;
+    padding: 0.62rem 0.8rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--data);
+    font-size: 0.7rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1.5px solid var(--ink-soft);
+    white-space: nowrap;
+  }
+  td.num { font-family: var(--data); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.yes { color: var(--ok); font-weight: 600; }
+  td.no  { color: var(--gap); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* callout */
+  .note {
+    background: var(--raise);
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--ratify);
+    padding: 1.15rem 1.3rem;
+    margin: 1.8rem 0;
+    font-size: 0.95rem;
+  }
+  .note.severe { border-top-color: var(--gap); }
+  .note h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.94rem;
+    font-weight: 650;
+  }
+  .note p:last-child { margin-bottom: 0; }
+
+  /* diagrams */
+  .diagram {
+    background: var(--raise);
+    border: 1px solid var(--rule);
+    padding: 1.4rem 1rem;
+    margin: 1.6rem 0 0.7rem;
+    overflow-x: auto;
+  }
+  .diagram pre.mermaid { margin: 0; text-align: center; }
+  .caption {
+    font-size: 0.84rem;
+    color: var(--ink-faint);
+    margin: 0 0 2.2rem;
+    text-align: center;
+    text-wrap: pretty;
+  }
+
+  .persona {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.3rem;
+    margin-top: 1.9rem;
+  }
+  .persona-title {
+    font-family: var(--display);
+    font-size: 1.28rem;
+    font-weight: 600;
+    margin: 0 0 0.15rem;
+  }
+  .persona-role {
+    font-family: var(--data);
+    font-size: 0.74rem;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin: 0 0 0.8rem;
+  }
+
+  footer {
+    max-width: 45rem;
+    margin: 5rem auto 0;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    font-size: 0.86rem;
+    color: var(--ink-faint);
+  }
+
+  @media (max-width: 640px) {
+    body { font-size: 16px; padding: 0 1.1rem 4rem; }
+    header.masthead { padding-top: 3rem; }
+  }
+</style>
+
+<header class="masthead">
+  <p class="eyebrow">Process explainer · For HR &amp; compliance review</p>
+  <h1>How this system scores candidates</h1>
+  <p class="standfirst">Every number the ranking engine produces, in plain language — what it measures, how much it counts, what is automatically verified, and the fifteen judgment calls that need a human owner before these scores are used in a hiring decision.</p>
+</header>
+
+<div class="wrap">
+
+<div class="legend">
+  <div><span class="chip ok">Test-gated</span> Verified automatically on every change. A regression blocks the release. You do not need to police this.</div>
+  <div><span class="chip ratify">Needs ratification</span> A policy choice encoded as a number. The software cannot tell you if it is <em>correct</em> — only HR can.</div>
+  <div><span class="chip gap">Known gap</span> A limitation we have documented and accepted. Read these before signing anything.</div>
+</div>
+
+<h2>What this document is for</h2>
+
+<p>The system reads résumés, compares them against a job description, and produces a ranked shortlist. Each candidate gets a single headline score between <strong>0 and 1</strong>, built from smaller scores underneath it.</p>
+
+<p>None of those numbers are objective facts. They are the arithmetic consequence of choices someone made — that skills matter more than education, that a missing must-have halves a score rather than disqualifying, that a degree in any field counts equally. Those are <em>hiring policy</em>, written as decimals. This document exposes each one so you can ratify it, change it, or reject it.</p>
+
+<p>Where you see <span class="chip ratify">Needs ratification</span>, the question is not "is this working?" It is "is this what we intend?"</p>
+
+<h2>Who does what</h2>
+<p class="kicker">Four system roles, plus the candidate — who is not a user, but is the person all of this is about.</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+flowchart LR
+  C["Candidate<br/>(data subject)"] -->|"consents, submits résumé"| R
+  R["Recruiter"] -->|"uploads, runs shortlist,<br/>may reveal identity"| SYS
+  A["Admin"] -->|"same as recruiter,<br/>plus configuration"| SYS
+  SYS[("Ranking system")]
+  SYS -->|"anonymised shortlist"| HM["Hiring Manager"]
+  SYS -->|"anonymised shortlist"| AU["Auditor"]
+  HM -->|"reviews, decides"| OUT["Hiring decision"]
+  AU -.->|"no viewer built yet"| LOG[("Reveal audit log")]
+  SYS --> LOG
+</pre>
+</div>
+<p class="caption">Access map. Solid lines are built and working; the dotted line is a capability the Auditor role does not yet have.</p>
+
+<div class="persona">
+  <p class="persona-title">The Recruiter</p>
+  <p class="persona-role">role: recruiter</p>
+  <p>Does the operational work: creates the job, uploads résumés, generates the shortlist, and is one of only two roles permitted to un-blind a candidate's identity. In practice a Recruiter can do everything an Admin can — the two roles are not distinguished by any route in the system today.</p>
+</div>
+
+<div class="persona">
+  <p class="persona-title">The Hiring Manager</p>
+  <p class="persona-role">role: hiring_manager</p>
+  <p>Read-only, and blind. Sees the ranked shortlist with names, emails, phone numbers and identifying filenames removed. Cannot upload, cannot re-run a shortlist, and <strong>cannot reveal a candidate's identity</strong> — that request has to go through a Recruiter, which is what makes the reveal auditable.</p>
+</div>
+
+<div class="persona">
+  <p class="persona-title">The Auditor</p>
+  <p class="persona-role">role: auditor</p>
+  <p>Currently identical to Hiring Manager: the same blind reads, nothing more. The role exists so that permissions are ready, but <span class="chip gap">Known gap</span> there is no screen for reading the reveal audit log. Retrieving it today means asking an engineer to run a database query.</p>
+</div>
+
+<div class="persona">
+  <p class="persona-title">The Admin</p>
+  <p class="persona-role">role: admin</p>
+  <p>Unrestricted. Also the role everyone silently becomes if authentication is switched off — the system logs a loud warning at startup when it is, and refuses to start on several misconfigurations that would quietly collapse two roles into one.</p>
+</div>
+
+<div class="note severe">
+  <h4><span class="chip gap">Known gap</span> &nbsp;Permissions are not scoped to a person's own requisitions</h4>
+  <p>There is no concept of "my jobs." Any Hiring Manager key grants read access to <em>every</em> job, every résumé and every shortlist in the company. If you intend a manager to see only their own openings, that control does not exist today and cannot be configured — it needs building.</p>
+</div>
+
+<h2>The process, end to end</h2>
+<p class="kicker">From a candidate's file arriving to a ranked shortlist landing in front of a manager.</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+flowchart TD
+  U["Recruiter uploads résumé<br/>+ ticks consent"] --> CG{"Consent<br/>confirmed?"}
+  CG -->|No| STOP["Rejected. Nothing stored,<br/>no file leaves the browser"]
+  CG -->|Yes| ST["File stored, identity<br/>encrypted at rest"]
+  ST --> P["Read the document,<br/>split into passages"]
+  P --> LLM["Language model extracts<br/>experience, education, skills"]
+  LLM --> EMB["Passages converted to<br/>numeric vectors, identity stripped"]
+  EMB --> RDY["Résumé ready"]
+
+  RDY --> S1["Stage 1 — Shortlisting pool"]
+  S1 --> S2["Stage 2 — Structured scoring"]
+  S2 --> S3["Stage 3 — Evidence gathering"]
+  S3 --> S4["Stage 4 — Final ranking"]
+  S4 --> SL["Anonymised shortlist"]
+  SL --> HM["Hiring Manager reviews"]
+  HM --> REV{"Identity needed?"}
+  REV -->|Yes| AUD["Recruiter reveals —<br/>audit row written first"]
+  REV -->|No| DEC["Decision on blind evidence"]
+  AUD --> DEC
+</pre>
+</div>
+<p class="caption">The full pipeline. Consent is a hard gate at the very front — refuse it and no candidate data is stored at all.</p>
+
+<h3><span class="stage-num">Stage 01</span> &nbsp;Building the pool</h3>
+<p>The system finds up to <strong>50</strong> résumés whose overall content is closest to the job description, using a mathematical similarity comparison rather than keyword matching. Only résumés uploaded <em>for that specific job</em> are eligible — nothing is pulled from other requisitions.</p>
+
+<h3><span class="stage-num">Stage 02</span> &nbsp;Structured scoring</h3>
+<p>Every candidate in the pool is scored on five measurable dimensions — skills, experience, education, seniority and overall similarity. This is the arithmetic layer, and it is fully deterministic: the same résumé against the same job always produces the same number.</p>
+
+<h3><span class="stage-num">Stage 03</span> &nbsp;Evidence gathering</h3>
+<p>For the <strong>top 15 candidates only</strong>, a language model goes back into the résumé and pulls out the actual sentences that prove each requirement is met. Every quote it produces is then verified against the real document — see <a href="#evidence">how quotes are checked</a>.</p>
+
+<h3><span class="stage-num">Stage 04</span> &nbsp;Final ranking</h3>
+<p>The structured score, the evidence score and the motivation score are combined into the headline number, and candidates are ordered by it.</p>
+
+<h2 id="score">What the headline score is made of</h2>
+<p class="kicker">Every candidate's final number, decomposed. All scores run 0 to 1.</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+flowchart LR
+  SK["Skills<br/>0.40"] --> STR
+  EX["Experience<br/>0.25"] --> STR
+  SN["Seniority<br/>0.15"] --> STR
+  ED["Education<br/>0.10"] --> STR
+  VC["Overall similarity<br/>0.10"] --> STR
+  STR["STRUCTURED SCORE"] -->|"× 0.6"| FIN
+  EV["EVIDENCE<br/>completeness"] -->|"× 0.3"| FIN
+  MO["MOTIVATION<br/>from cover letter"] -->|"× 0.1"| FIN
+  FIN["FINAL SCORE<br/>0 – 1"]
+</pre>
+</div>
+<p class="caption">Two layers of weighting. The five structured dimensions combine into one score, which is then worth 60% of the headline number.</p>
+
+<h3>The three top-level components</h3>
+
+<div class="metric flag">
+  <div class="metric-head"><span class="metric-name">Structured score</span><span class="metric-weight">0.60</span></div>
+  <p>The measurable, arithmetic assessment: skills, experience, education, seniority, similarity. Deterministic and repeatable.</p>
+</div>
+
+<div class="metric flag">
+  <div class="metric-head"><span class="metric-name">Evidence completeness</span><span class="metric-weight">0.30</span></div>
+  <p>What fraction of the job's requirements were proven with a verified quote from the résumé. A fully met requirement counts 1, a partial counts 0.5, unproven counts 0.</p>
+</div>
+
+<div class="metric flag">
+  <div class="metric-head"><span class="metric-name">Motivation</span><span class="metric-weight">0.10</span></div>
+  <p>Read from the cover letter only. Themes the model claims to find are only counted if they clear a confidence bar <em>and</em> can be traced to a real sentence — but the average is taken across <em>all</em> themes it proposed, so unverifiable enthusiasm actively drags the score down. A candidate with no cover letter scores 0 here.</p>
+</div>
+
+<h3>Inside the structured score</h3>
+
+<div class="metric">
+  <div class="metric-head"><span class="metric-name">Skills</span><span class="metric-weight">0.40</span></div>
+  <p>Each required skill is scored on years of use, how recently it was used, and how directly it matches. Recency is banded: used within 2 years scores full marks, within 5 years scores 0.7, older scores 0.4. A related-but-not-exact skill earns half credit.</p>
+  <p><strong>Missing a must-have halves the entire skills score</strong> — it does not disqualify. A strongly-matched candidate missing one mandatory skill can still outrank a weaker candidate who has it.</p>
+</div>
+
+<div class="metric">
+  <div class="metric-head"><span class="metric-name">Experience</span><span class="metric-weight">0.25</span></div>
+  <p>Measured against the job's stated minimum. Meeting it scores full marks. Substantially exceeding it is <em>dampened</em> — a candidate with more than double the required experience starts losing points, though never below 0.8. This is deliberate over-qualification handling.</p>
+</div>
+
+<div class="metric">
+  <div class="metric-head"><span class="metric-name">Seniority</span><span class="metric-weight">0.15</span></div>
+  <p>Compares the candidate's most recent job title against the job's title. A candidate with no detectable recent title scores 0.</p>
+</div>
+
+<div class="metric flag">
+  <div class="metric-head"><span class="metric-name">Education</span><span class="metric-weight">0.10</span></div>
+  <p>Reads the <em>level</em> only — high school through PhD. Meeting or exceeding the required level scores full marks; a lower level earns partial credit; no degree scores 0.</p>
+  <p><strong>The field of study is ignored entirely.</strong> A PhD in an unrelated discipline scores identically to a PhD in the exact field required.</p>
+</div>
+
+<div class="metric">
+  <div class="metric-head"><span class="metric-name">Overall similarity</span><span class="metric-weight">0.10</span></div>
+  <p>How closely the résumé as a whole resembles the job description. This score is <em>relative to the other candidates in the pool</em>, not absolute — the strongest résumé in any given batch scores 1.0 here regardless of how good it actually is.</p>
+</div>
+
+<h2 id="evidence">How quotes are verified</h2>
+<p class="kicker">The safeguard against a language model inventing a qualification.</p>
+
+<p>The main risk in using a language model for hiring is fabrication: the model asserting a candidate has an accreditation they never claimed. Three independent checks run against that, and the last is the strongest — every quote shown to a human must survive a match against the real document.</p>
+
+<div class="diagram wide">
+<pre class="mermaid">
+flowchart TD
+  Q["Model produces a quote<br/>+ says which passage it came from"] --> C1{"Does that passage<br/>actually exist?"}
+  C1 -->|No| DROP["Citation discarded"]
+  C1 -->|Yes| C2{"Does the quote match<br/>the real text ≥ 85%?"}
+  C2 -->|No| BLANK["Quote deleted.<br/>'Met' downgraded to 'missing'.<br/>Confidence capped at 0.3"]
+  C2 -->|Yes| KEEP["Quote shown to reviewer,<br/>counts toward the score"]
+  DROP --> C2
+</pre>
+</div>
+<p class="caption">Evidence verification. A quote that cannot be traced back to the candidate's own words is removed before any human sees it.</p>
+
+<p>This threshold was not guessed. It was chosen by measuring four deliberately fabricated quotes against four genuine ones and picking the comparison method that rejected all four fakes while accepting all four real quotes. A looser method that was tested let a fabrication through at 0.855.</p>
+
+<div class="note">
+  <h4><span class="chip ok">Test-gated</span> &nbsp;This one you can rely on</h4>
+  <p>Every release must show a <strong>100% verification rate</strong> — every quote surfaced traces to real text — and must correctly reject all four known fabrications. If either fails, the change cannot ship.</p>
+</div>
+
+<h2>What is checked automatically</h2>
+<p class="kicker">Quality bars that block a release. These do not need your ratification — they need your awareness.</p>
+
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>Check</th><th>Bar</th><th>What it prevents</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Precision in top 5</td><td class="num">100%</td><td>A weak or gaming candidate reaching the top five. Set at 100% because a looser 80% bar would be cleared by a random ranker about 40% of the time.</td></tr>
+    <tr><td>Keyword-stuffer excluded</td><td class="num">required</td><td>A deliberately gamed résumé — engineered to score top-tier on all five structured dimensions — must not reach the top five. Only evidence verification can catch it.</td></tr>
+    <tr><td>Quote verification</td><td class="num">100%</td><td>Any unverifiable quote reaching a reviewer.</td></tr>
+    <tr><td>Fabrication rejection</td><td class="num">4 of 4</td><td>A verifier that passes everything unconditionally.</td></tr>
+    <tr><td>Genuine-quote recall</td><td class="num">100%</td><td>Over-strict verification silently discarding real qualifications.</td></tr>
+    <tr><td>Ordering controls</td><td class="num">5 pairs</td><td>Near-identical candidates differing on one dimension must rank in the correct order, with a real gap — not a coin-flip tie.</td></tr>
+    <tr><td>Identity leakage</td><td class="num">0 leaks</td><td>Names, emails or phone numbers reaching the ranking maths or an exported file.</td></tr>
+    <tr><td>Repeatability</td><td class="num">0 rank change</td><td>The same candidates scoring differently on a re-run.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <h4>One caveat on "automatic"</h4>
+  <p>These run against a fixed set of 20 test résumés, and the routine version uses a stand-in for the language model rather than calling the real one. The full live measurement against the actual model is a <em>manual step a human performs before merging</em> — not something the machine enforces on its own.</p>
+</div>
+
+<h2>Privacy, consent and the audit trail</h2>
+
+<h3>Consent is a hard gate</h3>
+<p>The upload form requires an explicit tick: <em>"I confirm the candidate consented to this processing (PIPEDA/FIPPA)."</em> Without it the file is never sent, never stored, and no processing occurs. The confirmation is stored permanently against the upload.</p>
+
+<div class="note">
+  <h4><span class="chip ratify">Needs ratification</span> &nbsp;Consent is recorded as a single yes/no per upload batch</h4>
+  <p>There is no timestamp of its own, no record of which consent wording the candidate agreed to, and no per-candidate granularity within a batch — one tick covers every file in that upload. If your retention or subject-access obligations require per-candidate, per-version consent records, this does not currently meet that bar.</p>
+</div>
+
+<h3>How identity is protected</h3>
+<ul>
+  <li>Names, emails, phone numbers and cover letter text are <strong>encrypted in the database</strong>. The application only ever handles encrypted bytes.</li>
+  <li>Email addresses are additionally stored as a one-way hash, deliberately unencrypted — this is what lets you locate a candidate by email in response to a subject-access request without unlocking anything.</li>
+  <li>Identity is <strong>stripped before any text reaches the ranking maths</strong>, including out of the numeric vectors. The system treats those vectors as personal data in their own right.</li>
+  <li>Under blind review, the Hiring Manager's view removes names, emails, phones and identifying filenames — including from quoted passages, so a résumé header cannot leak a name through an evidence quote.</li>
+</ul>
+
+<h3>The reveal — the one way identity is un-blinded</h3>
+
+<div class="diagram wide">
+<pre class="mermaid">
+sequenceDiagram
+  participant HM as Hiring Manager
+  participant R as Recruiter
+  participant W as Web app
+  participant API as Ranking system
+  participant DB as Database
+
+  HM->>R: Requests identity for a shortlisted candidate
+  R->>W: Clicks "Reveal"
+  W->>W: Check request came from our own page
+  W->>W: Check single-use token for this specific candidate
+  Note over W: Both checks fail closed —<br/>a forged click never reaches the system
+  W->>API: Reveal request
+  API->>API: Confirm role may reveal (recruiter/admin only)
+  API->>DB: Does this candidate exist?
+  API->>DB: Write audit row FIRST
+  DB-->>API: Recorded
+  API->>DB: Decrypt identity
+  DB-->>API: Name, email, phone
+  API-->>W: Identity
+  W-->>R: Identity shown
+  R-->>HM: Shares as needed
+</pre>
+</div>
+<p class="caption">The reveal sequence. The audit row is written <em>before</em> anything is decrypted — so an identity cannot be viewed without leaving a record.</p>
+
+<p>The ordering here is deliberate and worth understanding: permission is checked before the candidate's existence is probed, and the audit entry is written before decryption. A rejected attempt cannot create a misleading audit row, and a successful one cannot avoid creating a real one.</p>
+
+<p>Two bulk reveal routes were removed during this work — including one that de-anonymised an entire shortlist in a single unaudited download.</p>
+
+<div class="note severe">
+  <h4><span class="chip gap">Known gap</span> &nbsp;The audit log cannot name the person who revealed</h4>
+  <p>Every reveal triggered through the web interface is recorded with the actor as <code>api</code> — not the individual who clicked. The browser interface shares one system credential for all users, and the name field it could send is not filled in and would not be verified if it were.</p>
+  <p><strong>What this means practically:</strong> you can prove <em>that</em> a candidate's identity was revealed, when, for which job, and from which screen. You cannot prove <em>who</em> did it. If your policy requires individual accountability for un-blinding, this needs building before these logs can support it.</p>
+</div>
+
+<div class="note severe">
+  <h4><span class="chip gap">Known gap</span> &nbsp;Turning blind review off is not audited at all</h4>
+  <p>Blind review is a per-job setting. A Recruiter or Admin can switch it off, which permanently un-blinds every candidate on that job for every future viewer — and unlike a single reveal, this action writes no audit record whatsoever.</p>
+  <p>The internal review describes this as a wider blast radius than the reveal endpoint that an entire audit table was built for. It is the single item on this page most worth fixing.</p>
+</div>
+
+<h2 id="register">The ratification register</h2>
+<p class="kicker">Fifteen decisions currently encoded in the software. Each one needs an owner who confirms it reflects our hiring policy.</p>
+
+<div class="scroll wide">
+<table>
+  <thead>
+    <tr><th>#</th><th>Decision as it stands today</th><th>Why it needs a human</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="num">1</td>
+      <td>Skills are worth 40% of the structured score; education 10%.</td>
+      <td>A defensible weighting for technical roles. May be indefensible for credential-regulated ones.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">2</td>
+      <td>Missing a mandatory skill halves the skills score rather than excluding the candidate.</td>
+      <td>Determines whether "must-have" is genuinely a requirement or merely a strong preference.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">3</td>
+      <td>Field of study is ignored — only degree level counts.</td>
+      <td>An unrelated PhD scores identically to a directly relevant one. Documented as unresolved.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">4</td>
+      <td>Nice-to-have skills contribute nothing to the structured score.</td>
+      <td>They earn credit only through evidence. Stating them may mislead candidates about their weight.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">5</td>
+      <td>Only the top 15 candidates receive evidence review.</td>
+      <td>Candidate 16 scores zero on 40% of the headline number by structure, not by merit. A hard cliff.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">6</td>
+      <td>A skill with no stated duration is treated as fully meeting the requirement.</td>
+      <td>A generous default. Résumés rarely state per-skill years, so this fires often.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">7</td>
+      <td>Substantially over-qualified candidates are scored down, with a floor.</td>
+      <td>Deliberate dampening. Carries obvious age-proxy risk and should be a conscious, defended choice.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">8</td>
+      <td>Skills used within 2 years score full marks; 5 years 0.7; older 0.4.</td>
+      <td>Penalises career breaks, parental leave and caring responsibilities. Human-rights exposure.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">9</td>
+      <td>Overall similarity is scored relative to the batch, not absolutely.</td>
+      <td>The best of a weak pool scores full marks. Scores are not comparable between requisitions.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">10</td>
+      <td>A cover letter is worth 10%; candidates without one score zero there.</td>
+      <td>A structural penalty for not submitting an optional document.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+    <tr>
+      <td class="num">11</td>
+      <td>If the language model returns malformed output for a candidate, they silently score 0 on 40% of the composite.</td>
+      <td>A technical failure becomes a ranking penalty, with only a log line behind it. Indistinguishable from a genuinely weak candidate. Note this is specifically <em>unreadable model output</em> — an outright outage fails the whole run loudly instead, which is the safer of the two behaviours.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">12</td>
+      <td>Any Hiring Manager or Auditor can read every job in the company.</td>
+      <td>No per-requisition scoping exists. Likely exceeds intended need-to-know.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">13</td>
+      <td>Reveals from the web interface are attributed to <code>api</code>, not a named person.</td>
+      <td>Individual accountability for un-blinding cannot currently be demonstrated.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">14</td>
+      <td>Switching off blind review writes no audit record.</td>
+      <td>The highest-impact privacy action in the system is the least observable.</td>
+      <td><span class="chip gap">Gap</span></td>
+    </tr>
+    <tr>
+      <td class="num">15</td>
+      <td>Consent is one yes/no per upload batch, with no wording version or timestamp.</td>
+      <td>May not satisfy per-candidate consent evidence obligations.</td>
+      <td><span class="chip ratify">Ratify</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Two operational realities worth knowing</h2>
+
+<p><strong>Scores from résumé-to-job matching are not comparable to job-to-résumé matching.</strong> The reverse direction omits the motivation component entirely, so its scores top out at 0.9 rather than 1.0. Never place the two side by side. Ranking quality in that direction is also not yet covered by the automatic checks.</p>
+
+<p><strong>A résumé can silently fail to process.</strong> If document processing fails, the résumé stays marked "uploaded" indefinitely rather than showing an error — the same state it would show if it had only just arrived. A résumé stuck in that state is <em>invisible to the shortlist</em> and the candidate is simply never ranked. This has happened in practice: on 19 July 2026 a batch of 16 sat unprocessed for roughly eighteen hours, showing no error at any point. Until it is fixed, if a batch of candidates seems to have vanished from a shortlist, check that they finished processing before concluding they scored poorly.</p>
+
+<p><strong>A résumé can also process only partially, and still look complete.</strong> In that same batch, 10 of the 16 finished with their skills extraction having failed — skills fell back to a basic keyword scan and the résumé was marked complete, with nothing to indicate anything was missing. Those candidates are rankable and will rank <em>worse than they should</em>, on skill data that is quietly incomplete. There is currently no way to distinguish this from a clean parse without reading the server logs.</p>
+
+<h2>Suggested next steps</h2>
+<ol>
+  <li><strong>Assign an owner to each of the fifteen register items.</strong> The eleven marked "Ratify" need a documented yes or a changed number; all of them are configurable without code changes.</li>
+  <li><strong>Treat items 3, 13 and 14 as blocking</strong> if these scores will inform real hiring decisions — ignored field of study, unattributable reveals, and unaudited un-blinding are the three that would be hardest to defend if challenged.</li>
+  <li><strong>Decide whether items 7 and 8 survive legal review</strong> before first production use. Over-qualification dampening and skill-recency banding are the two most likely to produce adverse impact.</li>
+</ol>
+
+<footer>
+  <p>Prepared for HR and compliance review. Every figure here was read from the running system's source, not from prior documentation. Where the system's own architecture records disagree with the code, the code is described.</p>
+  <p>Scores, weights and thresholds are configurable — changing a ratified number does not require a code change or a release.</p>
+</footer>
+
+</div>
