@@ -931,15 +931,15 @@ residuals R1/R2/R5 in ADR-016) layers on top.
 
 ### Queued next work — FU-5, FU-6, FU-7 (user-scoped 2026-07-20)
 
-> **⚠ FIRST: this planning work is UNCOMMITTED.** As of the 2026-07-20 session end, `git status` on
-> `feat/fu4-rbac` shows modified `HANDOFF.md`, `README.md`, `docs/EXTRACTION_PLAN.md`,
-> `docs/adr/{007,009,013,018}-*.md`, plus untracked `docs/adr/{019,020,021}-*.md` and `docs/process/`.
-> **None of it is committed and no branch was created for it.** The recommendation left on the table was
-> a separate `docs/fu5-7-plan` branch rather than growing PR #23, which is an RBAC code PR — but the
-> human had not decided. Do not assume this is merged, and do not commit it to `feat/fu4-rbac` without
-> asking. Everything below describes plans that exist only as working-tree files.
+> **Status of this planning work: COMMITTED.** It was uncommitted at the 2026-07-20 session end (working-
+> tree files on `feat/fu4-rbac`, no branch). On 2026-07-21 it was committed to its own docs-only branch
+> `chore/fu5-7-plan` — the separate-branch option that had been left on the table, rather than growing
+> PR #23 — and opened as **PR #24** (`391aafd` ADRs 019/020/021, `14aeddd` the 9 filed gaps + this
+> HANDOFF refresh), CI green on all five gates. `docs/adr/{019,020,021}-*.md` and `docs/process/` are
+> tracked files now, not working-tree scratch. **An earlier version of this block said the opposite** and
+> is corrected here; if you are looking for uncommitted planning work, there is none.
 >
-> Also uncommitted-by-design: `compose.live-eval.yml` is gitignored and now carries
+> Still uncommitted-by-design: `compose.live-eval.yml` is gitignored and now carries
 > `LLM_TIMEOUT_S: "300"` for the worker. A fresh clone will not have it and will hit the 120s parse
 > failure described in the incident below.
 
