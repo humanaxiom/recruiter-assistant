@@ -166,6 +166,10 @@ not be read as tacit acceptance of option 2.
   actual worker path — that wiring is a stated **4d requirement**, not a 4c gap: 4c proves the settings
   bridge (`weights_from_settings`) is correct in isolation; 4d must be the one call site that actually
   uses it when constructing the real `MatchingContext` for `shortlist_job`/`reverse_match_job`.
+- **An LLM failure in stage 3 becomes a silent ranking penalty.** `orchestrator.py:506-512` catches `LLMOutputInvalidError` and returns `None`, so the candidate keeps their structured score but scores 0.0 on the 0.3-weighted evidence and 0.1-weighted motivation components — 40% of the composite — behind only a `log.warning`. The resulting number is indistinguishable from a genuinely weak candidate. Deferred to FU-7 / ADR-021.
+- **Reverse-match scores are not comparable to forward-match scores.** `rank_job_matches` (lines 797-801) omits the motivation term, so reverse `score_final` maxes at 0.9 under default weights while forward maxes at 1.0. Nothing in the API, the export, or the UI signals this. Accepted for now; must be documented wherever both numbers can appear to the same reader.
+- **Two ranking numbers are not reachable from settings** — `_STRUCTURED_ONLY_WEIGHTS` (line 220) and the stage-1 3x oversample factor (line 279: `oversample=k * 3`) are in-code literals while all 26 `MatchWeights` values and both k values are env-configurable. Minor inconsistency; low priority.
+- **Reverse match has no separate coarse-k** — it reuses `match_coarse_k`; there is no `match_reverse_coarse_k`. Minor.
 
 ## Architecture Diagram
 

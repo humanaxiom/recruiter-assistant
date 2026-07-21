@@ -222,6 +222,7 @@ browser, not merely configured not to.
   `_unavailable` interpolated the raised exception's message into the rendered error page; because that
   message can carry the backend's base URL or a raw `httpx` exception string, it was removed in favor of a
   fully static `error.html` before this phase's HEAD. Not a residual — already fixed.
+- **Reverse-match ranking quality is entirely ungated.** The `[reverse_match]` section of `core/tests/evals/thresholds.toml` (lines 414-418) is a commented-out placeholder, so no precision, evidence-verification or ordering bar applies to the résumé→jobs direction, while the forward direction is gated at 100% precision@5. Accepted for v1; revisit before reverse match informs any decision.
 
 ## Still-open human decision, carried forward AGAIN — not touched by this phase
 
