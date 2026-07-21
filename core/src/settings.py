@@ -155,6 +155,8 @@ class Settings(BaseSettings):
     match_evidence_met_confidence: float = 0.7
     match_evidence_partial_weight: float = 0.5
     match_evidence_verify_fuzz: float = 0.85
+    # ADR-022 follow-up #4: minimum evidence-quote length, in characters.
+    match_evidence_min_quote_chars: int = 32
     match_motivation_min_confidence: float = 0.7
     # Semantic skill matching (ADR 0020) + latency caps (ADR 0021).
     match_family_weight: float = 0.5
@@ -304,6 +306,7 @@ def weights_from_settings(settings: Settings) -> MatchWeights:
         evidence_met_confidence=settings.match_evidence_met_confidence,
         evidence_partial_weight=settings.match_evidence_partial_weight,
         evidence_verify_fuzz=settings.match_evidence_verify_fuzz,
+        evidence_min_quote_chars=settings.match_evidence_min_quote_chars,
         motivation_min_confidence=settings.match_motivation_min_confidence,
     )
 

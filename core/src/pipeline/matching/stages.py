@@ -25,6 +25,7 @@ two corrected behaviours pinned by the Phase 4c RED tests:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -241,7 +242,25 @@ def normalise_vector_scores(scores: list[float]) -> list[float]:
 # ---------------- evidence verification ----------------
 
 
-def _fuzz_ratio(needle: str, haystack: str) -> float:
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Normalise runs of whitespace to a single space, then strip.
+
+    Applied to BOTH sides of the length comparison below, so honest whitespace
+    variation between a quote and its chunk (re-wrapped lines, double spaces
+    after a period) is never punished as an append.
+    """
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _fuzz_ratio(
+    needle: str,
+    haystack: str,
+    *,
+    min_chars: int = DEFAULT_WEIGHTS.evidence_min_quote_chars,
+) -> float:
     """Fuzzy substring score in [0, 1] via ``rapidfuzz.fuzz.partial_ratio``.
 
     ``partial_ratio`` scores the best-matching WINDOW of ``haystack`` against
@@ -249,8 +268,29 @@ def _fuzz_ratio(needle: str, haystack: str) -> float:
     cited chunk". BLOCKER #6: it rejects every fabricated corpus quote while
     accepting the gold anchors, unlike ``fuzz.WRatio`` (leaks r02's fabrication
     at 0.855) or ``fuzz.ratio`` (rejects gold anchors at 0.648/0.796).
+
+    Two guards run BEFORE ``partial_ratio``, because it is blind to both
+    (ADR-022 follow-up items #1 and #4):
+
+    * **Minimum quote length** (#4). Anything under ``min_chars`` scores 0.0.
+      ``"API"`` otherwise scores 1.000 against every chunk containing it, so a
+      bare token is indistinguishable from real evidence.
+    * **Length guard** (#1). ``partial_ratio`` scores the best-matching WINDOW
+      of the longer string, so a quote CONTAINING the cited chunk verbatim
+      plus arbitrary appended fabrication scores 1.000 at any append length.
+      A quote is a SPAN of exactly one cited chunk, and a span cannot be
+      longer than the thing it spans — so a quote longer than the chunk is
+      rejected outright, at any excess. This is a structural invariant, NOT a
+      tunable ratio: a threshold like ``k = 1.05`` leaves a small-append window
+      open (a +1 char append on a 100-char chunk lands at ~1.01) and the
+      fabrication rides through it. Cross-chunk concatenation is rejected as a
+      consequence, which is intended.
     """
-    if not needle:
+    if not needle or not needle.strip():
+        return 0.0
+    if len(needle) < min_chars:
+        return 0.0
+    if len(_collapse_whitespace(needle)) > len(_collapse_whitespace(haystack)):
         return 0.0
     return float(fuzz.partial_ratio(needle, haystack)) / 100.0
 
@@ -268,6 +308,7 @@ def verify_evidence(
     Returns a new EvidenceObject — never mutates input.
     """
     quote_threshold = weights.evidence_verify_fuzz
+    min_chars = weights.evidence_min_quote_chars
     cleaned: list[Any] = []
     for req in evidence.requirements:
         good_ids = [cid for cid in req.evidence_chunk_ids if cid in chunks_by_id]
@@ -275,7 +316,8 @@ def verify_evidence(
         if new_req.evidence and good_ids:
             quoted = new_req.evidence.lower().strip()
             if not any(
-                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower(), min_chars=min_chars)
+                >= quote_threshold
                 for cid in good_ids
             ):
                 # Quote not found in any cited chunk — fabrication likely.
@@ -313,7 +355,8 @@ def verify_evidence(
         if new_cle.evidence and good_ids:
             quoted = new_cle.evidence.lower().strip()
             if not any(
-                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower(), min_chars=min_chars)
+                >= quote_threshold
                 for cid in good_ids
             ):
                 new_cle = new_cle.model_copy(

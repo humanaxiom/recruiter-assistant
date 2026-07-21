@@ -16,12 +16,39 @@ sub-weights; the ``0.85`` anti-fabrication fuzz threshold).
 from __future__ import annotations
 
 import datetime as dt
-from typing import Literal
+import re
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 EvidenceStatus = Literal["met", "partial", "missing"]
+
+# ADR-022 follow-up #2 — C0 controls (plus DEL) that must never reach the
+# ``json.dumps`` in ``persist_shortlist``. Postgres rejects the JSON escape
+# for U+0000 outright ("unsupported Unicode escape sequence"), which kills the
+# whole shortlist transaction; the rest are junk in a human-facing quote and
+# go under the same rule. TAB (0x09), LF (0x0a) and CR (0x0d) carry real
+# formatting in a multi-line quote and are deliberately NOT in the class.
+#
+# This generalises the NUL-strip idiom already established on the parse path
+# (``src/pipeline/parsing/extract.py::_sanitize``) rather than inventing a
+# second one. It lives at the SCHEMA boundary, not in ``verify_evidence``:
+# the verifier only ever rewrites the two ``evidence`` fields, so
+# ``requirement`` / ``overall_summary`` / ``overall_motivation`` would still
+# reach Postgres unscrubbed.
+_C0_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _strip_control_chars(value: str) -> str:
+    """Drop C0 controls and DEL, keeping TAB / LF / CR. No-op on clean text."""
+    return _C0_CONTROLS.sub("", value)
+
+
+# Every LLM-authored free-text field on the evidence models carries this, so
+# the scrub holds on ``__init__`` and ``model_validate`` alike and is a fixed
+# point across a dump/validate roundtrip.
+CleanText = Annotated[str, AfterValidator(_strip_control_chars)]
 
 # A skill family/category label. Free-form string, resolved against the
 # config-driven ontology vocabulary at scoring time (not an enum).
@@ -58,6 +85,9 @@ class MatchWeights(BaseModel):
     evidence_met_confidence: float = Field(default=0.7, ge=0, le=1)
     evidence_partial_weight: float = Field(default=0.5, ge=0, le=1)
     evidence_verify_fuzz: float = Field(default=0.85, ge=0, le=1)
+    # ADR-022 follow-up #4: a quote shorter than this many characters is not
+    # evidence of anything — "API" matches any chunk containing it at 1.000.
+    evidence_min_quote_chars: int = Field(default=32, ge=0)
     motivation_min_confidence: float = Field(default=0.7, ge=0, le=1)
 
     @model_validator(mode="after")
@@ -122,9 +152,9 @@ class ScoreBreakdown(BaseModel):
 class RequirementEvidence(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    requirement: str
+    requirement: CleanText = Field(max_length=500)
     status: EvidenceStatus = "missing"
-    evidence: str = ""
+    evidence: CleanText = Field(default="", max_length=2000)
     evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=0.0, ge=0, le=1)
     # FU-2 (display-only): the resolved source text behind ``evidence_chunk_ids``,
@@ -144,7 +174,7 @@ class CoverLetterEvidence(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     theme: CoverLetterTheme
-    evidence: str = ""
+    evidence: CleanText = Field(default="", max_length=2000)
     evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=0.0, ge=0, le=1)
 
@@ -154,11 +184,11 @@ class EvidenceObject(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    requirements: list[RequirementEvidence] = Field(default_factory=list)
-    overall_summary: str = Field(default="", max_length=1000)
+    requirements: list[RequirementEvidence] = Field(default_factory=list, max_length=64)
+    overall_summary: CleanText = Field(default="", max_length=1000)
     cover_letter_presence: bool = False
     cover_letter_evidence: list[CoverLetterEvidence] = Field(default_factory=list)
-    overall_motivation: str = Field(default="", max_length=1000)
+    overall_motivation: CleanText = Field(default="", max_length=1000)
 
 
 class PipelineMeta(BaseModel):
