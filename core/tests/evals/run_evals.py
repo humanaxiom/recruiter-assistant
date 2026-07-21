@@ -433,7 +433,7 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     for rid, s in scored.items():
         chunks_by_id = s.chunks_by_id
         for req in s.evidence.requirements if s.evidence else []:
-            if req.evidence and req.evidence_chunk_ids:
+            if req.evidence:
                 assert any(
                     _partial_ratio(req.evidence, chunks_by_id.get(cid, ""))
                     >= verify_fuzz

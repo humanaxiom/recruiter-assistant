@@ -556,9 +556,11 @@ def test_verify_evidence_strips_hallucinated_chunk_ids() -> None:
     assert cleaned.requirements[0].evidence_chunk_ids == []
 
 
-def test_verify_evidence_downgrades_confidence_for_uncited_quote_but_keeps_it() -> None:
-    """A quote with NO surviving citation is downgraded, not blanked — that
-    branch is distinct from the fabrication-scrub branch."""
+def test_verify_evidence_blanks_and_demotes_an_uncited_quote() -> None:
+    """A quote with NO surviving citation gets the SAME scrub as a quote that
+    fails to match its cited chunk: evidence blanked, ``met`` demoted to
+    ``missing``, confidence capped. No citation is strictly less evidence than
+    a bad citation, so it cannot warrant a weaker response."""
     req = RequirementEvidence(
         requirement="Python",
         status="met",
@@ -569,7 +571,8 @@ def test_verify_evidence_downgrades_confidence_for_uncited_quote_but_keeps_it() 
     evidence = EvidenceObject(requirements=[req])
     cleaned = verify_evidence(evidence, {}, weights=DEFAULT_WEIGHTS)
     result = cleaned.requirements[0]
-    assert result.evidence == "some quote with no valid citation"
+    assert result.evidence == ""
+    assert result.status == "missing"
     assert result.confidence <= 0.3
 
 
