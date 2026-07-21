@@ -972,13 +972,60 @@ Each is a named feature, not a numbered phase — `docs/EXTRACTION_PLAN.md`'s ta
   `awaiting_llm` state and retries rather than publishing a degraded shortlist. Also makes parse status
   honest: claim `uploaded → parsing` on start, write `failed` + `failure_reason` on retry exhaustion, and
   surface partial-parse degradation instead of marking it `parsed`.
-- **HR-facing explainer (already written, untracked).** `docs/process/ranking-metrics-explainer.html` is
-  a plain-language explainer of the scoring model for HR/compliance, with Mermaid diagrams and a
-  **ratification register** of 15 policy decisions currently encoded as config defaults (weights, the
-  must-have penalty, education-field blindness, the top-15 evidence cliff, recency banding, over-qual
-  dampening, and the audit/scoping gaps). It has **not** had a `reviewer` pass; the weight table and
-  evals thresholds in it were relayed from explorer agents, not read line-by-line by the author. Get it
-  reviewed before it goes to HR.
+- **HR-facing explainer — REVIEWED 2026-07-21, verdict CHANGES-REQUIRED. Banner added; do NOT send to
+  HR.** `docs/process/ranking-metrics-explainer.html` is a plain-language explainer of the scoring model
+  for HR/compliance, with Mermaid diagrams and a **ratification register** of 15 policy decisions
+  currently encoded as config defaults. It has now had the `reviewer` pass it was flagged as needing.
+  **All fourteen weight values fact-checked MATCH** the code (`schemas/matching.py`, `settings.py`), as do
+  the recency bands, the over-qual constants, the 0.85 fuzz bar, the k values, and — creditably — the
+  education field-blindness, the motivation denominator, and the reverse-match incomparability. The
+  narrative around them is where it fails. A `⛔ DRAFT — NOT FOR CIRCULATION` banner is now rendered at
+  the top of the file; remove it only when the CRITICAL/MAJOR items are closed.
+  - **CRITICAL-1 — the senior-candidate must-have exemption is undocumented.** The doc (and register items
+    2 and 7) say a must-have miss halves the skills score. `stages.py:168-175`: if
+    `is_senior_candidate` (≥`implied_seniority_factor=1.5`× the JD's min years) AND ≥`implied_min_coverage=0.5`
+    of must-haves matched, the penalty is `implied_experience_relief=0.75` instead. **More years buys a
+    lighter penalty for lacking a mandatory skill** — a years-correlated advantage, while the doc flags
+    only a years-correlated *penalty*. Those three constants are also absent from the register.
+  - **CRITICAL-2 — "every quote shown to a human must survive a match against the real document" is
+    false, and this is a CODE gap, not only a doc gap.** `stages.py:291-295`: a requirement with a quote
+    but **no surviving citation id** caps confidence at 0.3 and **keeps the quote text and the `"met"`
+    status without ever text-matching it**. The doc's own diagram shows the fabrication check running on
+    that path; it does not. The evals gate cannot catch it either — `run_evals.py:436` guards on
+    `if req.evidence and req.evidence_chunk_ids`, so uncited quotes are **excluded from the 100%
+    verification-rate figure**. No display-path confidence filter exists
+    (`shortlist_service.py:880-890` passes confidence through untouched). Net: an uncited, unverified,
+    model-authored quote renders to a reviewer labelled "met". **Treat this as a product defect to
+    triage, not a wording fix.**
+  - **MAJOR-3 — relevant to FU-7's scope.** The doc claims a mid-run LLM outage "fails the whole run
+    loudly." `orchestrator.py:548-550` catches bare `Exception` per candidate and sets evidence to
+    `None` — so a stage-3 **timeout or connection reset produces the same silent 0.4 zeroing as malformed
+    JSON**. Given the 2026-07-20 incident, this fires in practice. This is more evidence for FU-7's
+    fail-closed requirement, and FU-7 should close it in code.
+  - **MAJOR-4** — "all of them are configurable without code changes" is false for ≥3 register items
+    (unstated-duration full credit is hardcoded `stages.py:129`; batch-relative normalisation
+    `stages.py:227-238`; consent granularity is a schema change).
+  - **MAJOR-5 — the 50-candidate coarse cutoff is a harder exclusion than the registered top-15 cliff and
+    is unregistered.** Worse, `stage1_coarse` (`orchestrator.py:264-280`) oversamples the **global** vector
+    index 3× and only then filters to the job — so on a busy instance a résumé can be squeezed out of its
+    own job's pool by similar résumés on unrelated requisitions. Non-merit exclusion, zero doc coverage.
+  - **MAJOR-6 — "Repeatability · 0 rank change" is presented under the "you do not need to police this"
+    chip, but `thresholds.toml:403-411` says the opposite in its own words:** no `seed` is passed to
+    Ollama, greedy decode is not bit-stable, and a warm-Redis rerun **passes vacuously** (testing the
+    cache, not the model). Pinning `seed` is still outstanding.
+  - **MAJOR-7 — ordering controls overstated.** `min_score_gap = 1e-6` is "a float-noise epsilon, not a
+    separation the fixtures have to earn" (`thresholds.toml:358`), and the three mutations that prove
+    those pairs gate anything are **human review obligations, not gates** (`thresholds.toml:265-274`) —
+    so the row marks a human process as machine-enforced.
+  - **MINORs (8–15), ride the same revision:** a "met" requirement under `confidence ≥ 0.7` contributes
+    **zero**; seniority's floor rescale means any title cosine ≤0.50 scores exactly 0 (adverse-impact
+    relevant, unregistered); the register is miscounted ("eleven" vs nine `Ratify`); the "~40% random
+    ranker" figure is stale (17-fixture corpus, not recomputed for 20); `education` returns **1.0 for
+    everyone** when the JD omits `min_level`; ~8 further policy-laden defaults are unregistered
+    (`match_family_weight`, `education_partial`, `evidence_met_confidence`, `motivation_min_confidence`,
+    `match_non_matchable_families`, plus CRITICAL-1's three) — the register is closer to 23 than 15;
+    "fully deterministic" at stage 2 contradicts the doc's own item 9; the 0.9 reverse-match cap holds
+    only while `evidence_k > 0`.
 - **Chore — config plumbing and fail-closed auth.** No `MATCH_*` tunable and none of the four `API_KEY_*`
   vars appear in `docker-compose.yml` or `compose.live-eval.yml`. Two consequences: the documented ranking
   knobs are unreachable in the running containers, and since auth is disabled iff all four keys are empty,
