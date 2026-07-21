@@ -68,6 +68,10 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    min_completeness_in_topk floor). Gates the
                                    extractor's RECALL, not just the verifier's
                                    precision.
+    min_quote_chars = 32        -- == MatchWeights.evidence_min_quote_chars.
+                                   Floor below which a "verified" evidence
+                                   quote is too short to be meaningful
+                                   evidence (ADR-022 hardening).
   [adversarial]
     must_not_surface_in_topk    -- r09 (the keyword-stuffer) must never appear
                                    in the top-k. Same for every fixture flagged
@@ -417,6 +421,11 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     assert (
         verify_fuzz == MatchWeights().evidence_verify_fuzz
     ), "thresholds.toml fuzz_threshold drifted from MatchWeights.evidence_verify_fuzz"
+    min_quote_chars = int(thresholds["evidence"]["min_quote_chars"])
+    assert min_quote_chars == MatchWeights().evidence_min_quote_chars, (
+        "thresholds.toml min_quote_chars drifted from "
+        "MatchWeights.evidence_min_quote_chars"
+    )
     for m in topk:
         surviving = [
             r

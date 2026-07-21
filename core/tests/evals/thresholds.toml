@@ -114,6 +114,16 @@ negative_evidence_must_fail = true
 # fabrication-rejection behave correctly on the requirements the LLM happened
 # to surface.
 gold_recall_min = 1.0
+# ADR-022 hardening: the floor below which a "verified" evidence quote is too
+# short to be meaningful evidence at all (e.g. a bare keyword match with no
+# surrounding textual grounding). SINGLE SOURCE OF TRUTH NOTE, same shape as
+# fuzz_threshold above: this value must always equal
+# `src.schemas.matching.MatchWeights().evidence_min_quote_chars` (currently
+# 32). Repeated here only because thresholds.toml must be readable without
+# importing src.* (see run_evals.py's pre-4c import-guard). Do NOT let this
+# drift from MatchWeights -- run_evals.py asserts equality between the two on
+# every gate run, the same way it does for fuzz_threshold.
+min_quote_chars = 32
 
 [adversarial]
 # Backstop invariant (Phase-4a strengthening, 4c-required T3): an adversarial
