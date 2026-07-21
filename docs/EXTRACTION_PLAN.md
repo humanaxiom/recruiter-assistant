@@ -98,14 +98,24 @@ see `HANDOFF.md`'s "Next session" section for the current list of candidates (th
 `jd.education.fields` decision, the deferred connectors feature, the no-advisory-lock gap, at-rest
 cleartext PII posture before multi-tenant, and others).
 
-**Update 2026-07-20 — a human has now scoped the next tranche.** Five post-v1 features have shipped
-(Workflow UI, FU-1/2/3) and FU-4 (RBAC) is built with PR #23 open. Three further features are scoped and
+**Update 2026-07-20 — a human has now scoped the next tranche.** Six post-v1 features have shipped
+(Workflow UI, FU-1/2/3, FU-4 RBAC — merged via PR #23, `961caab`). Three further features are scoped and
 queued, in dependency order: **FU-5** CAS identity + attributable audit ([ADR-019](adr/019-cas-identity-attributable-audit.md)),
 **FU-6** per-job assignment + row-level scoping ([ADR-020](adr/020-per-job-assignment-scoping.md)), and
 **FU-7** LLM failover + fail-closed ranking ([ADR-021](adr/021-llm-failover-fail-closed-ranking.md)).
 **This does not reopen the phase table** — these are named features, and the table above stays closed at
 Phase 7. The queued plan, its build order, and the 2026-07-20 operational incident that motivated FU-7
 live in `HANDOFF.md`'s "Queued next work" section.
+
+**Update 2026-07-21 — the plan doc's own status is now downstream of `HANDOFF.md`.** `main` is at
+`6db83b6`. PR #24 merged the FU-5/6/7 plan (`abb5d67`); PR #25 merged **[ADR-022](adr/022-uncited-evidence-quote-scrub.md)**,
+an evidence-integrity fix to `verify_evidence` — an uncited quote is now scrubbed like a fabricated one.
+**The build order gained an item ahead of FU-5:** the ADR-022 hardening branch, closing a HIGH
+`partial_ratio` superset bypass that PR #25 deliberately left open, plus a NUL-byte bug that kills the
+whole `persist_shortlist` transaction and unbounded evidence fields. Current order is **ADR-022 hardening
+→ FU-5 → FU-6 → FU-7**. Ranking is byte-unchanged by ADR-022 itself, but **the hardening branch is
+expected to move scores** — `ranking-evals` may fail for the right reason there; re-derive the affected
+corpus claims rather than relaxing a threshold.
 
 (Phase 4, Ranking engine, split into 4
 gated sub-phases, planner pass 2026-07-12, **all four now merged**; Phase 5, persist + anonymize +
