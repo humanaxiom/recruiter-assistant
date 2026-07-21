@@ -749,9 +749,16 @@ at Phase 7. **Post-v1, all merged to `main`, CI green:** the **Workflow UI** (PR
 upload (PR #20, `bc055f4`, ADR-016), and **FU-3** bulk ingest (PR #21, `e033d31`, ADR-017). Also merged
 this session: **PR #22** (`chore/fu3-merged-docs`, squash merge `2fc3d4f`) — the docs-only PR marking
 FU-1/FU-2/FU-3 merged. **FU-4 — RBAC is MERGED to `main` via PR #23 (merge `961caab`, 2026-07-21),
-CI green on all five gates** — `main` is now at `961caab`. It was the last item planned as of
+CI green on all five gates.** It was the last item planned as of
 2026-07-19; **FU-5/FU-6/FU-7 were scoped on 2026-07-20** (see "Queued next work"). Each post-v1 feature
 is a named feature, not a numbered phase.
+
+**Merged 2026-07-21, after FU-4 — `main` is now at `6db83b6`:**
+- **PR #24** (`chore/fu5-7-plan`, squash merge `abb5d67`) — the docs-only FU-5/6/7 plan: ADR-019/020/021,
+  9 gaps filed into their owning ADRs, the HR explainer, and the HANDOFF queued-work section.
+- **PR #25** (`fix/uncited-evidence-quotes`, squash merge `6db83b6`) — **ADR-022**, an evidence-integrity
+  fix in the anti-fabrication verifier. All three merge-blocking gates green. See "ADR-022 status" below,
+  and read it before touching `verify_evidence` — it leaves a **HIGH** finding deliberately open.
 
 ### Workflow-UI enhancements — FU-1, FU-2, FU-3, FU-4 ✅ ALL MERGED
 
@@ -929,15 +936,97 @@ residuals R1/R2/R5 in ADR-016) layers on top.
     already-correct behavior (the no-short-circuit comparison loop) that could only be shown RED by
     mutation testing, not by a normal failing-test-first cycle; same precedent as Phase 4a.
 
+### ADR-022 status — MERGED via PR #25 (squash `6db83b6`) — READ BEFORE TOUCHING `verify_evidence`
+
+An evidence-integrity fix in the anti-fabrication verifier
+(`core/src/pipeline/matching/stages.py::verify_evidence`), merged 2026-07-21. Full detail:
+[ADR-022](docs/adr/022-uncited-evidence-quote-scrub.md).
+
+**What was wrong.** The verifier had two asymmetric arms. A quote whose text failed to match a valid cited
+chunk was scrubbed (evidence blanked, `met`→`missing`, confidence capped at 0.3). A quote with **no
+surviving citation** was only confidence-capped — the quote text and the `"met"` status both survived, and
+it was **never text-matched against anything**. Since `good_ids` is empty whenever *every* cited id is
+hallucinated, **a fabricated CITATION took the lenient arm while a fabricated QUOTE took the strict one**:
+the verifier was weakest exactly where the model was least trustworthy. The cover-letter loop had the same
+shape. Both arms now scrub identically.
+
+**Three things about this worth carrying forward.**
+
+1. **It was a considered decision, not an oversight.** `test_matching_stages.py` carried a test whose
+   docstring defended the branch as "distinct from the fabrication-scrub branch." The asymmetry was
+   reasoned about, written down, tested, and never revisited — **the test locked in the intent and hid the
+   consequence.** It was provably wrong and was updated in place and renamed, per CLAUDE.md.
+2. **The gate's own scrubbing step was manufacturing the input that made the gate blind.**
+   `run_evals.py`'s verification-rate loop conditioned on `req.evidence and req.evidence_chunk_ids`, and
+   `verify_evidence` sets `evidence_chunk_ids` to `good_ids` *before* the branch fires — so a
+   fully-hallucinated citation reached the harness with an empty id list, precisely the shape the conjunct
+   filtered out. The `ranking-evals` gate proved the hole was reachable by running the 2×2: **old verifier
+   + old harness PASSED with a fabrication riding through the entire corpus gate undetected.**
+3. **The harness loop is now a backstop, not a live assertion.** On the unmutated corpus the new condition
+   is extensionally inert (`surfaced == 81` either way, `uncited_surfaced == 0`), because the deterministic
+   stand-in only cites real ids and the fixed verifier makes uncited quotes impossible by construction. Its
+   falsifiability rests entirely on `core/tests/unit/test_evals_uncited_quote_gate.py`. **Delete that file
+   and reverting the harness line becomes silently undetectable.**
+
+**It was found by fact-checking a document, not by reading code** — the `reviewer` pass on
+`docs/process/ranking-metrics-explainer.html`, which tells HR that "every quote shown to a human must
+survive a match against the real document." The claim was false, and chasing it found the defect.
+
+**Scope: display/integrity, not scoring.** The 0.3 cap already held these below `_evidence_completeness`'s
+`met AND confidence >= 0.7` bar. The corpus confirms it — the full 20-fixture ranking is **byte-identical**
+to `main` @ `961caab` (every `score_final` delta `+0.000e+00`, r09 still 12th, all five ordering pairs
+unchanged). The invariance is conditional on `evidence_met_confidence > 0.3`; `match_evidence_met_confidence`
+is env-settable, and below the cap the fix *does* move completeness (toward correctness). Pinned explicitly.
+
+**Gate state (HEAD `1e1776c`):** reviewer **APPROVE**, security **PASS** (7/7 mutations killed, zero
+findings introduced by the diff), ranking-evals **PASS** (six standing mutation obligations still FAIL as
+required on both input orders). 2730 unit tests @ 91.64%; CI green on all five gates including integration.
+
+### ⚠ NEXT WORK ITEM — evidence-verifier hardening (ADR-022 follow-ups). Do this BEFORE FU-5.
+
+The `security` gate passed PR #25's diff but found a **HIGH pre-existing defect in the same function that
+PR #25 deliberately did not close.** The human agreed on 2026-07-21 to merge #25 as-is and take these as
+one focused follow-up branch. **That branch is the immediate next work item — ahead of FU-5.**
+
+1. **HIGH — `partial_ratio` superset bypass** (`stages.py:277-280` and `:315-318`). `partial_ratio` slides
+   the shorter string over the longer one, so a quote that **contains the entire cited chunk verbatim plus
+   arbitrary appended text scores 1.000 regardless of how much fabrication is appended.** Measured: a
+   125-char chunk + **1120 characters of invented claims** → fuzz 1.000, `status="met"`, `confidence=0.95`,
+   full fabricated text surfaced to the reviewer and persisted to `shortlist_entries.evidence`. This is a
+   **larger** hole than the one PR #25 closed: #25 catches a model that cites nothing valid; this catches a
+   model that quotes correctly and then keeps talking. Fix: a length-ratio guard (reject
+   `len(quote) > len(chunk) * k`, k≈1.2) or `partial_ratio_alignment` requiring the matched window to cover
+   a fraction of the **needle**, not just the haystack.
+2. **MEDIUM — NUL-byte availability bug** (`shortlist_service.py:109-123`). A `\x00` in a quote survives
+   the verifier, `json.dumps` emits a `\u0000` escape, and Postgres rejects it outright — **the whole
+   `persist_shortlist` transaction dies, so one malformed quote loses the entire shortlist.** Strip C0
+   controls (except `\n`/`\t`) in `verify_evidence`.
+3. **MEDIUM — unbounded evidence fields** (`schemas/matching.py:127,147,157`). No `max_length` on either
+   `evidence` field nor on the `requirements` list, while `overall_summary` is capped at 1000.
+   2,000,000-char quotes and 100,000 requirements are accepted into O(n·m) fuzzy matching and into JSONB.
+4. **MEDIUM — no minimum quote length** (`stages.py:276-280`). `"API"` scores 1.000 against any chunk
+   containing it, so a degenerate model satisfies the verifier trivially.
+5. **LOW, accepted residuals** — homoglyph substitution scores 0.879 and passes the 0.85 bar; chunk ids are
+   not globally unique (`c_001` exists in every résumé), so cross-résumé isolation rests on `chunks_by_id`
+   being built per-candidate — correct at both call sites today, undefended by any assertion, and a future
+   batching refactor would silently verify quotes against the wrong person's document.
+
+**Expect this branch to move scores.** Unlike PR #25, tightening the fuzz bar can legitimately reject
+evidence the corpus currently counts, so `ranking-evals` may fail for the right reason. Do **not** relax a
+threshold to get green — re-derive the affected corpus claims, exactly as the Phase 4a hardening did.
+
 ### Queued next work — FU-5, FU-6, FU-7 (user-scoped 2026-07-20)
 
-> **Status of this planning work: COMMITTED.** It was uncommitted at the 2026-07-20 session end (working-
-> tree files on `feat/fu4-rbac`, no branch). On 2026-07-21 it was committed to its own docs-only branch
-> `chore/fu5-7-plan` — the separate-branch option that had been left on the table, rather than growing
-> PR #23 — and opened as **PR #24** (`391aafd` ADRs 019/020/021, `14aeddd` the 9 filed gaps + this
-> HANDOFF refresh), CI green on all five gates. `docs/adr/{019,020,021}-*.md` and `docs/process/` are
-> tracked files now, not working-tree scratch. **An earlier version of this block said the opposite** and
-> is corrected here; if you are looking for uncommitted planning work, there is none.
+> **Status of this planning work: MERGED to `main` via PR #24 (squash `abb5d67`), 2026-07-21.** It was
+> uncommitted at the 2026-07-20 session end (working-tree files on `feat/fu4-rbac`, no branch), then
+> committed to its own docs-only branch `chore/fu5-7-plan` — the separate-branch option that had been left
+> on the table, rather than growing PR #23 — and merged with CI green on all five gates.
+> `docs/adr/{019,020,021}-*.md` and `docs/process/` are tracked files on `main` now, not working-tree
+> scratch. **Two earlier versions of this block said the opposite**; if you are looking for uncommitted
+> planning work, there is none.
+>
+> **Build order changed on 2026-07-21:** the ADR-022 evidence-verifier hardening branch (see the section
+> immediately above) comes **before** FU-5. FU-5 → FU-6 → FU-7 is otherwise unchanged.
 >
 > Still uncommitted-by-design: `compose.live-eval.yml` is gitignored and now carries
 > `LLM_TIMEOUT_S: "300"` for the worker. A fresh clone will not have it and will hit the 120s parse
@@ -947,6 +1036,10 @@ residuals R1/R2/R5 in ADR-016) layers on top.
 incident (below) exposed the silent-failure class. Build order matters: **FU-5 → FU-6 → FU-7**, because
 FU-6's scoping predicates and FU-7's attributable failure states both key off FU-5's `users` table.
 Each is a named feature, not a numbered phase — `docs/EXTRACTION_PLAN.md`'s table stays closed at Phase 7.
+
+**The full current build order is: ADR-022 hardening → FU-5 → FU-6 → FU-7.** The hardening branch was
+inserted ahead of FU-5 on 2026-07-21 (human decision) because it carries a HIGH security finding that is
+live on `main`, in the ranking path, and ungated.
 
 - **FU-5 — CAS identity, user records, attributable audit (ADR-019).** Adds the first real `users` table
   (there is none today), authenticates humans via **CAS** rather than an API key, moves `role` onto the
@@ -973,7 +1066,10 @@ Each is a named feature, not a numbered phase — `docs/EXTRACTION_PLAN.md`'s ta
   honest: claim `uploaded → parsing` on start, write `failed` + `failure_reason` on retry exhaustion, and
   surface partial-parse degradation instead of marking it `parsed`.
 - **HR-facing explainer — REVIEWED 2026-07-21, verdict CHANGES-REQUIRED. Banner added; do NOT send to
-  HR.** `docs/process/ranking-metrics-explainer.html` is a plain-language explainer of the scoring model
+  HR. CRITICAL-2 is now FIXED IN CODE (ADR-022, PR #25) but the document is still wrong and still
+  blocked** — its anti-fabrication claim remains false while the `partial_ratio` superset bypass is open
+  (ADR-022 follow-up #1), and CRITICAL-1 plus all five MAJORs are untouched. **Remove the banner only when
+  the hardening branch lands AND the document is corrected**; fixing the code did not fix the prose. `docs/process/ranking-metrics-explainer.html` is a plain-language explainer of the scoring model
   for HR/compliance, with Mermaid diagrams and a **ratification register** of 15 policy decisions
   currently encoded as config defaults. It has now had the `reviewer` pass it was flagged as needing.
   **All fourteen weight values fact-checked MATCH** the code (`schemas/matching.py`, `settings.py`), as do
@@ -1341,22 +1437,44 @@ lock on concurrent shortlist/reverse-match runs (ADR-010 §1, still open, the
 viewer is read-only so Phase 7 didn't touch this either).
 
 Note: no local Python — verify gates in the python:3.11-slim Docker container per
-HANDOFF.md. Phase 7's PR #16 is merged; v1 is complete.
+HANDOFF.md. Phase 7's PR #16 is merged; v1 is complete. Post-v1, the Workflow
+UI and FU-1/2/3/4 are merged, and so are PR #24 (the FU-5/6/7 plan) and PR #25
+(ADR-022). Start with the ADR-022 hardening branch, not FU-5.
 
-CURRENT STATE AS OF 2026-07-20 — read HANDOFF.md's "Queued next work" section
-before doing anything:
-- FU-4 (RBAC) is MERGED to main via PR #23 (merge 961caab, 2026-07-21). The
-  org billing block was fixed that morning and CI ran green on all five gates
-  including integration against real pg/neo4j/redis — its first real execution
-  on that branch. `main` is now at 961caab.
-- Work IS now scoped, contrary to the "needs a human to scope it" note above:
-  FU-5 (CAS identity + attributable audit, ADR-019), FU-6 (per-job assignment +
-  row-level scoping, ADR-020), FU-7 (LLM failover + fail-closed ranking,
-  ADR-021). Build order is FU-5 -> FU-6 -> FU-7; each depends on the previous.
-- THE PLANNING WORK IS UNCOMMITTED. ADRs 019/020/021 and docs/process/ are
-  untracked; HANDOFF/README/EXTRACTION_PLAN/ADR-007/009/013/018 are modified.
-  No branch was made for it. Ask the human before committing, and do not assume
-  it landed. A `docs/fu5-7-plan` branch was recommended but not created.
+CURRENT STATE AS OF 2026-07-21 — read HANDOFF.md's "ADR-022 status" and
+"NEXT WORK ITEM" sections before doing anything:
+- `main` is at 6db83b6. Everything below is merged with CI green.
+- FU-4 (RBAC) MERGED via PR #23 (961caab). The org billing block was fixed that
+  morning and CI ran green on all five gates — its first real execution on that
+  branch. Diagnostic note if it recurs: a billing-refused job reports
+  conclusion=failure with steps=0; a job that genuinely ran and failed has
+  steps>0.
+- PR #24 (abb5d67) MERGED — the FU-5/6/7 plan (ADR-019/020/021), 9 gaps filed,
+  the HR explainer. THE PLANNING WORK IS COMMITTED; earlier handoff text
+  claiming it is uncommitted is stale and has been corrected twice.
+- PR #25 (6db83b6) MERGED — ADR-022, an evidence-integrity fix to
+  verify_evidence: an uncited quote is now scrubbed like a fabricated one, in
+  both the requirement and cover-letter arms. Found by fact-checking the HR
+  explainer, not by reading code. Ranking is byte-identical; it is a
+  display/integrity fix, not a scoring one.
+- THE IMMEDIATE NEXT WORK ITEM IS **NOT** FU-5. It is the ADR-022 hardening
+  branch. Security found a HIGH pre-existing bypass in the same function that
+  PR #25 deliberately left open: rapidfuzz partial_ratio returns 1.000 when a
+  quote contains the whole cited chunk verbatim PLUS arbitrary appended
+  fabrication (measured at 1120 appended chars, surfacing as met @ 0.95 and
+  persisting). Plus a NUL byte that kills the entire persist_shortlist
+  transaction, and unbounded evidence fields. Full ordered list in ADR-022 and
+  in HANDOFF's "NEXT WORK ITEM" section. Expect this branch to MOVE SCORES —
+  ranking-evals may fail for the right reason; re-derive the affected corpus
+  claims, never relax a threshold.
+- THEN: FU-5 (CAS identity + attributable audit, ADR-019), FU-6 (per-job
+  assignment + row-level scoping, ADR-020), FU-7 (LLM failover + fail-closed
+  ranking, ADR-021), in that order; each depends on the previous.
+- The HR explainer (docs/process/) carries a DRAFT/NOT-FOR-CIRCULATION banner
+  and must not go to HR. Fixing CRITICAL-2 in code did not fix the prose.
+- Two open decisions needing a human: ADR-020's auditor scoping (global-read-
+  but-every-read-logged, flagged for ratification, FU-6 needs it), and the
+  long-carried jd.education.fields question (ADR-009 §7).
 - Operational: `compose.live-eval.yml` (gitignored) now sets LLM_TIMEOUT_S=300
   for the worker. The 120s default is BELOW the real parse time on the
   calibrated peer (~23.5 tok/s vs max_tokens=3072 => ~131s), so a fresh clone
