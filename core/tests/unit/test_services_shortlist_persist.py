@@ -41,8 +41,11 @@ from src.pipeline.matching.orchestrator import (
 )
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
+    CoverLetterEvidence,
+    EvidenceObject,
     MatchWeights,
     PipelineMeta,
+    RequirementEvidence,
     ScoreBreakdown,
     SkillContribution,
 )
@@ -478,3 +481,282 @@ async def test_persist_reverse_match_pipeline_meta_carries_weights_and_git_sha()
     assert meta_json is not None
     assert meta_json["git_sha"] == "reverse-sha-42"
     assert meta_json["weights"]["structured"] == pytest.approx(0.7)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADR-022 follow-up #2 (RED) — the NUL-byte availability bug.
+#
+# A ``\x00`` anywhere in an LLM-authored evidence string survives the verifier,
+# ``json.dumps`` emits it as a six-character backslash-u-0-0-0-0 escape, and
+# Postgres rejects that escape outright ("unsupported Unicode escape
+# sequence ... cannot be converted to text"). The persist_shortlist
+# transaction dies entirely, so ONE malformed quote loses the ENTIRE
+# shortlist for that job. An availability bug, not a correctness one, which
+# is why it is pinned at the persist boundary.
+#
+# WHERE THE FIX BELONGS — deliberately NOT where the ADR says.
+#
+# ADR-022's follow-up #2 (and HANDOFF) say "strip C0 controls (except \n and
+# \t) in ``verify_evidence``". That is WRONG, and these tests are written to
+# catch a spec-literal fix. ``verify_evidence`` only ever touches two of the
+# five LLM-authored string fields that reach ``json.dumps`` in
+# ``persist_shortlist``:
+#
+#   1. RequirementEvidence.evidence      <- verify_evidence rewrites this
+#   2. CoverLetterEvidence.evidence      <- verify_evidence rewrites this
+#   3. EvidenceObject.overall_summary    <- passed through untouched
+#   4. EvidenceObject.overall_motivation <- passed through untouched
+#   5. RequirementEvidence.requirement   <- passed through untouched
+#
+# Fields 3-5 are model-authored free text on the same JSONB path, so a fix
+# confined to ``verify_evidence`` leaves three live routes to the same dead
+# transaction. Every field below is seeded with NUL for exactly that reason.
+#
+# ``\n`` and ``\t`` are legal in JSON strings and legal in Postgres text; they
+# carry real formatting in a multi-line quote and must SURVIVE. A fix that
+# reaches for a blunt "strip everything non-printable" fails the survival
+# assertions.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NUL_FIELD_IDS = [
+    "requirement_evidence",
+    "cover_letter_evidence",
+    "overall_summary",
+    "overall_motivation",
+    "requirement_name",
+]
+
+
+def _nul_seeded_evidence() -> EvidenceObject:
+    """An ``EvidenceObject`` with a NUL in ALL FIVE LLM-authored string fields,
+    each also carrying a ``\\n`` and a ``\\t`` that must survive."""
+    return EvidenceObject(
+        requirements=[
+            RequirementEvidence(
+                requirement="Python\x00 3.11\nasync\tstack",
+                status="met",
+                evidence="Shipped Python REST APIs\x00 for 40+ services\nwith\ttypes",
+                evidence_chunk_ids=["c_001"],
+                confidence=0.9,
+            )
+        ],
+        overall_summary="Strong backend\x00 candidate\noverall\ttake",
+        cover_letter_presence=True,
+        cover_letter_evidence=[
+            CoverLetterEvidence(
+                theme="motivation",
+                evidence="I am excited\x00 about the platform\nwork\there",
+                evidence_chunk_ids=["cl_001"],
+                confidence=0.8,
+            )
+        ],
+        overall_motivation="Genuine interest\x00 in the domain\nand\tteam",
+    )
+
+
+def _shortlist_result_with(evidence: EvidenceObject) -> ShortlistResult:
+    entry = ShortlistResultEntry(
+        resume_id=uuid4(),
+        rank=1,
+        score_final=0.9,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown(),
+        evidence=evidence,
+    )
+    return ShortlistResult(job_id=uuid4(), entries=[entry], pipeline_meta=_meta())
+
+
+def _evidence_arg(insert_call: Any) -> str:
+    """The raw evidence JSONB string argument of an INSERT call."""
+    for arg in _flat(insert_call):
+        if not isinstance(arg, str):
+            continue
+        try:
+            decoded = json.loads(arg)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(decoded, dict) and "requirements" in decoded:
+            return arg
+    raise AssertionError("no evidence JSONB argument found on the INSERT call")
+
+
+@pytest.mark.asyncio
+async def test_persist_shortlist_emits_no_nul_escape_for_any_seeded_field() -> None:
+    """The whole-payload pin. ``json.dumps`` writes a NUL as the literal
+    six-character sequence ``\\u0000``; Postgres refuses to convert that escape
+    to text and kills the transaction. Not one may reach the SQL argument.
+
+    This asserts on the RAW serialised string rather than the decoded object,
+    because it is the escape sequence itself — not the codepoint — that
+    Postgres rejects.
+    """
+    from src.services.shortlist_service import persist_shortlist
+
+    conn = _mock_conn()
+    await persist_shortlist(conn, _shortlist_result_with(_nul_seeded_evidence()))
+
+    insert_call = conn.execute.await_args_list[1]
+    raw = _evidence_arg(insert_call)
+    assert "\\u0000" not in raw, (
+        "the evidence JSONB carries a \\u0000 escape — Postgres rejects it "
+        "outright and the entire shortlist INSERT transaction is lost"
+    )
+    assert "\x00" not in raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_id", _NUL_FIELD_IDS)
+async def test_persist_shortlist_strips_nul_from_every_llm_authored_field(
+    field_id: str,
+) -> None:
+    """Field-by-field, so a partial fix names the field it missed.
+
+    ``overall_summary``, ``overall_motivation`` and ``requirement`` are the
+    three ``verify_evidence`` never touches. If those three are the failures
+    left standing, the fix was applied in ``verify_evidence`` as the ADR
+    literally says, rather than at the persist boundary where it belongs.
+    """
+    from src.services.shortlist_service import persist_shortlist
+
+    conn = _mock_conn()
+    await persist_shortlist(conn, _shortlist_result_with(_nul_seeded_evidence()))
+
+    insert_call = conn.execute.await_args_list[1]
+    payload = json.loads(_evidence_arg(insert_call))
+    req = payload["requirements"][0]
+    cle = payload["cover_letter_evidence"][0]
+    values = {
+        "requirement_evidence": req["evidence"],
+        "cover_letter_evidence": cle["evidence"],
+        "overall_summary": payload["overall_summary"],
+        "overall_motivation": payload["overall_motivation"],
+        "requirement_name": req["requirement"],
+    }
+    value = values[field_id]
+    assert "\x00" not in value, (
+        f"{field_id} still carries a NUL: it is LLM-authored free text on the "
+        "same JSONB path and a verify_evidence-only fix does not reach it"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_id", _NUL_FIELD_IDS)
+async def test_persist_shortlist_preserves_newlines_and_tabs(field_id: str) -> None:
+    """Over-scrub guard. ``\\n`` and ``\\t`` are legal JSON, legal Postgres
+    text, and meaningful formatting inside a multi-line quote. Stripping all
+    C0 controls indiscriminately would destroy real evidence, so the exclusion
+    is pinned as hard as the removal."""
+    from src.services.shortlist_service import persist_shortlist
+
+    conn = _mock_conn()
+    await persist_shortlist(conn, _shortlist_result_with(_nul_seeded_evidence()))
+
+    insert_call = conn.execute.await_args_list[1]
+    payload = json.loads(_evidence_arg(insert_call))
+    req = payload["requirements"][0]
+    cle = payload["cover_letter_evidence"][0]
+    values = {
+        "requirement_evidence": req["evidence"],
+        "cover_letter_evidence": cle["evidence"],
+        "overall_summary": payload["overall_summary"],
+        "overall_motivation": payload["overall_motivation"],
+        "requirement_name": req["requirement"],
+    }
+    value = values[field_id]
+    assert "\n" in value, f"{field_id} lost its newline — the scrub over-reached"
+    assert "\t" in value, f"{field_id} lost its tab — the scrub over-reached"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "control_char",
+    ["\x00", "\x01", "\x08", "\x0b", "\x0c", "\x1f"],
+    ids=["nul", "soh", "backspace", "vtab", "formfeed", "unit_sep"],
+)
+async def test_persist_shortlist_strips_c0_controls_other_than_newline_and_tab(
+    control_char: str,
+) -> None:
+    """ADR-022 follow-up #2 says "strip C0 controls (except ``\\n`` and
+    ``\\t``)". NUL is the one Postgres rejects outright; the rest are junk in a
+    human-facing quote and are removed under the same rule."""
+    from src.services.shortlist_service import persist_shortlist
+
+    evidence = EvidenceObject(
+        requirements=[
+            RequirementEvidence(
+                requirement=f"Docker{control_char}",
+                status="met",
+                evidence=f"Packaged consumers{control_char} with Docker",
+                evidence_chunk_ids=["c_001"],
+                confidence=0.9,
+            )
+        ],
+        overall_summary=f"Summary{control_char}",
+        overall_motivation=f"Motivation{control_char}",
+    )
+    conn = _mock_conn()
+    await persist_shortlist(conn, _shortlist_result_with(evidence))
+
+    insert_call = conn.execute.await_args_list[1]
+    raw = _evidence_arg(insert_call)
+    payload = json.loads(raw)
+    req = payload["requirements"][0]
+    # Decode-based, not escape-based. json.dumps writes backspace as the
+    # two-character escape \b and form feed as \f, so an assertion phrased only
+    # over the raw \uXXXX form silently passes for those two while the control
+    # character is still, in fact, persisted.
+    for label, value in (
+        ("requirement", req["requirement"]),
+        ("evidence", req["evidence"]),
+        ("overall_summary", payload["overall_summary"]),
+        ("overall_motivation", payload["overall_motivation"]),
+    ):
+        assert control_char not in value, (
+            f"{label} still carries the C0 control U+{ord(control_char):04X} "
+            "after persistence"
+        )
+    assert chr(92) + f"u{ord(control_char):04x}" not in raw
+
+
+@pytest.mark.asyncio
+async def test_persist_shortlist_nul_scrub_leaves_clean_evidence_byte_identical() -> (
+    None
+):
+    """ANTI-OVER-REJECTION arm. A payload with no control characters at all
+    must serialise exactly as it does today — the scrub is a no-op on clean
+    input, so it cannot be implemented as a lossy rewrite (e.g. dropping
+    non-ASCII, collapsing whitespace, or truncating)."""
+    from src.services.shortlist_service import persist_shortlist
+
+    clean = EvidenceObject(
+        requirements=[
+            RequirementEvidence(
+                requirement="Python — 3.11",
+                status="met",
+                evidence="Designed and shipped Python REST APIs for 40+ teams",
+                evidence_chunk_ids=["c_001"],
+                confidence=0.9,
+            )
+        ],
+        overall_summary="Strong backend candidate with café-level attention to detail",
+        cover_letter_presence=True,
+        cover_letter_evidence=[
+            CoverLetterEvidence(
+                theme="growth",
+                evidence="I want to grow into a staff engineering role",
+                evidence_chunk_ids=["cl_001"],
+                confidence=0.8,
+            )
+        ],
+        overall_motivation="Genuine, specific interest in the data platform",
+    )
+    conn = _mock_conn()
+    await persist_shortlist(conn, _shortlist_result_with(clean))
+
+    insert_call = conn.execute.await_args_list[1]
+    payload = json.loads(_evidence_arg(insert_call))
+    assert payload == clean.model_dump(), (
+        "clean evidence must round-trip unchanged; the control-character scrub "
+        "must be a no-op on input that has no control characters"
+    )

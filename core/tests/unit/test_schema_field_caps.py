@@ -32,6 +32,11 @@ cap tests — a confusing failure for a future editor who reintroduces it. The
 fix (an ``isinstance(row, sub)`` pass-through branch) is already in
 ``src/schemas/resumes.py``, so the Finding-7 tests below PASS today; they are
 a STANDING GUARD, not a red test.
+
+ADR-022 follow-up item #3 adds a fourth kind, at the bottom of this file: the
+evidence models (``RequirementEvidence`` / ``CoverLetterEvidence`` /
+``EvidenceObject``) have the SAME unbounded-field hole, and it is worse
+because the values feed O(n·m) fuzzy matching before they reach JSONB.
 """
 
 from __future__ import annotations
@@ -45,6 +50,11 @@ from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
 from src.schemas.jobs import Education
+from src.schemas.matching import (
+    CoverLetterEvidence,
+    EvidenceObject,
+    RequirementEvidence,
+)
 from src.schemas.resumes import (
     Bullet,
     CandidateInfo,
@@ -225,3 +235,234 @@ def test_resume_skill_details_skills_survive_already_validated_sub_models() -> N
     details = ResumeSkillDetails(skills=[ResumeSkillDetail(name="python")])
     assert details.skills != []
     assert details.skills[0].name == "python"
+
+
+# ── ADR-022 follow-up item #3 — bounded evidence fields ─────────────────────
+#
+# ADR-022 "Follow-up items" #3 (MEDIUM, ``schemas/matching.py:127,147,157``):
+# neither ``evidence`` field, nor ``RequirementEvidence.requirement``, nor the
+# ``requirements`` list carries a ``max_length``. ``overall_summary`` /
+# ``overall_motivation`` are capped at 1000 but the QUOTES are not, which is
+# backwards: the quotes are the larger, less trustworthy values.
+#
+# The blast radius is worse than for the resume schemas above, because the
+# evidence quote is not merely stored — ``verify_evidence`` feeds it to
+# ``rapidfuzz.partial_ratio`` against every cited chunk, which is O(n·m) in
+# quote length × chunk length. A 2,000,000-char quote and 100,000 requirements
+# are both accepted today, so a single looping model response is a CPU-bound
+# denial of service on the shortlist worker before it is a JSONB bloat problem.
+#
+# Caps pinned here: ``evidence`` 2000 (both models), ``requirement`` 500,
+# ``requirements`` list 64. ``evidence_chunk_ids`` is already capped at 8 and
+# ``overall_*`` at 1000; both are re-pinned below as standing guards.
+
+# (model, field, expected declared cap). Covers the NEW caps and the EXISTING
+# ones, so a future edit that loosens either fails by name.
+EVIDENCE_CAPS: tuple[tuple[type[BaseModel], str, int], ...] = (
+    (RequirementEvidence, "evidence", 2000),
+    (RequirementEvidence, "requirement", 500),
+    (RequirementEvidence, "evidence_chunk_ids", 8),
+    (CoverLetterEvidence, "evidence", 2000),
+    (CoverLetterEvidence, "evidence_chunk_ids", 8),
+    (EvidenceObject, "requirements", 64),
+    (EvidenceObject, "overall_summary", 1000),
+    (EvidenceObject, "overall_motivation", 1000),
+)
+
+_CAP_IDS = [f"{m.__name__}.{f}={n}" for m, f, n in EVIDENCE_CAPS]
+
+
+@pytest.mark.parametrize("model, field, cap", EVIDENCE_CAPS, ids=_CAP_IDS)
+def test_evidence_model_field_declares_the_expected_max_length(
+    model: type[BaseModel], field: str, cap: int
+) -> None:
+    """Declarative pin on the exact numbers, independent of the behavioural
+    tests below — so a cap cannot be quietly raised to a useless value."""
+    info = model.model_fields[field]
+    declared = [m.max_length for m in info.metadata if isinstance(m, MaxLen)]
+    assert declared == [cap], (
+        f"{model.__name__}.{field} should declare max_length={cap}, "
+        f"found {declared or 'no MaxLen constraint'}"
+    )
+
+
+# ── evidence quote: 2000 chars, on BOTH models ──────────────────────────────
+
+EVIDENCE_MODELS: tuple[tuple[type[BaseModel], dict[str, Any]], ...] = (
+    (RequirementEvidence, {"requirement": "Python"}),
+    (CoverLetterEvidence, {"theme": "motivation"}),
+)
+
+_EV_IDS = [m.__name__ for m, _ in EVIDENCE_MODELS]
+
+
+@pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
+def test_evidence_quote_accepts_exactly_2000_chars(
+    model: type[BaseModel], base: dict[str, Any]
+) -> None:
+    obj = model(**{**base, "evidence": "x" * 2000})
+    assert len(str(obj.model_dump()["evidence"])) == 2000
+
+
+@pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
+def test_evidence_quote_rejects_2001_chars(
+    model: type[BaseModel], base: dict[str, Any]
+) -> None:
+    with pytest.raises(ValidationError):
+        model(**{**base, "evidence": "x" * 2001})
+
+
+@pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
+def test_evidence_quote_rejects_a_pathological_two_million_char_quote(
+    model: type[BaseModel], base: dict[str, Any]
+) -> None:
+    """The size ADR-022 names explicitly — the O(n·m) fuzzy-match DoS input."""
+    with pytest.raises(ValidationError):
+        model(**{**base, "evidence": "x" * 2_000_000})
+
+
+@pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
+def test_evidence_quote_cap_is_enforced_via_model_validate_too(
+    model: type[BaseModel], base: dict[str, Any]
+) -> None:
+    """The LLM JSON path, not just in-process construction."""
+    with pytest.raises(ValidationError):
+        model.model_validate({**base, "evidence": "x" * 2001})
+
+
+# ── RequirementEvidence.requirement: 500 chars ──────────────────────────────
+
+
+def test_requirement_text_accepts_exactly_500_chars() -> None:
+    req = RequirementEvidence(requirement="x" * 500)
+    assert len(req.requirement) == 500
+
+
+def test_requirement_text_rejects_501_chars() -> None:
+    with pytest.raises(ValidationError):
+        RequirementEvidence(requirement="x" * 501)
+
+
+def test_requirement_text_cap_is_enforced_via_model_validate_too() -> None:
+    with pytest.raises(ValidationError):
+        RequirementEvidence.model_validate({"requirement": "x" * 501})
+
+
+# ── EvidenceObject.requirements: 64 entries ─────────────────────────────────
+
+
+def _reqs(count: int) -> list[RequirementEvidence]:
+    return [RequirementEvidence(requirement=f"req-{i}") for i in range(count)]
+
+
+def test_requirements_list_accepts_exactly_64_entries() -> None:
+    ev = EvidenceObject(requirements=_reqs(64))
+    assert len(ev.requirements) == 64
+
+
+def test_requirements_list_rejects_65_entries() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceObject(requirements=_reqs(65))
+
+
+def test_requirements_list_rejects_a_pathological_100000_entry_list() -> None:
+    """The count ADR-022 names explicitly."""
+    with pytest.raises(ValidationError):
+        EvidenceObject.model_validate(
+            {"requirements": [{"requirement": "x"} for _ in range(100_000)]}
+        )
+
+
+# ── Anti-over-rejection: the real corpus must still validate unchanged ───────
+#
+# The caps above are only defensible if they cannot reject legitimate input.
+# Measured against the shipped eval corpus (core/tests/evals/fixtures):
+#
+#   * longest résumé chunk       = 148 chars  (r01_casey_rivera.json)
+#   * longest cover-letter chunk = 243 chars  (r04_morgan_lee.json)
+#   * JD requirement count       = 8          (5 required_skills + 3
+#                                              nice_to_have_skills, per
+#                                              run_evals._extract_evidence)
+#
+# So the 2000-char quote cap has ~8x headroom over the longest quotable chunk,
+# and the 64-requirement cap has 8x headroom over the real JD. If any test
+# below starts failing, the cap is wrong — not the corpus.
+
+# Verbatim longest chunk in the corpus (r01_casey_rivera.json), 148 chars.
+CORPUS_LONGEST_CHUNK = (
+    "Designed and shipped Python REST APIs consumed by 40+ internal services "
+    "at Nimbus Analytics Inc, using FastAPI and typed request/response "
+    "contracts."
+)
+
+# Verbatim longest cover-letter chunk in the corpus (r04_morgan_lee.json), 243.
+CORPUS_LONGEST_CL_CHUNK = (
+    "I'm reaching out because your backend data engineering role lines up "
+    "exactly with the invoicing-pipeline work I've been doing at Capital "
+    "Ledger Systems, and I'm eager to bring that same focus to a team solving "
+    "these problems at a larger scale."
+)
+
+# The JD's 8 requirements, verbatim from jd_backend_data_engineer.json.
+CORPUS_REQUIREMENTS: tuple[str, ...] = (
+    "Python",
+    "PostgreSQL",
+    "Apache Airflow",
+    "Docker",
+    "REST API design",
+    "Kubernetes",
+    "dbt",
+    "Terraform",
+)
+
+
+def test_corpus_measurements_are_still_accurate() -> None:
+    """Keeps the headroom argument above honest: if the corpus grows past
+    these sizes this fails, and the caps get re-justified deliberately."""
+    assert len(CORPUS_LONGEST_CHUNK) == 148
+    assert len(CORPUS_LONGEST_CL_CHUNK) == 243
+    assert len(CORPUS_REQUIREMENTS) == 8
+
+
+def test_a_corpus_sized_evidence_payload_still_validates() -> None:
+    """The whole realistic shape — 8 requirements, each quoting the longest
+    real chunk, plus a cover-letter theme quoting the longest real cover-letter
+    chunk — must validate, and round-trip unchanged."""
+    payload: dict[str, Any] = {
+        "requirements": [
+            {
+                "requirement": name,
+                "status": "met",
+                "evidence": CORPUS_LONGEST_CHUNK,
+                "evidence_chunk_ids": ["c_001"],
+                "confidence": 0.9,
+            }
+            for name in CORPUS_REQUIREMENTS
+        ],
+        "overall_summary": "Strong overall fit for the backend data role.",
+        "cover_letter_presence": True,
+        "cover_letter_evidence": [
+            {
+                "theme": "motivation",
+                "evidence": CORPUS_LONGEST_CL_CHUNK,
+                "evidence_chunk_ids": ["cl_001"],
+                "confidence": 0.85,
+            }
+        ],
+        "overall_motivation": "Clear, specific motivation tied to the role.",
+    }
+    ev = EvidenceObject.model_validate(payload)
+
+    assert len(ev.requirements) == 8
+    assert ev.requirements[0].requirement == "Python"
+    # Unchanged: no truncation, no mangling of legitimate corpus text.
+    assert all(r.evidence == CORPUS_LONGEST_CHUNK for r in ev.requirements)
+    assert ev.cover_letter_evidence[0].evidence == CORPUS_LONGEST_CL_CHUNK
+
+    roundtripped = EvidenceObject.model_validate(ev.model_dump())
+    assert roundtripped.model_dump() == ev.model_dump()
+
+
+@pytest.mark.parametrize("name", CORPUS_REQUIREMENTS)
+def test_each_corpus_requirement_name_is_well_under_the_500_cap(name: str) -> None:
+    assert RequirementEvidence(requirement=name).requirement == name

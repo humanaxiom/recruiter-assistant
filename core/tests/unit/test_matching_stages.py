@@ -44,6 +44,7 @@ import pytest
 from src.pipeline.matching.stages import (
     _CombineInput,
     _evidence_completeness,
+    _fuzz_ratio,
     _motivation_score,
     _SkillRowFromCypher,
     is_senior_candidate,
@@ -865,3 +866,404 @@ def test_stage4_combine_writes_computed_motivation_into_breakdown() -> None:
     entries = stage4_combine([combine_in], DEFAULT_WEIGHTS)
     [entry] = entries
     assert entry.breakdown.motivation == pytest.approx(0.9)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADR-022 follow-up hardening (RED) — superset bypass, cross-chunk quotes,
+# minimum quote length.
+#
+# ADR-022 closed the WEAKER of two bypasses in ``verify_evidence`` (the lenient
+# uncited arm). Its "Follow-up items" list records the larger one, still open:
+#
+#   #1 HIGH   — ``partial_ratio`` returns 1.000 when the quote CONTAINS the
+#               whole cited chunk verbatim plus arbitrary appended fabrication.
+#   #4 MEDIUM — no minimum quote length; ``"API"`` scores 1.000 against any
+#               chunk containing it.
+#
+# Human decisions encoded here (settled, not re-litigated):
+#
+#   * A quote must be a span of EXACTLY ONE cited chunk. A quote spanning two
+#     cited chunks concatenated is REJECTED, not accepted.
+#   * Minimum quote length floor = 32 characters.
+#   * Length-ratio guard constant k = 1.05 — reject when
+#     ``len(quote) > len(chunk) * 1.05``.
+#
+# The length-ratio guard alone is NECESSARY BUT NOT SUFFICIENT: at k = 1.05 a
+# 1-character append to a 100-character chunk gives a ratio of ~1.01 and slips
+# through, yet ``partial_ratio`` still scores it 1.000. The +1 parameter case
+# below exists precisely to fail a length-ratio-only fix; closing it needs a
+# second, complementary rule (e.g. "the cited chunk appears verbatim inside the
+# quote and the quote is longer" => not a span).
+#
+# The ANTI-OVER-REJECTION arm at the bottom is load-bearing: without it a
+# ``_fuzz_ratio`` that simply ``return 0.0`` would satisfy every test above.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Length-ratio guard constant, fixed by human decision.
+_LENGTH_RATIO_K = 1.05
+# Minimum quote length floor, in characters, fixed by human decision.
+_MIN_QUOTE_CHARS = 32
+
+# Deterministic fabrication filler. Starts with a non-space character so that
+# an append of length 1 is a real character rather than trailing whitespace
+# that ``.strip()`` would silently erase.
+_FABRICATION_FILLER = (
+    "led a team of twelve engineers migrating the billing monolith to "
+    "kubernetes on google cloud and owned the dbt transformation layer "
+) * 24
+
+
+def _superset_quote(chunk_text: str, append_len: int) -> str:
+    """``chunk_text`` verbatim followed by ``append_len`` fabricated chars."""
+    assert len(_FABRICATION_FILLER) >= append_len
+    return chunk_text + _FABRICATION_FILLER[:append_len]
+
+
+def _r01_python_chunk() -> tuple[str, str]:
+    """(chunk_id, chunk_text) for r01's real Python-evidence chunk."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunk_id = _skill_chunk_id(resume_raw, "Python")
+    return chunk_id, _chunks_by_id(resume_raw)[chunk_id]
+
+
+# ── follow-up #1: the partial_ratio superset bypass ─────────────────────────
+
+
+@pytest.mark.parametrize("append_len", [1, 8, 50, 1120], ids=lambda n: f"plus{n}")
+def test_fuzz_ratio_rejects_a_quote_that_is_the_whole_chunk_plus_appended_text(
+    append_len: int,
+) -> None:
+    """ADR-022 follow-up #1. ``fuzz.partial_ratio`` scores the best-matching
+    WINDOW of the longer string against the shorter one, so a quote that
+    CONTAINS the cited chunk verbatim scores 1.000 no matter how much invented
+    text is bolted on. Measured at 1120 appended characters, surfacing as
+    ``met`` @ 0.95.
+
+    A quote must be a SPAN of the chunk. Text the chunk does not contain is
+    never a span of it, at ANY append length — including 1 character. The
+    ``plus1`` case is the one that fails a length-ratio-only fix: with
+    k = 1.05, one extra character on a ~100-char chunk is a ratio of ~1.01,
+    comfortably under the bar, while ``partial_ratio`` still returns 1.000.
+    """
+    _, chunk_text = _r01_python_chunk()
+    quote = _superset_quote(chunk_text, append_len)
+    assert len(quote) == len(chunk_text) + append_len
+    assert chunk_text.lower() in quote.lower()  # the bypass shape, by construction
+
+    score = _fuzz_ratio(quote.lower(), chunk_text.lower())
+    assert score < DEFAULT_WEIGHTS.evidence_verify_fuzz, (
+        f"quote = chunk verbatim + {append_len} fabricated chars scored "
+        f"{score:.3f} >= {DEFAULT_WEIGHTS.evidence_verify_fuzz}: a superset of "
+        "the chunk is not a span of it and must not verify"
+    )
+
+
+def test_superset_bypass_at_plus_one_is_not_caught_by_the_length_ratio_guard() -> None:
+    """Pins WHY the ``plus1`` case above is not redundant with ``plus1120``.
+
+    The length-ratio guard (k = 1.05) is necessary but not sufficient: at
+    +1 character the ratio is far below k, so a fix consisting solely of that
+    guard leaves the bypass wide open. This test states that arithmetic
+    explicitly so the implementer cannot mistake one guard for both.
+    """
+    _, chunk_text = _r01_python_chunk()
+    plus_one = _superset_quote(chunk_text, 1)
+    plus_1120 = _superset_quote(chunk_text, 1120)
+
+    assert len(plus_one) <= len(chunk_text) * _LENGTH_RATIO_K, (
+        "a 1-char append must NOT be caught by the k=1.05 length-ratio guard "
+        "— a second, complementary rule is required"
+    )
+    assert len(plus_1120) > len(chunk_text) * _LENGTH_RATIO_K
+
+
+@pytest.mark.parametrize("append_len", [1, 1120], ids=["plus1", "plus1120"])
+def test_verify_evidence_scrubs_a_superset_quote_like_a_fabrication(
+    append_len: int,
+) -> None:
+    """The requirements loop must give the superset quote the SAME scrub as
+    the fabrication arm: evidence blanked, ``met`` demoted to ``missing``,
+    confidence capped at 0.3."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunks_by_id = _chunks_by_id(resume_raw)
+    chunk_id, chunk_text = _r01_python_chunk()
+    req = RequirementEvidence(
+        requirement="Python",
+        status="met",
+        evidence=_superset_quote(chunk_text, append_len),
+        evidence_chunk_ids=[chunk_id],
+        confidence=0.95,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), chunks_by_id, weights=DEFAULT_WEIGHTS
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == "", (
+        "a quote containing the whole cited chunk plus fabricated text must be "
+        "blanked, not surfaced to a human reviewer"
+    )
+    assert result.status == "missing"
+    assert result.confidence <= 0.3
+
+
+@pytest.mark.parametrize("append_len", [1, 1120], ids=["plus1", "plus1120"])
+def test_verify_evidence_scrubs_a_superset_cover_letter_quote(
+    append_len: int,
+) -> None:
+    """The cover-letter loop has the same shape as the requirements loop and
+    must get the same fix — ADR-022's own defect recurred in both loops."""
+    chunk_text = (
+        "I am excited to apply my backend engineering skills to this role and "
+        "to keep growing the data platform I have spent four years building."
+    )
+    cle = CoverLetterEvidence(
+        theme="motivation",
+        evidence=_superset_quote(chunk_text, append_len),
+        evidence_chunk_ids=["cl_1"],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(cover_letter_evidence=[cle]),
+        {"cl_1": chunk_text},
+        weights=DEFAULT_WEIGHTS,
+    )
+    result = cleaned.cover_letter_evidence[0]
+    assert result.evidence == ""
+    assert result.confidence <= 0.3
+
+
+# ── cross-chunk quotes: a quote must be a span of EXACTLY ONE cited chunk ───
+
+
+def _two_real_chunks() -> tuple[str, str, str, str]:
+    """(id_a, text_a, id_b, text_b) — two real r01 chunks."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunks_by_id = _chunks_by_id(resume_raw)
+    ids = sorted(chunks_by_id)
+    assert len(ids) >= 2, "fixture must carry at least two chunks"
+    return ids[0], chunks_by_id[ids[0]], ids[1], chunks_by_id[ids[1]]
+
+
+def test_fuzz_ratio_rejects_a_cross_chunk_concatenation_against_each_chunk() -> None:
+    """Human decision: a quote must be a span of EXACTLY ONE cited chunk.
+
+    Two real chunks concatenated is a quote no single chunk contains, so it
+    must fail against BOTH of them — not "pass because each half matches
+    something". ``partial_ratio`` accepts it against either half today.
+    """
+    id_a, text_a, id_b, text_b = _two_real_chunks()
+    quote = f"{text_a} {text_b}"
+
+    for cid, text in ((id_a, text_a), (id_b, text_b)):
+        score = _fuzz_ratio(quote.lower(), text.lower())
+        assert score < DEFAULT_WEIGHTS.evidence_verify_fuzz, (
+            f"cross-chunk concatenation scored {score:.3f} against {cid}: a "
+            "quote spanning two chunks is a span of neither"
+        )
+
+
+def test_verify_evidence_rejects_a_quote_spanning_two_cited_chunks() -> None:
+    """Citing BOTH ids does not legitimise the concatenation: the quote is
+    still not a span of any ONE cited chunk, so it is scrubbed."""
+    id_a, text_a, id_b, text_b = _two_real_chunks()
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunks_by_id = _chunks_by_id(resume_raw)
+    req = RequirementEvidence(
+        requirement="Python",
+        status="met",
+        evidence=f"{text_a} {text_b}",
+        evidence_chunk_ids=[id_a, id_b],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), chunks_by_id, weights=DEFAULT_WEIGHTS
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == "", (
+        "a quote stitched from two cited chunks must be rejected against every "
+        "cited id, not accepted because each half matches one of them"
+    )
+    assert result.status == "missing"
+    assert result.confidence <= 0.3
+
+
+# ── follow-up #4: minimum quote length floor (32 chars) ─────────────────────
+
+_FLOOR_CHUNK = (
+    "Built API gateways on Kubernetes and shipped typed FastAPI services "
+    "for the platform team across three regions."
+)
+# Exactly 32 characters, and a verbatim span of _FLOOR_CHUNK.
+_FLOOR_SPAN_32 = "Built API gateways on Kubernetes"
+# Exactly 31 characters, and ALSO a verbatim span — the only thing separating
+# it from the case above is the floor itself.
+_FLOOR_SPAN_31 = "Built API gateways on Kubernete"
+
+
+@pytest.mark.parametrize(
+    "short_quote",
+    ["API", "Kubernetes", "FastAPI", _FLOOR_SPAN_31],
+    ids=["api", "kubernetes", "fastapi", "one_char_under_floor"],
+)
+def test_fuzz_ratio_is_zero_for_a_quote_under_the_32_char_floor(
+    short_quote: str,
+) -> None:
+    """ADR-022 follow-up #4. ``"API"`` scores 1.000 against any chunk
+    containing it, which makes a bare token indistinguishable from real
+    evidence. Anything below the 32-character floor scores 0.0 outright.
+
+    ``one_char_under_floor`` is the important case: it IS a genuine verbatim
+    span, so only the floor can reject it. A fix that keys off "is this a real
+    substring" instead of length will not fail it.
+    """
+    assert len(short_quote) < _MIN_QUOTE_CHARS
+    assert short_quote.lower() in _FLOOR_CHUNK.lower()  # genuinely present
+    assert _fuzz_ratio(short_quote.lower(), _FLOOR_CHUNK.lower()) == 0.0, (
+        f"{short_quote!r} is under the {_MIN_QUOTE_CHARS}-char floor and must "
+        "score 0.0 however well it matches"
+    )
+
+
+def test_fuzz_ratio_accepts_a_real_span_exactly_at_the_32_char_floor() -> None:
+    """The other side of the boundary. The floor is ``< 32 rejects``, NOT
+    ``<= 32 rejects``: a 32-character verbatim span is real evidence and must
+    still verify at 1.000. Pins the off-by-one in the direction of
+    over-rejection."""
+    assert len(_FLOOR_SPAN_32) == _MIN_QUOTE_CHARS
+    assert _FLOOR_SPAN_32.lower() in _FLOOR_CHUNK.lower()
+    assert _fuzz_ratio(_FLOOR_SPAN_32.lower(), _FLOOR_CHUNK.lower()) == 1.0
+
+
+def test_verify_evidence_scrubs_a_bare_token_quote() -> None:
+    """End-to-end shape of follow-up #4 through the verifier itself."""
+    req = RequirementEvidence(
+        requirement="API design",
+        status="met",
+        evidence="API",
+        evidence_chunk_ids=["c_1"],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]),
+        {"c_1": _FLOOR_CHUNK},
+        weights=DEFAULT_WEIGHTS,
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == ""
+    assert result.status == "missing"
+    assert result.confidence <= 0.3
+
+
+def test_verify_evidence_keeps_a_real_span_exactly_at_the_floor() -> None:
+    """Over-rejection guard for the floor, through the verifier."""
+    req = RequirementEvidence(
+        requirement="Kubernetes",
+        status="met",
+        evidence=_FLOOR_SPAN_32,
+        evidence_chunk_ids=["c_1"],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]),
+        {"c_1": _FLOOR_CHUNK},
+        weights=DEFAULT_WEIGHTS,
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == _FLOOR_SPAN_32
+    assert result.status == "met"
+    assert result.confidence == 0.9
+
+
+# ── regression pin: the empty-needle guard (mutant closed in 1e1776c) ───────
+
+
+@pytest.mark.parametrize(
+    "blank_needle",
+    ["", "   ", "\t\n ", " "],
+    ids=["empty", "spaces", "tabs_newline", "single_space"],
+)
+def test_fuzz_ratio_is_zero_for_a_blank_needle(blank_needle: str) -> None:
+    """ADR-022 records ``_fuzz_ratio``'s empty-needle guard as a mutation that
+    SURVIVED review until it was closed in ``1e1776c``. Flipping the guard to
+    return 1.0 would let an empty quote "verify" against any chunk and surface
+    as ``met``. This pin must not regress while the function is rewritten.
+
+    The whitespace-only variants extend it: ``verify_evidence`` strips before
+    calling, but ``_fuzz_ratio`` is a contract in its own right and a
+    whitespace run is not evidence of anything either.
+    """
+    assert _fuzz_ratio(blank_needle, _FLOOR_CHUNK.lower()) == 0.0
+
+
+# ── ANTI-OVER-REJECTION ARM ─────────────────────────────────────────────────
+#
+# Load-bearing. Every test above is satisfied by ``_fuzz_ratio`` returning 0.0
+# unconditionally; the tests below are what make that stub fail. The four gold
+# anchors are real corpus evidence and must survive the hardened verifier
+# untouched.
+
+
+@pytest.mark.parametrize("resume_id, skill_name, quote", _GOLD_EVIDENCE_CASES)
+def test_gold_anchor_still_scores_exactly_one_after_hardening(
+    resume_id: str, skill_name: str, quote: str
+) -> None:
+    """All four 4a gold anchors are verbatim substrings of their cited chunk
+    and must still score 1.000 — not merely "above the bar"."""
+    resume_raw = _load_resume_raw(resume_id)
+    chunks_by_id = _chunks_by_id(resume_raw)
+    chunk_text = chunks_by_id[_skill_chunk_id(resume_raw, skill_name)]
+    assert quote.lower() in chunk_text.lower()
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 1.0, (
+        f"{resume_id}/{skill_name} is a verbatim span of its cited chunk; the "
+        "hardening must not cost it a single point"
+    )
+
+
+@pytest.mark.parametrize("resume_id, skill_name, quote", _GOLD_EVIDENCE_CASES)
+def test_gold_anchor_survives_verify_evidence_completely_intact(
+    resume_id: str, skill_name: str, quote: str
+) -> None:
+    """Quote text, ``met`` status, confidence and citation all preserved."""
+    resume_raw = _load_resume_raw(resume_id)
+    chunks_by_id = _chunks_by_id(resume_raw)
+    chunk_id = _skill_chunk_id(resume_raw, skill_name)
+    req = RequirementEvidence(
+        requirement=skill_name,
+        status="met",
+        evidence=quote,
+        evidence_chunk_ids=[chunk_id],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), chunks_by_id, weights=DEFAULT_WEIGHTS
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == quote
+    assert result.status == "met"
+    assert result.confidence == 0.9
+    assert result.evidence_chunk_ids == [chunk_id]
+
+
+def test_gold_anchors_sit_well_inside_both_new_guards() -> None:
+    """Feasibility pin for the two constants, measured against real corpus
+    text: the gold anchors' quote/chunk length ratios are
+    0.480 / 0.661 / 0.823 / 0.836 — all comfortably under k = 1.05 — and all
+    four clear the 32-character floor.
+
+    If a future fixture edit pushes an anchor past either constant, this test
+    fails here rather than surfacing as a mysterious recall drop in the
+    ranking-evals gate.
+    """
+    ratios: list[float] = []
+    for resume_id, skill_name, quote in _GOLD_EVIDENCE_CASES:
+        resume_raw = _load_resume_raw(resume_id)
+        chunk_text = _chunks_by_id(resume_raw)[_skill_chunk_id(resume_raw, skill_name)]
+        assert len(quote) >= _MIN_QUOTE_CHARS, (
+            f"{resume_id}/{skill_name} is {len(quote)} chars, under the "
+            f"{_MIN_QUOTE_CHARS}-char floor — the floor would erase real evidence"
+        )
+        ratios.append(len(quote) / len(chunk_text))
+
+    assert len(ratios) == 4, "the corpus must carry exactly four gold anchors"
+    assert sorted(ratios) == pytest.approx([0.480, 0.661, 0.823, 0.836], abs=0.005)
+    assert max(ratios) < _LENGTH_RATIO_K
