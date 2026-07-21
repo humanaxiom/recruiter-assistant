@@ -17,13 +17,20 @@ that escapes the anti-fabrication scrub, and its quote reaches a human reviewer
 still labelled "met" through the shortlist read path
 (``src/services/shortlist_service.py`` passes ``confidence`` through untouched).
 
-SCOPE — this is a DISPLAY / data-integrity defect, NOT a scoring defect.
-The 0.3 confidence cap already keeps these requirements out of
-``_evidence_completeness`` (which needs ``status == "met"`` AND
-``confidence >= weights.evidence_met_confidence`` = 0.7), and
-``_motivation_score`` already requires a surviving ``cl_`` citation. The
-scoring-invariance tests at the bottom of this file pin that: the fix must not
-move a single score, so the ranking-evals gate is untouched by it.
+SCOPE — this is a DISPLAY / data-integrity defect, NOT a scoring defect, at
+every weighting the ranking-evals gate exercises. The 0.3 confidence cap
+already keeps these requirements out of ``_evidence_completeness`` (which needs
+``status == "met"`` AND ``confidence >= weights.evidence_met_confidence`` =
+0.7), and ``_motivation_score`` already requires a surviving ``cl_`` citation.
+The scoring-invariance tests at the bottom of this file pin that.
+
+The invariance is CONDITIONAL on ``evidence_met_confidence > 0.3`` — true of
+the 0.7 default and so of the whole corpus, but ``match_evidence_met_confidence``
+is env-settable, and below the cap the fix genuinely does move completeness
+(1.0 -> 0.0). That boundary is pinned explicitly as a CHANGE at the bottom of
+this file rather than left implied. Motivation is unconditionally unchanged:
+``_motivation_score`` gates on ``evidence_chunk_ids``, which is empty by
+definition in the lenient arm.
 
 NOTE FOR THE IMPLEMENTER — ``test_matching_stages.py::
 test_verify_evidence_downgrades_confidence_for_uncited_quote_but_keeps_it``
@@ -391,12 +398,21 @@ def test_partially_hallucinated_citations_keep_the_verified_quote() -> None:
     assert result.evidence_chunk_ids == [_REAL_CHUNK_ID]
 
 
-# ── scoring-invariance pins: the fix is DISPLAY-ONLY ─────────────────────────
+# ── scoring-invariance pins: display-only at evidence_met_confidence > 0.3 ───
 #
 # These pass BOTH before and after the fix, deliberately. They are the guard
 # that the fix does not move the ranking-evals gate: an uncited quote already
 # scores 0 (via the 0.3 confidence cap vs evidence_met_confidence = 0.7), and it
 # must still score 0 once the quote is blanked and the status demoted.
+#
+# The invariance is CONDITIONAL, and the boundary is worth stating exactly.
+# It holds for any evidence_met_confidence > 0.3, which covers the 0.7 default
+# and therefore the whole ranking-evals corpus. At <= 0.3 the confidence cap no
+# longer excludes the requirement, so blanking it genuinely does move
+# completeness (1.0 -> 0.0) — see the explicit test below, which pins that
+# CHANGE rather than an invariance. match_evidence_met_confidence is env-settable
+# (settings.py), so that configuration is reachable; the movement is toward
+# correctness and matches what the fabrication arm already did at those weights.
 
 
 @pytest.mark.parametrize(
@@ -458,3 +474,69 @@ def test_mixed_evidence_completeness_is_identical_before_and_after_the_fix() -> 
     assert _evidence_completeness(cleaned, weights=DEFAULT_WEIGHTS) == pytest.approx(
         1 / 3
     )
+
+
+# ── the boundary of the invariance, pinned as a CHANGE not an invariance ─────
+
+
+def test_uncited_quote_does_move_completeness_below_the_confidence_cap() -> None:
+    """At ``evidence_met_confidence <= 0.3`` the fix DOES move a score.
+
+    Everything above pins invariance, which holds only because the pre-existing
+    0.3 confidence cap sits below the 0.7 default. Lower the bar under the cap
+    and the cap stops excluding the requirement, so blanking it genuinely drops
+    completeness 1.0 -> 0.0. That configuration is reachable
+    (``match_evidence_met_confidence`` is env-settable), so pin it explicitly
+    rather than letting the file's headline claim imply it cannot happen.
+
+    The movement is toward correctness: an uncited quote ceasing to count as
+    ``met`` is the intended semantics, and it is what the fabrication arm
+    already did at these weights.
+    """
+    low_bar = DEFAULT_WEIGHTS.model_copy(update={"evidence_met_confidence": 0.25})
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[_one_requirement(["c_999"])]),
+        {_REAL_CHUNK_ID: _REAL_CHUNK_TEXT},
+        weights=low_bar,
+    )
+    assert _evidence_completeness(cleaned, weights=low_bar) == 0.0, (
+        "below the confidence cap the uncited quote must stop counting as met "
+        "— this is the intended change, not a regression"
+    )
+
+
+# ── an empty needle must never verify (kills the _fuzz_ratio guard mutation) ──
+
+
+@pytest.mark.parametrize(
+    "blank_quote", ["   ", "\t\n ", " "], ids=["spaces", "tabs_newline", "nbsp"]
+)
+def test_whitespace_only_quote_with_a_valid_citation_is_blanked(
+    blank_quote: str,
+) -> None:
+    """A whitespace-only quote carrying a REAL citation must still be scrubbed.
+
+    This lands in the strict arm (the citation resolves), so the only thing
+    stopping it is ``_fuzz_ratio``'s empty-needle guard returning 0.0. Flipping
+    that guard to 1.0 survived the entire suite under review mutation testing —
+    an empty quote would then "verify" against any chunk and surface as ``met``.
+    """
+    cleaned = verify_evidence(
+        EvidenceObject(
+            requirements=[
+                RequirementEvidence(
+                    requirement="Python",
+                    status="met",
+                    evidence=blank_quote,
+                    evidence_chunk_ids=[_REAL_CHUNK_ID],
+                    confidence=0.95,
+                )
+            ]
+        ),
+        {_REAL_CHUNK_ID: _REAL_CHUNK_TEXT},
+        weights=DEFAULT_WEIGHTS,
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == ""
+    assert result.status == "missing"
+    assert result.confidence <= 0.3
