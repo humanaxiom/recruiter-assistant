@@ -1,10 +1,16 @@
 """Job CRUD + status transition routes (Phase 6).
 
 ``router`` is mounted with absolute paths (no router-level ``prefix``) so it
-can be composed with the other Phase-6 routers without a path clash. Every
-route requires ``require_api_key`` (the configurable auth switch — see
-``src.api.deps``); it is applied at the router level so it can't be
-accidentally omitted from a new route added later.
+can be composed with the other Phase-6 routers without a path clash.
+
+**FU-4 (RBAC).** Authorization is PER ROUTE, not router-wide: reads are open to
+all four roles, while every write — and ``POST /jobs/jd-extract``, which is a
+recruiter-workflow step even though it touches no database — is admin/recruiter
+only. ``PATCH /jobs/{job_id}`` is explicitly in the writer set (D5): it can set
+``blind_review: false``, and every redaction key gates off ``jobs.blind_review``,
+so this route permanently un-blinds every résumé and shortlist under a job with
+NO audit row at all — a wider blast radius than the audited reveal endpoint.
+Each route names its own allowed set; none inherits one from a sibling.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from src.api.deps import get_arq, require_api_key, resolve_actor
+from src.api.deps import Role, get_arq, require_role, resolve_actor
 from src.errors import FileRejectedError
 from src.models.pool import Db
 from src.schemas.jobs import (
@@ -31,7 +37,13 @@ from src.schemas.jobs import (
 from src.services import bulk_ingest_service, jd_import_service, job_service
 from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
+
+# Job WRITES (plus the jd-extract transform, a recruiter-workflow step).
+_JOB_WRITERS: tuple[Role, ...] = (Role.ADMIN, Role.RECRUITER)
+# Job READS — every role, including auditor (D2) and hiring-manager. Blind
+# redaction, not the role, is what protects candidate identity on these.
+_JOB_READERS: tuple[Role, ...] = tuple(Role)
 
 # The bulk-JD extension allowlist for a ``.zip`` of job descriptions — WIDER
 # than the résumé allowlist (adds ``json``), so a JD exported as JSON is
@@ -43,7 +55,11 @@ _BULK_JD_ZIP_EXTENSIONS: frozenset[str] = frozenset({"pdf", "docx", "txt", "json
 _MAX_BULK_JD_FILES = _MAX_ZIP_ENTRIES
 
 
-@router.post("/jobs", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/jobs",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_role(*_JOB_WRITERS))],
+)
 async def create_job(
     payload: JobCreate,
     db: Db,
@@ -58,7 +74,7 @@ async def create_job(
 
 
 # Declared BEFORE /jobs/{job_id} so "jd-extract" never matches as a job id.
-@router.post("/jobs/jd-extract")
+@router.post("/jobs/jd-extract", dependencies=[Depends(require_role(*_JOB_WRITERS))])
 async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
     """Pull plain JD text out of an uploaded txt/json/pdf/docx so the
     recruiter can review/edit it before creating the job. Pure transform —
@@ -73,7 +89,11 @@ async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
 
 # Declared BEFORE /jobs/{job_id} so "bulk" never matches as a job id (same
 # reason jd-extract is declared before it).
-@router.post("/jobs/bulk", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs/bulk",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role(*_JOB_WRITERS))],
+)
 async def bulk_create_jobs(
     db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
@@ -129,7 +149,7 @@ async def bulk_create_jobs(
     return results
 
 
-@router.get("/jobs")
+@router.get("/jobs", dependencies=[Depends(require_role(*_JOB_READERS))])
 async def list_jobs(
     db: Db,
     limit: int = Query(default=50, ge=1, le=500),
@@ -141,12 +161,12 @@ async def list_jobs(
     )
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_READERS))])
 async def get_job(job_id: UUID, db: Db) -> JobOut:
     return await job_service.get_job(db, job_id)
 
 
-@router.patch("/jobs/{job_id}")
+@router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])
 async def update_job(job_id: UUID, payload: JobUpdate, db: Db) -> JobOut:
     """General partial update. ``status`` is NOT settable here — ``JobUpdate``
     has no ``status`` field (``extra="forbid"`` 422s a client that tries), and
@@ -158,7 +178,9 @@ async def update_job(job_id: UUID, payload: JobUpdate, db: Db) -> JobOut:
     return await job_service.update_job(db, job_id, payload)
 
 
-@router.patch("/jobs/{job_id}/status")
+@router.patch(
+    "/jobs/{job_id}/status", dependencies=[Depends(require_role(*_JOB_WRITERS))]
+)
 async def patch_job_status(job_id: UUID, payload: JobTransition, db: Db) -> JobOut:
     """A valid forward transition (e.g. draft -> open) applies and returns
     200. An invalid transition (skipping a state, a backward move, a same-

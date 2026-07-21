@@ -28,7 +28,7 @@ from flask import (
     url_for,
 )
 
-from frontend import api_client
+from frontend import api_client, csrf
 from src.settings import get_settings
 
 # The backend caps résumé uploads at ~10 MB/file and up to 20 files per
@@ -444,6 +444,23 @@ def blind_review(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+def _mint_card_tokens(entries: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
+
+    Returns a ``str(resume_id) -> token`` mapping the card template indexes by
+    its own entry's résumé id, so every card on one render carries an
+    independently valid, independently one-shot token. Entries without a usable
+    ``resume_id`` are skipped rather than minting an unusable slot.
+    """
+    tokens: dict[str, str] = {}
+    for entry in entries or []:
+        resume_id = entry.get("resume_id") if isinstance(entry, dict) else None
+        if resume_id is None:
+            continue
+        tokens[str(resume_id)] = csrf.issue_token(resume_id)
+    return tokens
+
+
 @app.get("/jobs/<uuid:job_id>/shortlist")
 def job_shortlist(job_id: UUID) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the shortlist
@@ -466,6 +483,10 @@ def job_shortlist(job_id: UUID) -> Any:
         any_resume_parsed=_any_resume_parsed(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+        # The included `shortlist_cards.html` carries one reveal form per card,
+        # all posting to the SAME guarded route, so each card needs its OWN
+        # token keyed by its own résumé id (FU-4/D4).
+        csrf_tokens=_mint_card_tokens(entries),
     )
 
 
@@ -512,6 +533,11 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         entries=entries,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
+        # Each poll re-renders the cards, so re-minting here keeps every card's
+        # token in the swapped-in DOM in sync with its session slot. Re-minting
+        # for a résumé already present overwrites that résumé's slot in place,
+        # so repeated polls cannot grow the mapping or evict unrelated tokens.
+        csrf_tokens=_mint_card_tokens(entries),
     )
 
 
@@ -533,7 +559,7 @@ def resume_detail(resume_id: UUID) -> Any:
     # False here, so a visitor cannot re-introduce de-anonymization by
     # editing the URL.
     try:
-        resume = api_client.get_resume(resume_id, reveal=False)
+        resume = api_client.get_resume(resume_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -546,6 +572,10 @@ def resume_detail(resume_id: UUID) -> Any:
         resume=resume,
         current_year=dt.date.today().year,
         revealed=False,
+        # FU-4/D4: mint the one-shot anti-forgery token the reveal form posts
+        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
+        # manufacture an audit row.
+        csrf_token=csrf.issue_token(resume_id),
     )
 
 
@@ -555,7 +585,16 @@ def resume_reveal(resume_id: UUID) -> Any:
     prefetched/link-crawled, but a reveal must be an explicit act. Calls the
     backend's audited reveal endpoint (which records who/what/when), then
     re-renders the résumé UN-blinded in place. Blind stays the default; this is
-    the only path that surfaces identity."""
+    the only path that surfaces identity.
+
+    FU-4/D4: guarded by a session-bound one-shot CSRF token plus an
+    ``Origin``/``Referer`` same-origin check. BOTH are evaluated BEFORE any call
+    reaches the backend, so a rejected forgery attempt can never imply a
+    ``reveal_audit`` row."""
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(resume_id, request.form.get(csrf.FORM_FIELD)):
+        abort(403)
     # `context` records WHERE the reveal was triggered (shortlist card vs the
     # résumé page) in the audit row; defaults to the résumé page.
     context = (request.form.get("context") or "resume_detail").strip()[:64]

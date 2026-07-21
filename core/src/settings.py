@@ -60,13 +60,25 @@ class Settings(BaseSettings):
     # ── Storage (filesystem BlobStore root — no MinIO/S3) ────────────────────
     storage_dir: str = "/data"
 
-    # ── API auth (Phase 6) ────────────────────────────────────────────────────
-    # ONE switch for the configurable auth boundary (decision 1). Empty string =
-    # auth DISABLED (local dev; fail-open by EXPLICIT configuration, never by
-    # omission-in-code — src.api.deps.log_auth_mode logs a loud WARNING at
-    # startup when it is empty). A non-empty value = auth ENABLED (fail-closed:
-    # require_api_key rejects a missing/wrong X-API-Key with 401).
+    # ── API auth (FU-4: keyed roles) ─────────────────────────────────────────
+    # LEGACY, DETECTION-ONLY (FU-4/D1). Phase 6's single `API_KEY` switch is
+    # superseded by the four role keys below and no longer gates auth at all.
+    # The field is KEPT so `validate_startup_auth_config` can spot a stale
+    # `API_KEY` still sitting in a deploy's .env and refuse to boot — with
+    # `extra="ignore"`, a bare env-var rename would otherwise fall through to
+    # auth-disabled (fail-open) silently.
     api_key: str = ""
+    # The four role keys. Auth is DISABLED iff ALL FOUR are empty (local dev;
+    # fail-open by EXPLICIT configuration, never by omission-in-code —
+    # src.api.deps.log_auth_mode logs a loud WARNING at startup in that case,
+    # and every caller resolves to Role.ADMIN). Auth is ENABLED iff ANY is
+    # non-empty: the presented X-API-Key must match exactly one of them
+    # (constant-time, UTF-8 bytes) or the request is rejected with 401; a
+    # resolved role outside a route's allowed set is a 403.
+    api_key_admin: str = ""
+    api_key_recruiter: str = ""
+    api_key_hiring_manager: str = ""
+    api_key_auditor: str = ""
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
@@ -170,6 +182,85 @@ class Settings(BaseSettings):
     git_sha: str | None = None
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @property
+    def auth_enabled(self) -> bool:
+        """The single source of truth for "is the auth boundary on?".
+
+        ``False`` iff ALL FOUR role keys are empty. The legacy ``api_key``
+        field is deliberately NOT consulted — a stale ``API_KEY`` must fail
+        loud through ``validate_startup_auth_config``, never quietly enable
+        auth in an undocumented way.
+        """
+        return any(
+            (
+                self.api_key_admin,
+                self.api_key_recruiter,
+                self.api_key_hiring_manager,
+                self.api_key_auditor,
+            )
+        )
+
+
+# The env-var names of the four role keys, in the order they are reported to a
+# misconfigured operator. Kept next to the fields they mirror.
+_ROLE_KEY_ENV_VARS: tuple[str, ...] = (
+    "API_KEY_ADMIN",
+    "API_KEY_RECRUITER",
+    "API_KEY_HIRING_MANAGER",
+    "API_KEY_AUDITOR",
+)
+
+
+def validate_startup_auth_config(settings: Settings) -> None:
+    """Refuse to boot on an auth configuration that would silently fail open
+    or silently collapse two roles into one (FU-4).
+
+    Called from ``src.api.main``'s lifespan, alongside the ADR-008
+    ``SKILL_HASH_SALT`` refusal. Raises ``RuntimeError``; never logs, and
+    never includes a key VALUE in the message it raises.
+
+    * **D1 — legacy ``API_KEY``**: a non-empty ``settings.api_key`` is a hard
+      failure regardless of whether the new fields are also set. ``Settings``
+      has ``extra="ignore"``, so a stale ``API_KEY`` with none of the new keys
+      configured would otherwise land in auth-DISABLED mode — a fail-open
+      regression from Phase 6.
+    * **Collision refusal**: two CONFIGURED (non-empty) role keys that are
+      byte-identical collapse two roles into one (e.g. an auditor key that
+      also opens every recruiter-only route). Two EMPTY fields are not a
+      collision — that is simply "not configured".
+    """
+    if settings.api_key:
+        raise RuntimeError(
+            "API_KEY is set but is no longer used — FU-4 replaced the single "
+            "API key with per-role keys. Remove API_KEY from the environment "
+            "and configure the roles you need instead: "
+            + ", ".join(_ROLE_KEY_ENV_VARS)
+            + "."
+        )
+
+    configured: dict[str, str] = {}
+    for env_var, value in zip(
+        _ROLE_KEY_ENV_VARS,
+        (
+            settings.api_key_admin,
+            settings.api_key_recruiter,
+            settings.api_key_hiring_manager,
+            settings.api_key_auditor,
+        ),
+        strict=True,
+    ):
+        if not value:
+            continue
+        previous = configured.get(value)
+        if previous is not None:
+            raise RuntimeError(
+                f"role keys {previous} and {env_var} are byte-identical — "
+                "refusing to start: two roles sharing one key silently "
+                "collapses them into the more privileged of the two. Give "
+                "every configured role its own distinct key."
+            )
+        configured[value] = env_var
 
 
 @lru_cache

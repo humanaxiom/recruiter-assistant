@@ -38,6 +38,10 @@
     <form method="post"
           action="{{ url_for('resume_reveal', resume_id=resume.id) }}"
           style="display:inline">
+      {# FU-4/D4: session-bound one-shot anti-forgery token, minted for THIS
+         résumé id. A cross-site auto-submit cannot read it, so it cannot forge
+         an audited reveal; and it is valid only for this résumé's reveal. #}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
         (audited)</button>
     </form>

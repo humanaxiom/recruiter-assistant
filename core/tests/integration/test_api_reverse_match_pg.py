@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from testcontainers.postgres import PostgresContainer
 
-from src.api.deps import get_arq, require_api_key
+from src.api.deps import Role, get_arq, resolve_role
 from src.api.routes import resumes as resumes_routes
 from src.errors import AppError
 from src.models.ddl import init_schema
@@ -120,7 +120,7 @@ def _build_app(pool: asyncpg.Pool, *, arq: MagicMock) -> FastAPI:
 
     app.dependency_overrides[get_db] = _get_db_override
     app.dependency_overrides[get_arq] = lambda: arq
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[resolve_role] = lambda: Role.ADMIN
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:

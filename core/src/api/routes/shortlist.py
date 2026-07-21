@@ -15,18 +15,28 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from src.api.deps import get_arq, require_api_key
+from src.api.deps import Role, get_arq, require_role
 from src.models.pool import Db
 from src.schemas.matching import ShortlistEntry
 from src.services import shortlist_service
 from src.services.pii import set_pii_key
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
+
+# FU-4 (RBAC), per route: generating a shortlist enqueues real ranking work, so
+# it is a write; listing/reading/exporting are blind reads open to all four
+# roles (the export can no longer un-blind at all — see below).
+_SHORTLIST_WRITERS: tuple[Role, ...] = (Role.ADMIN, Role.RECRUITER)
+_SHORTLIST_READERS: tuple[Role, ...] = tuple(Role)
 
 ExportFormat = Literal["csv", "evidence-csv", "json"]
 
 
-@router.post("/jobs/{job_id}/shortlist", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs/{job_id}/shortlist",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role(*_SHORTLIST_WRITERS))],
+)
 async def generate_shortlist(
     job_id: UUID,
     arq: Annotated[ArqRedis, Depends(get_arq)],
@@ -38,32 +48,40 @@ async def generate_shortlist(
 # Declared BEFORE /jobs/{job_id}/shortlist's own path shape is unambiguous
 # (export is a THIRD path segment) so no ordering hazard exists, but kept
 # adjacent for readability.
-@router.get("/jobs/{job_id}/shortlist/export")
+@router.get(
+    "/jobs/{job_id}/shortlist/export",
+    dependencies=[Depends(require_role(*_SHORTLIST_READERS))],
+)
 async def export_shortlist(
     job_id: UUID,
     db: Db,
     format: Annotated[ExportFormat, Query()] = "csv",
-    reveal: Annotated[bool, Query()] = False,
 ) -> Response:
     """``pii_service.set_pii_key`` runs inside an open ``db.transaction()``
     BEFORE ``shortlist_service.export_rows`` — its own raw ``pgp_sym_decrypt``
-    fails loud without it."""
+    fails loud without it.
+
+    FU-4/D3: exports are BLIND-ONLY. The former ``reveal`` query parameter was
+    an UNAUDITED BULK de-anonymization across a whole shortlist (never recorded
+    in ADR-016), so it is gone — ``reveal=False`` is hardcoded below and the
+    ``-anon`` filename suffix is now unconditional. If a bulk reveal export
+    ever becomes a real need it gets its own audited POST route.
+    """
     async with db.transaction():
         await set_pii_key(db)
-        rows = await shortlist_service.export_rows(db, job_id=job_id, reveal=reveal)
+        rows = await shortlist_service.export_rows(db, job_id=job_id, reveal=False)
 
-    anon_suffix = "" if reveal else "-anon"
     if format == "csv":
         content = shortlist_service.shortlist_csv(rows)
-        filename = f"shortlist-{job_id}{anon_suffix}.csv"
+        filename = f"shortlist-{job_id}-anon.csv"
         media_type = "text/csv"
     elif format == "evidence-csv":
         content = shortlist_service.shortlist_evidence_csv(rows)
-        filename = f"shortlist-{job_id}-evidence{anon_suffix}.csv"
+        filename = f"shortlist-{job_id}-evidence-anon.csv"
         media_type = "text/csv"
     else:
         content = shortlist_service.shortlist_json(rows)
-        filename = f"shortlist-{job_id}{anon_suffix}.json"
+        filename = f"shortlist-{job_id}-anon.json"
         media_type = "application/json"
 
     return Response(
@@ -73,12 +91,17 @@ async def export_shortlist(
     )
 
 
-@router.get("/jobs/{job_id}/shortlist")
+@router.get(
+    "/jobs/{job_id}/shortlist",
+    dependencies=[Depends(require_role(*_SHORTLIST_READERS))],
+)
 async def list_shortlist(job_id: UUID, db: Db) -> list[ShortlistEntry]:
     return await shortlist_service.list_for_job(db, job_id=job_id)
 
 
-@router.get("/shortlist/{entry_id}")
+@router.get(
+    "/shortlist/{entry_id}", dependencies=[Depends(require_role(*_SHORTLIST_READERS))]
+)
 async def get_shortlist_entry(entry_id: UUID, db: Db) -> ShortlistEntry:
     return await shortlist_service.get_one(db, entry_id)
 
