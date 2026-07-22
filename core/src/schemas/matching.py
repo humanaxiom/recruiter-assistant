@@ -37,6 +37,17 @@ EvidenceStatus = Literal["met", "partial", "missing"]
 # the verifier only ever rewrites the two ``evidence`` fields, so
 # ``requirement`` / ``overall_summary`` / ``overall_motivation`` would still
 # reach Postgres unscrubbed.
+#
+# It is also not redundant with ``pipeline/llm/client.py::_strip_nuls``, which
+# ALREADY recursively strips U+0000 from parsed LLM JSON before validation —
+# so the specific byte Postgres rejects is, on the ``chat_json`` path, handled
+# twice. Stating the justification that way makes it stronger, not weaker:
+# this layer earns its place by being wider on BOTH axes. It removes the other
+# C0 controls (invisible junk in a human-facing quote, which ``_strip_nuls``
+# leaves alone), and it holds for every caller that never goes through the LLM
+# client at all — read-path revalidation, tests, and any future non-LLM
+# producer of an evidence object. Defence in depth with the outer layer
+# strictly containing the inner one, not two copies of the same check.
 _C0_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
@@ -48,16 +59,6 @@ def _strip_control_chars(value: str) -> str:
 # Every LLM-authored free-text field on the evidence models carries this, so
 # the scrub holds on ``__init__`` and ``model_validate`` alike and is a fixed
 # point across a dump/validate roundtrip.
-#
-# It is not redundant with ``pipeline/llm/client.py::_strip_nuls``, which
-# already walks parsed LLM JSON and removes U+0000 before validation. That
-# covers the single byte Postgres rejects outright, on the single path that
-# goes through ``chat_json``. This layer is broader on both axes: it also
-# removes the REST of the C0 controls (junk in a human-facing quote, and
-# invisible in a reviewed excerpt), and it holds for callers that never touch
-# the LLM client at all — read-path revalidation, tests, and any future
-# non-LLM producer of an evidence object. Defence in depth, with the outer
-# layer strictly wider than the inner one.
 CleanText = Annotated[str, AfterValidator(_strip_control_chars)]
 
 # ── ADR-022 follow-up #3 — evidence size caps ───────────────────────────────
