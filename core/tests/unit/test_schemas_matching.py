@@ -29,6 +29,7 @@ import src.schemas as schemas_pkg
 import src.schemas.matching as matching_mod
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
+    CleanText,
     CoverLetterEvidence,
     EvidenceObject,
     JobMatchEntry,
@@ -549,3 +550,215 @@ def test_c0_sanitisation_survives_the_dump_validate_roundtrip() -> None:
     again = EvidenceObject.model_validate(ev.model_dump())
     assert again.model_dump() == ev.model_dump()
     assert again.requirements[0].requirement == "Python"
+
+
+# ── security FINDING 1 — Unicode format (Cf) controls in the scrub class ─────
+#
+# The C0 class above stops at DEL. It leaves every Unicode FORMAT character
+# untouched, and two sub-classes of those are a live fabrication vector in a
+# quote that a human reviewer is asked to trust:
+#
+#   * BIDI OVERRIDES AND ISOLATES (U+202A-202E, U+2066-2069). MEASURED against
+#     r01's real 148-char chunk c_001: the quote
+#     ``chunk[:100] + U+202E + "detacirbaf"`` is 111 characters, clears the
+#     minimum-quote-length floor and the length guard, scores 0.948 against its
+#     cited chunk and VERIFIES — and then RENDERS TO THE REVIEWER as the
+#     English word "fabricated", because U+202E reverses the display order of
+#     everything after it. The reviewer reads a word the résumé does not
+#     contain, inside a quote the verifier has just certified.
+#   * ZERO-WIDTH / INVISIBLE FORMAT CHARACTERS (ZWSP U+200B, WJ U+2060,
+#     BOM U+FEFF, SHY U+00AD, MVS U+180E). These carry no text, cannot be seen,
+#     and cannot be typed out of a quote by a reviewer who wants to check it.
+#
+# U+200E / U+200F (LRM / RLM) are in the class too. The security finding
+# enumerated only the overrides and isolates, but the marks are the same shape
+# of defect — invisible Cf codepoints whose only effect is to reorder the
+# display of neighbouring neutral text — so excluding them would leave an
+# adjacent hole of identical character. The class is therefore a strict
+# SUPERSET of what was asked for, never a subset.
+#
+# ZWNJ (U+200C) and ZWJ (U+200D) are deliberately NOT stripped: they are
+# script-meaningful in Persian/Arabic/Devanagari and inside emoji sequences, so
+# removing them would corrupt genuine résumé text. That boundary is pinned
+# below rather than left to convention.
+
+# The Cf codepoints added to ADR-022's class by FINDING 1. Written as an
+# explicit set, without escapes, for the same reason as C0_STRIPPED_CODEPOINTS.
+FORMAT_STRIPPED_CODEPOINTS: frozenset[int] = frozenset(
+    {
+        0x00AD,  # SOFT HYPHEN
+        0x180E,  # MONGOLIAN VOWEL SEPARATOR
+        0x200B,  # ZERO WIDTH SPACE
+        0x200E,  # LEFT-TO-RIGHT MARK
+        0x200F,  # RIGHT-TO-LEFT MARK
+        0x2060,  # WORD JOINER
+        0x202A,  # LEFT-TO-RIGHT EMBEDDING
+        0x202B,  # RIGHT-TO-LEFT EMBEDDING
+        0x202C,  # POP DIRECTIONAL FORMATTING
+        0x202D,  # LEFT-TO-RIGHT OVERRIDE
+        0x202E,  # RIGHT-TO-LEFT OVERRIDE
+        0x2066,  # LEFT-TO-RIGHT ISOLATE
+        0x2067,  # RIGHT-TO-LEFT ISOLATE
+        0x2068,  # FIRST STRONG ISOLATE
+        0x2069,  # POP DIRECTIONAL ISOLATE
+        0xFEFF,  # ZERO WIDTH NO-BREAK SPACE / BOM
+    }
+)
+
+# Invisible-ish codepoints that must SURVIVE. The first two are script- and
+# emoji-meaningful; the rest are real whitespace that ``_collapse_whitespace``
+# already normalises symmetrically on both sides of the fuzzy match, so
+# stripping them here would be a second, asymmetric normalisation.
+FORMAT_PRESERVED_CODEPOINTS: tuple[int, ...] = (
+    0x200C,  # ZERO WIDTH NON-JOINER
+    0x200D,  # ZERO WIDTH JOINER
+    0x00A0,  # NO-BREAK SPACE
+    0x2028,  # LINE SEPARATOR
+    0x2029,  # PARAGRAPH SEPARATOR
+    0x3000,  # IDEOGRAPHIC SPACE
+)
+
+# ``source_context`` joins the guarded set under FINDING 6 — it is the only
+# free-text evidence field that carried a bare ``str | None`` annotation.
+FORMAT_GUARDED_FIELDS: tuple[tuple[str, str], ...] = (
+    *C0_GUARDED_FIELDS,
+    ("RequirementEvidence", "source_context"),
+)
+
+_FORMAT_IDS = [f"{model}.{field}" for model, field in FORMAT_GUARDED_FIELDS]
+
+
+@pytest.mark.parametrize("model_name, field", FORMAT_GUARDED_FIELDS, ids=_FORMAT_IDS)
+@pytest.mark.parametrize("codepoint", sorted(FORMAT_STRIPPED_CODEPOINTS))
+def test_format_control_is_stripped_from_every_llm_authored_evidence_field(
+    model_name: str, field: str, codepoint: int
+) -> None:
+    """Every Cf codepoint in the FINDING 1 class, on every guarded field."""
+    obj = _validate_with(model_name, field, f"a{chr(codepoint)}b")
+    assert getattr(obj, field) == "ab", (
+        f"U+{codepoint:04X} survived on {model_name}.{field} — it is invisible "
+        "to a reviewer and must never reach a stored quote"
+    )
+
+
+@pytest.mark.parametrize("codepoint", FORMAT_PRESERVED_CODEPOINTS)
+def test_script_meaningful_and_whitespace_codepoints_survive_the_format_scrub(
+    codepoint: int,
+) -> None:
+    """Anti-over-scrub, and the deliberate boundary of the class: ZWNJ/ZWJ are
+    script- and emoji-meaningful, and the separators are genuine whitespace
+    ``_collapse_whitespace`` already handles symmetrically."""
+    kept = f"a{chr(codepoint)}b"
+    ev = RequirementEvidence.model_validate(
+        {"requirement": "Python", "evidence": kept}
+    )
+    assert ev.evidence == kept
+
+
+def test_the_measured_bidi_override_fabrication_is_scrubbed_from_the_quote() -> None:
+    """The exact string the security gate measured at 0.948-and-verifying.
+
+    The scrub does not change the fuzzy SCORE (the visible characters are
+    untouched, and 'detacirbaf' is still 10 characters of appended
+    fabrication). What it removes is the RENDERING deception: with U+202E gone
+    the reviewer sees the literal, obviously-junk 'detacirbaf' instead of the
+    plausible English word 'fabricated'. That is the whole of FINDING 1 — see
+    ``test_matching_stages.py`` for what the fuzzy guards do and do not close.
+    """
+    rlo = chr(0x202E)
+    chunk = (
+        "Designed and shipped Python REST APIs consumed by 40+ internal "
+        "services at Nimbus Analytics Inc, using FastAPI and asyncio."
+    )
+    attack = chunk[:100] + rlo + "detacirbaf"
+    ev = RequirementEvidence.model_validate(
+        {"requirement": "Python", "evidence": attack, "evidence_chunk_ids": ["c_001"]}
+    )
+    assert rlo not in ev.evidence
+    assert ev.evidence == chunk[:100] + "detacirbaf"
+
+
+def test_serialised_evidence_carries_no_bidi_override() -> None:
+    """Boundary that matters: what ``persist_shortlist`` hands to
+    ``json.dumps`` — and therefore what any reader ever renders."""
+    rlo = chr(0x202E)
+    ev = EvidenceObject.model_validate(
+        {
+            "requirements": [
+                {"requirement": f"Py{rlo}thon", "evidence": f"quote{rlo}here"}
+            ],
+            "cover_letter_evidence": [
+                {"theme": "motivation", "evidence": f"cl{rlo}quote"}
+            ],
+            "overall_summary": f"sum{rlo}mary",
+            "overall_motivation": f"moti{rlo}vation",
+        }
+    )
+    dumped = json.dumps(ev.model_dump())
+    assert rlo not in dumped
+    assert chr(0x5C) + "u202e" not in dumped.lower()
+
+
+def test_format_scrub_survives_the_dump_validate_roundtrip() -> None:
+    """Same fixed-point guarantee the C0 class carries."""
+    ev = EvidenceObject.model_validate(
+        {
+            "requirements": [
+                {
+                    "requirement": f"Py{chr(0x200B)}thon",
+                    "evidence": f"a{chr(0x2066)}b",
+                    "source_context": f"c{chr(0xFEFF)}d",
+                }
+            ],
+            "overall_summary": f"s{chr(0x00AD)}um",
+        }
+    )
+    again = EvidenceObject.model_validate(ev.model_dump())
+    assert again.model_dump() == ev.model_dump()
+    assert again.requirements[0].requirement == "Python"
+    assert again.requirements[0].source_context == "cd"
+
+
+# ── security FINDING 6 — ``source_context`` was the one unannotated field ────
+
+
+def test_source_context_is_annotated_clean_text() -> None:
+    """FINDING 6. ``source_context`` is expanded from ``resumes.parsed`` text
+    on the display path; every OTHER free-text evidence field carries
+    ``CleanText``. Annotating it structurally (rather than relying on the parse
+    path's own NUL-strip) is what keeps the guarantee true for any future
+    producer."""
+    annotation = RequirementEvidence.model_fields["source_context"].annotation
+    assert annotation == (CleanText | None), (
+        "source_context must be CleanText | None, not str | None — otherwise "
+        "the one display-only evidence field is the one that is not scrubbed"
+    )
+
+
+def test_source_context_is_scrubbed_on_validate_and_on_construction() -> None:
+    ev = RequirementEvidence.model_validate(
+        {"requirement": "Python", "source_context": f"a{NUL}b{chr(0x202E)}c"}
+    )
+    assert ev.source_context == "abc"
+    direct = RequirementEvidence(
+        requirement="Python", source_context=f"x{chr(0x200B)}y"
+    )
+    assert direct.source_context == "xy"
+
+
+def test_model_copy_bypasses_clean_text_and_the_docstring_says_so() -> None:
+    """FINDING 6's other half. ``model_copy`` / ``model_construct`` do NOT
+    re-run validators, so an update dict can put a live control character back
+    onto a validated model — measured reaching ``json.dumps`` as the escaped
+    form Postgres rejects. There is no live exploit today (``verify_evidence``
+    only ever updates ``evidence`` to ``""``), so the response is a documented
+    caveat on the model rather than a runtime guard; this test is what stops
+    the caveat from being deleted."""
+    ev = RequirementEvidence(requirement="Python")
+    bypassed = ev.model_copy(update={"requirement": f"x{NUL}y"})
+    assert bypassed.requirement == f"x{NUL}y"  # the bypass is real
+    doc = RequirementEvidence.__doc__ or ""
+    assert "model_copy" in doc, (
+        "RequirementEvidence's docstring must record the model_copy/"
+        "model_construct CleanText bypass — it is the only mitigation"
+    )

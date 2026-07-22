@@ -42,6 +42,7 @@ from uuid import uuid4
 import pytest
 
 from src.pipeline.matching.stages import (
+    _collapse_whitespace,
     _CombineInput,
     _evidence_completeness,
     _fuzz_ratio,
@@ -61,6 +62,7 @@ from src.schemas.matching import (
     EvidenceObject,
     RequirementEvidence,
     ScoreBreakdown,
+    _strip_control_chars,
 )
 
 # ── Evals-corpus fixture loading (read-only — mirrors test_evals_corpus.py) ──
@@ -884,7 +886,9 @@ def test_stage4_combine_writes_computed_motivation_into_breakdown() -> None:
 #
 #   * A quote must be a span of EXACTLY ONE cited chunk. A quote spanning two
 #     cited chunks concatenated is REJECTED, not accepted.
-#   * Minimum quote length floor = 32 characters.
+#   * Minimum quote length floor = 16 characters (LOWERED from 32 by human
+#     decision — see the FINDING 4 block further down for the measurements
+#     that forced it).
 #   * The length guard is FULLY CLOSED, not a ratio: reject when the
 #     whitespace-collapsed quote is longer than the whitespace-collapsed chunk
 #     AT ALL. There is no tunable ``k``.
@@ -912,7 +916,12 @@ def test_stage4_combine_writes_computed_motivation_into_breakdown() -> None:
 # ratio cannot work can state it; the implementation has no such constant.
 _REJECTED_LENGTH_RATIO_K = 1.05
 # Minimum quote length floor, in characters, fixed by human decision.
-_MIN_QUOTE_CHARS = 32
+# Lowered 32 -> 16 (security FINDING 4). Kept as a module constant so every
+# boundary case below moves together with MatchWeights.
+_MIN_QUOTE_CHARS = 16
+# The floor as originally shipped. Retained ONLY so the FINDING 4 cases can
+# state which genuine credentials the old value erased.
+_PRE_FINDING_4_FLOOR = 32
 
 # Deterministic fabrication filler. Starts with a non-space character so that
 # an append of length 1 is a real character rather than trailing whitespace
@@ -1105,51 +1114,156 @@ def test_verify_evidence_rejects_a_quote_spanning_two_cited_chunks() -> None:
     assert result.confidence <= 0.3
 
 
-# ── follow-up #4: minimum quote length floor (32 chars) ─────────────────────
+# ── follow-up #4: minimum quote length floor (16 chars) ─────────────────────
+#
+# SECURITY FINDING 4 — THE FLOOR WAS LOWERED 32 -> 16 BY HUMAN DECISION.
+#
+# At 32 the floor was scrubbing GENUINE evidence and demoting it met ->
+# missing, indistinguishably from a fabrication. Measured, all blanked at 32:
+#
+#     "PhD in Computer Science"       23 chars
+#     "AWS Solutions Architect"       23 chars
+#     "Postgres schema migrations"    26 chars
+#
+# The eval corpus could not catch this — its shortest gold anchor was 71
+# characters, so nothing in the corpus lived anywhere near the boundary. (That
+# gap is now closed: labels.json carries a genuinely short gold anchor, and
+# ``test_gold_anchors_sit_well_inside_both_new_guards`` pins that at least one
+# anchor sits below the OLD floor, so reverting the floor fails the corpus.)
+#
+# 16 still rejects every degenerate case the floor exists for — "API" (3),
+# "SQL" (3), "ETL" (3), "Kubernetes" (10) — while preserving short credentials
+# and skill phrases that are real evidence. Both sides of the new boundary are
+# pinned below (15 rejected / 16 accepted), exactly as they were at 32.
+#
+# The floor is ALSO load-bearing for security FINDING 1: a bare token padded
+# with zero-width characters used to clear a 32-char floor on raw length
+# (measured: "API" + 40x U+200B = 43 characters, floor cleared, rejected only
+# by ``partial_ratio``). Lowering the floor makes that padding cheaper, which
+# is precisely why the invisible-stripping half of FINDING 1 lands in the same
+# change — after the scrub the same needle is 3 characters and the floor
+# rejects it outright. See ``test_stripping_invisibles_...`` below.
 
 _FLOOR_CHUNK = (
     "Built API gateways on Kubernetes and shipped typed FastAPI services "
     "for the platform team across three regions."
 )
-# Exactly 32 characters, and a verbatim span of _FLOOR_CHUNK.
-_FLOOR_SPAN_32 = "Built API gateways on Kubernetes"
-# Exactly 31 characters, and ALSO a verbatim span — the only thing separating
+# Exactly 16 characters, and a verbatim span of _FLOOR_CHUNK.
+_FLOOR_SPAN_16 = "Built API gatewa"
+# Exactly 15 characters, and ALSO a verbatim span — the only thing separating
 # it from the case above is the floor itself.
-_FLOOR_SPAN_31 = "Built API gateways on Kubernete"
+_FLOOR_SPAN_15 = "Built API gatew"
+# A verbatim span that the OLD 32-char floor erased and the new one keeps.
+_FLOOR_SPAN_UNDER_OLD_FLOOR = "Built API gateways on"
 
 
 @pytest.mark.parametrize(
     "short_quote",
-    ["API", "Kubernetes", "FastAPI", _FLOOR_SPAN_31],
-    ids=["api", "kubernetes", "fastapi", "one_char_under_floor"],
+    ["API", "SQL", "ETL", "Kubernetes", "FastAPI", _FLOOR_SPAN_15],
+    ids=[
+        "api",
+        "sql",
+        "etl",
+        "kubernetes",
+        "fastapi",
+        "one_char_under_floor",
+    ],
 )
-def test_fuzz_ratio_is_zero_for_a_quote_under_the_32_char_floor(
+def test_fuzz_ratio_is_zero_for_a_quote_under_the_16_char_floor(
     short_quote: str,
 ) -> None:
     """ADR-022 follow-up #4. ``"API"`` scores 1.000 against any chunk
     containing it, which makes a bare token indistinguishable from real
-    evidence. Anything below the 32-character floor scores 0.0 outright.
+    evidence. Anything below the 16-character floor scores 0.0 outright.
 
     ``one_char_under_floor`` is the important case: it IS a genuine verbatim
     span, so only the floor can reject it. A fix that keys off "is this a real
     substring" instead of length will not fail it.
+
+    "SQL" and "ETL" are the degenerate cases the human decision named as still
+    having to be rejected at the lowered floor.
     """
     assert len(short_quote) < _MIN_QUOTE_CHARS
-    assert short_quote.lower() in _FLOOR_CHUNK.lower()  # genuinely present
+    if short_quote != "SQL" and short_quote != "ETL":
+        assert short_quote.lower() in _FLOOR_CHUNK.lower()  # genuinely present
     assert _fuzz_ratio(short_quote.lower(), _FLOOR_CHUNK.lower()) == 0.0, (
         f"{short_quote!r} is under the {_MIN_QUOTE_CHARS}-char floor and must "
         "score 0.0 however well it matches"
     )
 
 
-def test_fuzz_ratio_accepts_a_real_span_exactly_at_the_32_char_floor() -> None:
-    """The other side of the boundary. The floor is ``< 32 rejects``, NOT
-    ``<= 32 rejects``: a 32-character verbatim span is real evidence and must
+def test_fuzz_ratio_accepts_a_real_span_exactly_at_the_16_char_floor() -> None:
+    """The other side of the boundary. The floor is ``< 16 rejects``, NOT
+    ``<= 16 rejects``: a 16-character verbatim span is real evidence and must
     still verify at 1.000. Pins the off-by-one in the direction of
     over-rejection."""
-    assert len(_FLOOR_SPAN_32) == _MIN_QUOTE_CHARS
-    assert _FLOOR_SPAN_32.lower() in _FLOOR_CHUNK.lower()
-    assert _fuzz_ratio(_FLOOR_SPAN_32.lower(), _FLOOR_CHUNK.lower()) == 1.0
+    assert len(_FLOOR_SPAN_16) == _MIN_QUOTE_CHARS
+    assert _FLOOR_SPAN_16.lower() in _FLOOR_CHUNK.lower()
+    assert _fuzz_ratio(_FLOOR_SPAN_16.lower(), _FLOOR_CHUNK.lower()) == 1.0
+
+
+# The genuine short credentials FINDING 4 measured being blanked at 32, each
+# embedded in a chunk that really contains them.
+_SHORT_CREDENTIAL_CASES: tuple[tuple[str, str], ...] = (
+    (
+        "PhD in Computer Science",
+        "PhD in Computer Science, University of British Columbia, 2019.",
+    ),
+    (
+        "AWS Solutions Architect",
+        "Certifications: AWS Solutions Architect (Professional), renewed 2025.",
+    ),
+    (
+        "Postgres schema migrations",
+        "Owned Postgres schema migrations for the billing service end to end.",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "quote, chunk",
+    _SHORT_CREDENTIAL_CASES,
+    ids=["phd", "aws_cert", "postgres_migrations"],
+)
+def test_genuine_short_credentials_survive_the_lowered_floor(
+    quote: str, chunk: str
+) -> None:
+    """FINDING 4, stated as the over-rejection it was. Each of these is a real,
+    unambiguous span of its chunk that the 32-char floor scored 0.0 and blanked
+    as if it were invented."""
+    assert quote in chunk
+    assert len(quote) < _PRE_FINDING_4_FLOOR, "otherwise this case pins nothing"
+    assert (
+        _fuzz_ratio(quote.lower(), chunk.lower(), min_chars=_PRE_FINDING_4_FLOOR) == 0.0
+    ), "the old floor erased it — this is the defect"
+    assert _fuzz_ratio(quote.lower(), chunk.lower()) == 1.0
+
+
+@pytest.mark.parametrize(
+    "quote, chunk",
+    _SHORT_CREDENTIAL_CASES,
+    ids=["phd", "aws_cert", "postgres_migrations"],
+)
+def test_verify_evidence_keeps_genuine_short_credentials(
+    quote: str, chunk: str
+) -> None:
+    """The same three, end-to-end: at 32 they came back blank and demoted
+    ``met`` -> ``missing``, which is the exact signal a recruiter reads as
+    "the model made this up"."""
+    req = RequirementEvidence(
+        requirement="Credential",
+        status="met",
+        evidence=quote,
+        evidence_chunk_ids=["c_1"],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), {"c_1": chunk}, weights=DEFAULT_WEIGHTS
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == quote
+    assert result.status == "met"
+    assert result.confidence == 0.9
 
 
 def test_verify_evidence_scrubs_a_bare_token_quote() -> None:
@@ -1177,7 +1291,7 @@ def test_verify_evidence_keeps_a_real_span_exactly_at_the_floor() -> None:
     req = RequirementEvidence(
         requirement="Kubernetes",
         status="met",
-        evidence=_FLOOR_SPAN_32,
+        evidence=_FLOOR_SPAN_16,
         evidence_chunk_ids=["c_1"],
         confidence=0.9,
     )
@@ -1187,7 +1301,7 @@ def test_verify_evidence_keeps_a_real_span_exactly_at_the_floor() -> None:
         weights=DEFAULT_WEIGHTS,
     )
     result = cleaned.requirements[0]
-    assert result.evidence == _FLOOR_SPAN_32
+    assert result.evidence == _FLOOR_SPAN_16
     assert result.status == "met"
     assert result.confidence == 0.9
 
@@ -1264,8 +1378,8 @@ def test_gold_anchor_survives_verify_evidence_completely_intact(
 
 def test_gold_anchors_sit_well_inside_both_new_guards() -> None:
     """Feasibility pin for the two guards, measured against real corpus text:
-    the gold anchors' quote/chunk length ratios are
-    0.480 / 0.661 / 0.823 / 0.836, and all four clear the 32-character floor.
+    every gold anchor clears the minimum-quote-length floor, and none is longer
+    than its own chunk.
 
     The bound asserted is ``<= 1.0``, NOT ``< 1.05``. The implemented
     invariant is "a span is never longer than its chunk", so a future fixture
@@ -1283,12 +1397,47 @@ def test_gold_anchors_sit_well_inside_both_new_guards() -> None:
         )
         ratios.append(len(quote) / len(chunk_text))
 
-    assert len(ratios) == 4, "the corpus must carry exactly four gold anchors"
-    assert sorted(ratios) == pytest.approx([0.480, 0.661, 0.823, 0.836], abs=0.005)
+    assert len(ratios) == 5, "the corpus must carry exactly five gold anchors"
+    assert sorted(ratios) == pytest.approx(
+        [0.276, 0.480, 0.661, 0.823, 0.836], abs=0.005
+    )
     assert max(ratios) <= 1.0, (
         "a gold anchor longer than its own chunk is not a span of it and the "
         "shipped guard will reject it — fix the fixture, not the guard"
     )
+
+
+def test_the_corpus_carries_a_gold_anchor_that_defends_the_lowered_floor() -> None:
+    """FINDING 4's second half. The floor was lowered on the strength of three
+    MEASURED credentials ("PhD in Computer Science" and friends) that the
+    corpus itself could not see: its shortest gold anchor was 71 characters,
+    more than twice the old floor, so a revert to 32 — or to anything up to 71
+    — passed the entire ranking-evals gate untouched.
+
+    labels.json now carries a genuinely SHORT anchor, a real span of a real
+    résumé chunk. This is the pin that makes the floor's value falsifiable by
+    the corpus rather than by nothing: raise the floor above the shortest
+    anchor and this fails, and so does the gate.
+    """
+    lengths = sorted(len(quote) for _, _, quote in _GOLD_EVIDENCE_CASES)
+    assert lengths[0] < _PRE_FINDING_4_FLOOR, (
+        f"shortest gold anchor is {lengths[0]} chars; with no anchor below the "
+        f"old {_PRE_FINDING_4_FLOOR}-char floor the corpus cannot detect a "
+        "revert of the FINDING 4 decision"
+    )
+    assert lengths[0] >= _MIN_QUOTE_CHARS
+
+
+@pytest.mark.parametrize("resume_id, skill_name, quote", _GOLD_EVIDENCE_CASES)
+def test_every_gold_anchor_survives_the_real_verifier_at_the_shipped_floor(
+    resume_id: str, skill_name: str, quote: str
+) -> None:
+    """The short anchor's defence, run through ``_fuzz_ratio`` itself rather
+    than through a length assertion. At a floor of 32 the short anchor scores
+    0.0 here and is blanked; at 16 it scores 1.000."""
+    resume_raw = _load_resume_raw(resume_id)
+    chunk_text = _chunks_by_id(resume_raw)[_skill_chunk_id(resume_raw, skill_name)]
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 1.0
 
 
 # ── WHITESPACE NORMALISATION (reviewer round 2, MINOR 6 + NIT 7) ────────────
@@ -1443,7 +1592,7 @@ def test_whitespace_normalisation_does_not_reopen_the_superset_bypass() -> None:
 def test_fuzz_ratio_floor_rejects_a_bare_token_padded_out_to_the_floor() -> None:
     """``_fuzz_ratio``'s docstring presents a standalone contract, and under a
     raw ``len(needle)`` floor ``"API"`` plus 30 spaces (33 raw characters)
-    cleared the 32-character bar while carrying three characters of evidence.
+    cleared the bar while carrying three characters of evidence.
 
     Unreachable through ``verify_evidence`` today, which strips first — but a
     guard whose contract only holds because of what its one caller happens to
@@ -1468,10 +1617,184 @@ def test_fuzz_ratio_floor_rejects_an_interior_padded_bare_token() -> None:
 
 
 def test_fuzz_ratio_floor_still_accepts_a_re_rendered_span_at_the_floor() -> None:
-    """Over-rejection guard for the collapsed floor: the 32-char span rendered
-    with double spaces collapses back to 32 characters and must still verify.
+    """Over-rejection guard for the collapsed floor: the 16-char span rendered
+    with double spaces collapses back to 16 characters and must still verify.
     A floor applied to the RAW needle would pass this too, so it is paired
     with the padded cases above, which it does not."""
-    quote = _FLOOR_SPAN_32.replace(" ", "  ")
+    quote = _FLOOR_SPAN_16.replace(" ", "  ")
     assert len(" ".join(quote.split())) == _MIN_QUOTE_CHARS
     assert _fuzz_ratio(quote.lower(), _FLOOR_CHUNK.lower()) == 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECURITY FINDING 1 — the interaction between the invisible-character scrub
+# and the guards it sits in front of.
+#
+# The schema-level fix lives in ``schemas/matching.py`` and is tested there.
+# What belongs HERE is the question the security gate asked about it, because
+# the fix could weaken the guard it is meant to strengthen:
+#
+#   Python's ``\s`` — and therefore ``_collapse_whitespace`` — collapses NBSP,
+#   U+2028 and U+3000, but NOT ZWSP / BOM / WJ / SHY. Those non-collapsing
+#   invisibles INFLATE the needle's collapsed length, and the length guard
+#   ("a span cannot be longer than the chunk it spans") then rejects it. So
+#   today the asymmetry is FAIL-CLOSED. MEASURED against r01's real 148-char
+#   chunk c_001, before the scrub:
+#
+#       genuine 60-char span                  score 1.000  accepted
+#       same span + 200x U+200B (260 chars)   score 0.000  REJECTED (guard)
+#       "API" + 40x U+200B      ( 43 chars)   score 0.076  rejected (fuzz)
+#
+#   Once the invisibles are STRIPPED, that inflation is gone: the padded span
+#   is 60 characters again and scores 1.000. The guard that was rejecting it
+#   no longer fires.
+#
+# THAT IS NOT A NEW WINDOW, and the reason is exactly what the tests below
+# assert. Stripping removes only zero-width and format characters, so the
+# needle's VISIBLE content is unchanged. After the scrub, the verdict on a
+# padded quote is by construction the verdict on the same quote with no
+# padding at all — a string the attacker could always have submitted
+# directly. The fail-closed asymmetry was rejecting quotes whose visible
+# content was GENUINE (an over-rejection), never quotes whose visible content
+# was fabricated: appended visible fabrication is still visible after the
+# scrub, and still trips the length guard.
+#
+# In one direction the scrub is strictly STRONGER, and the floor is where:
+# "API" + 40x ZWSP is 43 characters and CLEARS even the old 32-char floor,
+# surviving only on ``partial_ratio``'s verdict. Scrubbed, it is 3 characters
+# and the floor rejects it outright. At the lowered 16-char floor that matters
+# more, not less — 13 invisible characters would have been enough.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The invisible characters the FINDING 1 class removes and ``\s`` does not.
+_NON_COLLAPSING_INVISIBLES: tuple[str, ...] = (
+    chr(0x200B),  # ZERO WIDTH SPACE
+    chr(0xFEFF),  # BOM
+    chr(0x2060),  # WORD JOINER
+    chr(0x00AD),  # SOFT HYPHEN
+    chr(0x180E),  # MONGOLIAN VOWEL SEPARATOR
+    chr(0x202E),  # RIGHT-TO-LEFT OVERRIDE
+)
+
+
+def _scrub(text: str) -> str:
+    """The shipped schema scrub, applied directly so the verdict tests below
+    exercise the SAME class the models do (not a copy that can drift)."""
+    return _strip_control_chars(text)
+
+
+def test_python_whitespace_does_not_collapse_the_invisibles_the_scrub_removes() -> None:
+    """The premise the whole interaction rests on. If ``\\s`` ever started
+    collapsing these, the reasoning above would need redoing rather than
+    silently continuing to hold."""
+    for ch in _NON_COLLAPSING_INVISIBLES:
+        assert _collapse_whitespace(f"a{ch}b") == f"a{ch}b", (
+            f"U+{ord(ch):04X} is collapsed by \\s after all — the fail-closed "
+            "inflation argument no longer describes this code"
+        )
+    for ch in (chr(0x00A0), chr(0x2028), chr(0x3000)):
+        assert _collapse_whitespace(f"a{ch}b") == "a b"
+
+
+@pytest.mark.parametrize(
+    "visible, verifies",
+    [
+        (_FLOOR_CHUNK[:60], True),
+        (_FLOOR_SPAN_16, True),
+        (_FLOOR_CHUNK, True),
+        (_FLOOR_CHUNK + " and led a team of twelve engineers", False),
+        (_FLOOR_CHUNK[:60] + " and owned the dbt transformation layer", False),
+        ("API", False),
+        (_FLOOR_SPAN_15, False),
+    ],
+    ids=[
+        "genuine_span",
+        "span_at_floor",
+        "whole_chunk",
+        "chunk_plus_fabrication",
+        "prefix_plus_fabrication",
+        "bare_token",
+        "one_under_floor",
+    ],
+)
+@pytest.mark.parametrize(
+    "invisible", _NON_COLLAPSING_INVISIBLES, ids=lambda c: f"U+{ord(c):04X}"
+)
+def test_stripping_invisibles_cannot_change_a_quotes_verdict(
+    visible: str, verifies: bool, invisible: str
+) -> None:
+    """The window check FINDING 1 demands. Padding a quote with 200 invisible
+    characters and then scrubbing must land on EXACTLY the verdict the
+    unpadded quote gets — no more (no new acceptance) and no less (no new
+    over-rejection). Anything else means the scrub is doing work of its own
+    on the fuzzy match, which it must not."""
+    padded = visible + invisible * 200
+    plain_score = _fuzz_ratio(_scrub(visible).lower(), _FLOOR_CHUNK.lower())
+    scrubbed_score = _fuzz_ratio(_scrub(padded).lower(), _FLOOR_CHUNK.lower())
+
+    assert scrubbed_score == plain_score
+    assert (scrubbed_score >= DEFAULT_WEIGHTS.evidence_verify_fuzz) is verifies
+
+
+@pytest.mark.parametrize(
+    "invisible", _NON_COLLAPSING_INVISIBLES, ids=lambda c: f"U+{ord(c):04X}"
+)
+def test_invisible_padding_interleaved_through_a_fabrication_still_fails(
+    invisible: str,
+) -> None:
+    """The adversarial shape the inflation argument was covering by accident:
+    invisibles sprinkled BETWEEN the fabricated words, so that neither
+    ``.strip()`` nor a trailing-padding heuristic would see them. The visible
+    fabrication is still there after the scrub, so the length guard still
+    rejects it."""
+    fabrication = " and led a team of twelve engineers"
+    quote = _FLOOR_CHUNK + invisible.join(fabrication)
+    assert _fuzz_ratio(_scrub(quote).lower(), _FLOOR_CHUNK.lower()) == 0.0
+
+
+@pytest.mark.parametrize(
+    "invisible", _NON_COLLAPSING_INVISIBLES, ids=lambda c: f"U+{ord(c):04X}"
+)
+def test_the_scrub_makes_the_floor_strictly_harder_to_pad_past(
+    invisible: str,
+) -> None:
+    """The one direction in which the scrub is stronger, not merely neutral.
+    Unscrubbed, a bare token padded with invisibles clears the floor on
+    length — measured at 43 characters against the OLD 32-char floor — and is
+    left to ``partial_ratio`` alone. Scrubbed, the floor rejects it."""
+    padded = "API" + invisible * 40
+    assert len(_collapse_whitespace(padded)) > _PRE_FINDING_4_FLOOR
+    assert len(_collapse_whitespace(_scrub(padded))) < _MIN_QUOTE_CHARS
+    assert _fuzz_ratio(_scrub(padded).lower(), _FLOOR_CHUNK.lower()) == 0.0
+
+
+def test_verify_evidence_never_surfaces_a_bidi_override_in_a_quote() -> None:
+    """End-to-end. The measured attack is
+    ``chunk[:100] + U+202E + "detacirbaf"``: 111 characters, clears the floor
+    and the length guard, scores 0.948 and VERIFIES — and renders to a human
+    reviewer as the word "fabricated".
+
+    The honest statement of what this fix does and does not do: the scrub does
+    NOT drop the score (measured 0.948 -> 0.952 after stripping — the appended
+    fabrication is 10 visible characters either way, and a short append onto a
+    long chunk is inside ``partial_ratio``'s existing tolerance, which is a
+    separate, known property of the 0.85 bar). What it removes is the ability
+    to make that appended text RENDER as plausible English. The quote a
+    reviewer sees is the quote that was scored.
+    """
+    rlo = chr(0x202E)
+    chunk = _FLOOR_CHUNK
+    quote = chunk[:60] + rlo + "detacirbaf"
+    req = RequirementEvidence(
+        requirement="API design",
+        status="met",
+        evidence=quote,
+        evidence_chunk_ids=["c_1"],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), {"c_1": chunk}, weights=DEFAULT_WEIGHTS
+    )
+    surfaced = cleaned.requirements[0].evidence
+    assert rlo not in surfaced
+    assert all(ch not in surfaced for ch in _NON_COLLAPSING_INVISIBLES)

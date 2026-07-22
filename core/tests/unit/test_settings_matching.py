@@ -91,7 +91,10 @@ def test_match_evidence_and_motivation_confidence_defaults() -> None:
     assert s.match_evidence_met_confidence == 0.7
     assert s.match_evidence_partial_weight == 0.5
     assert s.match_evidence_verify_fuzz == 0.85
-    assert s.match_evidence_min_quote_chars == 32
+    # Lowered 32 -> 16 by human decision (security FINDING 4): at 32 the floor
+    # blanked genuine short credentials ("PhD in Computer Science", 23) and
+    # demoted them met -> missing, indistinguishably from fabrication.
+    assert s.match_evidence_min_quote_chars == 16
     assert s.match_motivation_min_confidence == 0.7
 
 
@@ -344,7 +347,7 @@ def test_env_override_of_match_evidence_min_quote_chars_flows_into_weights(
     Its two siblings — ``evidence_verify_fuzz`` above and
     ``evidence_met_confidence`` — were both pinned; this one was in none of
     the three field lists in this file either. The value chosen differs from
-    the default (32) in BOTH directions from any plausible typo, so a mapping
+    the default (16) in BOTH directions from any plausible typo, so a mapping
     that reads the wrong setting cannot coincidentally pass.
     """
     monkeypatch.setenv("MATCH_EVIDENCE_MIN_QUOTE_CHARS", "77")
@@ -356,7 +359,7 @@ def test_env_override_of_match_evidence_min_quote_chars_reaches_the_verifier(
     monkeypatch: MonkeyPatch,
 ) -> None:
     """The knob is only real if the wired value changes behaviour. At a floor
-    of 200 a genuine 71-char verbatim span must be scrubbed; at the default 32
+    of 200 a genuine 71-char verbatim span must be scrubbed; at the default 16
     the same span verifies."""
     from src.pipeline.matching.stages import verify_evidence
     from src.schemas.matching import EvidenceObject, RequirementEvidence

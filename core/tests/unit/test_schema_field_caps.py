@@ -56,6 +56,7 @@ from pydantic.fields import FieldInfo
 import src.schemas.matching as matching_schemas
 from src.schemas.jobs import Education
 from src.schemas.matching import (
+    MAX_REQUIREMENTS,
     CoverLetterEvidenceIngest,
     EvidenceObjectIngest,
     RequirementEvidence,
@@ -393,6 +394,107 @@ def test_requirements_list_bounds_a_pathological_100000_entry_list() -> None:
         {"requirements": [{"requirement": "x"} for _ in range(100_000)]}
     )
     assert len(ev.requirements) == 64
+
+
+# ── security FINDING 3 — the DoS bound itself, not just its output shape ────
+#
+# ``_bound_lists_before_item_validation`` is the ``mode="before"`` slice on
+# ``EvidenceObjectIngest``. Its docstring claims it is "what actually bounds
+# the DoS", and it is: pydantic validates every list ITEM first and only then
+# applies a ``max_length``, so an unsliced 100,000-entry list of 2,000,000-char
+# quotes runs the per-item scrub 100,000 times before anything is rejected.
+# MEASURED: with the slice, that payload costs ~0.40s / ~49MB; with the slice
+# deleted, > 300s (timeout).
+#
+# NONE OF THE THREE TESTS ABOVE CATCH ITS REMOVAL. Every one of them asserts
+# the OUTPUT list length, and the ``mode="after"`` validator slices the list a
+# SECOND time (``self.requirements[:MAX_REQUIREMENTS]``) — so the output is 64
+# either way and the whole suite (2913/2913) stays green with the guard gone.
+#
+# The distinction matters for HOW to count, too, and the obvious counter is the
+# wrong one: counting ``RequirementEvidenceIngest`` validations cannot kill the
+# mutation either, because those happen inside the after-validator, downstream
+# of its own slice. What the before-slice bounds is the number of RAW
+# requirement payloads pydantic validates against the field annotation
+# (``RequirementEvidence``). That is what these tests count.
+#
+# The counting mechanism is a ``dict`` subclass that records each read of its
+# own contents. Pydantic only reads a mapping it is actually validating, so the
+# number of DISTINCT payloads touched is exactly the number of items validated.
+
+
+class _CountingPayload(dict[str, object]):
+    """A requirement payload that records when pydantic reads it."""
+
+    def __init__(self, payload: dict[str, object], index: int, seen: set[int]) -> None:
+        super().__init__(payload)
+        self._index = index
+        self._seen = seen
+
+    def keys(self) -> Any:
+        self._seen.add(self._index)
+        return super().keys()
+
+    def __getitem__(self, key: str) -> object:
+        self._seen.add(self._index)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: object = None) -> object:
+        self._seen.add(self._index)
+        return super().get(key, default)
+
+
+def _counted_validate(count: int, key: str = "requirements") -> set[int]:
+    """Validate ``count`` items through ``EvidenceObjectIngest`` and return the
+    set of item indices pydantic actually looked at."""
+    seen: set[int] = set()
+    base: dict[str, object] = (
+        {"requirement": "x"} if key == "requirements" else {"theme": "motivation"}
+    )
+    payload = {
+        key: [_CountingPayload(dict(base), i, seen) for i in range(count)],
+    }
+    EvidenceObjectIngest.model_validate(payload)
+    return seen
+
+
+def test_requirements_beyond_the_bound_are_never_validated_at_all() -> None:
+    """The DoS bound, stated as a COUNT of validations rather than as an output
+    length. Deleting the ``mode="before"`` slice makes this fail (200 items
+    validated instead of 64) while every output-length assertion above stays
+    green."""
+    seen = _counted_validate(200)
+    assert len(seen) <= MAX_REQUIREMENTS, (
+        f"pydantic validated {len(seen)} requirement payloads; the "
+        f"mode='before' slice must bound it at {MAX_REQUIREMENTS}"
+    )
+    assert seen == set(range(MAX_REQUIREMENTS)), (
+        "the bound must keep the FIRST MAX_REQUIREMENTS items, in order — a "
+        "slice from the wrong end silently reorders the LLM's output"
+    )
+
+
+def test_cover_letter_evidence_beyond_the_bound_is_never_validated_at_all() -> None:
+    """The same slice covers ``cover_letter_evidence``; without a count, a
+    mutation that drops that key from the loop is equally invisible."""
+    seen = _counted_validate(200, key="cover_letter_evidence")
+    assert seen == set(range(MAX_REQUIREMENTS))
+
+
+def test_a_payload_at_the_bound_is_validated_in_full() -> None:
+    """Both sides of the boundary. Pins that the slice is not over-eager: an
+    at-the-bound payload must be validated item-for-item, so a mutation
+    tightening the slice (e.g. to ``MAX_REQUIREMENTS - 1``) fails here."""
+    seen = _counted_validate(MAX_REQUIREMENTS)
+    assert seen == set(range(MAX_REQUIREMENTS))
+
+
+def test_the_counting_payload_actually_counts() -> None:
+    """Falsifier for the mechanism above: if ``_CountingPayload`` recorded
+    nothing, every count assertion would pass vacuously against a deleted
+    guard."""
+    seen = _counted_validate(4)
+    assert seen == {0, 1, 2, 3}
 
 
 # ── Anti-over-rejection: the real corpus must still validate unchanged ───────

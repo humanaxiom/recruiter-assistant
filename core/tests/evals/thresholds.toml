@@ -119,11 +119,26 @@ gold_recall_min = 1.0
 # surrounding textual grounding). SINGLE SOURCE OF TRUTH NOTE, same shape as
 # fuzz_threshold above: this value must always equal
 # `src.schemas.matching.MatchWeights().evidence_min_quote_chars` (currently
-# 32). Repeated here only because thresholds.toml must be readable without
+# 16). Repeated here only because thresholds.toml must be readable without
 # importing src.* (see run_evals.py's pre-4c import-guard). Do NOT let this
 # drift from MatchWeights -- run_evals.py asserts equality between the two on
 # every gate run, the same way it does for fuzz_threshold.
-min_quote_chars = 32
+#
+# LOWERED 32 -> 16 BY HUMAN DECISION (security FINDING 4). The floor was
+# scrubbing GENUINE short evidence and demoting it met -> missing,
+# indistinguishably from a fabrication. MEASURED as blanked at 32:
+# "PhD in Computer Science" (23), "AWS Solutions Architect" (23),
+# "Postgres schema migrations" (26). 16 still rejects every degenerate case
+# the floor exists for -- "API" (3), "SQL" (3), "Kubernetes" (10).
+#
+# THIS CORPUS COULD NOT SEE THE DEFECT, AND THAT IS NOW FIXED TOO. Every gold
+# anchor was 71-123 characters, so any floor value up to 71 passed this gate
+# untouched -- the one threshold in this file whose value nothing falsified.
+# labels.json's r03_avery_thompson now carries a genuinely SHORT gold anchor
+# ("infrastructure with Terraform", 29 chars) and run_evals.py scores every
+# gold anchor through the REAL _fuzz_ratio, floor included. Raise this value
+# above 29 and the gate fails, as it always should have.
+min_quote_chars = 16
 
 [adversarial]
 # Backstop invariant (Phase-4a strengthening, 4c-required T3): an adversarial

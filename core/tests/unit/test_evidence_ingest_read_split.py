@@ -570,3 +570,85 @@ def test_shortlist_service_does_not_import_any_ingest_model(name: str) -> None:
         f"shortlist_service imported {name}; it is a READ layer, and a strict "
         "model there re-breaks retrieval of pre-existing rows"
     )
+
+
+# ── security FINDING 5 — the tolerant/strict split at the WRITE boundary ────
+#
+# The split above is enforced at exactly one point: the ``chat_json`` schema
+# argument. Everything downstream of it — ``ShortlistResultEntry.evidence``,
+# ``JobMatchResultEntry.evidence``, ``_JobScore.evidence`` and both persist
+# functions (which read those dataclasses) — was annotated with the TOLERANT
+# ``EvidenceObject``. So a tolerant, uncapped instance was TYPE-LEGAL all the
+# way to ``json.dumps`` and into Postgres; the only thing preventing it was
+# that both producers happen to funnel through ``_stage3_per_candidate``.
+#
+# No live bypass exists today. The point is that the split should be
+# STRUCTURAL rather than a convention a future producer can miss without mypy
+# saying anything. ``verify_evidence`` and ``stage4_combine`` are generic in
+# the evidence type, so ingest-ness survives the whole pipeline instead of
+# being widened away at stage 3's return.
+#
+# These tests read ANNOTATIONS, so the mutation they kill — swapping the write
+# boundary back to ``EvidenceObject`` — fails pytest and not only mypy. A
+# type-level-only guarantee is invisible to the ranking gate.
+
+WRITE_BOUNDARY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ShortlistResultEntry", "evidence"),
+    ("JobMatchResultEntry", "evidence"),
+    ("_JobScore", "evidence"),
+)
+
+
+@pytest.mark.parametrize(
+    "dataclass_name, field", WRITE_BOUNDARY_FIELDS, ids=[f"{n}.{f}" for n, f in WRITE_BOUNDARY_FIELDS]
+)
+def test_write_boundary_dataclass_is_typed_with_the_strict_ingest_model(
+    dataclass_name: str, field: str
+) -> None:
+    """What ``persist_shortlist`` / ``persist_reverse_match`` are handed must
+    be an ingest instance by TYPE, not by the accident of who built it."""
+    import typing
+
+    from src.pipeline.matching import orchestrator
+
+    hints = typing.get_type_hints(getattr(orchestrator, dataclass_name))
+    assert hints[field] == (EvidenceObjectIngest | None), (
+        f"{dataclass_name}.{field} is {hints[field]}; the write boundary must "
+        "be EvidenceObjectIngest | None so a tolerant instance cannot reach "
+        "persist_* without mypy objecting"
+    )
+
+
+def test_stage3_returns_the_strict_model_so_ingest_ness_is_not_widened_away(
+) -> None:
+    """The load-bearing link. If ``_stage3_per_candidate`` declares
+    ``EvidenceObject | None`` the write-boundary annotations above become
+    unsatisfiable and someone widens THEM back instead."""
+    import typing
+
+    from src.pipeline.matching import orchestrator
+
+    hints = typing.get_type_hints(orchestrator._stage3_per_candidate)
+    assert hints["return"] == (EvidenceObjectIngest | None)
+
+
+def test_verify_evidence_preserves_the_model_class_it_was_given() -> None:
+    """The runtime half of the same guarantee: ``verify_evidence`` is generic
+    because it round-trips through ``model_copy``, which preserves the class.
+    An implementation that rebuilt an ``EvidenceObject`` would silently
+    downgrade every verified object to the tolerant model."""
+    from src.pipeline.matching.stages import verify_evidence
+
+    strict = EvidenceObjectIngest.model_validate(
+        {
+            "requirements": [
+                {"requirement": "Python", "status": "met", "evidence": "x"}
+            ]
+        }
+    )
+    out = verify_evidence(strict, {})
+    assert type(out) is EvidenceObjectIngest
+    assert type(out.requirements[0]) is RequirementEvidenceIngest
+
+    tolerant = EvidenceObject.model_validate({"requirements": []})
+    assert type(verify_evidence(tolerant, {})) is EvidenceObject

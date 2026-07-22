@@ -40,6 +40,24 @@
     "  (must fail >= evidence_verify_fuzz) and ~0.87 (must pass). Fixture-only;",
     "  no scoring logic here.",
     "",
+    "--- ADR-022 hardening, security FINDING 4 (SHORT gold anchor) ---",
+    "r03_avery_thompson carries a deliberately SHORT gold anchor:",
+    "  Terraform -> 'infrastructure with Terraform' (29 chars), an exact",
+    "  substring of its cited chunk c_004. It exists to defend",
+    "  MatchWeights.evidence_min_quote_chars, which the corpus previously could",
+    "  not see at all: every other gold anchor is 71-123 characters, more than",
+    "  twice the old 32-char floor, so ANY floor value up to 71 passed the whole",
+    "  ranking-evals gate untouched. MEASURED consequence of that blind spot:",
+    "  at 32, genuine short credentials -- 'PhD in Computer Science' (23),",
+    "  'AWS Solutions Architect' (23), 'Postgres schema migrations' (26) -- were",
+    "  blanked and demoted met -> missing, indistinguishably from fabrication.",
+    "  The human decision lowered the floor to 16; this anchor is what makes a",
+    "  revert of that decision FAIL the corpus instead of passing it silently.",
+    "  It is scored through the REAL _fuzz_ratio (floor included) by",
+    "  run_evals.py's _assert_gold_anchor_text_survives_the_verifier, not merely",
+    "  length-checked -- a length assertion would pass a verifier that ignores",
+    "  the floor entirely.",
+    "",
     "--- Phase-4a FALSIFIABILITY hardening (round 3) ---",
     "negative_evidence: chunk_id -> a FABRICATED quote that a correct",
     "  anti-fabrication verifier MUST FAIL to verify against that chunk (score",
@@ -443,7 +461,10 @@
     "r03_avery_thompson": {
       "tag": "strong",
       "fixture": "resumes/r03_avery_thompson.json",
-      "expected_rank_band": { "min": 1, "max": 9 }
+      "expected_rank_band": { "min": 1, "max": 9 },
+      "gold_evidence": {
+        "Terraform": "infrastructure with Terraform"
+      }
     },
     "r04_morgan_lee": {
       "tag": "borderline",

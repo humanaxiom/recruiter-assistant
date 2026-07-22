@@ -68,10 +68,17 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    min_completeness_in_topk floor). Gates the
                                    extractor's RECALL, not just the verifier's
                                    precision.
-    min_quote_chars = 32        -- == MatchWeights.evidence_min_quote_chars.
+    min_quote_chars = 16        -- == MatchWeights.evidence_min_quote_chars.
                                    Floor below which a "verified" evidence
                                    quote is too short to be meaningful
-                                   evidence (ADR-022 hardening).
+                                   evidence (ADR-022 hardening). LOWERED
+                                   32 -> 16 by human decision (security
+                                   FINDING 4): at 32 it blanked genuine short
+                                   credentials ("PhD in Computer Science", 23)
+                                   and demoted them met -> missing. Defended
+                                   by r03's short gold anchor, scored through
+                                   the real _fuzz_ratio -- see
+                                   _assert_gold_anchor_text_survives_the_verifier.
   [adversarial]
     must_not_surface_in_topk    -- r09 (the keyword-stuffer) must never appear
                                    in the top-k. Same for every fixture flagged
@@ -458,6 +465,9 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     gold_recall_min = float(thresholds["evidence"]["gold_recall_min"])
     _assert_gold_recall(scored, gold_recall_min, verify_fuzz)
 
+    # ── the gold anchor TEXT itself, through the real verifier ─────────────
+    _assert_gold_anchor_text_survives_the_verifier(corpus, verify_fuzz)
+
     # ── ordering_controls ──────────────────────────────────────────────────
     if thresholds["ordering_controls"]["enforce"]:
         min_gap = float(thresholds["ordering_controls"]["min_score_gap"])
@@ -821,6 +831,80 @@ def _assert_gold_recall(
     assert (
         recall >= gold_recall_min
     ), f"gold_recall={recall:.3f} ({recovered}/{total}) < {gold_recall_min}"
+
+
+def _assert_gold_anchor_text_survives_the_verifier(
+    corpus: Corpus, verify_fuzz: float
+) -> None:
+    """Every gold anchor's own TEXT, run through the REAL verifier.
+
+    ``_assert_gold_recall`` above reads only the anchor KEYS: the stand-in
+    extractor quotes a whole chunk, so the anchor STRING never reaches
+    ``verify_evidence`` and its LENGTH is gated by nothing. That is exactly why
+    ``min_quote_chars`` was the one threshold in thresholds.toml whose value no
+    fixture could falsify — every anchor was 71-123 characters, so any floor up
+    to 71 passed this gate untouched (security FINDING 4).
+
+    This loop closes that. Each anchor is submitted as the quote for its own
+    cited chunk and must come back UNBLANKED and still ``met``. Because
+    ``verify_evidence`` applies the minimum-quote-length floor, r03's short
+    29-char anchor fails here at any floor above 29 — which is what makes the
+    human's 32 -> 16 decision a corpus-enforced value rather than a comment.
+    """
+    from src.pipeline.matching.stages import verify_evidence
+    from src.schemas.matching import (
+        EvidenceObject,
+        RequirementEvidence,
+    )
+
+    labels = _labels()
+    parsed_by_id = {r.resume_id: r.parsed for r in corpus.resumes}
+    checked = 0
+    shortest = None
+    for rid, entry in labels["resumes"].items():
+        gold = entry.get("gold_evidence", {})
+        if not gold:
+            continue
+        parsed = parsed_by_id[rid]
+        chunks_by_id = {
+            c["id"]: c["text"] for c in (parsed.get("chunks") or []) if c.get("id")
+        }
+        skill_ids = {
+            s["name"]: s.get("evidence_chunk_ids", []) for s in parsed.get("skills", [])
+        }
+        for skill_name, quote in gold.items():
+            cited = skill_ids.get(skill_name, [])
+            assert cited, f"{rid}: gold anchor {skill_name!r} cites no chunk"
+            verified = verify_evidence(
+                EvidenceObject(
+                    requirements=[
+                        RequirementEvidence(
+                            requirement=skill_name,
+                            status="met",
+                            evidence=quote,
+                            evidence_chunk_ids=list(cited),
+                            confidence=0.9,
+                        )
+                    ]
+                ),
+                chunks_by_id,
+            )
+            req = verified.requirements[0]
+            assert req.evidence == quote and req.status == "met", (
+                f"{rid}: gold anchor {skill_name!r} ({len(quote)} chars) was "
+                "SCRUBBED by the verifier — it is a genuine exact substring of "
+                "its cited chunk, so either the floor is too high or the "
+                "fixture is wrong. Do NOT relax a threshold to clear this."
+            )
+            checked += 1
+            shortest = len(quote) if shortest is None else min(shortest, len(quote))
+
+    assert checked > 0, "no gold anchors were verified"
+    assert shortest is not None and shortest < 32, (
+        f"shortest gold anchor is {shortest} chars; with none below the "
+        "pre-FINDING-4 floor of 32 the corpus cannot detect a revert of the "
+        "min_quote_chars decision"
+    )
 
 
 def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:
