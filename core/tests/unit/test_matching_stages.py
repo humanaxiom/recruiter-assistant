@@ -1768,6 +1768,92 @@ def test_the_scrub_makes_the_floor_strictly_harder_to_pad_past(
     assert _fuzz_ratio(_scrub(padded).lower(), _FLOOR_CHUNK.lower()) == 0.0
 
 
+# ── the scrub must be SYMMETRIC, or it becomes an over-rejection ────────────
+#
+# A defect the FINDING 1 fix INTRODUCES if the scrub is applied on one side
+# only. The quote is scrubbed at the schema boundary; the CHUNK is not — it
+# comes from ``resumes.parsed``, and ``parsing/extract.py::_sanitize`` strips
+# NULs and nothing else. So a résumé whose extracted text carries SOFT HYPHENS
+# (which is what a PDF emits at its line-break points) yields a haystack full
+# of U+00AD and a needle with every one of them removed, and the two no longer
+# match character-for-character.
+#
+# MEASURED on a 148-char chunk, needle = the same text scrubbed:
+#
+#     SHY every 60 chars (n=2)    0.986  verifies
+#     SHY every 20 chars (n=7)    0.956  verifies
+#     SHY every  8 chars (n=18)   0.892  verifies
+#     SHY every  5 chars (n=29)   0.838  SCRUBBED AS FABRICATION
+#     SHY every  2 chars (n=73)   0.671  SCRUBBED AS FABRICATION
+#
+# Real PDF hyphenation is far sparser than the break-even, so this is a narrow
+# hole rather than a live corpus failure — but it is a hole of exactly the kind
+# FINDING 4 was raised about (genuine evidence blanked and demoted, looking to
+# a recruiter like a fabrication), and it did not exist before this change.
+#
+# The fix is to scrub BOTH sides inside ``_fuzz_ratio``, exactly as ``.lower()``
+# and ``_collapse_whitespace`` already are. It is a normalisation, not a
+# relaxation: it removes only invisible characters, from needle and haystack
+# alike, so it cannot turn a non-span into a span — the anti-relaxation arm
+# below is what holds that claim to account.
+
+
+def _hyphenate(text: str, every: int) -> str:
+    """Insert a SOFT HYPHEN every ``every`` characters — a PDF line-break
+    artefact, rendered as nothing at all."""
+    shy = chr(0x00AD)
+    out: list[str] = []
+    for i, ch in enumerate(text):
+        out.append(ch)
+        if i and i % every == 0:
+            out.append(shy)
+    return "".join(out)
+
+
+@pytest.mark.parametrize("every", [60, 20, 8, 5, 2], ids=lambda n: f"every_{n}")
+def test_a_scrubbed_quote_still_verifies_against_an_unscrubbed_chunk(
+    every: int,
+) -> None:
+    """Over-rejection guard for the asymmetry. At every density — including the
+    two that measured BELOW the 0.85 bar with a one-sided scrub — a quote that
+    is the chunk itself must verify at 1.000."""
+    dirty_chunk = _hyphenate(_FLOOR_CHUNK, every)
+    quote = _scrub(dirty_chunk)
+    assert quote != dirty_chunk, "otherwise this case pins nothing"
+    assert _fuzz_ratio(quote.lower(), dirty_chunk.lower()) == 1.0
+
+
+@pytest.mark.parametrize("every", [60, 8, 2], ids=lambda n: f"every_{n}")
+def test_a_scrubbed_span_still_verifies_against_an_unscrubbed_chunk(
+    every: int,
+) -> None:
+    """The same, for a genuine SPAN rather than the whole chunk — the shape a
+    real evidence quote takes."""
+    dirty_chunk = _hyphenate(_FLOOR_CHUNK, every)
+    span = _scrub(_hyphenate(_FLOOR_CHUNK[:70], every))
+    assert _fuzz_ratio(span.lower(), dirty_chunk.lower()) == 1.0
+
+
+@pytest.mark.parametrize("every", [60, 8, 2], ids=lambda n: f"every_{n}")
+def test_symmetric_scrubbing_does_not_relax_the_superset_guard(every: int) -> None:
+    """The anti-relaxation arm. Normalising both sides must not let appended
+    fabrication through: the visible fabrication survives the scrub on the
+    needle, so the collapsed needle is still longer than the collapsed
+    haystack and the length guard still rejects it at 0.0."""
+    dirty_chunk = _hyphenate(_FLOOR_CHUNK, every)
+    quote = _scrub(dirty_chunk) + " and led a team of twelve engineers"
+    assert _fuzz_ratio(quote.lower(), dirty_chunk.lower()) == 0.0
+
+
+def test_symmetric_scrubbing_does_not_relax_the_floor() -> None:
+    """A haystack made ENTIRELY of invisibles scrubs to nothing, and a needle
+    that scrubs to nothing hits the empty-needle guard. Neither may score."""
+    invisible_only = chr(0x200B) * 200
+    assert _fuzz_ratio("Built API gateways", invisible_only) == 0.0
+    assert _fuzz_ratio(invisible_only, _FLOOR_CHUNK) == 0.0
+    assert _fuzz_ratio(invisible_only, invisible_only) == 0.0
+
+
 def test_verify_evidence_never_surfaces_a_bidi_override_in_a_quote() -> None:
     """End-to-end. The measured attack is
     ``chunk[:100] + U+202E + "detacirbaf"``: 111 characters, clears the floor
