@@ -193,6 +193,12 @@ def _row_to_job_match_entry(row: Any) -> JobMatchEntry:
         # table never folded score_structured/score_evidence into the jsonb,
         # so ScoreBreakdown.model_validate runs on the jsonb AS-IS.
         score_breakdown=ScoreBreakdown.model_validate(sb),
+        # TOLERANT model, deliberately (ADR-022 follow-up #3). This validate is
+        # uncaught and runs on bytes already committed to JSONB, so a size cap
+        # here is a 500 on the whole reverse-match response for the résumé —
+        # and there is no migration framework to clean the row up with. A cap
+        # prevents a bad WRITE; it buys nothing on READ. Never swap in
+        # EvidenceObjectIngest.
         evidence=EvidenceObject.model_validate(ev) if ev is not None else None,
         requirement_count=raw["requirement_count"],
         must_have_count=raw["must_have_count"],
@@ -314,7 +320,13 @@ def _parse_entry_jsonb(raw: dict[str, Any]) -> None:
     ``persist_shortlist`` (4d) FOLDS ``score_structured``/``score_evidence``
     into the ``score_breakdown`` jsonb (the table has no dedicated columns).
     ``ScoreBreakdown`` is ``extra="forbid"``, so those two folded keys MUST be
-    stripped before validating or every 4d row raises ValidationError."""
+    stripped before validating or every 4d row raises ValidationError.
+
+    Same rule for the evidence jsonb: it is validated with the TOLERANT
+    ``EvidenceObject``, never an ingest variant. Both validates below are
+    uncaught and run on already-stored bytes, so any length cap reached from
+    here 500s the entire shortlist for the job — permanently, since nothing
+    can rewrite the row."""
     sb = raw["score_breakdown"]
     if isinstance(sb, str):
         sb = json.loads(sb)

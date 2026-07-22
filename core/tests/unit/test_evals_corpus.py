@@ -925,6 +925,7 @@ _THRESHOLD_KEYS: list[tuple[str, str]] = [
     ("evidence", "min_completeness_in_topk"),
     ("evidence", "negative_evidence_must_fail"),
     ("evidence", "gold_recall_min"),
+    ("evidence", "min_quote_chars"),
     ("adversarial", "must_not_surface_in_topk"),
     ("ordering_controls", "enforce"),
     ("ordering_controls", "pairs"),

@@ -25,20 +25,38 @@ two corrected behaviours pinned by the Phase 4c RED tests:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 from uuid import UUID
 
 from rapidfuzz import fuzz
 
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
+    SCRUBBED_CONFIDENCE_CAP,
     EvidenceObject,
     MatchWeights,
     ScoreBreakdown,
     SkillContribution,
+    _strip_control_chars,
 )
+
+# security FINDING 5 — the tolerant/strict evidence split must be STRUCTURAL,
+# not a convention. ``EvidenceObjectIngest`` is the strict LLM-boundary model
+# and ``EvidenceObject`` the tolerant read/DTO one; before this, everything
+# downstream of the single ``chat_json`` call was annotated with the TOLERANT
+# model, so an uncapped instance was TYPE-LEGAL all the way into
+# ``persist_shortlist``'s ``json.dumps``. Nothing but the accident of who
+# builds it kept one out.
+#
+# ``verify_evidence`` and ``stage4_combine`` are therefore generic in the
+# evidence type. Both round-trip through ``model_copy``, which preserves the
+# class, so the guarantee is real at runtime as well as in mypy: what goes in
+# strict comes out strict, and the write boundary can demand strict without
+# forcing a cast.
+_E = TypeVar("_E", bound=EvidenceObject)
 
 _LEVEL_ORDER: Mapping[str, int] = {
     "high_school": 1,
@@ -241,7 +259,36 @@ def normalise_vector_scores(scores: list[float]) -> list[float]:
 # ---------------- evidence verification ----------------
 
 
-def _fuzz_ratio(needle: str, haystack: str) -> float:
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Normalise runs of whitespace to a single space, then strip.
+
+    Applied SYMMETRICALLY to the needle and the haystack, and to every stage
+    of ``_fuzz_ratio`` — the length floor, the length guard AND the string
+    handed to ``partial_ratio`` — exactly like ``.lower()`` already is. It is
+    a normalisation, not a relaxation: it cannot turn a non-span into a span,
+    only let a genuine span score as one.
+
+    Applying it to the guard alone (the original shape) was not enough, and
+    the corpus says so. Measured on r01's real 148-char Python chunk, with
+    quotes that collapse to a verbatim span in every case, ``partial_ratio``
+    on the RAW strings scored: whole chunk triple-spaced 0.797 and the gold
+    anchor with 4-space column padding 0.826 — both BELOW the 0.85 bar, i.e.
+    real evidence scrubbed as fabrication — and the newline-wrapped anchor
+    0.859, nine thousandths from the same fate. Collapsed on both sides all
+    six re-renders score 1.000.
+    """
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _fuzz_ratio(
+    needle: str,
+    haystack: str,
+    *,
+    min_chars: int = DEFAULT_WEIGHTS.evidence_min_quote_chars,
+) -> float:
     """Fuzzy substring score in [0, 1] via ``rapidfuzz.fuzz.partial_ratio``.
 
     ``partial_ratio`` scores the best-matching WINDOW of ``haystack`` against
@@ -249,25 +296,77 @@ def _fuzz_ratio(needle: str, haystack: str) -> float:
     cited chunk". BLOCKER #6: it rejects every fabricated corpus quote while
     accepting the gold anchors, unlike ``fuzz.WRatio`` (leaks r02's fabrication
     at 0.855) or ``fuzz.ratio`` (rejects gold anchors at 0.648/0.796).
+
+    Both sides are whitespace-collapsed first (see ``_collapse_whitespace``),
+    and every check below — including ``partial_ratio`` itself — runs on the
+    collapsed forms.
+
+    Two guards run BEFORE ``partial_ratio``, because it is blind to both
+    (ADR-022 follow-up items #1 and #4):
+
+    * **Minimum quote length** (#4). Anything under ``min_chars`` scores 0.0.
+      ``"API"`` otherwise scores 1.000 against every chunk containing it, so a
+      bare token is indistinguishable from real evidence. Measured on the
+      COLLAPSED needle, not the raw one: ``"API"`` followed by 30 spaces is 33
+      raw characters and cleared a raw floor while carrying three characters
+      of evidence. ``verify_evidence`` happens to strip before calling, but a
+      guard that only holds because of what its caller does first is not a
+      guard — this function's contract stands on its own.
+    * **Length guard** (#1). ``partial_ratio`` scores the best-matching WINDOW
+      of the longer string, so a quote CONTAINING the cited chunk verbatim
+      plus arbitrary appended fabrication scores 1.000 at any append length.
+      A quote is a SPAN of exactly one cited chunk, and a span cannot be
+      longer than the thing it spans — so a quote longer than the chunk is
+      rejected outright, at any excess. This is a structural invariant, NOT a
+      tunable ratio: a threshold like ``k = 1.05`` leaves a small-append window
+      open (a +1 char append on r01's 148-char chunk lands at 1.007) and the
+      fabrication rides through it. Cross-chunk concatenation is rejected as a
+      consequence, which is intended.
+
+    Both sides are also scrubbed of the invisible/bidi class
+    (``schemas.matching._strip_control_chars``) before any of the above, and
+    SYMMETRY there is load-bearing. The QUOTE is already scrubbed at the schema
+    boundary; the CHUNK is not — it comes from ``resumes.parsed``, and
+    ``parsing/extract.py::_sanitize`` strips NULs and nothing else. So a résumé
+    whose extracted text carries SOFT HYPHENS (what a PDF emits at its
+    line-break points) would give a haystack full of U+00AD and a needle with
+    every one removed. MEASURED on a 148-char chunk, needle = the same text
+    scrubbed: SHY every 60 chars scores 0.986, every 20 chars 0.956, every 8
+    chars 0.892 — but every 5 chars 0.838 and every 2 chars 0.671, i.e. the
+    chunk's own text rejected as a fabrication. Scrubbing both sides is a
+    normalisation exactly like ``.lower()`` and ``_collapse_whitespace``: it
+    removes only invisible characters, from needle and haystack alike, so it
+    cannot turn a non-span into a span. Appended VISIBLE fabrication survives
+    the scrub on the needle and still trips the length guard.
     """
+    needle = _collapse_whitespace(_strip_control_chars(needle))
+    haystack = _collapse_whitespace(_strip_control_chars(haystack))
     if not needle:
+        return 0.0
+    if len(needle) < min_chars:
+        return 0.0
+    if len(needle) > len(haystack):
         return 0.0
     return float(fuzz.partial_ratio(needle, haystack)) / 100.0
 
 
 def verify_evidence(
-    evidence: EvidenceObject,
+    evidence: _E,
     chunks_by_id: Mapping[str, str],
     *,
     weights: MatchWeights = DEFAULT_WEIGHTS,
-) -> EvidenceObject:
+) -> _E:
     """Strip hallucinated chunk_ids; downgrade requirements whose ``evidence``
     quote doesn't actually appear in any cited chunk (fuzzy-match threshold
     ``weights.evidence_verify_fuzz``).
 
-    Returns a new EvidenceObject — never mutates input.
+    Returns a new evidence object of the SAME CLASS it was given — never
+    mutates input. Generic rather than widened to ``EvidenceObject`` so an
+    ``EvidenceObjectIngest`` survives verification as an ingest instance and
+    the write boundary can be typed strictly (security FINDING 5).
     """
     quote_threshold = weights.evidence_verify_fuzz
+    min_chars = weights.evidence_min_quote_chars
     cleaned: list[Any] = []
     for req in evidence.requirements:
         good_ids = [cid for cid in req.evidence_chunk_ids if cid in chunks_by_id]
@@ -275,7 +374,8 @@ def verify_evidence(
         if new_req.evidence and good_ids:
             quoted = new_req.evidence.lower().strip()
             if not any(
-                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower(), min_chars=min_chars)
+                >= quote_threshold
                 for cid in good_ids
             ):
                 # Quote not found in any cited chunk — fabrication likely.
@@ -285,7 +385,7 @@ def verify_evidence(
                         "status": (
                             "missing" if new_req.status == "met" else new_req.status
                         ),
-                        "confidence": min(new_req.confidence, 0.3),
+                        "confidence": min(new_req.confidence, SCRUBBED_CONFIDENCE_CAP),
                     }
                 )
         elif new_req.evidence and not good_ids:
@@ -297,7 +397,7 @@ def verify_evidence(
                     "status": (
                         "missing" if new_req.status == "met" else new_req.status
                     ),
-                    "confidence": min(new_req.confidence, 0.3),
+                    "confidence": min(new_req.confidence, SCRUBBED_CONFIDENCE_CAP),
                 }
             )
         cleaned.append(new_req)
@@ -313,15 +413,22 @@ def verify_evidence(
         if new_cle.evidence and good_ids:
             quoted = new_cle.evidence.lower().strip()
             if not any(
-                _fuzz_ratio(quoted, chunks_by_id[cid].lower()) >= quote_threshold
+                _fuzz_ratio(quoted, chunks_by_id[cid].lower(), min_chars=min_chars)
+                >= quote_threshold
                 for cid in good_ids
             ):
                 new_cle = new_cle.model_copy(
-                    update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
+                    update={
+                        "evidence": "",
+                        "confidence": min(new_cle.confidence, SCRUBBED_CONFIDENCE_CAP),
+                    }
                 )
         elif new_cle.evidence and not good_ids:
             new_cle = new_cle.model_copy(
-                update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
+                update={
+                    "evidence": "",
+                    "confidence": min(new_cle.confidence, SCRUBBED_CONFIDENCE_CAP),
+                }
             )
         cleaned_cover.append(new_cle)
 
@@ -334,29 +441,29 @@ def verify_evidence(
 
 
 @dataclass(frozen=True)
-class _CombineInput:
+class _CombineInput(Generic[_E]):
     resume_id: UUID
     structured: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    evidence: _E | None
 
 
 @dataclass(frozen=True)
-class _CombineEntry:
+class _CombineEntry(Generic[_E]):
     resume_id: UUID
     rank: int
     score_final: float
     score_structured: float
     score_evidence: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    evidence: _E | None
 
 
 def stage4_combine(
-    candidates: Iterable[_CombineInput], weights: MatchWeights
-) -> list[_CombineEntry]:
+    candidates: Iterable[_CombineInput[_E]], weights: MatchWeights
+) -> list[_CombineEntry[_E]]:
     """Combine structured + evidence into a final score and rank descending."""
-    entries: list[_CombineEntry] = []
+    entries: list[_CombineEntry[_E]] = []
     for c in candidates:
         evidence_completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)

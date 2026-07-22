@@ -55,10 +55,17 @@ When gates fail, read the failure output, fix ONLY what failed, re-run `make gat
 |---|---|
 | `/gates` | Run full gate suite, report results table |
 | `/review-loop <task>` | Run iterate-until-green cycle on current branch |
-| `/memory-query <text>` | Vector-search Neo4j for similar prior artifacts before implementing |
 
 ## Before implementing anything new
 
-1. `curl localhost:8000/memory/similar?q=<task>` — check if similar work exists in graph memory
-2. Read the relevant ADRs in `docs/adr/`
-3. Check `docker compose ps` — stack must be healthy for integration tests
+1. Read `HANDOFF.md` (state, environment quirks, exact next step) and the relevant ADRs in `docs/adr/` —
+   this is the actual source of truth for prior/similar work in this repo.
+2. Check `docker compose ps` — stack must be healthy for integration tests
+
+A `/memory-query` command and a `/memory/similar` route were part of the golden template's demo app,
+deleted in Phase 0 along with the rest of the template's task/lineage scaffolding
+(`core/tests/unit/test_api.py`'s `DEMO_ROUTES` asserts the route's absence; `core/src/agents/` and the
+`BaseAgent._memory_context()` retrieval the command claimed ran inside every subagent are gone too).
+There is no graph-memory similarity endpoint in this codebase — do not attempt to curl it, and do not
+re-add the command without building the feature first. The command file was removed in the ADR-023
+branch; until Phase 0 it had been instructing every session to run a mandated step that could not work.

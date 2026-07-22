@@ -91,6 +91,10 @@ def test_match_evidence_and_motivation_confidence_defaults() -> None:
     assert s.match_evidence_met_confidence == 0.7
     assert s.match_evidence_partial_weight == 0.5
     assert s.match_evidence_verify_fuzz == 0.85
+    # Lowered 32 -> 16 by human decision (security FINDING 4): at 32 the floor
+    # blanked genuine short credentials ("PhD in Computer Science", 23) and
+    # demoted them met -> missing, indistinguishably from fabrication.
+    assert s.match_evidence_min_quote_chars == 16
     assert s.match_motivation_min_confidence == 0.7
 
 
@@ -140,6 +144,7 @@ def test_match_llm_concurrency_and_max_tokens_defaults() -> None:
         "match_evidence_met_confidence",
         "match_evidence_partial_weight",
         "match_evidence_verify_fuzz",
+        "match_evidence_min_quote_chars",
         "match_motivation_min_confidence",
         "match_family_weight",
         "match_non_matchable_families",
@@ -199,6 +204,7 @@ def test_weights_from_settings_fields_equal_settings_values() -> None:
     assert weights.evidence_met_confidence == s.match_evidence_met_confidence
     assert weights.evidence_partial_weight == s.match_evidence_partial_weight
     assert weights.evidence_verify_fuzz == s.match_evidence_verify_fuzz
+    assert weights.evidence_min_quote_chars == s.match_evidence_min_quote_chars
     assert weights.motivation_min_confidence == s.match_motivation_min_confidence
 
 
@@ -291,6 +297,7 @@ def test_constructor_override_of_scoring_curve_tunables_flows_through() -> None:
             match_evidence_met_confidence=0.8,
             match_evidence_partial_weight=0.25,
             match_evidence_verify_fuzz=0.95,
+            match_evidence_min_quote_chars=64,
             match_motivation_min_confidence=0.6,
         )
     )
@@ -305,6 +312,7 @@ def test_constructor_override_of_scoring_curve_tunables_flows_through() -> None:
     assert weights.evidence_met_confidence == 0.8
     assert weights.evidence_partial_weight == 0.25
     assert weights.evidence_verify_fuzz == 0.95
+    assert weights.evidence_min_quote_chars == 64
     assert weights.motivation_min_confidence == 0.6
 
 
@@ -324,3 +332,58 @@ def test_env_override_of_match_evidence_verify_fuzz_flows_into_weights(
     monkeypatch.setenv("MATCH_EVIDENCE_VERIFY_FUZZ", "0.5")
     weights = weights_from_settings(Settings())
     assert weights.evidence_verify_fuzz == pytest.approx(0.5)
+
+
+def test_env_override_of_match_evidence_min_quote_chars_flows_into_weights(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Mutation pin (reviewer round 2, MAJOR 1). Deleting
+    ``evidence_min_quote_chars=settings.match_evidence_min_quote_chars`` from
+    ``weights_from_settings`` used to pass the ENTIRE suite: the knob was
+    declared, documented and defaulted, but nothing connected it to the
+    ``MatchWeights`` the verifier actually reads, so ``MATCH_EVIDENCE_MIN_
+    QUOTE_CHARS`` could silently become a no-op while looking configurable.
+
+    Its two siblings — ``evidence_verify_fuzz`` above and
+    ``evidence_met_confidence`` — were both pinned; this one was in none of
+    the three field lists in this file either. The value chosen differs from
+    the default (16) in BOTH directions from any plausible typo, so a mapping
+    that reads the wrong setting cannot coincidentally pass.
+    """
+    monkeypatch.setenv("MATCH_EVIDENCE_MIN_QUOTE_CHARS", "77")
+    weights = weights_from_settings(Settings())
+    assert weights.evidence_min_quote_chars == 77
+
+
+def test_env_override_of_match_evidence_min_quote_chars_reaches_the_verifier(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The knob is only real if the wired value changes behaviour. At a floor
+    of 200 a genuine 71-char verbatim span must be scrubbed; at the default 16
+    the same span verifies."""
+    from src.pipeline.matching.stages import verify_evidence
+    from src.schemas.matching import EvidenceObject, RequirementEvidence
+
+    chunk = (
+        "Designed and shipped Python REST APIs consumed by 40+ internal "
+        "services at Nimbus Analytics Inc."
+    )
+    quote = "Designed and shipped Python REST APIs consumed by 40+ internal services"
+
+    def _run(weights: MatchWeights) -> str:
+        req = RequirementEvidence(
+            requirement="Python",
+            status="met",
+            evidence=quote,
+            evidence_chunk_ids=["c_001"],
+            confidence=0.9,
+        )
+        cleaned = verify_evidence(
+            EvidenceObject(requirements=[req]), {"c_001": chunk}, weights=weights
+        )
+        return cleaned.requirements[0].evidence
+
+    assert _run(weights_from_settings(Settings())) == quote
+
+    monkeypatch.setenv("MATCH_EVIDENCE_MIN_QUOTE_CHARS", "200")
+    assert _run(weights_from_settings(Settings())) == ""

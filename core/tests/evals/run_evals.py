@@ -68,6 +68,17 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    min_completeness_in_topk floor). Gates the
                                    extractor's RECALL, not just the verifier's
                                    precision.
+    min_quote_chars = 16        -- == MatchWeights.evidence_min_quote_chars.
+                                   Floor below which a "verified" evidence
+                                   quote is too short to be meaningful
+                                   evidence (ADR-022 hardening). LOWERED
+                                   32 -> 16 by human decision (security
+                                   FINDING 4): at 32 it blanked genuine short
+                                   credentials ("PhD in Computer Science", 23)
+                                   and demoted them met -> missing. Defended
+                                   by r03's short gold anchor, scored through
+                                   the real _fuzz_ratio -- see
+                                   _assert_gold_anchor_text_survives_the_verifier.
   [adversarial]
     must_not_surface_in_topk    -- r09 (the keyword-stuffer) must never appear
                                    in the top-k. Same for every fixture flagged
@@ -169,6 +180,7 @@ import json
 import re
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -417,6 +429,11 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     assert (
         verify_fuzz == MatchWeights().evidence_verify_fuzz
     ), "thresholds.toml fuzz_threshold drifted from MatchWeights.evidence_verify_fuzz"
+    min_quote_chars = int(thresholds["evidence"]["min_quote_chars"])
+    assert min_quote_chars == MatchWeights().evidence_min_quote_chars, (
+        "thresholds.toml min_quote_chars drifted from "
+        "MatchWeights.evidence_min_quote_chars"
+    )
     for m in topk:
         surviving = [
             r
@@ -444,10 +461,14 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     # ── negative_evidence_must_fail ────────────────────────────────────────
     if thresholds["evidence"]["negative_evidence_must_fail"]:
         _assert_fabrications_are_scrubbed(scored, weights)
+        _assert_superset_quotes_are_scrubbed(scored, weights)
 
     # ── gold_recall_min ────────────────────────────────────────────────────
     gold_recall_min = float(thresholds["evidence"]["gold_recall_min"])
     _assert_gold_recall(scored, gold_recall_min, verify_fuzz)
+
+    # ── the gold anchor TEXT itself, through the real verifier ─────────────
+    _assert_gold_anchor_text_survives_the_verifier(corpus, verify_fuzz)
 
     # ── ordering_controls ──────────────────────────────────────────────────
     if thresholds["ordering_controls"]["enforce"]:
@@ -743,6 +764,199 @@ def _score_corpus(corpus: Corpus, weights: Any) -> dict[str, _Scored]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# ADR-022 round-2 probe builders.
+#
+# EVERY invisible character below is built with ``chr()`` and never written as
+# a literal. A literal NUL broke this branch's compilation three times and a
+# literal SOFT HYPHEN in a fixture is unreviewable in a diff; the whole point
+# of these probes is invisible-character handling, so the source that builds
+# them must stay visibly auditable.
+# ---------------------------------------------------------------------------
+
+_SOFT_HYPHEN = chr(0x00AD)  # U+00AD, what a PDF emits at a line-break point
+_NEWLINE = chr(0x0A)
+
+
+def _soft_hyphenate(text: str, every: int = 5) -> str:
+    """Insert a SOFT HYPHEN every ``every`` characters (PDF line-break debris).
+
+    ADR-022 measures the resulting fuzz score against a CLEAN needle at 0.838
+    for ``every == 5`` — below the 0.85 bar, i.e. the résumé's own text
+    rejected as a fabrication — unless the invisible/bidi scrub is applied to
+    the HAYSTACK as well as the needle.
+    """
+    out: list[str] = []
+    for i, ch in enumerate(text):
+        out.append(ch)
+        if (i + 1) % every == 0:
+            out.append(_SOFT_HYPHEN)
+    return "".join(out)
+
+
+def _column_pad(text: str) -> str:
+    """Re-render with 4-space column padding (measured raw: 0.826)."""
+    return text.replace(" ", " " * 4)
+
+
+def _triple_space(text: str) -> str:
+    """Re-render triple-spaced (raw needle outgrows its chunk -> length guard)."""
+    return text.replace(" ", " " * 3)
+
+
+def _newline_wrap(text: str, width: int = 40) -> str:
+    """Hard-wrap at ``width`` columns (measured raw: 0.986 — a PASSING control)."""
+    lines: list[str] = []
+    line: list[str] = []
+    used = 0
+    for tok in text.split(" "):
+        if line and used + len(tok) > width:
+            lines.append(" ".join(line))
+            line, used = [], 0
+        line.append(tok)
+        used += len(tok) + 1
+    if line:
+        lines.append(" ".join(line))
+    return _NEWLINE.join(lines)
+
+
+# variant name -> (gold anchor, cited chunk text) -> the needle to submit.
+_RENDER_VARIANTS: dict[str, Callable[[str, str], str]] = {
+    "column_padded_4": lambda anchor, _chunk: _column_pad(anchor),
+    "triple_spaced_cited_chunk": lambda _anchor, chunk: _triple_space(chunk),
+    "newline_wrapped_40": lambda anchor, _chunk: _newline_wrap(anchor),
+}
+
+
+def _assert_quote_is_scrubbed(
+    label: str,
+    quote: str,
+    chunk_id: str,
+    chunks_by_id: dict[str, str],
+    weights: Any,
+) -> None:
+    """Submit ``quote`` as the evidence for ``chunk_id`` through the REAL
+    verifier and require it to come back blanked and demoted."""
+    from src.pipeline.matching.stages import verify_evidence
+    from src.schemas.matching import EvidenceObject, RequirementEvidence
+
+    cleaned = verify_evidence(
+        EvidenceObject(
+            requirements=[
+                RequirementEvidence(
+                    requirement=f"{label} probe",
+                    status="met",
+                    evidence=quote,
+                    evidence_chunk_ids=[chunk_id],
+                    confidence=0.9,
+                )
+            ]
+        ),
+        chunks_by_id,
+        weights=weights,
+    ).requirements[0]
+    assert cleaned.evidence == "" and cleaned.status == "missing", (
+        f"{label}: a quote of {len(quote)} chars against {chunk_id} "
+        f"({len(chunks_by_id[chunk_id])} chars) was NOT scrubbed "
+        f"(status={cleaned.status!r}, evidence={cleaned.evidence[:80]!r}...). "
+        "Do NOT relax this by weakening the probe — it is a guard regression."
+    )
+
+
+def _assert_superset_quotes_are_scrubbed(
+    scored: dict[str, _Scored], weights: Any
+) -> None:
+    """labels.json's ``superset_evidence`` + ``degenerate_evidence`` probes.
+
+    Symmetric with ``_assert_fabrications_are_scrubbed`` and gated by the same
+    ``[evidence].negative_evidence_must_fail`` key: these are fabrications too,
+    just of the two shapes ``partial_ratio`` scores 1.000 on. A SUPERSET quote
+    contains its whole cited chunk verbatim plus appended invention (ADR-022
+    follow-up #1); a DEGENERATE quote is a bare token the chunk genuinely
+    contains (follow-up #4). Neither is falsifiable by the corpus's own
+    surfaced quotes, which are byte-identical to their chunks.
+    """
+    labels = _labels()
+    n = 0
+    for rid, entry in labels["resumes"].items():
+        chunks_by_id = scored[rid].chunks_by_id
+        for probe_id, spec in entry.get("superset_evidence", {}).items():
+            cid = spec["chunk_id"]
+            assert cid in chunks_by_id, f"{rid}: superset chunk {cid} missing"
+            quote = chunks_by_id[cid]
+            other = spec.get("concat_chunk_id")
+            if other is not None:
+                assert other in chunks_by_id, f"{rid}: superset chunk {other} missing"
+                quote = f"{quote} {chunks_by_id[other]}"
+            quote += spec.get("append", "")
+            assert len(quote) > len(chunks_by_id[cid]), (
+                f"{rid}/{probe_id}: a superset probe must be strictly LONGER "
+                "than its cited chunk or it probes nothing"
+            )
+            _assert_quote_is_scrubbed(
+                f"{rid}/{probe_id}", quote, cid, chunks_by_id, weights
+            )
+            n += 1
+        for probe_id, spec in entry.get("degenerate_evidence", {}).items():
+            cid = spec["chunk_id"]
+            assert cid in chunks_by_id, f"{rid}: degenerate chunk {cid} missing"
+            quote = spec["quote"]
+            assert quote.lower() in chunks_by_id[cid].lower(), (
+                f"{rid}/{probe_id}: {quote!r} is not genuinely present in {cid} "
+                "— a degenerate probe only tests the length floor if the text "
+                "itself would otherwise score 1.000"
+            )
+            _assert_quote_is_scrubbed(
+                f"{rid}/{probe_id}", quote, cid, chunks_by_id, weights
+            )
+            n += 1
+    assert n == 4, f"expected 4 superset/degenerate probes, ran {n}"
+    _assert_a_blank_needle_never_verifies()
+
+
+def _assert_a_blank_needle_never_verifies() -> None:
+    """``_fuzz_ratio``'s empty-needle guard, probed where it is REACHABLE.
+
+    The guard is normally shadowed: with ``evidence_min_quote_chars`` at its
+    default 16 an empty needle is already rejected by the length floor one line
+    later, so deleting the guard is an EQUIVALENT mutation over the whole
+    corpus. ``evidence_min_quote_chars`` is env-settable and ``ge=0``, and at 0
+    the guard is the only thing left — ``rapidfuzz.fuzz.partial_ratio("", "")``
+    returns 100, so a whitespace-only quote against an empty chunk VERIFIES AT
+    1.000 without it.
+
+    The needle is whitespace rather than an invisible character on purpose:
+    ``CleanText`` scrubs the invisible class at the schema boundary, so an
+    all-invisible quote never reaches the verifier as a non-empty string at
+    all. ``verify_evidence`` then ``.strip()``s, which is what makes this the
+    empty-needle path rather than the floor path.
+    """
+    from src.pipeline.matching.stages import verify_evidence
+    from src.schemas.matching import EvidenceObject, MatchWeights, RequirementEvidence
+
+    blank = chr(0x09) + chr(0x20) * 4 + chr(0x0A)
+    cleaned = verify_evidence(
+        EvidenceObject(
+            requirements=[
+                RequirementEvidence(
+                    requirement="blank-needle probe",
+                    status="met",
+                    evidence=blank,
+                    evidence_chunk_ids=["c_blank"],
+                    confidence=0.9,
+                )
+            ]
+        ),
+        {"c_blank": ""},
+        weights=MatchWeights(evidence_min_quote_chars=0),
+    ).requirements[0]
+    assert cleaned.evidence == "" and cleaned.status == "missing", (
+        "a whitespace-only quote verified against an empty chunk with the "
+        "min-quote floor configured to 0 — _fuzz_ratio's empty-needle guard "
+        f"is gone (status={cleaned.status!r}, evidence={cleaned.evidence!r})"
+    )
+
+
 def _assert_fabrications_are_scrubbed(scored: dict[str, _Scored], weights: Any) -> None:
     """Every labels.json negative_evidence anchor is a FABRICATION and must be
     blanked by the verifier (score < evidence_verify_fuzz against its chunk)."""
@@ -812,6 +1026,163 @@ def _assert_gold_recall(
     assert (
         recall >= gold_recall_min
     ), f"gold_recall={recall:.3f} ({recovered}/{total}) < {gold_recall_min}"
+
+
+def _assert_gold_anchor_text_survives_the_verifier(
+    corpus: Corpus, verify_fuzz: float
+) -> None:
+    """Every gold anchor's own TEXT, run through the REAL verifier.
+
+    ``_assert_gold_recall`` above reads only the anchor KEYS: the stand-in
+    extractor quotes a whole chunk, so the anchor STRING never reaches
+    ``verify_evidence`` and its LENGTH is gated by nothing. That is exactly why
+    ``min_quote_chars`` was the one threshold in thresholds.toml whose value no
+    fixture could falsify — every anchor was 71-123 characters, so any floor up
+    to 71 passed this gate untouched (security FINDING 4).
+
+    This loop closes that. Each anchor is submitted as the quote for its own
+    cited chunk and must come back UNBLANKED and still ``met``. Because
+    ``verify_evidence`` applies the minimum-quote-length floor, r03's short
+    29-char anchor fails here at any floor above 29 — which is what makes the
+    human's 32 -> 16 decision a corpus-enforced value rather than a comment.
+
+    ADR-022 round 2 extends the same loop to the two NORMALISATIONS inside
+    ``_fuzz_ratio``, which the corpus was equally blind to for the same reason
+    (a whole-chunk quote needs no normalisation, so disabling one is a no-op):
+
+    * ``gold_anchor_render_variants`` — the anchor RE-RENDERED the way an
+      extractor emits it (column padding, hard wrapping, triple spacing),
+      against its own unmodified chunk. Falsifies the whitespace collapse.
+    * ``invisible_char_haystack`` — a CLEAN anchor against a chunk re-rendered
+      with SOFT HYPHENs. The only probe that perturbs the HAYSTACK, and so the
+      only one that can tell a symmetric invisible-character scrub from a
+      needle-only one.
+
+    All of them assert SURVIVAL, not rejection: they are the résumé's own text
+    in a different rendering, and scrubbing them is the verifier calling real
+    evidence a fabrication.
+    """
+    from src.pipeline.matching.stages import verify_evidence
+    from src.schemas.matching import (
+        EvidenceObject,
+        RequirementEvidence,
+    )
+
+    def _must_survive(
+        label: str,
+        needle: str,
+        cited_ids: list[str],
+        haystacks: dict[str, str],
+    ) -> None:
+        req = verify_evidence(
+            EvidenceObject(
+                requirements=[
+                    RequirementEvidence(
+                        requirement=label,
+                        status="met",
+                        evidence=needle,
+                        evidence_chunk_ids=cited_ids,
+                        confidence=0.9,
+                    )
+                ]
+            ),
+            haystacks,
+        ).requirements[0]
+        assert req.evidence == needle and req.status == "met", (
+            f"{label} ({len(needle)} chars) was SCRUBBED by the verifier — it "
+            "is a genuine span of its cited chunk, so either a threshold is "
+            "too high, a normalisation was removed, or the fixture is wrong. "
+            "Do NOT relax a threshold to clear this."
+        )
+
+    labels = _labels()
+    parsed_by_id = {r.resume_id: r.parsed for r in corpus.resumes}
+    checked = 0
+    rendered_checked = 0
+    haystack_checked = 0
+    shortest = None
+    for rid, entry in labels["resumes"].items():
+        gold = entry.get("gold_evidence", {})
+        if not gold:
+            continue
+        parsed = parsed_by_id[rid]
+        chunks_by_id = {
+            c["id"]: c["text"] for c in (parsed.get("chunks") or []) if c.get("id")
+        }
+        skill_ids = {
+            s["name"]: s.get("evidence_chunk_ids", []) for s in parsed.get("skills", [])
+        }
+        for skill_name, quote in gold.items():
+            cited = skill_ids.get(skill_name, [])
+            assert cited, f"{rid}: gold anchor {skill_name!r} cites no chunk"
+            verified = verify_evidence(
+                EvidenceObject(
+                    requirements=[
+                        RequirementEvidence(
+                            requirement=skill_name,
+                            status="met",
+                            evidence=quote,
+                            evidence_chunk_ids=list(cited),
+                            confidence=0.9,
+                        )
+                    ]
+                ),
+                chunks_by_id,
+            )
+            req = verified.requirements[0]
+            assert req.evidence == quote and req.status == "met", (
+                f"{rid}: gold anchor {skill_name!r} ({len(quote)} chars) was "
+                "SCRUBBED by the verifier — it is a genuine exact substring of "
+                "its cited chunk, so either the floor is too high or the "
+                "fixture is wrong. Do NOT relax a threshold to clear this."
+            )
+            checked += 1
+            shortest = len(quote) if shortest is None else min(shortest, len(quote))
+
+            # ── re-rendered anchors (whitespace collapse) ──────────────────
+            cited_text = chunks_by_id[cited[0]]
+            for variant in entry.get("gold_anchor_render_variants", {}).get(
+                skill_name, []
+            ):
+                _must_survive(
+                    f"{rid}: gold anchor {skill_name!r} rendered {variant}",
+                    _RENDER_VARIANTS[variant](quote, cited_text),
+                    [cited[0]],
+                    chunks_by_id,
+                )
+                rendered_checked += 1
+
+            # ── perturbed HAYSTACK (symmetry of the invisible-char scrub) ──
+            shy_chunk = entry.get("invisible_char_haystack", {}).get(skill_name)
+            if shy_chunk is not None:
+                assert (
+                    shy_chunk in chunks_by_id
+                ), f"{rid}: invisible_char_haystack cites unknown chunk {shy_chunk!r}"
+                _must_survive(
+                    f"{rid}: gold anchor {skill_name!r} against a "
+                    "soft-hyphenated chunk",
+                    quote,
+                    [shy_chunk],
+                    {shy_chunk: _soft_hyphenate(chunks_by_id[shy_chunk])},
+                )
+                haystack_checked += 1
+
+    assert checked > 0, "no gold anchors were verified"
+    assert rendered_checked == 3, (
+        f"expected 3 re-rendered gold-anchor variants, ran {rendered_checked} "
+        "— labels.json's gold_anchor_render_variants block is the only thing "
+        "that falsifies _collapse_whitespace"
+    )
+    assert haystack_checked == 1, (
+        f"expected 1 soft-hyphenated-haystack probe, ran {haystack_checked} — "
+        "labels.json's invisible_char_haystack block is the only thing that "
+        "falsifies the SYMMETRY of the invisible-character scrub"
+    )
+    assert shortest is not None and shortest < 32, (
+        f"shortest gold anchor is {shortest} chars; with none below the "
+        "pre-FINDING-4 floor of 32 the corpus cannot detect a revert of the "
+        "min_quote_chars decision"
+    )
 
 
 def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:

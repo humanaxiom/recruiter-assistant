@@ -338,10 +338,19 @@
     keeps its text and its "met" label without ever being text-matched, and the evals gate excludes that path
     from its 100% verification figure.</li>
   </ol>
-  <p style="margin:0">Five further MAJOR findings follow the same pattern — a control presented here as
+  <p style="margin:0 0 .6rem">Five further MAJOR findings follow the same pattern — a control presented here as
   machine-enforced that the source files themselves describe as open or human-dependent. The
   <span class="chip ok">Test-gated</span> chip in particular is over-applied. Full findings are recorded in
-  HANDOFF.md under "Queued next work". Remove this banner only when they are closed.</p>
+  HANDOFF.md under "Queued next work".</p>
+  <p style="margin:0"><strong>Update (ADR-023, 2026-07-21):</strong> claim 2 above is narrowed but not
+  resolved. The evidence verifier now closes the uncited-quote path (ADR-022) and converts the
+  cited-superset bypass from unbounded fabrication length to a bounded ~26% content replacement within one
+  chunk's length (ADR-023) — a real reduction, not a closure. The statement below that "every quote shown
+  to a human must survive a match against the real document" is therefore <strong>still not literally
+  true</strong>: a quote that keeps most of its cited chunk verbatim and replaces roughly a quarter of it
+  with invented text still verifies. <strong>Remove this banner only once that residual is closed</strong>
+  (tracked as the "bounded replacement" residual in ADR-023) — not merely once the uncited-citation path
+  (claim 2's original trigger) is fixed, which is already done and was insufficient on its own.</p>
 </div>
 </div>
 
