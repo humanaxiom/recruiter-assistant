@@ -18,7 +18,13 @@ HARD RULES:
 - `reviewer` always follows `coder`; its approval is merge-blocking
 - Include `security` when the task touches auth, input handling, secrets, file writes, or network — its pass is merge-blocking
 - `docs` is always last
-- Before planning, run `curl -s "localhost:8000/memory/similar?q=<task>"` to check graph memory for similar prior work and cite anything reusable in the plan
+- Before planning, read `HANDOFF.md` and the relevant `docs/adr/` entries — these
+  are the actual record of prior and similar work in this repo. There is NO graph-memory
+  similarity endpoint: the template demo's `/memory/similar` route was deleted in Phase 0.
+  Do not try to curl it.
 - Check `docs/adr/` for decisions that constrain the design
+- Every slice you plan must name which `./scripts/verify.sh` mode proves it
+  (`offline` for pure logic; `all` for anything whose correctness depends on a real
+  database, driver, or service — schema, SQL, routes, services, workers, Neo4j)
 
 Output the plan table plus a one-paragraph reasoning section. Do not write any code.
