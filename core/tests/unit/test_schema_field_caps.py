@@ -34,9 +34,13 @@ fix (an ``isinstance(row, sub)`` pass-through branch) is already in
 a STANDING GUARD, not a red test.
 
 ADR-022 follow-up item #3 adds a fourth kind, at the bottom of this file: the
-evidence models (``RequirementEvidence`` / ``CoverLetterEvidence`` /
-``EvidenceObject``) have the SAME unbounded-field hole, and it is worse
-because the values feed O(n·m) fuzzy matching before they reach JSONB.
+evidence models have the SAME unbounded-field hole, and it is worse because
+the values feed O(n·m) fuzzy matching before they reach JSONB. Those caps live
+on the ``*Ingest`` subclasses — ``RequirementEvidenceIngest`` /
+``CoverLetterEvidenceIngest`` / ``EvidenceObjectIngest`` — and are enforced by
+scrubbing the offending field rather than raising. The tolerant read models
+they subclass carry no caps at all; that half of the split, and the guards
+against swapping the two, are in ``test_evidence_ingest_read_split.py``.
 """
 
 from __future__ import annotations
@@ -49,11 +53,13 @@ from annotated_types import MaxLen
 from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
+import src.schemas.matching as matching_schemas
 from src.schemas.jobs import Education
 from src.schemas.matching import (
-    CoverLetterEvidence,
-    EvidenceObject,
+    CoverLetterEvidenceIngest,
+    EvidenceObjectIngest,
     RequirementEvidence,
+    RequirementEvidenceIngest,
 )
 from src.schemas.resumes import (
     Bullet,
@@ -252,45 +258,58 @@ def test_resume_skill_details_skills_survive_already_validated_sub_models() -> N
 # are both accepted today, so a single looping model response is a CPU-bound
 # denial of service on the shortlist worker before it is a JSONB bloat problem.
 #
+# TESTS CHANGED (reviewer round 2, MAJOR 2) — and CLAUDE.md permits that only
+# when the test is provably wrong, so: the first version of this section
+# pinned the caps as pydantic ``max_length`` constraints on
+# ``RequirementEvidence`` / ``CoverLetterEvidence`` / ``EvidenceObject``, i.e.
+# on the models the READ path validates stored JSONB with. Those assertions
+# were wrong in two ways, both demonstrated by the reviewer:
+#
+#   * There is no migration framework, so a row already on disk carrying a
+#     2500-char quote (``string_too_long``) or 100 requirements (``too_long``)
+#     made ``list_for_job`` / ``get_one`` / the reverse-match read 500 for the
+#     whole job. The pathological bytes the caps target became permanently
+#     UNREADABLE — a cap prevents a bad WRITE and buys nothing once the bytes
+#     exist.
+#   * A raising cap at ingest failed the ENTIRE ``EvidenceObject`` over one
+#     bad quote, so ``_stage3_per_candidate`` returned ``None`` and the
+#     candidate lost every OTHER requirement's evidence too.
+#
+# Per the human decision the caps now live on ``*Ingest`` subclasses and are
+# enforced by SCRUBBING, not raising. The numbers are unchanged; only where
+# and how they apply moved. Nothing was deleted or xfailed — every case below
+# is the same case, retargeted at the model that actually enforces it. The
+# read side of the split, and the anti-swap guards, live in
+# ``test_evidence_ingest_read_split.py``.
+#
 # Caps pinned here: ``evidence`` 2000 (both models), ``requirement`` 500,
-# ``requirements`` list 64. ``evidence_chunk_ids`` is already capped at 8 and
-# ``overall_*`` at 1000; both are re-pinned below as standing guards.
+# ``requirements`` list 64, ``evidence_chunk_ids`` 8, ``overall_*`` 1000.
 
-# (model, field, expected declared cap). Covers the NEW caps and the EXISTING
-# ones, so a future edit that loosens either fails by name.
-EVIDENCE_CAPS: tuple[tuple[type[BaseModel], str, int], ...] = (
-    (RequirementEvidence, "evidence", 2000),
-    (RequirementEvidence, "requirement", 500),
-    (RequirementEvidence, "evidence_chunk_ids", 8),
-    (CoverLetterEvidence, "evidence", 2000),
-    (CoverLetterEvidence, "evidence_chunk_ids", 8),
-    (EvidenceObject, "requirements", 64),
-    (EvidenceObject, "overall_summary", 1000),
-    (EvidenceObject, "overall_motivation", 1000),
+# (constant, expected value). Declarative pin on the exact numbers,
+# independent of the behavioural tests below — so a cap cannot be quietly
+# raised to a useless value. These constants replace the ``MaxLen`` metadata
+# the earlier version introspected.
+EVIDENCE_CAP_CONSTANTS: tuple[tuple[str, int], ...] = (
+    ("MAX_EVIDENCE_QUOTE_CHARS", 2000),
+    ("MAX_REQUIREMENT_CHARS", 500),
+    ("MAX_EVIDENCE_CHUNK_IDS", 8),
+    ("MAX_REQUIREMENTS", 64),
+    ("MAX_OVERALL_TEXT_CHARS", 1000),
 )
 
-_CAP_IDS = [f"{m.__name__}.{f}={n}" for m, f, n in EVIDENCE_CAPS]
+_CAP_IDS = [f"{n}={v}" for n, v in EVIDENCE_CAP_CONSTANTS]
 
 
-@pytest.mark.parametrize("model, field, cap", EVIDENCE_CAPS, ids=_CAP_IDS)
-def test_evidence_model_field_declares_the_expected_max_length(
-    model: type[BaseModel], field: str, cap: int
-) -> None:
-    """Declarative pin on the exact numbers, independent of the behavioural
-    tests below — so a cap cannot be quietly raised to a useless value."""
-    info = model.model_fields[field]
-    declared = [m.max_length for m in info.metadata if isinstance(m, MaxLen)]
-    assert declared == [cap], (
-        f"{model.__name__}.{field} should declare max_length={cap}, "
-        f"found {declared or 'no MaxLen constraint'}"
-    )
+@pytest.mark.parametrize("name, value", EVIDENCE_CAP_CONSTANTS, ids=_CAP_IDS)
+def test_evidence_cap_constant_has_the_expected_value(name: str, value: int) -> None:
+    assert getattr(matching_schemas, name) == value
 
 
-# ── evidence quote: 2000 chars, on BOTH models ──────────────────────────────
+# ── evidence quote: 2000 chars, on BOTH ingest models ───────────────────────
 
 EVIDENCE_MODELS: tuple[tuple[type[BaseModel], dict[str, Any]], ...] = (
-    (RequirementEvidence, {"requirement": "Python"}),
-    (CoverLetterEvidence, {"theme": "motivation"}),
+    (RequirementEvidenceIngest, {"requirement": "Python"}),
+    (CoverLetterEvidenceIngest, {"theme": "motivation"}),
 )
 
 _EV_IDS = [m.__name__ for m, _ in EVIDENCE_MODELS]
@@ -305,20 +324,22 @@ def test_evidence_quote_accepts_exactly_2000_chars(
 
 
 @pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
-def test_evidence_quote_rejects_2001_chars(
+def test_evidence_quote_is_dropped_at_2001_chars(
     model: type[BaseModel], base: dict[str, Any]
 ) -> None:
-    with pytest.raises(ValidationError):
-        model(**{**base, "evidence": "x" * 2001})
+    obj = model(**{**base, "evidence": "x" * 2001})
+    assert obj.model_dump()["evidence"] == ""
 
 
 @pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
-def test_evidence_quote_rejects_a_pathological_two_million_char_quote(
+def test_a_pathological_two_million_char_quote_is_dropped(
     model: type[BaseModel], base: dict[str, Any]
 ) -> None:
-    """The size ADR-022 names explicitly — the O(n·m) fuzzy-match DoS input."""
-    with pytest.raises(ValidationError):
-        model(**{**base, "evidence": "x" * 2_000_000})
+    """The size ADR-022 names explicitly — the O(n·m) fuzzy-match DoS input.
+    It never reaches ``partial_ratio`` because the quote is gone, not because
+    the surrounding object was thrown away."""
+    obj = model(**{**base, "evidence": "x" * 2_000_000})
+    assert obj.model_dump()["evidence"] == ""
 
 
 @pytest.mark.parametrize("model, base", EVIDENCE_MODELS, ids=_EV_IDS)
@@ -326,29 +347,29 @@ def test_evidence_quote_cap_is_enforced_via_model_validate_too(
     model: type[BaseModel], base: dict[str, Any]
 ) -> None:
     """The LLM JSON path, not just in-process construction."""
-    with pytest.raises(ValidationError):
-        model.model_validate({**base, "evidence": "x" * 2001})
+    obj = model.model_validate({**base, "evidence": "x" * 2001})
+    assert obj.model_dump()["evidence"] == ""
 
 
-# ── RequirementEvidence.requirement: 500 chars ──────────────────────────────
+# ── RequirementEvidenceIngest.requirement: 500 chars ────────────────────────
 
 
 def test_requirement_text_accepts_exactly_500_chars() -> None:
-    req = RequirementEvidence(requirement="x" * 500)
+    req = RequirementEvidenceIngest(requirement="x" * 500)
     assert len(req.requirement) == 500
 
 
-def test_requirement_text_rejects_501_chars() -> None:
-    with pytest.raises(ValidationError):
-        RequirementEvidence(requirement="x" * 501)
+def test_requirement_text_is_truncated_at_501_chars() -> None:
+    req = RequirementEvidenceIngest(requirement="x" * 501)
+    assert req.requirement == "x" * 500
 
 
 def test_requirement_text_cap_is_enforced_via_model_validate_too() -> None:
-    with pytest.raises(ValidationError):
-        RequirementEvidence.model_validate({"requirement": "x" * 501})
+    req = RequirementEvidenceIngest.model_validate({"requirement": "x" * 501})
+    assert req.requirement == "x" * 500
 
 
-# ── EvidenceObject.requirements: 64 entries ─────────────────────────────────
+# ── EvidenceObjectIngest.requirements: 64 entries ───────────────────────────
 
 
 def _reqs(count: int) -> list[RequirementEvidence]:
@@ -356,21 +377,22 @@ def _reqs(count: int) -> list[RequirementEvidence]:
 
 
 def test_requirements_list_accepts_exactly_64_entries() -> None:
-    ev = EvidenceObject(requirements=_reqs(64))
+    ev = EvidenceObjectIngest(requirements=_reqs(64))
     assert len(ev.requirements) == 64
 
 
-def test_requirements_list_rejects_65_entries() -> None:
-    with pytest.raises(ValidationError):
-        EvidenceObject(requirements=_reqs(65))
+def test_requirements_list_is_truncated_at_65_entries() -> None:
+    ev = EvidenceObjectIngest(requirements=_reqs(65))
+    assert len(ev.requirements) == 64
+    assert ev.requirements[0].requirement == "req-0"
 
 
-def test_requirements_list_rejects_a_pathological_100000_entry_list() -> None:
+def test_requirements_list_bounds_a_pathological_100000_entry_list() -> None:
     """The count ADR-022 names explicitly."""
-    with pytest.raises(ValidationError):
-        EvidenceObject.model_validate(
-            {"requirements": [{"requirement": "x"} for _ in range(100_000)]}
-        )
+    ev = EvidenceObjectIngest.model_validate(
+        {"requirements": [{"requirement": "x"} for _ in range(100_000)]}
+    )
+    assert len(ev.requirements) == 64
 
 
 # ── Anti-over-rejection: the real corpus must still validate unchanged ───────
@@ -451,18 +473,19 @@ def test_a_corpus_sized_evidence_payload_still_validates() -> None:
         ],
         "overall_motivation": "Clear, specific motivation tied to the role.",
     }
-    ev = EvidenceObject.model_validate(payload)
+    ev = EvidenceObjectIngest.model_validate(payload)
 
     assert len(ev.requirements) == 8
     assert ev.requirements[0].requirement == "Python"
     # Unchanged: no truncation, no mangling of legitimate corpus text.
     assert all(r.evidence == CORPUS_LONGEST_CHUNK for r in ev.requirements)
+    assert all(r.status == "met" for r in ev.requirements)
     assert ev.cover_letter_evidence[0].evidence == CORPUS_LONGEST_CL_CHUNK
 
-    roundtripped = EvidenceObject.model_validate(ev.model_dump())
+    roundtripped = EvidenceObjectIngest.model_validate(ev.model_dump())
     assert roundtripped.model_dump() == ev.model_dump()
 
 
 @pytest.mark.parametrize("name", CORPUS_REQUIREMENTS)
 def test_each_corpus_requirement_name_is_well_under_the_500_cap(name: str) -> None:
-    assert RequirementEvidence(requirement=name).requirement == name
+    assert RequirementEvidenceIngest(requirement=name).requirement == name

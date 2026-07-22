@@ -885,22 +885,32 @@ def test_stage4_combine_writes_computed_motivation_into_breakdown() -> None:
 #   * A quote must be a span of EXACTLY ONE cited chunk. A quote spanning two
 #     cited chunks concatenated is REJECTED, not accepted.
 #   * Minimum quote length floor = 32 characters.
-#   * Length-ratio guard constant k = 1.05 — reject when
-#     ``len(quote) > len(chunk) * 1.05``.
+#   * The length guard is FULLY CLOSED, not a ratio: reject when the
+#     whitespace-collapsed quote is longer than the whitespace-collapsed chunk
+#     AT ALL. There is no tunable ``k``.
 #
-# The length-ratio guard alone is NECESSARY BUT NOT SUFFICIENT: at k = 1.05 a
-# 1-character append to a 100-character chunk gives a ratio of ~1.01 and slips
-# through, yet ``partial_ratio`` still scores it 1.000. The +1 parameter case
-# below exists precisely to fail a length-ratio-only fix; closing it needs a
-# second, complementary rule (e.g. "the cited chunk appears verbatim inside the
-# quote and the quote is longer" => not a span).
+# WHY THE RATIO WAS ABANDONED (this block previously recorded ``k = 1.05`` as
+# the settled decision; that framing is superseded, and the shipped guard is
+# the closed one). A ratio leaves a small-append window permanently open, and
+# the corpus measures how small: appending ONE fabricated character to r01's
+# 148-char Python chunk yields a length ratio of ~1.007, and to r02's 131-char
+# chunk ~1.008. ``partial_ratio`` still scores both 1.000. k = 1.05 does not
+# catch either, so every "+1" case below would ride straight through a
+# ratio-based fix. A quote is a SPAN of one chunk, and a span cannot be longer
+# than the thing it spans — so the structural rule ("longer at all => not a
+# span") is both simpler and strictly stronger than any k.
+#
+# The ``plus1`` parameter case and ``test_superset_bypass_at_plus_one_...``
+# below are KEPT as regression pins: the arithmetic they state is real and is
+# exactly why the ratio is gone. Only their framing changed.
 #
 # The ANTI-OVER-REJECTION arm at the bottom is load-bearing: without it a
 # ``_fuzz_ratio`` that simply ``return 0.0`` would satisfy every test above.
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Length-ratio guard constant, fixed by human decision.
-_LENGTH_RATIO_K = 1.05
+# The rejected ratio constant. Retained ONLY so the tests that document why a
+# ratio cannot work can state it; the implementation has no such constant.
+_REJECTED_LENGTH_RATIO_K = 1.05
 # Minimum quote length floor, in characters, fixed by human decision.
 _MIN_QUOTE_CHARS = 32
 
@@ -941,9 +951,10 @@ def test_fuzz_ratio_rejects_a_quote_that_is_the_whole_chunk_plus_appended_text(
 
     A quote must be a SPAN of the chunk. Text the chunk does not contain is
     never a span of it, at ANY append length — including 1 character. The
-    ``plus1`` case is the one that fails a length-ratio-only fix: with
-    k = 1.05, one extra character on a ~100-char chunk is a ratio of ~1.01,
-    comfortably under the bar, while ``partial_ratio`` still returns 1.000.
+    ``plus1`` case is the one that fails a length-ratio-only fix: one extra
+    character on r01's 148-char chunk is a ratio of ~1.007, comfortably under
+    any usable k, while ``partial_ratio`` still returns 1.000. That is why the
+    shipped guard rejects on "longer at all" rather than on a ratio.
     """
     _, chunk_text = _r01_python_chunk()
     quote = _superset_quote(chunk_text, append_len)
@@ -958,23 +969,30 @@ def test_fuzz_ratio_rejects_a_quote_that_is_the_whole_chunk_plus_appended_text(
     )
 
 
-def test_superset_bypass_at_plus_one_is_not_caught_by_the_length_ratio_guard() -> None:
-    """Pins WHY the ``plus1`` case above is not redundant with ``plus1120``.
+def test_superset_bypass_at_plus_one_would_survive_any_length_ratio_guard() -> None:
+    """Pins WHY the ``plus1`` case above is not redundant with ``plus1120``,
+    and why the shipped guard is fully closed rather than ratio-based.
 
-    The length-ratio guard (k = 1.05) is necessary but not sufficient: at
-    +1 character the ratio is far below k, so a fix consisting solely of that
-    guard leaves the bypass wide open. This test states that arithmetic
-    explicitly so the implementer cannot mistake one guard for both.
+    This test does NOT describe the implementation — there is no ``k`` in
+    ``stages.py``. It records the measurement that ruled a ratio out: a 1-char
+    append to r01's 148-char chunk measures 1.007, so the candidate constant
+    k = 1.05 misses it by a wide margin while ``partial_ratio`` still returns
+    1.000. Any k > 1.0 leaves the same window open; the only ratio that closes
+    it is 1.0, which is the closed guard stated as a ratio.
     """
     _, chunk_text = _r01_python_chunk()
     plus_one = _superset_quote(chunk_text, 1)
     plus_1120 = _superset_quote(chunk_text, 1120)
 
-    assert len(plus_one) <= len(chunk_text) * _LENGTH_RATIO_K, (
-        "a 1-char append must NOT be caught by the k=1.05 length-ratio guard "
-        "— a second, complementary rule is required"
+    ratio_plus_one = len(plus_one) / len(chunk_text)
+    assert ratio_plus_one == pytest.approx(1.007, abs=0.001)
+    assert ratio_plus_one <= _REJECTED_LENGTH_RATIO_K, (
+        "a 1-char append is NOT caught by a k=1.05 length-ratio guard — which "
+        "is why the shipped guard rejects on 'longer at all' instead"
     )
-    assert len(plus_1120) > len(chunk_text) * _LENGTH_RATIO_K
+    # ...while the guard that DID ship rejects it, because it is longer at all.
+    assert len(plus_one) > len(chunk_text)
+    assert len(plus_1120) > len(chunk_text) * _REJECTED_LENGTH_RATIO_K
 
 
 @pytest.mark.parametrize("append_len", [1, 1120], ids=["plus1", "plus1120"])
@@ -1245,14 +1263,15 @@ def test_gold_anchor_survives_verify_evidence_completely_intact(
 
 
 def test_gold_anchors_sit_well_inside_both_new_guards() -> None:
-    """Feasibility pin for the two constants, measured against real corpus
-    text: the gold anchors' quote/chunk length ratios are
-    0.480 / 0.661 / 0.823 / 0.836 — all comfortably under k = 1.05 — and all
-    four clear the 32-character floor.
+    """Feasibility pin for the two guards, measured against real corpus text:
+    the gold anchors' quote/chunk length ratios are
+    0.480 / 0.661 / 0.823 / 0.836, and all four clear the 32-character floor.
 
-    If a future fixture edit pushes an anchor past either constant, this test
-    fails here rather than surfacing as a mysterious recall drop in the
-    ranking-evals gate.
+    The bound asserted is ``<= 1.0``, NOT ``< 1.05``. The implemented
+    invariant is "a span is never longer than its chunk", so a future fixture
+    landing at ratio 1.02 would pass a 1.05 assertion here and then be
+    silently rejected by the guard — the precise failure this pin advertises
+    catching. Asserting the real invariant is what makes it catch it.
     """
     ratios: list[float] = []
     for resume_id, skill_name, quote in _GOLD_EVIDENCE_CASES:
@@ -1266,4 +1285,193 @@ def test_gold_anchors_sit_well_inside_both_new_guards() -> None:
 
     assert len(ratios) == 4, "the corpus must carry exactly four gold anchors"
     assert sorted(ratios) == pytest.approx([0.480, 0.661, 0.823, 0.836], abs=0.005)
-    assert max(ratios) < _LENGTH_RATIO_K
+    assert max(ratios) <= 1.0, (
+        "a gold anchor longer than its own chunk is not a span of it and the "
+        "shipped guard will reject it — fix the fixture, not the guard"
+    )
+
+
+# ── WHITESPACE NORMALISATION (reviewer round 2, MINOR 6 + NIT 7) ────────────
+#
+# ``_collapse_whitespace`` was introduced to stop the length guard punishing
+# honest whitespace variation (a re-wrapped quote, double spaces after a
+# period, PDF column padding). Two problems were found and MEASURED:
+#
+# 1. Its comparison was unpinned — swapping the collapsed length comparison
+#    for a raw ``len(needle) > len(haystack)`` passed the entire suite, so the
+#    helper's whole documented purpose was untested.
+# 2. Worse, the claimed tolerance did not actually MATERIALISE. The guard
+#    compared COLLAPSED lengths but handed the RAW strings to
+#    ``partial_ratio``, so a quote that survived the guard could still be
+#    scrubbed by the 0.85 bar. Measured against r01's real 148-char Python
+#    chunk, with the quote collapsing to a verbatim span in every case:
+#
+#      quote form                              raw pr    collapsed pr
+#      whole chunk, double-spaced              0.885     1.000
+#      whole chunk, triple-spaced              0.797 ✗   1.000
+#      gold anchor, double-spaced              0.934     1.000
+#      gold anchor, triple-spaced              0.877     1.000
+#      gold anchor, newline-wrapped            0.859     1.000
+#      gold anchor, 4-space column padding     0.826 ✗   1.000
+#
+#    Two of six legitimate re-renders scored BELOW 0.85 and were scrubbed as
+#    fabrications, and one more sat 0.009 above the bar. The tolerance was
+#    nominal.
+#
+# RESOLUTION (not a paper-over): the collapse now applies to BOTH the guard
+# and the ``partial_ratio`` input, exactly like ``.lower()`` already does.
+# It is a normalisation applied symmetrically to needle and haystack, so it
+# opens no fabrication window — it cannot turn a non-span into a span, only
+# make a genuine span score as one. Every row above becomes 1.000.
+#
+# ``_collapse_whitespace`` was NOT dropped: the measurements show the raw
+# comparison over-rejects real evidence, which is the thing the helper exists
+# to prevent. Corpus impact is nil — exactly one chunk in the 20-résumé corpus
+# has any whitespace slack at all (r17_harper_nakamura/c_003, 1 character) —
+# so the ranking is unchanged; the guard is for input the corpus does not
+# contain yet.
+
+# r01's real Python chunk collapses to itself (no internal whitespace runs),
+# which is what lets these cases isolate the re-render from the text.
+_WS_CASES: list[tuple[str, str]] = [
+    ("double_spaced", "  "),
+    ("triple_spaced", "   "),
+    ("column_padded", "    "),
+]
+
+
+def test_r01_python_chunk_has_no_internal_whitespace_slack() -> None:
+    """Keeps the cases below honest: any slack in the source chunk would make
+    the collapsed-length arithmetic mean something else."""
+    _, chunk_text = _r01_python_chunk()
+    assert " ".join(chunk_text.split()) == chunk_text
+
+
+@pytest.mark.parametrize("case_id, sep", _WS_CASES, ids=[c for c, _ in _WS_CASES])
+def test_fuzz_ratio_scores_a_re_rendered_whole_chunk_exactly_one(
+    case_id: str, sep: str
+) -> None:
+    """MINOR 6. A quote that collapses to the chunk verbatim IS the chunk, so
+    it must score 1.000 — not "somewhere above the bar", which is what the raw
+    ``partial_ratio`` input gave (0.885 double-spaced, 0.797 triple-spaced).
+
+    This is also the mutation pin for ``_collapse_whitespace``: every quote
+    here is LONGER than the chunk in raw characters, so a guard that compares
+    raw lengths returns 0.0 and fails this test.
+    """
+    _, chunk_text = _r01_python_chunk()
+    quote = chunk_text.replace(" ", sep)
+
+    assert len(quote) > len(chunk_text), "raw-longer is the point of the case"
+    assert " ".join(quote.split()) == chunk_text, "collapses to the chunk verbatim"
+
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 1.0
+
+
+@pytest.mark.parametrize("case_id, sep", _WS_CASES, ids=[c for c, _ in _WS_CASES])
+def test_fuzz_ratio_scores_a_re_rendered_gold_anchor_exactly_one(
+    case_id: str, sep: str
+) -> None:
+    """The same for a genuine SPAN rather than the whole chunk. The
+    ``column_padded`` case is the one that was being scrubbed outright: it
+    measured 0.826 against the raw chunk, below the 0.85 bar."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunk_text = _chunks_by_id(resume_raw)[_skill_chunk_id(resume_raw, "Python")]
+    anchor = _LABELS["resumes"]["r01_casey_rivera"]["gold_evidence"]["Python"]
+    quote = anchor.replace(" ", sep)
+
+    assert anchor in chunk_text, "the anchor is a verbatim span, by construction"
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 1.0
+
+
+def test_fuzz_ratio_scores_a_newline_wrapped_gold_anchor_exactly_one() -> None:
+    """Line re-wrapping, the most common real cause: same character count, so
+    the guard was never the problem — the raw ``partial_ratio`` was, at 0.859
+    (0.009 above the bar, i.e. one more wrapped line from being scrubbed)."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunk_text = _chunks_by_id(resume_raw)[_skill_chunk_id(resume_raw, "Python")]
+    anchor = _LABELS["resumes"]["r01_casey_rivera"]["gold_evidence"]["Python"]
+    quote = anchor.replace(" ", "\n")
+
+    assert len(quote) == len(anchor)
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 1.0
+
+
+def test_verify_evidence_keeps_a_column_padded_quote_completely_intact() -> None:
+    """End-to-end, through the verifier at the real 0.85 threshold: a
+    legitimately re-rendered quote must survive with its text, ``met`` status
+    and confidence untouched. Before the fix this quote was blanked and
+    demoted exactly like a fabrication."""
+    resume_raw = _load_resume_raw("r01_casey_rivera")
+    chunks_by_id = _chunks_by_id(resume_raw)
+    chunk_id = _skill_chunk_id(resume_raw, "Python")
+    anchor = _LABELS["resumes"]["r01_casey_rivera"]["gold_evidence"]["Python"]
+    quote = anchor.replace(" ", "    ")
+
+    req = RequirementEvidence(
+        requirement="Python",
+        status="met",
+        evidence=quote,
+        evidence_chunk_ids=[chunk_id],
+        confidence=0.9,
+    )
+    cleaned = verify_evidence(
+        EvidenceObject(requirements=[req]), chunks_by_id, weights=DEFAULT_WEIGHTS
+    )
+    result = cleaned.requirements[0]
+    assert result.evidence == quote, (
+        "a quote whose only difference from a verbatim span is whitespace "
+        "rendering is real evidence, not a fabrication"
+    )
+    assert result.status == "met"
+    assert result.confidence == 0.9
+
+
+def test_whitespace_normalisation_does_not_reopen_the_superset_bypass() -> None:
+    """The collapse is a normalisation, not a relaxation. A quote that is the
+    whole chunk plus fabricated WORDS is still longer after collapsing, so it
+    is still rejected — collapsing only erases whitespace differences."""
+    _, chunk_text = _r01_python_chunk()
+    quote = chunk_text.replace(" ", "   ") + "   and led a team of twelve engineers"
+
+    assert _fuzz_ratio(quote.lower(), chunk_text.lower()) == 0.0
+
+
+# ── NIT 7: the floor is measured on the collapsed needle ────────────────────
+
+
+def test_fuzz_ratio_floor_rejects_a_bare_token_padded_out_to_the_floor() -> None:
+    """``_fuzz_ratio``'s docstring presents a standalone contract, and under a
+    raw ``len(needle)`` floor ``"API"`` plus 30 spaces (33 raw characters)
+    cleared the 32-character bar while carrying three characters of evidence.
+
+    Unreachable through ``verify_evidence`` today, which strips first — but a
+    guard whose contract only holds because of what its one caller happens to
+    do first is not a guard. The floor is measured on the collapsed, stripped
+    needle, which is also the string actually scored.
+    """
+    padded = "API" + " " * 30
+    assert len(padded) > _MIN_QUOTE_CHARS, "clears the floor on raw length"
+    assert len(" ".join(padded.split())) < _MIN_QUOTE_CHARS
+
+    assert _fuzz_ratio(padded.lower(), _FLOOR_CHUNK.lower()) == 0.0
+
+
+def test_fuzz_ratio_floor_rejects_an_interior_padded_bare_token() -> None:
+    """The same hole with the padding inside the needle rather than trailing,
+    so ``.strip()`` alone would not close it."""
+    padded = "API" + " " * 25 + "gateways"
+    assert len(padded) > _MIN_QUOTE_CHARS
+    assert len(" ".join(padded.split())) < _MIN_QUOTE_CHARS
+
+    assert _fuzz_ratio(padded.lower(), _FLOOR_CHUNK.lower()) == 0.0
+
+
+def test_fuzz_ratio_floor_still_accepts_a_re_rendered_span_at_the_floor() -> None:
+    """Over-rejection guard for the collapsed floor: the 32-char span rendered
+    with double spaces collapses back to 32 characters and must still verify.
+    A floor applied to the RAW needle would pass this too, so it is paired
+    with the padded cases above, which it does not."""
+    quote = _FLOOR_SPAN_32.replace(" ", "  ")
+    assert len(" ".join(quote.split())) == _MIN_QUOTE_CHARS
+    assert _fuzz_ratio(quote.lower(), _FLOOR_CHUNK.lower()) == 1.0
