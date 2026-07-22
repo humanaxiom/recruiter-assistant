@@ -156,7 +156,11 @@ class Settings(BaseSettings):
     match_evidence_partial_weight: float = 0.5
     match_evidence_verify_fuzz: float = 0.85
     # ADR-022 follow-up #4: minimum evidence-quote length, in characters.
-    match_evidence_min_quote_chars: int = 32
+    # Lowered 32 -> 16 by human decision (security FINDING 4) — at 32 the floor
+    # blanked genuine short credentials and demoted them met -> missing. Must
+    # stay equal to MatchWeights().evidence_min_quote_chars and to
+    # tests/evals/thresholds.toml's [evidence].min_quote_chars.
+    match_evidence_min_quote_chars: int = 16
     match_motivation_min_confidence: float = 0.7
     # Semantic skill matching (ADR 0020) + latency caps (ADR 0021).
     match_family_weight: float = 0.5

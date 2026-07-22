@@ -172,7 +172,14 @@ class ShortlistResultEntry:
     score_structured: float
     score_evidence: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    # security FINDING 5 — the WRITE boundary is typed with the STRICT ingest
+    # model. ``persist_shortlist`` / ``persist_reverse_match`` read this field
+    # straight into ``json.dumps``; with the tolerant ``EvidenceObject`` here,
+    # an uncapped instance was type-legal all the way to Postgres and only the
+    # accident that both producers funnel through ``_stage3_per_candidate``
+    # prevented it. ``verify_evidence`` and ``stage4_combine`` are generic, so
+    # ingest-ness survives the pipeline and this costs no cast.
+    evidence: EvidenceObjectIngest | None
 
 
 @dataclass(frozen=True)
@@ -194,7 +201,14 @@ class JobMatchResultEntry:
     score_structured: float
     score_evidence: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    # security FINDING 5 — the WRITE boundary is typed with the STRICT ingest
+    # model. ``persist_shortlist`` / ``persist_reverse_match`` read this field
+    # straight into ``json.dumps``; with the tolerant ``EvidenceObject`` here,
+    # an uncapped instance was type-legal all the way to Postgres and only the
+    # accident that both producers funnel through ``_stage3_per_candidate``
+    # prevented it. ``verify_evidence`` and ``stage4_combine`` are generic, so
+    # ingest-ness survives the pipeline and this costs no cast.
+    evidence: EvidenceObjectIngest | None
     requirement_count: int
     must_have_count: int
 
@@ -476,7 +490,7 @@ async def _stage3_per_candidate(
     parsed: dict[str, Any],
     *,
     weights: MatchWeights = DEFAULT_WEIGHTS,
-) -> EvidenceObject | None:
+) -> EvidenceObjectIngest | None:
     # ``parsed`` is fetched by the caller before the concurrent fan-out.
     chunks = parsed.get("chunks") or []
     if not chunks or not job.required_skills:
@@ -530,10 +544,10 @@ async def stage3_evidence(
     top_k: list[Stage2Candidate],
     *,
     weights: MatchWeights = DEFAULT_WEIGHTS,
-) -> dict[UUID, EvidenceObject | None]:
+) -> dict[UUID, EvidenceObjectIngest | None]:
     """Run LLM evidence extraction with a concurrency cap."""
     sem = asyncio.Semaphore(ctx.llm_concurrency)
-    results: dict[UUID, EvidenceObject | None] = {}
+    results: dict[UUID, EvidenceObjectIngest | None] = {}
 
     # Pre-fetch each candidate's parsed row SEQUENTIALLY before the fan-out —
     # the shared asyncpg connection can't be queried concurrently inside gather.
@@ -608,7 +622,7 @@ async def generate_shortlist(
 
     # Stage 4 — combine + rank
     t = dt.datetime.now(dt.UTC)
-    combine_in = [
+    combine_in: list[_CombineInput[EvidenceObjectIngest]] = [
         _CombineInput(
             resume_id=c.resume_id,
             structured=c.structured,
@@ -745,7 +759,7 @@ async def match_resume_to_jobs(
     # Stage 3 — LLM evidence for the top few jobs only (latency cap).
     t = dt.datetime.now(dt.UTC)
     sem = asyncio.Semaphore(ctx.llm_concurrency)
-    evidence_by_job: dict[UUID, EvidenceObject | None] = {}
+    evidence_by_job: dict[UUID, EvidenceObjectIngest | None] = {}
     # Reverse match scores ONE résumé against many jobs — fetch its parsed row
     # ONCE before the concurrent fan-out (shared asyncpg connection).
     resume_parsed = await _fetch_parsed(ctx.db, resume_id)
@@ -791,7 +805,14 @@ class _JobScore:
     job: JobView
     structured: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    # security FINDING 5 — the WRITE boundary is typed with the STRICT ingest
+    # model. ``persist_shortlist`` / ``persist_reverse_match`` read this field
+    # straight into ``json.dumps``; with the tolerant ``EvidenceObject`` here,
+    # an uncapped instance was type-legal all the way to Postgres and only the
+    # accident that both producers funnel through ``_stage3_per_candidate``
+    # prevented it. ``verify_evidence`` and ``stage4_combine`` are generic, so
+    # ingest-ness survives the pipeline and this costs no cast.
+    evidence: EvidenceObjectIngest | None
 
 
 def rank_job_matches(

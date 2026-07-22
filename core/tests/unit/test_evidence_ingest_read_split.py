@@ -599,8 +599,11 @@ WRITE_BOUNDARY_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+_WRITE_BOUNDARY_IDS = [f"{n}.{f}" for n, f in WRITE_BOUNDARY_FIELDS]
+
+
 @pytest.mark.parametrize(
-    "dataclass_name, field", WRITE_BOUNDARY_FIELDS, ids=[f"{n}.{f}" for n, f in WRITE_BOUNDARY_FIELDS]
+    "dataclass_name, field", WRITE_BOUNDARY_FIELDS, ids=_WRITE_BOUNDARY_IDS
 )
 def test_write_boundary_dataclass_is_typed_with_the_strict_ingest_model(
     dataclass_name: str, field: str
@@ -619,8 +622,7 @@ def test_write_boundary_dataclass_is_typed_with_the_strict_ingest_model(
     )
 
 
-def test_stage3_returns_the_strict_model_so_ingest_ness_is_not_widened_away(
-) -> None:
+def test_stage3_returns_the_strict_model_so_ingest_ness_is_not_widened_away() -> None:
     """The load-bearing link. If ``_stage3_per_candidate`` declares
     ``EvidenceObject | None`` the write-boundary annotations above become
     unsatisfiable and someone widens THEM back instead."""
@@ -640,11 +642,7 @@ def test_verify_evidence_preserves_the_model_class_it_was_given() -> None:
     from src.pipeline.matching.stages import verify_evidence
 
     strict = EvidenceObjectIngest.model_validate(
-        {
-            "requirements": [
-                {"requirement": "Python", "status": "met", "evidence": "x"}
-            ]
-        }
+        {"requirements": [{"requirement": "Python", "status": "met", "evidence": "x"}]}
     )
     out = verify_evidence(strict, {})
     assert type(out) is EvidenceObjectIngest

@@ -649,9 +649,7 @@ def test_script_meaningful_and_whitespace_codepoints_survive_the_format_scrub(
     script- and emoji-meaningful, and the separators are genuine whitespace
     ``_collapse_whitespace`` already handles symmetrically."""
     kept = f"a{chr(codepoint)}b"
-    ev = RequirementEvidence.model_validate(
-        {"requirement": "Python", "evidence": kept}
-    )
+    ev = RequirementEvidence.model_validate({"requirement": "Python", "evidence": kept})
     assert ev.evidence == kept
 
 

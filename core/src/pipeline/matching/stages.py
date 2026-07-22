@@ -28,7 +28,7 @@ import datetime as dt
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 from uuid import UUID
 
 from rapidfuzz import fuzz
@@ -41,6 +41,21 @@ from src.schemas.matching import (
     ScoreBreakdown,
     SkillContribution,
 )
+
+# security FINDING 5 — the tolerant/strict evidence split must be STRUCTURAL,
+# not a convention. ``EvidenceObjectIngest`` is the strict LLM-boundary model
+# and ``EvidenceObject`` the tolerant read/DTO one; before this, everything
+# downstream of the single ``chat_json`` call was annotated with the TOLERANT
+# model, so an uncapped instance was TYPE-LEGAL all the way into
+# ``persist_shortlist``'s ``json.dumps``. Nothing but the accident of who
+# builds it kept one out.
+#
+# ``verify_evidence`` and ``stage4_combine`` are therefore generic in the
+# evidence type. Both round-trip through ``model_copy``, which preserves the
+# class, so the guarantee is real at runtime as well as in mypy: what goes in
+# strict comes out strict, and the write boundary can demand strict without
+# forcing a cast.
+_E = TypeVar("_E", bound=EvidenceObject)
 
 _LEVEL_ORDER: Mapping[str, int] = {
     "high_school": 1,
@@ -319,16 +334,19 @@ def _fuzz_ratio(
 
 
 def verify_evidence(
-    evidence: EvidenceObject,
+    evidence: _E,
     chunks_by_id: Mapping[str, str],
     *,
     weights: MatchWeights = DEFAULT_WEIGHTS,
-) -> EvidenceObject:
+) -> _E:
     """Strip hallucinated chunk_ids; downgrade requirements whose ``evidence``
     quote doesn't actually appear in any cited chunk (fuzzy-match threshold
     ``weights.evidence_verify_fuzz``).
 
-    Returns a new EvidenceObject — never mutates input.
+    Returns a new evidence object of the SAME CLASS it was given — never
+    mutates input. Generic rather than widened to ``EvidenceObject`` so an
+    ``EvidenceObjectIngest`` survives verification as an ingest instance and
+    the write boundary can be typed strictly (security FINDING 5).
     """
     quote_threshold = weights.evidence_verify_fuzz
     min_chars = weights.evidence_min_quote_chars
@@ -406,29 +424,29 @@ def verify_evidence(
 
 
 @dataclass(frozen=True)
-class _CombineInput:
+class _CombineInput(Generic[_E]):
     resume_id: UUID
     structured: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    evidence: _E | None
 
 
 @dataclass(frozen=True)
-class _CombineEntry:
+class _CombineEntry(Generic[_E]):
     resume_id: UUID
     rank: int
     score_final: float
     score_structured: float
     score_evidence: float
     breakdown: ScoreBreakdown
-    evidence: EvidenceObject | None
+    evidence: _E | None
 
 
 def stage4_combine(
-    candidates: Iterable[_CombineInput], weights: MatchWeights
-) -> list[_CombineEntry]:
+    candidates: Iterable[_CombineInput[_E]], weights: MatchWeights
+) -> list[_CombineEntry[_E]]:
     """Combine structured + evidence into a final score and rank descending."""
-    entries: list[_CombineEntry] = []
+    entries: list[_CombineEntry[_E]] = []
     for c in candidates:
         evidence_completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)

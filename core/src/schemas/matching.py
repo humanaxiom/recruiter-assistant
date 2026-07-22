@@ -48,12 +48,104 @@ EvidenceStatus = Literal["met", "partial", "missing"]
 # client at all — read-path revalidation, tests, and any future non-LLM
 # producer of an evidence object. Defence in depth with the outer layer
 # strictly containing the inner one, not two copies of the same check.
-_C0_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# security FINDING 1 — the class also covers Unicode FORMAT (Cf) characters.
+#
+# C0 + DEL is not the whole of "invisible junk in a human-facing quote". Two
+# sub-classes of Cf are a live FABRICATION vector, because the anti-fabrication
+# verifier scores the codepoints and the recruiter reads the RENDERING:
+#
+#   * BIDI OVERRIDES AND ISOLATES (U+202A-202E, U+2066-2069). MEASURED against
+#     r01's real 148-char chunk c_001, the quote
+#     ``chunk[:100] + U+202E + "detacirbaf"`` is 111 characters, clears both
+#     the minimum-quote-length floor and the length guard, scores 0.948 and
+#     VERIFIES — then renders to the reviewer as the English word "fabricated",
+#     because U+202E reverses the display order of everything after it. The
+#     reviewer reads a word the résumé does not contain, inside a quote the
+#     verifier has just certified.
+#   * ZERO-WIDTH / INVISIBLE FORMAT CHARACTERS (ZWSP U+200B, WJ U+2060,
+#     BOM U+FEFF, SHY U+00AD, MVS U+180E). No text, no visibility, and no way
+#     for a reviewer to see them in the quote they are being asked to trust.
+#
+# The BIDI MARKS (U+200E/200F) are in the class too. The security finding
+# enumerated only the overrides and isolates, but the marks are the same shape
+# of defect — invisible Cf codepoints whose only effect is to reorder the
+# display of neighbouring neutral text — so leaving them out would leave an
+# adjacent hole of identical character. The class is a strict SUPERSET of the
+# finding, never a subset.
+#
+# ZWNJ (U+200C) and ZWJ (U+200D) are deliberately EXCLUDED: they are
+# script-meaningful in Persian/Arabic/Devanagari and inside emoji sequences, so
+# stripping them would corrupt genuine résumé text. NBSP, U+2028/2029 and
+# U+3000 are excluded for a different reason — they are real whitespace, and
+# ``stages._collapse_whitespace`` already normalises them SYMMETRICALLY on both
+# sides of the fuzzy match. Removing them here would be a second, asymmetric
+# normalisation applied to the needle alone.
+#
+# WHAT THIS DOES AND DOES NOT CLOSE, stated honestly. Stripping U+202E does
+# NOT lower the attack's fuzzy score (measured 0.948 -> 0.952: the appended
+# "detacirbaf" is 10 visible characters either way, and a short append onto a
+# long chunk sits inside ``partial_ratio``'s existing tolerance at the 0.85
+# bar — a separate, known property). What it removes is the ability to make
+# appended text RENDER as plausible prose. The quote a reviewer sees is now
+# the quote that was scored.
+#
+# INTERACTION WITH THE LENGTH GUARD — verified, not assumed. Python's ``\s``
+# collapses NBSP/U+2028/U+3000 but NOT ZWSP/BOM/WJ/SHY, so before this change
+# those inflated the needle's collapsed length and the length guard ("a span
+# cannot be longer than the chunk it spans") rejected it: fail-CLOSED.
+# Stripping them removes that inflation. It opens no window, because the scrub
+# touches no VISIBLE character: after it, the verdict on a padded quote is by
+# construction the verdict on the same quote unpadded — a string the producer
+# could always have submitted directly. Appended visible fabrication is still
+# visible, and still trips the length guard. In one direction the scrub is
+# strictly stronger: ``"API"`` + 40x U+200B is 43 characters and cleared even
+# the old 32-char floor on length, surviving only on ``partial_ratio``;
+# scrubbed it is 3 characters and the floor rejects it outright. Pinned in
+# ``tests/unit/test_matching_stages.py``'s FINDING 1 block.
+#
+# Every non-ASCII codepoint below is written as a HEX INTEGER and materialised
+# with ``chr()``, never as the literal character. ADR-022 records that its own
+# first draft embedded a literal NUL and git classified the file as binary; a
+# literal U+202E in this source would be worse still, since it would reorder
+# the display of the very code that defines the class. The tests follow the
+# same rule.
+_INVISIBLE_FORMAT_CODEPOINTS: tuple[int | tuple[int, int], ...] = (
+    0x00AD,  # SOFT HYPHEN
+    0x180E,  # MONGOLIAN VOWEL SEPARATOR
+    0x200B,  # ZERO WIDTH SPACE
+    (0x200E, 0x200F),  # LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    (0x202A, 0x202E),  # bidi EMBEDDING / OVERRIDE / POP DIRECTIONAL FORMATTING
+    0x2060,  # WORD JOINER
+    (0x2066, 0x2069),  # bidi ISOLATE / FIRST STRONG ISOLATE / POP
+    0xFEFF,  # ZERO WIDTH NO-BREAK SPACE (BOM)
+)
+
+
+def _char_class_body(codepoints: tuple[int | tuple[int, int], ...]) -> str:
+    """Render single codepoints and inclusive ranges as regex class members."""
+    parts: list[str] = []
+    for item in codepoints:
+        if isinstance(item, tuple):
+            lo, hi = item
+            parts.append(f"{chr(lo)}-{chr(hi)}")
+        else:
+            parts.append(chr(item))
+    return "".join(parts)
+
+
+_INVISIBLE_CONTROLS = re.compile(
+    # C0 controls (keeping TAB 0x09 / LF 0x0a / CR 0x0d) and DEL, then the Cf
+    # class above.
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f"
+    + _char_class_body(_INVISIBLE_FORMAT_CODEPOINTS)
+    + "]"
+)
 
 
 def _strip_control_chars(value: str) -> str:
-    """Drop C0 controls and DEL, keeping TAB / LF / CR. No-op on clean text."""
-    return _C0_CONTROLS.sub("", value)
+    """Drop C0 controls, DEL and the invisible/bidi Cf class above, keeping
+    TAB / LF / CR and real whitespace. No-op on clean text."""
+    return _INVISIBLE_CONTROLS.sub("", value)
 
 
 # Every LLM-authored free-text field on the evidence models carries this, so
@@ -130,7 +222,20 @@ class MatchWeights(BaseModel):
     evidence_verify_fuzz: float = Field(default=0.85, ge=0, le=1)
     # ADR-022 follow-up #4: a quote shorter than this many characters is not
     # evidence of anything — "API" matches any chunk containing it at 1.000.
-    evidence_min_quote_chars: int = Field(default=32, ge=0)
+    #
+    # LOWERED 32 -> 16 BY HUMAN DECISION (security FINDING 4). At 32 the floor
+    # was ALSO scrubbing genuine short evidence and demoting it met ->
+    # missing, indistinguishably from a fabrication. MEASURED as blanked at
+    # 32: "PhD in Computer Science" (23), "AWS Solutions Architect" (23),
+    # "Postgres schema migrations" (26). 16 still rejects every degenerate
+    # case the floor exists for — "API" (3), "SQL" (3), "Kubernetes" (10).
+    #
+    # The eval corpus could not see the defect: its shortest gold anchor was
+    # 71 characters, so any floor up to 71 passed the ranking gate untouched.
+    # That is closed in the same change — labels.json carries a genuinely
+    # short anchor and run_evals.py scores every anchor through the real
+    # ``_fuzz_ratio``, floor included.
+    evidence_min_quote_chars: int = Field(default=16, ge=0)
     motivation_min_confidence: float = Field(default=0.7, ge=0, le=1)
 
     @model_validator(mode="after")
@@ -194,7 +299,19 @@ class ScoreBreakdown(BaseModel):
 
 class RequirementEvidence(BaseModel):
     """TOLERANT read/DTO model. Deliberately carries no length caps — see the
-    ingest/read note above. ``RequirementEvidenceIngest`` is the strict one."""
+    ingest/read note above. ``RequirementEvidenceIngest`` is the strict one.
+
+    CAVEAT — ``model_copy`` / ``model_construct`` BYPASS ``CleanText``
+    (security FINDING 6). Pydantic does not re-run validators for either, so
+    ``model_copy(update={"requirement": ...})`` can put a live control
+    character back onto an already-validated instance; MEASURED reaching
+    ``json.dumps`` as the escaped form Postgres rejects. There is no live
+    exploit today — ``verify_evidence`` is the only ``model_copy`` caller on
+    this model and it only ever updates ``evidence`` to ``""`` — so the
+    response is this caveat rather than a runtime guard. Any future
+    ``model_copy`` that writes ATTACKER- OR MODEL-AUTHORED text into a field
+    must scrub it itself, or go through ``model_validate`` instead.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -208,7 +325,16 @@ class RequirementEvidence(BaseModel):
     # review, exactly like ``evidence``. Populated only on the display paths; the
     # LLM never emits it, so at write time it is always ``None`` and persists as
     # JSONB ``null`` — a pure display expansion, never a stored value.
-    source_context: str | None = None
+    #
+    # ``CleanText``, not bare ``str`` (security FINDING 6). It was the one
+    # free-text field on these models without the scrub. The text it carries is
+    # fed from ``resumes.parsed``, which the parse path already NUL-strips in
+    # ``pipeline/parsing/extract.py::_sanitize``, so there is no live gap —
+    # but that is a property of the CURRENT producer, not of this model, and
+    # the scrub class is wider than ``_sanitize``'s anyway (bidi and
+    # zero-width characters in an expanded source context render to a reviewer
+    # exactly as they would in the quote itself).
+    source_context: CleanText | None = None
 
 
 CoverLetterTheme = Literal["motivation", "role_alignment", "cultural_fit", "growth"]
