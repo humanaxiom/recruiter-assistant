@@ -2,14 +2,17 @@
 
 There is no migration framework: ``init_schema`` runs on every boot of the API
 and the worker, so **every statement must be re-runnable**. Ported from the
-hris migrations, with the review workflow, the JD-Harmonizer, the Taleo ingest
-columns and the CAS auth tables cut (see docs/EXTRACTION_PLAN.md).
+hris migrations, with the review workflow, the JD-Harmonizer, and the Taleo
+ingest columns cut (see docs/EXTRACTION_PLAN.md). CAS auth tables were
+originally cut too, but ADR-019 (FU-5) reverses that: ``users`` and
+``audit_log`` below are the foundation for attributable audit.
 
 Deviations from hris, all deliberate:
 
 * ``jobs.blind_review`` defaults ``TRUE`` (hris: ``FALSE``) — decision 4.
 * ``jobs.created_by`` / ``resumes.uploaded_by`` are nullable ``TEXT`` actor
-  labels, not UUID FKs — there is no auth table in v1.
+  labels, not UUID FKs — this predates ADR-019's ``users`` table and is not
+  yet wired to it (FU-5 slice 1 is schema only).
 * ``score_final`` is ``DOUBLE PRECISION`` in both ranking tables (hris mixed
   ``NUMERIC(5,4)`` and ``DOUBLE PRECISION``, so asyncpg handed back a
   ``Decimal`` from one and a ``float`` from the other). The 0..1 CHECK stays.
@@ -214,7 +217,8 @@ _STATEMENTS: tuple[str, ...] = (
     # identity is the de-anonymization action, so every reveal writes one row
     # here. Never UPDATEd or DELETEd by app code. `actor` is best-effort today
     # (the optional X-Actor-Name header); real per-user identity arrives with
-    # RBAC (FU-4).
+    # FU-5 (ADR-019) via the new `users`/`audit_log` tables below. This table
+    # is kept read-only per ADR-019 §6 — no data migration into `audit_log`.
     """
     CREATE TABLE IF NOT EXISTS reveal_audit (
         id          UUID PRIMARY KEY,
@@ -228,6 +232,50 @@ _STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS reveal_audit_resume_idx
         ON reveal_audit (resume_id, revealed_at DESC)
+    """,
+    # ── users (ADR-019 §1, FU-5 slice 1: schema only) ────────────────────────
+    # Real identity entity: a row per CAS-authenticated person. Append-mostly —
+    # rows are created and updated (display_name/email/last_seen_at refresh on
+    # login), never deleted, so historical audit_log rows stay attributable.
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        cas_username TEXT NOT NULL UNIQUE,
+        display_name TEXT,
+        email        TEXT,
+        role         TEXT NOT NULL DEFAULT 'recruiter',
+        active       BOOLEAN NOT NULL DEFAULT true,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # ── audit_log (ADR-019 §1.4/§6, FU-5 slice 1: schema only) ───────────────
+    # Generalized, append-only audit sink replacing reveal-only reveal_audit.
+    # Every row names EXACTLY ONE actor: a human (actor_kind='user', with
+    # actor_user_id set and actor_service NULL) or a service (actor_kind=
+    # 'service', with actor_service set and actor_user_id NULL) — enforced by
+    # the CHECK constraint below, not by column-level NOT NULL.
+    """
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        actor_kind    TEXT NOT NULL,
+        actor_user_id UUID REFERENCES users (id) ON DELETE RESTRICT,
+        actor_service TEXT,
+        action        TEXT NOT NULL,
+        subject_type  TEXT NOT NULL,
+        subject_id    UUID NOT NULL,
+        job_id        UUID,
+        context       TEXT,
+        details       JSONB,
+        occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT audit_log_actor_identity CHECK (
+            (actor_kind = 'user' AND actor_user_id IS NOT NULL
+                AND actor_service IS NULL)
+            OR
+            (actor_kind = 'service' AND actor_user_id IS NULL
+                AND actor_service IS NOT NULL)
+        )
+    )
     """,
 )
 
