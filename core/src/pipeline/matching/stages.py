@@ -40,6 +40,7 @@ from src.schemas.matching import (
     MatchWeights,
     ScoreBreakdown,
     SkillContribution,
+    _strip_control_chars,
 )
 
 # security FINDING 5 — the tolerant/strict evidence split must be STRUCTURAL,
@@ -321,9 +322,25 @@ def _fuzz_ratio(
       open (a +1 char append on r01's 148-char chunk lands at 1.007) and the
       fabrication rides through it. Cross-chunk concatenation is rejected as a
       consequence, which is intended.
+
+    Both sides are also scrubbed of the invisible/bidi class
+    (``schemas.matching._strip_control_chars``) before any of the above, and
+    SYMMETRY there is load-bearing. The QUOTE is already scrubbed at the schema
+    boundary; the CHUNK is not — it comes from ``resumes.parsed``, and
+    ``parsing/extract.py::_sanitize`` strips NULs and nothing else. So a résumé
+    whose extracted text carries SOFT HYPHENS (what a PDF emits at its
+    line-break points) would give a haystack full of U+00AD and a needle with
+    every one removed. MEASURED on a 148-char chunk, needle = the same text
+    scrubbed: SHY every 60 chars scores 0.986, every 20 chars 0.956, every 8
+    chars 0.892 — but every 5 chars 0.838 and every 2 chars 0.671, i.e. the
+    chunk's own text rejected as a fabrication. Scrubbing both sides is a
+    normalisation exactly like ``.lower()`` and ``_collapse_whitespace``: it
+    removes only invisible characters, from needle and haystack alike, so it
+    cannot turn a non-span into a span. Appended VISIBLE fabrication survives
+    the scrub on the needle and still trips the length guard.
     """
-    needle = _collapse_whitespace(needle)
-    haystack = _collapse_whitespace(haystack)
+    needle = _collapse_whitespace(_strip_control_chars(needle))
+    haystack = _collapse_whitespace(_strip_control_chars(haystack))
     if not needle:
         return 0.0
     if len(needle) < min_chars:
