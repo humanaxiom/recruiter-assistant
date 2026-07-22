@@ -93,6 +93,11 @@ ADR-010 §6 is otherwise unchanged.
 
 ## Follow-up items (from the `security` gate, ordered)
 
+> **Superseded by [ADR-023](023-evidence-verifier-hardening.md).** Status: #1 **PARTIALLY closed** (the
+> length guard converts unbounded append into a bounded ~26%-of-chunk replacement — narrowed, not closed;
+> see ADR-023's residuals); #2, #3, #4 **closed**; #5 **unchanged, still open**. Read ADR-023 before
+> touching `verify_evidence` or these schemas again.
+
 1. **HIGH — `partial_ratio` superset bypass** (`stages.py:277-280`, `:315-318`). Quote containing the whole
    chunk verbatim + appended fabrication scores 1.000 at any append length. Fix: length-ratio guard
    (reject `len(quote) > len(chunk) * k`, k≈1.2) or `partial_ratio_alignment` requiring the matched window
@@ -100,8 +105,15 @@ ADR-010 §6 is otherwise unchanged.
 2. **MEDIUM — NUL-byte availability bug** (`shortlist_service.py:109-123`). A `\x00` in a quote survives the
    verifier, `json.dumps` emits it as a `\u0000` escape, and Postgres rejects that escape outright
    ("unsupported Unicode escape sequence ... cannot be converted to text"). The whole `persist_shortlist`
-   transaction dies, so one malformed quote loses the entire shortlist. Strip C0 controls (except `\n`
-   and `\t`) in `verify_evidence`.
+   transaction dies, so one malformed quote loses the entire shortlist.
+
+   **Correction (ADR-023): the fix site named above is wrong — do not follow it.** The original instruction
+   read "Strip C0 controls (except `\n` and `\t`) in `verify_evidence`." `verify_evidence` only ever
+   rewrites the two `evidence` fields; `requirement`, `overall_summary` and `overall_motivation` never pass
+   through it, so a scrub placed there as specified would leave those three fields reaching `json.dumps`
+   unscrubbed and still able to kill the transaction. ADR-023 places the scrub at the schema boundary
+   instead (`schemas/matching.py`'s `CleanText` annotation), which covers every free-text evidence field,
+   including future producers that never go through `verify_evidence` at all.
 
    Writing this ADR reproduced the bug in miniature: the first draft embedded a literal NUL while
    describing it, which git classified as binary and committed as a zero-line diff. The byte is easy to
