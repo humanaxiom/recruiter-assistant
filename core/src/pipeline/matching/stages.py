@@ -35,6 +35,7 @@ from rapidfuzz import fuzz
 
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
+    SCRUBBED_CONFIDENCE_CAP,
     EvidenceObject,
     MatchWeights,
     ScoreBreakdown,
@@ -248,9 +249,20 @@ _WHITESPACE = re.compile(r"\s+")
 def _collapse_whitespace(text: str) -> str:
     """Normalise runs of whitespace to a single space, then strip.
 
-    Applied to BOTH sides of the length comparison below, so honest whitespace
-    variation between a quote and its chunk (re-wrapped lines, double spaces
-    after a period) is never punished as an append.
+    Applied SYMMETRICALLY to the needle and the haystack, and to every stage
+    of ``_fuzz_ratio`` — the length floor, the length guard AND the string
+    handed to ``partial_ratio`` — exactly like ``.lower()`` already is. It is
+    a normalisation, not a relaxation: it cannot turn a non-span into a span,
+    only let a genuine span score as one.
+
+    Applying it to the guard alone (the original shape) was not enough, and
+    the corpus says so. Measured on r01's real 148-char Python chunk, with
+    quotes that collapse to a verbatim span in every case, ``partial_ratio``
+    on the RAW strings scored: whole chunk triple-spaced 0.797 and the gold
+    anchor with 4-space column padding 0.826 — both BELOW the 0.85 bar, i.e.
+    real evidence scrubbed as fabrication — and the newline-wrapped anchor
+    0.859, nine thousandths from the same fate. Collapsed on both sides all
+    six re-renders score 1.000.
     """
     return _WHITESPACE.sub(" ", text).strip()
 
@@ -269,12 +281,21 @@ def _fuzz_ratio(
     accepting the gold anchors, unlike ``fuzz.WRatio`` (leaks r02's fabrication
     at 0.855) or ``fuzz.ratio`` (rejects gold anchors at 0.648/0.796).
 
+    Both sides are whitespace-collapsed first (see ``_collapse_whitespace``),
+    and every check below — including ``partial_ratio`` itself — runs on the
+    collapsed forms.
+
     Two guards run BEFORE ``partial_ratio``, because it is blind to both
     (ADR-022 follow-up items #1 and #4):
 
     * **Minimum quote length** (#4). Anything under ``min_chars`` scores 0.0.
       ``"API"`` otherwise scores 1.000 against every chunk containing it, so a
-      bare token is indistinguishable from real evidence.
+      bare token is indistinguishable from real evidence. Measured on the
+      COLLAPSED needle, not the raw one: ``"API"`` followed by 30 spaces is 33
+      raw characters and cleared a raw floor while carrying three characters
+      of evidence. ``verify_evidence`` happens to strip before calling, but a
+      guard that only holds because of what its caller does first is not a
+      guard — this function's contract stands on its own.
     * **Length guard** (#1). ``partial_ratio`` scores the best-matching WINDOW
       of the longer string, so a quote CONTAINING the cited chunk verbatim
       plus arbitrary appended fabrication scores 1.000 at any append length.
@@ -282,15 +303,17 @@ def _fuzz_ratio(
       longer than the thing it spans — so a quote longer than the chunk is
       rejected outright, at any excess. This is a structural invariant, NOT a
       tunable ratio: a threshold like ``k = 1.05`` leaves a small-append window
-      open (a +1 char append on a 100-char chunk lands at ~1.01) and the
+      open (a +1 char append on r01's 148-char chunk lands at 1.007) and the
       fabrication rides through it. Cross-chunk concatenation is rejected as a
       consequence, which is intended.
     """
-    if not needle or not needle.strip():
+    needle = _collapse_whitespace(needle)
+    haystack = _collapse_whitespace(haystack)
+    if not needle:
         return 0.0
     if len(needle) < min_chars:
         return 0.0
-    if len(_collapse_whitespace(needle)) > len(_collapse_whitespace(haystack)):
+    if len(needle) > len(haystack):
         return 0.0
     return float(fuzz.partial_ratio(needle, haystack)) / 100.0
 
@@ -327,7 +350,7 @@ def verify_evidence(
                         "status": (
                             "missing" if new_req.status == "met" else new_req.status
                         ),
-                        "confidence": min(new_req.confidence, 0.3),
+                        "confidence": min(new_req.confidence, SCRUBBED_CONFIDENCE_CAP),
                     }
                 )
         elif new_req.evidence and not good_ids:
@@ -339,7 +362,7 @@ def verify_evidence(
                     "status": (
                         "missing" if new_req.status == "met" else new_req.status
                     ),
-                    "confidence": min(new_req.confidence, 0.3),
+                    "confidence": min(new_req.confidence, SCRUBBED_CONFIDENCE_CAP),
                 }
             )
         cleaned.append(new_req)
@@ -360,11 +383,17 @@ def verify_evidence(
                 for cid in good_ids
             ):
                 new_cle = new_cle.model_copy(
-                    update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
+                    update={
+                        "evidence": "",
+                        "confidence": min(new_cle.confidence, SCRUBBED_CONFIDENCE_CAP),
+                    }
                 )
         elif new_cle.evidence and not good_ids:
             new_cle = new_cle.model_copy(
-                update={"evidence": "", "confidence": min(new_cle.confidence, 0.3)}
+                update={
+                    "evidence": "",
+                    "confidence": min(new_cle.confidence, SCRUBBED_CONFIDENCE_CAP),
+                }
             )
         cleaned_cover.append(new_cle)
 

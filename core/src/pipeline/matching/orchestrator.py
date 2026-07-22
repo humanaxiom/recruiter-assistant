@@ -58,6 +58,7 @@ from src.prompts import load_prompt
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
     EvidenceObject,
+    EvidenceObjectIngest,
     MatchWeights,
     PipelineMeta,
     ScoreBreakdown,
@@ -497,9 +498,15 @@ async def _stage3_per_candidate(
         cover_letter_chunks=cl_chunks,
     )
     try:
+        # THE ingest boundary. ``EvidenceObjectIngest`` is the strict variant
+        # and must not be swapped for the tolerant ``EvidenceObject`` used
+        # everywhere downstream: this is the only place the size caps are
+        # applied, and they scrub the offending field rather than raising, so
+        # one over-long quote no longer drops us into the except-branch below
+        # and costs this candidate ALL of their evidence.
         evidence = await ctx.llm.chat_json(
             prompt.messages,
-            EvidenceObject,
+            EvidenceObjectIngest,
             max_tokens=ctx.evidence_max_tokens,
             max_retries=1,
         )

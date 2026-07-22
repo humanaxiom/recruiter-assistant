@@ -77,10 +77,10 @@ def _legacy_evidence_dict() -> dict[str, Any]:
     return {
         "requirements": [
             {
-                "requirement": "req-%d" % i,
+                "requirement": f"req-{i}",
                 "status": "met",
                 "evidence": LEGACY_OVERSIZE_QUOTE,
-                "evidence_chunk_ids": ["c_%03d" % j for j in range(12)],
+                "evidence_chunk_ids": [f"c_{j:03d}" for j in range(12)],
                 "confidence": 0.9,
             }
             for i in range(LEGACY_REQUIREMENT_COUNT)
@@ -91,7 +91,7 @@ def _legacy_evidence_dict() -> dict[str, Any]:
             {
                 "theme": "motivation",
                 "evidence": LEGACY_OVERSIZE_QUOTE,
-                "evidence_chunk_ids": ["cl_%03d" % j for j in range(12)],
+                "evidence_chunk_ids": [f"cl_{j:03d}" for j in range(12)],
                 "confidence": 0.9,
             }
         ],
@@ -478,7 +478,10 @@ def test_ingest_truncates_over_long_chunk_id_lists() -> None:
     ev = EvidenceObjectIngest.model_validate(
         {
             "requirements": [
-                {"requirement": "Python", "evidence_chunk_ids": [f"c_{i}" for i in range(30)]}
+                {
+                    "requirement": "Python",
+                    "evidence_chunk_ids": [f"c_{i}" for i in range(30)],
+                }
             ]
         }
     )
@@ -547,15 +550,23 @@ def test_orchestrator_parses_llm_evidence_with_the_strict_ingest_model() -> None
     )
 
 
-def test_shortlist_service_does_not_import_any_ingest_model() -> None:
-    """The read layer must never reach for a strict model. Static, so it holds
-    for read paths this file does not exercise."""
-    import inspect
+INGEST_MODEL_NAMES = (
+    "EvidenceObjectIngest",
+    "RequirementEvidenceIngest",
+    "CoverLetterEvidenceIngest",
+)
 
+
+@pytest.mark.parametrize("name", INGEST_MODEL_NAMES)
+def test_shortlist_service_does_not_import_any_ingest_model(name: str) -> None:
+    """The read layer must never reach for a strict model. Checks the module
+    NAMESPACE rather than the source text, so the read path is free to name
+    these models in comments explaining why it does not use them — while an
+    actual import (the only way one could be called) still fails here. Static,
+    so it holds for read paths this file does not exercise."""
     from src.services import shortlist_service
 
-    source = inspect.getsource(shortlist_service)
-    assert "Ingest" not in source, (
-        "shortlist_service is a READ layer; an ingest model there re-breaks "
-        "retrieval of pre-existing rows"
+    assert not hasattr(shortlist_service, name), (
+        f"shortlist_service imported {name}; it is a READ layer, and a strict "
+        "model there re-breaks retrieval of pre-existing rows"
     )

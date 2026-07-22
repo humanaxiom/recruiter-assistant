@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
@@ -48,7 +48,49 @@ def _strip_control_chars(value: str) -> str:
 # Every LLM-authored free-text field on the evidence models carries this, so
 # the scrub holds on ``__init__`` and ``model_validate`` alike and is a fixed
 # point across a dump/validate roundtrip.
+#
+# It is not redundant with ``pipeline/llm/client.py::_strip_nuls``, which
+# already walks parsed LLM JSON and removes U+0000 before validation. That
+# covers the single byte Postgres rejects outright, on the single path that
+# goes through ``chat_json``. This layer is broader on both axes: it also
+# removes the REST of the C0 controls (junk in a human-facing quote, and
+# invisible in a reviewed excerpt), and it holds for callers that never touch
+# the LLM client at all — read-path revalidation, tests, and any future
+# non-LLM producer of an evidence object. Defence in depth, with the outer
+# layer strictly wider than the inner one.
 CleanText = Annotated[str, AfterValidator(_strip_control_chars)]
+
+# ── ADR-022 follow-up #3 — evidence size caps ───────────────────────────────
+#
+# HUMAN DECISION (reviewer round 2): the READ path is TOLERANT, INGEST is
+# STRICT. A cap prevents a bad WRITE; once the bytes are on disk it buys no
+# protection whatsoever and only breaks retrieval. This project has no
+# migration framework, and ``shortlist_service`` validates stored JSONB with
+# an uncaught ``model_validate``, so a cap on the read model turns any
+# pre-existing over-cap row into a 500 for the whole job — making exactly the
+# pathological output the cap targets PERMANENTLY UNREADABLE.
+#
+# So the three evidence models below carry NO length constraints and are what
+# the DTOs, the read path and ``verify_evidence`` use. The ``*Ingest``
+# subclasses at the bottom of this module carry the caps, and are wired at
+# exactly one place: the ``chat_json`` call in
+# ``pipeline/matching/orchestrator.py::_stage3_per_candidate``.
+#
+# The ingest caps SCRUB rather than raise, for the same reason
+# ``verify_evidence`` scrubs per-requirement instead of rejecting wholesale:
+# one over-long quote must not cost a candidate every OTHER requirement's
+# evidence, which is what a raising cap did (the object failed validation, so
+# ``_stage3_per_candidate`` returned ``None``).
+MAX_EVIDENCE_QUOTE_CHARS = 2000
+MAX_REQUIREMENT_CHARS = 500
+MAX_EVIDENCE_CHUNK_IDS = 8
+MAX_REQUIREMENTS = 64
+MAX_OVERALL_TEXT_CHARS = 1000
+
+# Confidence ceiling applied to any requirement/theme whose quote was scrubbed.
+# Shared with ``pipeline/matching/stages.py::verify_evidence`` so the ingest
+# drop and the anti-fabrication scrub cannot drift apart.
+SCRUBBED_CONFIDENCE_CAP = 0.3
 
 # A skill family/category label. Free-form string, resolved against the
 # config-driven ontology vocabulary at scoring time (not an enum).
@@ -150,12 +192,15 @@ class ScoreBreakdown(BaseModel):
 
 
 class RequirementEvidence(BaseModel):
+    """TOLERANT read/DTO model. Deliberately carries no length caps — see the
+    ingest/read note above. ``RequirementEvidenceIngest`` is the strict one."""
+
     model_config = ConfigDict(extra="ignore")
 
-    requirement: CleanText = Field(max_length=500)
+    requirement: CleanText
     status: EvidenceStatus = "missing"
-    evidence: CleanText = Field(default="", max_length=2000)
-    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
+    evidence: CleanText = ""
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
     # FU-2 (display-only): the resolved source text behind ``evidence_chunk_ids``,
     # expanded from ``resumes.parsed`` at read/export time. Redacted under blind
@@ -169,26 +214,123 @@ CoverLetterTheme = Literal["motivation", "role_alignment", "cultural_fit", "grow
 
 
 class CoverLetterEvidence(BaseModel):
-    """One cover-letter theme with a cited quote (Feature 1)."""
+    """One cover-letter theme with a cited quote (Feature 1).
+
+    TOLERANT read/DTO model — no length caps, by the same decision as
+    ``RequirementEvidence``."""
 
     model_config = ConfigDict(extra="ignore")
 
     theme: CoverLetterTheme
-    evidence: CleanText = Field(default="", max_length=2000)
-    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
+    evidence: CleanText = ""
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 class EvidenceObject(BaseModel):
-    """LLM-output schema for shortlist_evidence_v1/v2 / chat_json target."""
+    """Evidence for one candidate: the READ/DTO shape.
+
+    This is what ``shortlist_service`` validates stored JSONB with, what the
+    ``ShortlistEntry`` / ``JobMatchEntry`` DTOs hold, and what
+    ``verify_evidence`` takes and returns. It must accept anything ever
+    written, so it declares no length caps. The LLM ingest boundary uses
+    ``EvidenceObjectIngest``."""
 
     model_config = ConfigDict(extra="ignore")
 
-    requirements: list[RequirementEvidence] = Field(default_factory=list, max_length=64)
-    overall_summary: CleanText = Field(default="", max_length=1000)
+    requirements: list[RequirementEvidence] = Field(default_factory=list)
+    overall_summary: CleanText = ""
     cover_letter_presence: bool = False
     cover_letter_evidence: list[CoverLetterEvidence] = Field(default_factory=list)
-    overall_motivation: CleanText = Field(default="", max_length=1000)
+    overall_motivation: CleanText = ""
+
+
+# ── STRICT ingest variants — LLM boundary ONLY ──────────────────────────────
+#
+# Never use these on a read path. They subclass their tolerant counterparts so
+# variance runs one way only: an ingest instance is accepted everywhere a read
+# instance is (``verify_evidence``, the DTOs, ``persist_shortlist``), and a
+# read instance can never stand in for an ingest one.
+
+
+class RequirementEvidenceIngest(RequirementEvidence):
+    """``RequirementEvidence`` with the size caps enforced by scrubbing."""
+
+    @model_validator(mode="after")
+    def _enforce_ingest_caps(self) -> RequirementEvidenceIngest:
+        if len(self.requirement) > MAX_REQUIREMENT_CHARS:
+            # The label is the row's KEY, not evidence of anything, so it is
+            # trimmed rather than dropped — blanking it would orphan the row.
+            self.requirement = self.requirement[:MAX_REQUIREMENT_CHARS]
+        if len(self.evidence_chunk_ids) > MAX_EVIDENCE_CHUNK_IDS:
+            self.evidence_chunk_ids = self.evidence_chunk_ids[:MAX_EVIDENCE_CHUNK_IDS]
+        if len(self.evidence) > MAX_EVIDENCE_QUOTE_CHARS:
+            # DROP the quote, never truncate it. A truncated superset-bypass
+            # quote can still contain the cited chunk verbatim in its prefix
+            # and would then verify at 1.000 — trimming would manufacture the
+            # fabrication the guard exists to catch. Demote exactly as
+            # ``verify_evidence`` does: a blanked-but-still-``met`` row would
+            # keep full credit in ``_evidence_completeness``, which scores on
+            # status and confidence and never looks at the quote text.
+            self.evidence = ""
+            if self.status == "met":
+                self.status = "missing"
+            self.confidence = min(self.confidence, SCRUBBED_CONFIDENCE_CAP)
+        return self
+
+
+class CoverLetterEvidenceIngest(CoverLetterEvidence):
+    """``CoverLetterEvidence`` with the size caps enforced by scrubbing."""
+
+    @model_validator(mode="after")
+    def _enforce_ingest_caps(self) -> CoverLetterEvidenceIngest:
+        if len(self.evidence_chunk_ids) > MAX_EVIDENCE_CHUNK_IDS:
+            self.evidence_chunk_ids = self.evidence_chunk_ids[:MAX_EVIDENCE_CHUNK_IDS]
+        if len(self.evidence) > MAX_EVIDENCE_QUOTE_CHARS:
+            self.evidence = ""
+            self.confidence = min(self.confidence, SCRUBBED_CONFIDENCE_CAP)
+        return self
+
+
+class EvidenceObjectIngest(EvidenceObject):
+    """LLM-output schema for shortlist_evidence_v1/v2 — the ``chat_json``
+    target, and the ONLY place the evidence size caps are enforced."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_lists_before_item_validation(cls, data: Any) -> Any:
+        """Slice the raw lists BEFORE pydantic validates their items.
+
+        This is what actually bounds the DoS. The previous ``max_length``
+        constraint did not: pydantic validates every item first and only then
+        checks the length, so a 100,000-entry list of 2,000,000-char quotes
+        ran the per-item scrub 100,000 times before raising.
+        """
+        if isinstance(data, dict):
+            for key in ("requirements", "cover_letter_evidence"):
+                value = data.get(key)
+                if isinstance(value, list) and len(value) > MAX_REQUIREMENTS:
+                    data = {**data, key: value[:MAX_REQUIREMENTS]}
+        return data
+
+    @model_validator(mode="after")
+    def _enforce_ingest_caps(self) -> EvidenceObjectIngest:
+        # Re-validate the children through their strict variants: the field
+        # annotations are deliberately NOT narrowed (that would be an
+        # invariant-list override), so the per-item caps are applied here.
+        reqs: list[RequirementEvidence] = [
+            RequirementEvidenceIngest.model_validate(r.model_dump())
+            for r in self.requirements[:MAX_REQUIREMENTS]
+        ]
+        self.requirements = reqs
+        themes: list[CoverLetterEvidence] = [
+            CoverLetterEvidenceIngest.model_validate(c.model_dump())
+            for c in self.cover_letter_evidence[:MAX_REQUIREMENTS]
+        ]
+        self.cover_letter_evidence = themes
+        self.overall_summary = self.overall_summary[:MAX_OVERALL_TEXT_CHARS]
+        self.overall_motivation = self.overall_motivation[:MAX_OVERALL_TEXT_CHARS]
+        return self
 
 
 class PipelineMeta(BaseModel):
@@ -257,15 +399,24 @@ class JobMatchResultOut(BaseModel):
 
 __all__ = [
     "CoverLetterEvidence",
+    "CoverLetterEvidenceIngest",
     "CoverLetterTheme",
     "DEFAULT_WEIGHTS",
     "EvidenceObject",
+    "EvidenceObjectIngest",
     "EvidenceStatus",
     "JobMatchEntry",
     "JobMatchResultOut",
+    "MAX_EVIDENCE_CHUNK_IDS",
+    "MAX_EVIDENCE_QUOTE_CHARS",
+    "MAX_OVERALL_TEXT_CHARS",
+    "MAX_REQUIREMENTS",
+    "MAX_REQUIREMENT_CHARS",
     "MatchWeights",
     "PipelineMeta",
     "RequirementEvidence",
+    "RequirementEvidenceIngest",
+    "SCRUBBED_CONFIDENCE_CAP",
     "ScoreBreakdown",
     "ShortlistEntry",
     "SkillCategory",
