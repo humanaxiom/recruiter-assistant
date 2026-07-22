@@ -134,6 +134,38 @@ The backend's `require_role` gate checks the presented API key (if any) and reso
 
 **Tradeoff and mitigation.** A compromised Flask process can forge any `X-Actor-Assertion`, since it holds the signing secret. An attacker with code execution on Flask can impersonate any user. Mitigations: short expiry (e.g., 15 minutes, renewed on each request), so a forged token's window is bounded; independent role validation by the API (the backend checks the `users` table and rejects requests from deactivated users, even if the assertion says otherwise); and separation of concerns (the API still validates role permissions for the resource being accessed, so a forged admin assertion against a recruiter-only route still 403s).
 
+### 9. Ratified build decisions (human, 2026-07-22)
+
+Four points this ADR left silent or ambiguous were ratified at the start of the FU-5 build. They are
+recorded here so the build does not re-litigate them, and so FU-6/FU-7 inherit settled ground.
+
+1. **Flask reaches Postgres through the backend, not directly.** §2 says Flask "upserts a `users` row"
+   without naming the boundary. Flask has never touched Postgres — every write today goes through
+   FastAPI via `core/frontend/api_client.py`. FU-5 preserves that layering: a new internal endpoint
+   (`POST /internal/users/upsert`) performs the upsert, called by Flask after CAS validation and
+   authenticated by the service key. Giving Flask its own asyncpg pool was rejected as a new
+   architectural precedent that would make Flask an owner of DB state.
+2. **`created_by` / `uploaded_by` carry human identity, `NULL` for services.** §8.3 removes
+   `resolve_actor` entirely, but `routes/jobs.py` consumes it today to populate these two descriptive
+   TEXT columns. They are now populated from the session's `cas_username` when a human assertion is
+   present, and written as `NULL` when a service key calls — making the columns meaningful for the
+   first time instead of recording the constant `"api"`. Note this changes `JobOut.created_by` /
+   `ResumeOut.uploaded_by` from always-populated to nullable.
+3. **`ACTOR_ASSERTION_SECRET` is startup-fatal only when auth is configured.** §8.1 invokes the
+   `PII_KEY` / `SKILL_HASH_SALT` discipline, which is an unconditional hard-fail. Applied
+   unconditionally here it would break every existing local-dev and CI boot, since the shipped compose
+   runs auth-disabled by ADR-018's own recorded default. The check therefore raises on an empty secret
+   **when auth/CAS is enabled**, and boots normally in the all-auth-disabled default.
+4. **`GET /audit/reveals-legacy` is admin + auditor.** §6 says only "an admin endpoint". Auditor is
+   included: reading an audit trail is that role's stated purpose, and this becomes the auditor's first
+   real capability, partially closing the ADR-018 residual restated above.
+
+**Related scope gap, accepted not patched.** FU-5 ships no role-provisioning path — every CAS login
+lands as `recruiter` (§2 step 3), and promotion to `admin`/`auditor`/`hiring_manager` requires manual
+SQL until an admin endpoint exists. This is stated in Consequences as a future feature; the practical
+consequence worth naming is that the admin+auditor endpoint in (4) is unreachable until someone runs
+that SQL. Deliberately not patched with an ad hoc bootstrap-admin mechanism.
+
 ## Consequences
 
 - **Flask becomes the identity gateway.** Every human recruiter must authenticate via CAS before accessing the UI. The `/login` and `/login/callback` routes are new and public (unauthenticated). All other routes are protected by a session check, which redirects to `/login` on expiry.
