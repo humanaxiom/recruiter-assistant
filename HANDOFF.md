@@ -188,6 +188,22 @@ Full write-up: [docs/activity/phase-3-ingest-parse.md](docs/activity/phase-3-ing
   instead of going through `settings`, and no tests. It is not part of any branch and was deliberately
   left untracked. A resuming session should not mistake it for product code, and should not `git add` or
   commit it without first rewriting it to the codebase's actual conventions.
+- **A NUL escape written into file content becomes a REAL 0x00 byte.** In the ADR-023 session this broke
+  two tester subagents, a coder, and the coordinator's own `git commit -m`: pytest dies at collection with
+  `SyntaxError: source code string cannot contain null bytes`, git classifies the file as binary and
+  commits a zero-line diff, and the Bash tool refuses the command outright. ADR-022 records the same thing
+  happening to its own first draft. In code build control characters with `chr()`; in prose (ADRs, commit
+  messages) spell the escape out in words; write commit messages that discuss control characters to a
+  scratchpad file and use `git commit -F`. Scan before committing: `grep -rlP '\x00' core/src core/tests`.
+- **Stale `.pyc` gives FALSE GREENS when mutation-testing.** `default=32` and `default=16` are the same
+  byte length, so bytecode cache validation (mtime + size) accepted a stale `.pyc` and validated the
+  *restored* source — a mutant looked like a survivor without ever executing. Bit the `ranking-evals` gate
+  in the ADR-023 session. Clear `__pycache__` **and** pass `-B` between every mutation run
+  (`PYTHONDONTWRITEBYTECODE=1` stops writing, not reading), or run each mutant on a throwaway tree copy.
+  Treat any single-token numeric/boolean mutation as especially suspect.
+- **`minio` and `web` containers may show in `docker compose ps`.** This project dropped MinIO in Phase 0
+  (filesystem `BlobStore`). They are almost certainly stale containers from `C:\repos\hris` sharing a
+  compose project name — not this stack, and not something to wire back in.
 
 ## Subagent roster (`.claude/agents/`)
 
@@ -195,6 +211,13 @@ Build harness (from the template): `planner`, `tester`, `coder`, `reviewer`, `se
 Domain additions (this project): **`data-pipeline`** (ranking coder with the invariants baked in) and **`ranking-evals`** (merge-blocking quality gate: precision@k, evidence-verification rate = 1.0, PII-leak check).
 
 Per-phase flow: planner → tester (+ evals fixture) → data-pipeline coder (ReviewLoop, ≤5 iters) → reviewer + security + ranking-evals (all merge-blocking) → docs. `make gates` green before the next phase.
+
+**Run the mutation-testing gates SEQUENTIALLY, never concurrently.** `reviewer`, `security` and
+`ranking-evals` all prove findings by editing source and re-running the suite. Two of them on the shared
+tree at once and each reads the other's mutations as its own — a survivor that only survived because the
+other agent reverted mid-run. The ADR-023 session launched `reviewer` and `security` together and had to
+kill one (caught before either wrote). Parallel *producers* are fine, but only with exclusive file
+ownership and explicit-pathspec commits.
 
 **Subagent model tiering ([docs/SUBAGENT_MODEL_POLICY.md](docs/SUBAGENT_MODEL_POLICY.md)):** cheap producers + strong verifiers. The three merge-blocking gates (`reviewer`, `security`, `ranking-evals`) run on **opus** and are never downgraded; producers (`data-pipeline`, `planner`, `tester`, `coder`) default to **sonnet**; `docs` runs on **haiku**. Defaults are in each `.claude/agents/*.md` frontmatter. The coordinator overrides per-call: `data-pipeline` UP to `opus` for diffs touching the 4-stage ranking algorithm / evidence verifier / PII crypto / Neo4j scoring; `docs` UP to `sonnet` for load-bearing handoff/plan refreshes; `coder`/`Explore` DOWN to `haiku` for mechanical fixes / lookups. Quality holds because every producer's diff passes the opus-tier gates + CI before merge.
 
@@ -760,11 +783,13 @@ is a named feature, not a numbered phase.
   fix in the anti-fabrication verifier. All three merge-blocking gates green. See "ADR-022 status" below,
   and read it before touching `verify_evidence` — it leaves a **HIGH** finding deliberately open.
 
-**Ready to merge, 2026-07-21 — branch `fix/adr022-evidence-verifier-hardening` (HEAD `2fc61c8`, off `main`
-@ `1f526f6`):** **ADR-023**, the evidence-verifier hardening follow-up to ADR-022 (closes/narrows the four
-items PR #25 left open). All three merge-blocking gates green (reviewer APPROVE, security PASS,
-ranking-evals PASS); 3125 unit tests, 123 integration tests. See "ADR-023 status" below. **FU-5 is the
-next work item after this merges.**
+**OPEN AS PR #27, CI GREEN, AWAITING THE HUMAN'S MERGE (2026-07-22) — branch
+`fix/adr022-evidence-verifier-hardening` (HEAD `85d995c`, off `main` @ `1f526f6`):** **ADR-023**, the
+evidence-verifier hardening follow-up to ADR-022 (closes three of the four items PR #25 left open and
+**narrows, does not close,** the HIGH one). All three merge-blocking gates green (reviewer APPROVE,
+security PASS, ranking-evals PASS); 3125 unit tests, 123 integration tests, **CI 10/10**. Merge with
+`gh pr merge 27 --squash --delete-branch`. See "ADR-023 status" below. **FU-5 is the next work item after
+this merges.**
 
 ### Workflow-UI enhancements — FU-1, FU-2, FU-3, FU-4 ✅ ALL MERGED
 
@@ -988,9 +1013,24 @@ is env-settable, and below the cap the fix *does* move completeness (toward corr
 findings introduced by the diff), ranking-evals **PASS** (six standing mutation obligations still FAIL as
 required on both input orders). 2730 unit tests @ 91.64%; CI green on all five gates including integration.
 
-### ADR-023 status — evidence-verifier hardening — COMPLETE, gates green
+### ADR-023 status — evidence-verifier hardening — PR #27 OPEN, CI green, AWAITING HUMAN MERGE
 
-Branch `fix/adr022-evidence-verifier-hardening` (HEAD `2fc61c8`, off `main` @ `1f526f6`). The `security`
+> **Resume here.** Branch `fix/adr022-evidence-verifier-hardening`, HEAD `85d995c`, pushed to origin and
+> opened as **PR #27** (https://github.com/humanaxiom/recruiter-assistant/pull/27) on 2026-07-22.
+> **CI is fully green — 10/10 checks, zero pending, zero failures**, including `✅ ALL GATES GREEN` and
+> `Gate: integration (pg + neo4j + redis)`. `gh pr view 27` reports `MERGEABLE` / `CLEAN`.
+> **Nothing is left to build.** The only outstanding action is the human running:
+>
+> ```
+> gh pr merge 27 --squash --delete-branch
+> ```
+>
+> (`gh pr merge` is classifier-blocked for the agent — see the standing note in this file; drive to green
+> and hand over the command.) If you are resuming and PR #27 is already merged, this whole section is
+> history: go to "Queued next work" and start **FU-5**. **Verify against origin before trusting either
+> state** — `git fetch && gh pr view 27`.
+
+Branch `fix/adr022-evidence-verifier-hardening` (HEAD `85d995c`, off `main` @ `1f526f6`). The `security`
 gate had passed PR #25's diff but found a **HIGH pre-existing defect in the same function that PR #25
 deliberately did not close**; the human agreed on 2026-07-21 to merge #25 as-is and take these as one
 focused follow-up branch. **That branch is done: all four items below are closed or narrowed, all three
@@ -1057,10 +1097,24 @@ residual above), so the explainer's claim that "every quote shown to a human mus
 the real document" is still not literally true. The banner's stated removal trigger now points at the
 bounded-replacement residual rather than at "#1 closed."
 
-**Gate state (HEAD `2fc61c8`):** reviewer **APPROVE**, security **PASS**, ranking-evals **PASS** — ranking
+**Gate state (HEAD `85d995c`):** reviewer **APPROVE**, security **PASS**, ranking-evals **PASS** — ranking
 byte-identical to `main` (expected, and per the Fix A finding above not on its own evidence that the new
 guards work; see the dedicated guard-gate test for that). **3125 unit tests**; **123 integration tests**
-passed live against real Postgres + Neo4j.
+passed live against real Postgres + Neo4j. **CI on PR #27: 10/10 green.**
+
+The reviewer's APPROVE is a **re-review**. Its first pass on `3fdae95` was CHANGES-REQUIRED (2 major, 4
+minor, 3 nits); the re-run independently rebuilt the guard-mutation battery rather than trusting the
+branch's own numbers, and killed **20/20 across 10 mutations × 2 input orders**. It also confirmed
+branch-wide test integrity: `git diff 1f526f6..HEAD -- core/tests/` removes **exactly one line**, an unused
+import. Every intra-branch test edit has a stronger replacement — details in ADR-023.
+
+**Commit shape (13 commits, TDD-ordered).** `red:` 91 failing tests → `green:` src-only → drift pin →
+`red:`/`green:` reviewer findings → `red:`/`green:` security findings → `red:`/`green:` corpus probes →
+`docs:`. Two rounds fixed defects that this branch's own fixes introduced (the read-path 500s from the new
+caps; a symmetric-scrub defect the coder caught and closed itself, where scrubbing the needle but not the
+haystack made a chunk fail to match *itself* at 0.838). Severity fell monotonically across rounds — HIGH →
+2 major → 5 medium/low → self-caught — which is why it was allowed to run five rounds rather than being
+split.
 
 ### Queued next work — FU-5, FU-6, FU-7 (user-scoped 2026-07-20)
 
@@ -1495,14 +1549,17 @@ Note: no local Python — verify gates in the python:3.11-slim Docker container 
 HANDOFF.md. Phase 7's PR #16 is merged; v1 is complete. Post-v1, the Workflow
 UI and FU-1/2/3/4 are merged, and so are PR #24 (the FU-5/6/7 plan) and PR #25
 (ADR-022). The ADR-022/ADR-023 hardening branch (fix/adr022-evidence-verifier-
-hardening, HEAD 2fc61c8) is COMPLETE — all gates green, awaiting merge. Start
-with FU-5 next.
+hardening, HEAD 85d995c) is COMPLETE and open as PR #27 with CI 10/10 green —
+it needs the human to run `gh pr merge 27 --squash --delete-branch`. Then
+start FU-5.
 
-CURRENT STATE AS OF 2026-07-21 — read HANDOFF.md's "ADR-022 status" and
+CURRENT STATE AS OF 2026-07-22 — read HANDOFF.md's "ADR-022 status" and
 "ADR-023 status" sections before doing anything:
-- `main` is at 6db83b6. Everything below is merged with CI green, except the
-  ADR-023 hardening branch, which is gates-green and ready to merge but not
-  yet on `main` as of this writing.
+- `main` is at 1f526f6. Everything below is merged with CI green, EXCEPT the
+  ADR-023 hardening branch, which is open as PR #27 — CI fully green (10/10),
+  MERGEABLE/CLEAN, awaiting the human's merge command. FETCH AND CHECK FIRST:
+  `git fetch && gh pr view 27` — if it is already merged, skip to FU-5. This
+  file has lagged origin by a whole sub-phase before; do not trust it blind.
 - FU-4 (RBAC) MERGED via PR #23 (961caab). The org billing block was fixed that
   morning and CI ran green on all five gates — its first real execution on that
   branch. Diagnostic note if it recurs: a billing-refused job reports
@@ -1516,16 +1573,43 @@ CURRENT STATE AS OF 2026-07-21 — read HANDOFF.md's "ADR-022 status" and
   both the requirement and cover-letter arms. Found by fact-checking the HR
   explainer, not by reading code. Ranking is byte-identical; it is a
   display/integrity fix, not a scoring one.
-- THE ADR-022 HARDENING BRANCH IS DONE (ADR-023, HEAD 2fc61c8): the security
-  HIGH finding PR #25 deliberately left open — rapidfuzz partial_ratio
-  returning 1.000 when a quote contains the whole cited chunk verbatim PLUS
-  arbitrary appended fabrication — is narrowed (unbounded append -> bounded
-  ~26%-of-chunk replacement, NOT fully closed), the NUL-byte transaction
-  killer is closed at the schema boundary, evidence fields are capped at
-  ingest, and the missing minimum-quote-length floor is closed at 16 chars.
-  Deferred: Fix A (span-quoting the eval-corpus stand-in), the 26% residual,
-  the ellipsis-quote false-negative class. Full detail in ADR-023 and
-  HANDOFF's "ADR-023 status" section.
+- THE ADR-022 HARDENING BRANCH IS DONE (ADR-023, HEAD 85d995c, PR #27, CI
+  10/10 green, awaiting merge): the security HIGH finding PR #25 deliberately
+  left open — rapidfuzz partial_ratio returning 1.000 when a quote contains
+  the whole cited chunk verbatim PLUS arbitrary appended fabrication — is
+  narrowed (unbounded append -> bounded ~26%-of-chunk replacement, NOT fully
+  closed), the NUL-byte transaction killer is closed at the schema boundary,
+  evidence fields are capped at ingest, and the missing minimum-quote-length
+  floor is closed at 16 chars. Deferred: Fix A (span-quoting the eval-corpus
+  stand-in), the 26% residual, the ellipsis-quote false-negative class. Full
+  detail in ADR-023 and HANDOFF's "ADR-023 status" section.
+- TWO PIECES OF WRITTEN GUIDANCE WERE WRONG AND ARE CORRECTED IN PLACE — if
+  you have older text in context, distrust it. (a) ADR-022 follow-up #2 named
+  verify_evidence as the fix site for the NUL bug; it never rewrites
+  requirement / overall_summary / overall_motivation, so a spec-literal fix
+  leaves three fields killing the transaction. (b) ADR-022 recommended a
+  length-ratio guard at k~1.2; measurement rejects ANY usable k, because the
+  bypass returns 1.000 at +1 appended character (~1.008 ratio), not only at
+  the +1120 the ADR records.
+- THE MOST TRANSFERABLE FINDING, and the reason a green ranking-evals run is
+  not by itself evidence: the corpus could falsify NONE of the six guards
+  ADR-023 added — all seven guard mutations survived on both input orders,
+  because the stand-in extractor quotes each chunk IN FULL, so every surfaced
+  quote is byte-identical to its cited chunk and no guard ever binds. A
+  byte-identical ranking was the ONLY possible outcome; it would have been
+  identical for a materially broken implementation. Third recurrence of this
+  pattern (Phase 4a's corpus, ADR-022's own harness loop, now this). Fixed
+  for these guards by additive probes (20/20 kills), but the ROOT CAUSE
+  STANDS: the corpus is blind to any future quote-shape guard by
+  construction. Do Fix A before the next change to _fuzz_ratio.
+- CLAUDE.md's "Before implementing anything new" step 1 used to say to curl
+  localhost:8000/memory/similar. That route was a golden-template demo route
+  DELETED IN PHASE 0 (test_api.py's DEMO_ROUTES asserts its absence), so a
+  mandated step was silently unfollowable for this project's entire life.
+  Fixed, and .claude/commands/memory-query.md was REMOVED rather than
+  corrected — it also documented BaseAgent._memory_context(), a retrieval it
+  claimed ran inside every subagent, and core/src/agents/ was deleted in
+  Phase 0 too. Do not re-add either without building the feature first.
 - THE IMMEDIATE NEXT WORK ITEM IS FU-5 (CAS identity + attributable audit,
   ADR-019), THEN FU-6 (per-job assignment + row-level scoping, ADR-020), THEN
   FU-7 (LLM failover + fail-closed ranking, ADR-021), in that order; each
