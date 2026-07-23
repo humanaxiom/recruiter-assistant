@@ -21,7 +21,13 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from src.api.deps import Role, get_arq, require_role, resolve_user
+from src.api.deps import (
+    Role,
+    actor_fields_from_user,
+    get_arq,
+    require_role,
+    resolve_user,
+)
 from src.errors import FileRejectedError
 from src.models.pool import Db
 from src.schemas.auth import User
@@ -174,15 +180,39 @@ async def get_job(job_id: UUID, db: Db) -> JobOut:
 
 
 @router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])
-async def update_job(job_id: UUID, payload: JobUpdate, db: Db) -> JobOut:
+async def update_job(
+    job_id: UUID,
+    payload: JobUpdate,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> JobOut:
     """General partial update. ``status`` is NOT settable here — ``JobUpdate``
     has no ``status`` field (``extra="forbid"`` 422s a client that tries), and
     status changes must go through ``PATCH /jobs/{job_id}/status`` so the
     forward-only state-machine guard always applies. Fields the client omits
     are left unchanged (see ``job_service.update_job`` for the merge
     semantics); 404 (via the global ``AppError`` handler) when the id does
-    not resolve."""
-    return await job_service.update_job(db, job_id, payload)
+    not resolve.
+
+    **FU-5 slice 9 (ADR-019 §1.4/§6).** ``blind_review`` is the widest-
+    blast-radius unaudited action in the codebase (it permanently un-blinds
+    every résumé/shortlist under this job) — this route now also depends on
+    ``resolve_user`` and forwards the derived actor identity
+    (``src.api.deps.actor_fields_from_user``) into ``job_service.update_job``,
+    which writes exactly one ``audit_log`` row when (and only when) the
+    payload actually flips ``blind_review``. Unlike ``POST
+    /resumes/{id}/reveal``, this route is NOT human-only: a bare service-key
+    caller (``user is None``) is forwarded as ``actor_kind='service'`` /
+    ``actor_service='api'`` rather than 403ing."""
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    return await job_service.update_job(
+        db,
+        job_id,
+        payload,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
 
 
 @router.patch(

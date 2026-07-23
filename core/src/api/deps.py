@@ -221,3 +221,38 @@ async def resolve_user(
         return None
 
     return await user_service.get_by_id(db, session.user_id)
+
+
+def actor_fields_from_user(
+    user: User | None,
+) -> tuple[str, UUID | None, str | None]:
+    """Derive the ``(actor_kind, actor_user_id, actor_service)`` triple
+    ``audit_service.record_audit`` expects, from a :func:`resolve_user`
+    resolution.
+
+    FU-5 slice 9 (ADR-019 §1.4/§6) factors this OUT of
+    ``src.api.routes.resumes.reveal_resume``'s inline if/else (which handles
+    only two of these three cases, because reveal 403s outright on ``user is
+    None``) so ``src.api.routes.jobs``'s ``blind_review``-flip audit — which
+    is NOT human-only and must succeed for a bare service-key caller too —
+    can share the derivation without duplicating it. Three cases:
+
+    1. ``user is None`` (no identity resolves at all, e.g. CAS enabled with
+       no live session) -> ``("service", None, "api")``.
+    2. ``user.id == _DEV_ADMIN_SENTINEL_ID`` (the synthetic dev-anonymous
+       identity, CAS disabled) -> ``("service", None, user.cas_username)`` —
+       never ``actor_kind="user"`` against the sentinel id: it is not a real
+       ``users`` row and would violate ``audit_log.actor_user_id``'s FK.
+    3. Any other resolved user (a real human session) ->
+       ``("user", user.id, None)``.
+
+    Deliberately NOT wired into ``reveal_resume`` in this slice: reveal's
+    403-on-``None`` gate runs BEFORE any actor derivation, so reusing this
+    helper there would require restructuring an already-green, security-
+    sensitive code path for no behavioural gain. Left alone.
+    """
+    if user is None:
+        return ("service", None, "api")
+    if user.id == _DEV_ADMIN_SENTINEL_ID:
+        return ("service", None, user.cas_username)
+    return ("user", user.id, None)
