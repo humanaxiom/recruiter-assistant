@@ -1,33 +1,48 @@
-"""Route tests for FU-1's AUDITED reveal — ``POST /resumes/{id}/reveal`` on
-``src.api.routes.resumes``.
+"""Route tests for ``POST /resumes/{id}/reveal`` on ``src.api.routes.resumes``.
 
 Revealing a candidate is the de-anonymization action, so the route must:
 * probe existence FIRST — a missing id 404s and writes NO audit row and never
   decrypts;
-* on an existing id, record exactly one ``reveal_audit`` row (via
-  ``reveal_service.record_reveal``) with the resolved actor, THEN return the
+* on an existing id, record exactly one audit row, THEN return the
   UN-blinded ``ResumeOut`` (via ``resume_service.get_one(..., reveal=True)``).
 
-``record_reveal`` and ``get_one`` are monkeypatched so this isolates the ROUTE
-contract (order, audit-before-return, 404-before-audit); their own behaviour is
-covered by ``test_services_reveal.py`` and the résumé-service tests.
+``record_audit``/``get_one`` are monkeypatched so this isolates the ROUTE
+contract (order, audit-before-return, 404-before-audit, human-attribution
+gate); their own behaviour is covered by ``test_audit_service.py`` /
+``test_services_reveal.py`` and the résumé-service tests.
 
-**FU-5 slice 7 (ADR-019 §8.3/§9.2).** The actor recorded on ``reveal_audit``
-now comes from ``src.api.deps.resolve_user`` — never the retired
-``X-Actor-Name`` header/``resolve_actor``. See the dedicated section near
-the end of this file for the identity-source coverage; the human-only 403
-gate on a non-resolving identity is out of scope for this slice (slice 8).
+**FU-5 slice 8 (ADR-019 §6/§7/§10b) — the reveal -> audit_log cutover, plus
+the human-attribution gate.** This SUPERSEDES slice 7's behaviour pinned
+below in three ways, per ADR-019:
+
+1. The route no longer writes ``reveal_audit`` (via
+   ``reveal_service.record_reveal``) at all on the reveal path. It writes
+   exactly one ``audit_log`` row via the NEW ``src.services.audit_service
+   .record_audit`` — see the dedicated section below. ``reveal_audit`` and
+   ``reveal_service`` are KEPT (read-only, ADR-019 §6) — every test that
+   still patches ``reveal_service.record_reveal`` now asserts it is NEVER
+   awaited, proving the cutover rather than the old write.
+2. A caller for whom NO human identity resolves (``resolve_user`` -> ``None``,
+   e.g. a bare service-key caller with CAS enabled) now gets **403**, not the
+   old ``"api"``-fallback 200. This REVERSES
+   ``test_reveal_actor_falls_back_to_api_when_no_user_resolves`` from slice 7,
+   whose own docstring said the human-only gate was "slice 8" scope — it now
+   is. See ``test_reveal_case2_no_human_session_403s_writes_no_audit_no_decrypt``.
+3. CAS-disabled dev mode (ADR-019 §10b) SKIPS the human gate — the synthetic
+   dev-anonymous identity resolves and the audit row is written with
+   ``actor_kind='service'`` / ``actor_service='dev-anonymous'`` (never
+   ``actor_kind='user'`` against the sentinel id, which is not a real
+   ``users`` row and would violate the ``audit_log.actor_user_id`` FK).
 
 **FU-4 (RBAC) — the MOST EXPLICIT coverage in the whole PR, per the locked
 decisions doc.** ``POST /resumes/{id}/reveal`` is admin/recruiter ONLY —
 narrower than every read route on this router, and per D2, the auditor role
 explicitly gets the SAME blind reads as hiring-manager but may NEVER reveal
 ("Auditor may read jobs / résumés / shortlists in blind form; may NOT
-reveal. Revisit when a ``reveal_audit`` viewing endpoint exists."). Every
-disallowed-role test below asserts BOTH the 403 AND that no audit row was
-written and the résumé was never decrypted — a role check that runs AFTER
-the audit/decrypt would still 403 the HTTP response while having already
-performed the very de-anonymization it exists to prevent.
+reveal."). Every disallowed-role test below asserts BOTH the 403 AND that no
+audit row was written and the résumé was never decrypted — a role check that
+runs AFTER the audit/decrypt would still 403 the HTTP response while having
+already performed the very de-anonymization it exists to prevent.
 """
 
 from __future__ import annotations
@@ -114,67 +129,6 @@ async def _client(app: FastAPI) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-@pytest.mark.asyncio
-async def test_reveal_404_on_missing_resume_writes_no_audit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
-    get_one = AsyncMock()
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
-    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
-
-    app = _build_app(_mock_conn(exists=False))
-    async with await _client(app) as client:
-        resp = await client.post(f"/resumes/{resume_id}/reveal")
-
-    assert resp.status_code == 404
-    record.assert_not_awaited()  # no audit row for a nonexistent id
-    get_one.assert_not_awaited()  # never decrypts
-
-
-@pytest.mark.asyncio
-async def test_reveal_records_audit_then_returns_unblinded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
-    get_one = AsyncMock(return_value=_unblinded(resume_id))
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
-    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
-
-    app = _build_app(_mock_conn(exists=True))
-    async with await _client(app) as client:
-        resp = await client.post(f"/resumes/{resume_id}/reveal?context=shortlist")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    # Un-blinded: real identity is present (this is the whole point of reveal).
-    assert body["candidate"]["name"] == "Casey Rivera"
-    assert body["candidate"]["email"] == "casey.rivera@example.test"
-    # Audited: exactly one row, keyed on this résumé, with the context.
-    record.assert_awaited_once()
-    kwargs = record.await_args.kwargs
-    assert kwargs["resume_id"] == resume_id
-    assert kwargs["context"] == "shortlist"
-    # Un-blind is via the audited reveal=True read, not a raw blind read.
-    get_one.assert_awaited_once()
-    assert get_one.await_args.kwargs.get("reveal") is True
-
-
-# ── FU-5 slice 7 (ADR-019 §8.3/§9.2): actor sourced from resolve_user, NOT
-#    the deleted X-Actor-Name header ──────────────────────────────────────
-#
-# REVERSES the deleted ``test_reveal_actor_comes_from_x_actor_name_header``
-# (it asserted the retired header populated the audit actor — ADR-019 §8.3
-# removes ``X-Actor-Name``/``resolve_actor`` entirely). The reveal route
-# still writes ``reveal_audit`` in this slice (the audit_log cutover is
-# slice 8) but its actor now comes from ``src.api.deps.resolve_user``: the
-# resolved user's ``cas_username`` when a user/dev-anonymous identity
-# resolves, and the existing ``"api"`` fallback string when no identity
-# resolves at all (NOT a 403 — the human-only reveal gate is slice 8).
-
-
 def _identity_user(*, cas_username: str = "alice", role: str = "recruiter") -> User:
     return User(
         id=uuid4(),
@@ -188,23 +142,208 @@ def _identity_user(*, cas_username: str = "alice", role: str = "recruiter") -> U
     )
 
 
+def _tracking_mocks(resume_id: UUID) -> tuple[AsyncMock, AsyncMock, list[str]]:
+    """Two AsyncMocks that each append a marker to a shared list, so the
+    relative CALL ORDER between them can be asserted (ADR-016's ordering
+    guarantee, restated ADR-019 §7: the audit write happens BEFORE decrypt)."""
+    order: list[str] = []
+
+    async def _audit_side_effect(*_args: Any, **_kwargs: Any) -> None:
+        order.append("audit")
+
+    async def _get_one_side_effect(*_args: Any, **_kwargs: Any) -> ResumeOut:
+        order.append("get_one")
+        return _unblinded(resume_id)
+
+    audit = AsyncMock(side_effect=_audit_side_effect)
+    get_one = AsyncMock(side_effect=_get_one_side_effect)
+    return audit, get_one, order
+
+
+@pytest.mark.asyncio
+async def test_reveal_404_on_missing_resume_writes_no_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_id = uuid4()
+    legacy_record = AsyncMock(return_value=uuid4())
+    audit = AsyncMock(return_value=None)
+    get_one = AsyncMock()
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+
+    app = _build_app(_mock_conn(exists=False))
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 404
+    legacy_record.assert_not_awaited()  # no legacy reveal_audit row either
+    audit.assert_not_awaited()  # no audit row for a nonexistent id
+    get_one.assert_not_awaited()  # never decrypts
+
+
+@pytest.mark.asyncio
+async def test_reveal_records_audit_log_row_then_returns_unblinded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FU-5 slice 8 (ADR-019 §6/§7): the reveal -> audit_log cutover. The
+    route writes ONE ``audit_log`` row (via ``audit_service.record_audit``,
+    forwarding the caller-supplied ``context``) BEFORE returning the
+    un-blinded résumé, and NEVER writes to the retired ``reveal_audit`` sink
+    any more."""
+    resume_id = uuid4()
+    audit = AsyncMock(return_value=None)
+    get_one = AsyncMock(return_value=_unblinded(resume_id))
+    legacy_record = AsyncMock(return_value=uuid4())
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+
+    app = _build_app(_mock_conn(exists=True))
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal?context=shortlist")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Un-blinded: real identity is present (this is the whole point of reveal).
+    assert body["candidate"]["name"] == "Casey Rivera"
+    assert body["candidate"]["email"] == "casey.rivera@example.test"
+    # Audited: exactly one audit_log row, keyed on this résumé, with the
+    # supplied context.
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["subject_type"] == "resume"
+    assert kwargs["subject_id"] == resume_id
+    assert kwargs["action"] == "reveal"
+    assert kwargs["context"] == "shortlist"
+    # Un-blind is via the audited reveal=True read, not a raw blind read.
+    get_one.assert_awaited_once()
+    assert get_one.await_args.kwargs.get("reveal") is True
+    # The retired reveal_audit writer must never be called any more.
+    legacy_record.assert_not_awaited()
+
+
+# ── FU-5 slice 8 (ADR-019 §7/§10b): the three reveal cases ────────────────
+#
+# Case 1: cas_enabled=True AND a real human session resolves -> actor_kind
+#         'user', audit BEFORE decrypt.
+# Case 2: cas_enabled=True AND no human session (resolve_user -> None) -> 403,
+#         no decrypt, no audit row at all.
+# Case 3: cas_enabled=False (dev mode, this suite's ambient default) -> the
+#         human gate is SKIPPED; audit is written as actor_kind='service' /
+#         actor_service='dev-anonymous'.
+
+
+@pytest.mark.asyncio
+async def test_reveal_case1_human_session_writes_user_actor_audit_before_decrypt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_id = uuid4()
+    user = _identity_user(cas_username="priya")
+    audit, get_one, order = _tracking_mocks(resume_id)
+    legacy_record = AsyncMock(return_value=uuid4())
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+
+    app = _build_app(_mock_conn(exists=True))
+    app.dependency_overrides[resolve_user] = lambda: user
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == user.id
+    assert kwargs.get("actor_service") is None
+    assert kwargs["action"] == "reveal"
+    assert kwargs["subject_type"] == "resume"
+    assert kwargs["subject_id"] == resume_id
+    # ADR-016's ordering guarantee, restated ADR-019 §7: audit BEFORE decrypt.
+    assert order == ["audit", "get_one"]
+    legacy_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reveal_case2_no_human_session_403s_writes_no_audit_no_decrypt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-019 §7 — REVERSES the deleted slice-7
+    ``test_reveal_actor_falls_back_to_api_when_no_user_resolves`` (that
+    test's own docstring said the human-only gate was out of its scope; it is
+    THIS slice's scope). A service-key-only caller (``resolve_user`` -> None,
+    e.g. CAS enabled with no session) must now 403 — no fallback identity,
+    no decryption, and no audit row of any kind."""
+    resume_id = uuid4()
+    audit, get_one, order = _tracking_mocks(resume_id)
+    legacy_record = AsyncMock(return_value=uuid4())
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+
+    app = _build_app(_mock_conn(exists=True))
+    app.dependency_overrides[resolve_user] = lambda: None
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 403
+    audit.assert_not_awaited()
+    get_one.assert_not_awaited()
+    legacy_record.assert_not_awaited()
+    assert order == []
+
+
+@pytest.mark.asyncio
+async def test_reveal_case3_cas_disabled_writes_service_actor_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-019 §10b — CAS disabled, no session possible. This test suite's
+    ambient default (no ``resolve_user`` override) resolves the REAL
+    dependency's synthetic dev-anonymous identity. The human-only gate is
+    SKIPPED, and the audit row is written with ``actor_kind='service'`` /
+    ``actor_service='dev-anonymous'`` — never ``actor_kind='user'`` against
+    the sentinel id (which is not a real ``users`` row and would violate the
+    ``audit_log.actor_user_id`` FK)."""
+    resume_id = uuid4()
+    audit, get_one, order = _tracking_mocks(resume_id)
+    legacy_record = AsyncMock(return_value=uuid4())
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+
+    app = _build_app(_mock_conn(exists=True))
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "service"
+    assert kwargs["actor_service"] == "dev-anonymous"
+    assert kwargs.get("actor_user_id") is None
+    assert order == ["audit", "get_one"]
+    legacy_record.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_reveal_ignores_x_actor_name_header_and_uses_dev_anonymous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CAS disabled is this test suite's ambient default — no
-    ``resolve_user`` override is installed, so the REAL dependency resolves
-    the synthetic dev-anonymous identity. A leftover ``X-Actor-Name`` header
-    must be read nowhere: the recorded actor is ``"dev-anonymous"``, never
-    the header's value."""
+    """A leftover ``X-Actor-Name`` header (retired since slice 7) must be
+    read nowhere: the audit_log row's ``actor_service`` is
+    ``"dev-anonymous"``, never the header's value, and the retired
+    ``reveal_audit`` writer is never called."""
     resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
+    audit = AsyncMock(return_value=None)
+    legacy_record = AsyncMock(return_value=uuid4())
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
     monkeypatch.setattr(
         resumes_routes.resume_service,
         "get_one",
         AsyncMock(return_value=_unblinded(resume_id)),
     )
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
 
     app = _build_app(_mock_conn(exists=True))
     async with await _client(app) as client:
@@ -214,16 +353,27 @@ async def test_reveal_ignores_x_actor_name_header_and_uses_dev_anonymous(
         )
 
     assert resp.status_code == 200
-    assert record.await_args.kwargs["actor"] == "dev-anonymous"
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "service"
+    assert kwargs["actor_service"] == "dev-anonymous"
+    legacy_record.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_reveal_actor_is_the_resolved_users_cas_username(
+async def test_reveal_route_always_supplies_exactly_one_actor_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Light touch on the ``audit_log_actor_identity`` CHECK contract
+    (enforced for real by Postgres — see
+    ``tests/integration/test_users_audit_pg.py`` and
+    ``tests/integration/test_reveal_audit_log_pg.py``). Whichever reveal case
+    fires, the route's call into ``audit_service.record_audit`` must supply
+    EXACTLY ONE of ``actor_user_id`` / ``actor_service`` — never both, never
+    neither. Exercised back to back for case 3 (service) and case 1 (user)
+    against the same mock."""
     resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
     monkeypatch.setattr(
         resumes_routes.resume_service,
         "get_one",
@@ -231,40 +381,23 @@ async def test_reveal_actor_is_the_resolved_users_cas_username(
     )
 
     app = _build_app(_mock_conn(exists=True))
-    app.dependency_overrides[resolve_user] = lambda: _identity_user(
-        cas_username="priya"
-    )
+
+    # Case 3: no override -> dev-anonymous synthetic identity -> service actor.
     async with await _client(app) as client:
-        resp = await client.post(f"/resumes/{resume_id}/reveal")
-
-    assert resp.status_code == 200
-    assert record.await_args.kwargs["actor"] == "priya"
-
-
-@pytest.mark.asyncio
-async def test_reveal_actor_falls_back_to_api_when_no_user_resolves(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-019 §9.2/§10b: a bare service-key caller (``resolve_user``
-    resolves to ``None``, e.g. CAS enabled with no session) keeps the
-    EXISTING ``"api"`` fallback — this slice does NOT add the human-only
-    403 gate (that is slice 8), so reveal must still succeed."""
-    resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
-    monkeypatch.setattr(
-        resumes_routes.resume_service,
-        "get_one",
-        AsyncMock(return_value=_unblinded(resume_id)),
+        await client.post(f"/resumes/{resume_id}/reveal")
+    service_kwargs = audit.await_args.kwargs
+    assert (service_kwargs.get("actor_user_id") is None) != (
+        service_kwargs.get("actor_service") is None
     )
 
-    app = _build_app(_mock_conn(exists=True))
-    app.dependency_overrides[resolve_user] = lambda: None
+    # Case 1: a real human session -> user actor.
+    app.dependency_overrides[resolve_user] = lambda: _identity_user()
     async with await _client(app) as client:
-        resp = await client.post(f"/resumes/{resume_id}/reveal")
-
-    assert resp.status_code == 200
-    assert record.await_args.kwargs["actor"] == "api"
+        await client.post(f"/resumes/{resume_id}/reveal")
+    user_kwargs = audit.await_args.kwargs
+    assert (user_kwargs.get("actor_user_id") is None) != (
+        user_kwargs.get("actor_service") is None
+    )
 
 
 # ── FU-4 (RBAC): admin/recruiter ONLY — the MOST EXPLICIT coverage ──────
@@ -329,15 +462,18 @@ async def test_reveal_403_writes_no_audit_row_for_disallowed_roles(
 ) -> None:
     """The 403 must happen BEFORE the existence probe / audit write / decrypt
     — a disallowed caller's attempt must leave NO trace of an attempted
-    reveal in the audit log and must never decrypt the résumé, even
-    transiently. This is the load-bearing test in this file: a role check
-    wired in AFTER ``reveal_service.record_reveal`` would still return 403
-    to the caller while having already performed the de-anonymization the
-    check exists to prevent."""
+    reveal in the audit log (the NEW ``audit_log`` sink, as of slice 8, as
+    well as the legacy ``reveal_audit`` one) and must never decrypt the
+    résumé, even transiently. This is the load-bearing test in this file: a
+    role check wired in AFTER the audit write would still return 403 to the
+    caller while having already performed the de-anonymization the check
+    exists to prevent."""
     resume_id = uuid4()
-    record = AsyncMock(return_value=uuid4())
+    legacy_record = AsyncMock(return_value=uuid4())
+    audit = AsyncMock(return_value=None)
     get_one = AsyncMock(return_value=_unblinded(resume_id))
-    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", record)
+    monkeypatch.setattr(resumes_routes.reveal_service, "record_reveal", legacy_record)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
     monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
 
     app = _build_app(_mock_conn(exists=True), role=role)
@@ -345,7 +481,8 @@ async def test_reveal_403_writes_no_audit_row_for_disallowed_roles(
         resp = await client.post(f"/resumes/{resume_id}/reveal")
 
     assert resp.status_code == 403
-    record.assert_not_awaited()
+    legacy_record.assert_not_awaited()
+    audit.assert_not_awaited()
     get_one.assert_not_awaited()
 
 
