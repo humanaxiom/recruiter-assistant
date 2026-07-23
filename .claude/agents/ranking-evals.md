@@ -53,3 +53,13 @@ The table below is **parsed**, so every key gets its own `` `[section] key` `` r
 - If a fixture is genuinely wrong (mislabelled), say so explicitly rather than silently ignoring it.
 - You are read-only on product code; you may add/adjust fixtures and thresholds under `core/tests/evals/` only.
 - A guard you did not watch fail is not verified: when you strengthen a fixture or threshold, run the mutation that the guard is supposed to catch and confirm it goes RED.
+- **Watching it fail requires the mutant to actually execute.** Stale bytecode
+  produced a false GREEN in the ADR-023 session: `default=32` and `default=16` are
+  the same byte length, so cache validation (mtime + size) accepted a stale `.pyc`
+  and re-validated the *restored* source — the mutant never ran and looked like a
+  survivor. Verify through `./scripts/verify.sh`, which clears `__pycache__` first.
+  Treat single-token numeric/boolean mutations as especially suspect.
+- **Never run concurrently with `reviewer` or `security`** — all three mutate the
+  shared tree and will read each other's edits as their own. Restore every mutation
+  before finishing and confirm `git status` is clean in your report.
+- Report the exact command you ran and its real pasted output, not a summary of it.

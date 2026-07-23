@@ -15,11 +15,44 @@ Read automatically by Claude Code every session. This governs ALL work in this r
 ## Non-negotiable gates — run before EVERY commit
 
 ```bash
-make gates        # full suite
-make gates-fast   # pre-commit subset
+./scripts/verify.sh              # offline gates (= make gates)
+./scripts/verify.sh integration  # integration suite vs real Postgres/Neo4j/Redis
+./scripts/verify.sh all          # everything CI runs (= make gates-all)
 ```
 
+**There is no usable Python on this host** (only the WindowsApps stub), so
+`make gates` cannot run natively. `scripts/verify.sh` runs those exact Makefile
+targets inside a container — the Makefile stays the single source of truth, so
+the gate cannot drift from CI. **Never hand-write a `docker run` to check work
+and never substitute a narrower command.** Every recorded instance of that ran
+something narrower than the real gate and let a defect through.
+
 Gates: ruff · black · mypy --strict · pytest unit · pytest integration (testcontainers) · coverage ≥ 80% · branch-name. **A single red gate = the work is not done. Iterate until all green — do not report success, do not open a PR, do not stop.**
+
+### `offline` is not always enough
+
+If the correctness of a change depends on how a real database, driver, or
+service behaves, the unit suite **structurally cannot** prove it — it can only
+string-match the source. Run `./scripts/verify.sh all` for any diff touching
+`models/` (schema, SQL), `api/`, `services/`, `worker/`, or Neo4j/embedding code.
+
+The canonical example, from FU-5 slice 1: a `users.role` column declared
+`NOT NULL` with no `DEFAULT` passed all 2764 unit tests and would have failed
+the first real INSERT, because ADR-019 requires a first login to omit `role`.
+Only the integration run against a real Postgres could see it.
+
+## Trusting subagent reports — coordinator rule
+
+**A subagent's claim of green is not evidence of green.** Require the pasted
+command and its real output; if a report says "gates pass" or only summarizes a
+diff, treat the work as unverified and re-run the gate yourself before
+committing. This is cheap and has already caught a real defect.
+
+When a subagent's report is thin, the fault is usually in the instruction, not
+the agent: check what you actually asked for before attributing the miss. Asking
+for "a diff summary" and receiving a diff summary is a prompt bug. State the
+required evidence explicitly in the task prompt, and prefer the standing
+contract in `.claude/agents/*.md` over re-describing it each time.
 
 ## Git workflow — mandatory
 
