@@ -5,8 +5,9 @@ The DDL is the schema contract for the whole port. These tests pin:
 * **idempotency** — every ``CREATE`` carries ``IF NOT EXISTS`` so the app can
   run ``init_schema`` on every boot (integration proves it for real),
 * **scope** — the ported tables exist (now including ``users``/``audit_log``
-  per ADR-019, FU-5 slice 1 — schema only) and the still-cut ones (review
-  workflow, JD-Harmonizer) cannot creep back in,
+  per ADR-019, FU-5 slice 1 — schema only, and ``sessions`` per ADR-019 §10
+  step 4, FU-5 slice 3) and the still-cut ones (review workflow,
+  JD-Harmonizer) cannot creep back in,
 * **PII at rest** — name/email/phone/cover-letter-text are ``BYTEA``
   (pgcrypto), and only the email *hash* is plaintext,
 * **blind review ON by default** (decision 4),
@@ -16,6 +17,15 @@ The DDL is the schema contract for the whole port. These tests pin:
 Contract with the implementation: ``init_schema`` awaits ``.execute(stmt)`` on
 the object it is handed (an asyncpg ``Connection`` or ``Pool``) once per
 statement, in ``_STATEMENTS`` order.
+
+The ``sessions``-table tests below (ADR-019 §10 step 4) are, like the rest of
+this module, string-matches against the DDL source text: they can prove a
+column is *named* with a given type/constraint keyword, but NOT that
+Postgres actually enforces it (a real FK violation, a real CASCADE delete, a
+real INET-vs-TEXT distinction). That behavioural proof lives in
+``tests/integration/test_sessions_pg.py`` against a live testcontainers
+Postgres — this module and that one are deliberately complementary, not
+redundant.
 """
 
 from __future__ import annotations
@@ -39,6 +49,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "reveal_audit",
         "users",
         "audit_log",
+        "sessions",
     }
 )
 
@@ -101,6 +112,8 @@ EXPECTED_INDEXES: tuple[str, ...] = (
     "outbox_undelivered_idx",
     "outbox_aggregate_idx",
     "reveal_audit_resume_idx",
+    "sessions_user_id_idx",
+    "sessions_active_idx",
 )
 
 # ADR-019 §1: the minimum column set for `users` — real identity entity.
@@ -129,6 +142,18 @@ AUDIT_LOG_EXPECTED_COLUMNS: tuple[str, ...] = (
     "context",
     "details",
     "occurred_at",
+)
+
+# ADR-019 §10 step 4: the minimum column set for `sessions` — opaque,
+# server-held session state behind an httpOnly cookie, ported from hris.
+SESSIONS_EXPECTED_COLUMNS: tuple[str, ...] = (
+    "id",
+    "user_id",
+    "expires_at",
+    "revoked_at",
+    "user_agent",
+    "ip_addr",
+    "created_at",
 )
 
 # ADR-019 §4: the Role vocabulary — data now, not code. `recruiter` is the
@@ -595,6 +620,101 @@ def test_users_table_is_created_before_audit_log() -> None:
     """audit_log's actor_user_id is conceptually keyed to a users row
     (ADR-019 §6); users must exist first."""
     assert _statement_index("users") < _statement_index("audit_log")
+
+
+# ── sessions (ADR-019 §10 step 4, FU-5 slice 3) ─────────────────────────────
+#
+# The ported hris session store: an opaque server-held session row behind an
+# httpOnly cookie. NOTE (honesty about what this section can and cannot
+# prove): these are all string-matches against the DDL source. They can show
+# a column is *declared* TEXT/UUID/INET/NOT NULL/REFERENCES-with-CASCADE, but
+# NOT that Postgres actually enforces the FK, the CASCADE, the PK uniqueness,
+# or the INET type distinction at INSERT time. That behavioural proof is
+# integration-only — see tests/integration/test_sessions_pg.py.
+
+
+@pytest.mark.parametrize("column", SESSIONS_EXPECTED_COLUMNS)
+def test_sessions_table_has_expected_columns(column: str) -> None:
+    assert re.search(rf"\b{column}\b", _table_sql("sessions"), re.IGNORECASE)
+
+
+def test_sessions_id_is_a_text_primary_key() -> None:
+    """Opaque ``secrets.token_urlsafe(32)`` id — TEXT, not UUID (unlike every
+    other primary key in this schema)."""
+    assert re.search(
+        r"id\s+TEXT\s+PRIMARY\s+KEY", _table_sql("sessions"), re.IGNORECASE
+    )
+
+
+def test_sessions_user_id_references_users_with_cascade() -> None:
+    """ON DELETE CASCADE — deprovisioning/deleting a user revokes (removes)
+    their sessions, the behaviour hris relied on for revocation-on-deprovision
+    (ADR-019 §10 step 4)."""
+    assert re.search(
+        r"user_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+users\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+CASCADE",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_expires_at_is_not_null() -> None:
+    assert re.search(
+        r"expires_at\s+TIMESTAMPTZ\s+NOT\s+NULL",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_revoked_at_is_nullable() -> None:
+    """No NOT NULL — an active/live session has ``revoked_at IS NULL``; this
+    is exactly what the partial index below relies on."""
+    sql = _table_sql("sessions")
+    assert re.search(r"revoked_at\s+TIMESTAMPTZ\b", sql, re.IGNORECASE)
+    assert not re.search(r"revoked_at\s+TIMESTAMPTZ\s+NOT\s+NULL", sql, re.IGNORECASE)
+
+
+def test_sessions_ip_addr_is_inet_not_text() -> None:
+    """Must stay the real Postgres INET type, not a plain string — unit-level
+    this only proves the DDL says INET; integration proves the driver really
+    rejects a non-IP value."""
+    sql = _table_sql("sessions")
+    assert re.search(r"ip_addr\s+INET\b", sql, re.IGNORECASE)
+    assert not re.search(r"ip_addr\s+TEXT\b", sql, re.IGNORECASE)
+
+
+def test_sessions_created_at_defaults_to_now() -> None:
+    assert re.search(
+        r"created_at\s+TIMESTAMPTZ\s+NOT\s+NULL\s+DEFAULT\s+now\s*\(\s*\)",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_users_table_is_created_before_sessions() -> None:
+    """sessions.user_id FKs to users — users must exist first."""
+    assert _statement_index("users") < _statement_index("sessions")
+
+
+def test_sessions_active_idx_is_partial_on_unrevoked_sessions() -> None:
+    """The sliding-window active-session lookup index (ADR-019 §10 step 5):
+    ``ON sessions(expires_at) WHERE revoked_at IS NULL``."""
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+sessions_active_idx\s+"
+        r"ON\s+sessions\s*\(\s*expires_at\s*\)\s+"
+        r"WHERE\s+revoked_at\s+IS\s+NULL",
+        _all_sql(),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_user_id_idx_exists() -> None:
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+sessions_user_id_idx\s+"
+        r"ON\s+sessions\s*\(\s*user_id\s*\)",
+        _all_sql(),
+        re.IGNORECASE,
+    )
 
 
 # ── indexes ────────────────────────────────────────────────────────────────
