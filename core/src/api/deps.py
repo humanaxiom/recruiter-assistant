@@ -22,14 +22,19 @@ cannot express. Two primitives replace it:
 a misconfigured deploy is impossible to miss in the logs. No role key value is
 ever logged, here or anywhere else.
 
-``X-Actor-Name`` (:func:`resolve_actor`) stays an unverified display label for
-audit rows — it is NEVER an authorization input, and neither auth function
-above accepts it.
-
 **Session identity (FU-5 slice 6, ADR-019 §10/§10b).** :func:`resolve_user`
 is a SEPARATE, additive dependency — the cookie -> session -> user chain used
-by ``src.api.routes.auth`` and (in a later slice) route-level identity checks.
-It does not replace or modify :func:`resolve_role`/:func:`require_role`.
+by ``src.api.routes.auth`` and (as of slice 7) the audit-identity call sites
+in ``src.api.routes.jobs``/``resumes``. It does not replace or modify
+:func:`resolve_role`/:func:`require_role`.
+
+**Actor identity (FU-5 slice 7, ADR-019 §8.3/§9.2).** The formerly optional,
+unverified actor-name header (and the function that read it) is REMOVED
+ENTIRELY — a spoofable identity-shaped header next to a cryptographically
+verified session invited confusion and misconfiguration.
+``created_by``/``uploaded_by``/the reveal actor are now sourced exclusively
+from :func:`resolve_user`'s resolved ``cas_username`` (``None`` when no
+identity resolves, e.g. a bare service-key caller with CAS enabled).
 """
 
 from __future__ import annotations
@@ -61,10 +66,6 @@ logger = logging.getLogger(__name__)
 # pattern) was deliberately NOT ported: it would pollute `users` with an
 # account that never actually logged in.
 _DEV_ADMIN_SENTINEL_ID = UUID("00000000-0000-0000-0000-000000000000")
-
-# Cap the attacker-controlled ``X-Actor-Name`` header so an unbounded string
-# cannot fill the audit ``created_by``/``uploaded_by`` TEXT columns.
-_MAX_ACTOR_NAME_CHARS = 128
 
 
 class Role(StrEnum):
@@ -146,19 +147,6 @@ def require_role(*allowed: Role) -> Callable[..., Awaitable[Role]]:
         return role
 
     return _check
-
-
-def resolve_actor(
-    x_actor_name: str | None = Header(default=None, alias="X-Actor-Name"),
-) -> str:
-    """The optional ``X-Actor-Name`` header (truncated to
-    ``_MAX_ACTOR_NAME_CHARS``), or the fixed default ``"api"``.
-
-    An UNVERIFIED display label for audit rows only — never an authorization
-    input (see this module's docstring)."""
-    if x_actor_name:
-        return x_actor_name[:_MAX_ACTOR_NAME_CHARS]
-    return "api"
 
 
 def get_arq(request: Request) -> ArqRedis:

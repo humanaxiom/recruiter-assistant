@@ -20,12 +20,12 @@ each route function — NOT ``Depends(get_settings)`` — mirroring
 ``src.api.deps.resolve_role``'s existing convention (every other settings
 consumer in this codebase calls ``get_settings()`` directly).
 
-Scope boundary (slice 6 ONLY, per the task): this module does not remove
-``X-Actor-Name``/``resolve_actor`` (slice 7), does not write ``audit_log``
-rows (slice 8), and does not implement the hris ``cas_dev_fake_user`` /
-``cas_service_from_request``-forwarded-host short-circuits — neither is
-exercised by this slice's locked test contract, so they are deliberately
-left for a later slice rather than shipped untested.
+Scope boundary (slice 6 ONLY, per the task): this module does not write
+``audit_log`` rows (slice 8), and does not implement the hris
+``cas_dev_fake_user`` / ``cas_service_from_request``-forwarded-host
+short-circuits — neither is exercised by this slice's locked test contract,
+so they are deliberately left for a later slice rather than shipped
+untested.
 
 The raw CAS ticket and the session id are NEVER logged here — only their
 lengths / short prefixes, matching ``src.services.cas_service`` and

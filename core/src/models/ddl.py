@@ -215,10 +215,10 @@ _STATEMENTS: tuple[str, ...] = (
     """,
     # FU-1 (audited reveal): an append-only audit sink. Revealing a candidate's
     # identity is the de-anonymization action, so every reveal writes one row
-    # here. Never UPDATEd or DELETEd by app code. `actor` is best-effort today
-    # (the optional X-Actor-Name header); real per-user identity arrives with
-    # FU-5 (ADR-019) via the new `users`/`audit_log` tables below. This table
-    # is kept read-only per ADR-019 §6 — no data migration into `audit_log`.
+    # here. Never UPDATEd or DELETEd by app code. `actor` is sourced from the
+    # CAS session identity as of FU-5 slice 7 (ADR-019 §8.3/§9.2), via the new
+    # `users`/`audit_log` tables below. This table is kept read-only per
+    # ADR-019 §6 — no data migration into `audit_log`.
     """
     CREATE TABLE IF NOT EXISTS reveal_audit (
         id          UUID PRIMARY KEY,

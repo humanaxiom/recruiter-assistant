@@ -6,8 +6,9 @@ must leave an audit trail. :func:`record_reveal` is a PURE insert: it writes one
 ``resume_service.get_one``'s job) — this module never touches PII.
 
 The id is app-minted (like the résumé-upload path) so no ``RETURNING`` round trip
-is needed. ``actor`` is best-effort today (the optional ``X-Actor-Name`` header);
-real per-user identity arrives with RBAC (FU-4).
+is needed. ``actor`` is sourced from the CAS session identity as of FU-5 slice 7
+(ADR-019 §8.3/§9.2) — the resolved user's ``cas_username``, or the ``"api"``
+fallback when no identity resolves.
 """
 
 from __future__ import annotations

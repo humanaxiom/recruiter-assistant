@@ -28,9 +28,10 @@ from fastapi import (
     status,
 )
 
-from src.api.deps import Role, get_arq, require_role, resolve_actor
+from src.api.deps import Role, get_arq, require_role, resolve_user
 from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
+from src.schemas.auth import User
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
 from src.services import (
@@ -72,7 +73,7 @@ async def upload_resumes(
     db: Db,
     blob_store: Annotated[BlobStore, Depends(get_blob_store)],
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     files: Annotated[list[UploadFile], File()],
     consent_acknowledged: Annotated[str, Form()],
     cover_letter_text: Annotated[str | None, Form()] = None,
@@ -163,6 +164,7 @@ async def upload_resumes(
         )
 
     consent = consent_acknowledged.strip().lower() == "true"
+    uploaded_by = user.cas_username if user is not None else None
     try:
         results = await resume_service.upload_resumes(
             db,
@@ -170,7 +172,7 @@ async def upload_resumes(
             job_id=job_id,
             files=resume_files,
             consent_acknowledged=consent,
-            uploaded_by=actor,
+            uploaded_by=uploaded_by,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_file,
             cover_letter_map=cover_letter_map or None,
@@ -235,7 +237,7 @@ _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
 async def reveal_resume(
     resume_id: UUID,
     db: Db,
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     context: Annotated[str | None, Query(max_length=64)] = None,
 ) -> ResumeOut:
     """AUDITED de-anonymization. Records exactly one ``reveal_audit`` row, then
@@ -244,10 +246,17 @@ async def reveal_resume(
     query parameter from ``GET /resumes/{id}``, this is the ONLY un-blinding
     path in the API — restricted to admin/recruiter, and the role check runs
     as a dependency so a disallowed caller is rejected BEFORE the existence
-    probe, the audit write, or any decryption."""
+    probe, the audit write, or any decryption.
+
+    The recorded actor is sourced from the resolved session identity
+    (ADR-019 §8.3/§9.2) — the user's ``cas_username`` when one resolves, the
+    existing ``"api"`` fallback when no identity resolves. This slice keeps
+    writing ``reveal_audit`` (the reveal->``audit_log`` cutover and the
+    human-actor 403 gate are slice 8 scope, not this one)."""
     exists = await db.fetchval(_EXISTS_SQL, resume_id)
     if exists is None:
         raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+    actor = user.cas_username if user is not None else "api"
     await reveal_service.record_reveal(
         db, resume_id=resume_id, actor=actor, context=context
     )

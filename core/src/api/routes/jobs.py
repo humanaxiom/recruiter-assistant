@@ -21,9 +21,10 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from src.api.deps import Role, get_arq, require_role, resolve_actor
+from src.api.deps import Role, get_arq, require_role, resolve_user
 from src.errors import FileRejectedError
 from src.models.pool import Db
+from src.schemas.auth import User
 from src.schemas.jobs import (
     BulkJobResult,
     JDExtractText,
@@ -64,11 +65,16 @@ async def create_job(
     payload: JobCreate,
     db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
 ) -> JobOut:
     """Insert a draft job and enqueue its ``parse_job`` task with the newly
-    created (server-minted) id — never a client-supplied one."""
-    job = await job_service.create_job(db, payload, created_by=actor)
+    created (server-minted) id — never a client-supplied one.
+
+    ``created_by`` is sourced from the resolved session identity (ADR-019
+    §8.3/§9.2) — the user's ``cas_username`` when one resolves, ``None`` for
+    a bare service-key caller."""
+    created_by = user.cas_username if user is not None else None
+    job = await job_service.create_job(db, payload, created_by=created_by)
     await arq.enqueue_job("parse_job", str(job.id))
     return job
 
@@ -97,7 +103,7 @@ async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
 async def bulk_create_jobs(
     db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     files: Annotated[list[UploadFile], File()],
     manifest: Annotated[UploadFile | None, File()] = None,
 ) -> list[BulkJobResult]:
@@ -140,8 +146,9 @@ async def bulk_create_jobs(
     if manifest is not None:
         parsed_manifest = bulk_ingest_service.parse_csv_manifest(await manifest.read())
 
+    created_by = user.cas_username if user is not None else None
     results = await job_service.create_jobs_bulk(
-        db, files=expanded, manifest=parsed_manifest, created_by=actor
+        db, files=expanded, manifest=parsed_manifest, created_by=created_by
     )
     for r in results:
         if r.outcome == "created" and r.job_id is not None:
