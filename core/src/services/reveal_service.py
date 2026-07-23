@@ -9,12 +9,20 @@ The id is app-minted (like the résumé-upload path) so no ``RETURNING`` round t
 is needed. ``actor`` is sourced from the CAS session identity as of FU-5 slice 7
 (ADR-019 §8.3/§9.2) — the resolved user's ``cas_username``, or the ``"api"``
 fallback when no identity resolves.
+
+**FU-5 slice 10 (ADR-019 §6 / §9.4).** :func:`list_reveal_audit` is the READ
+side backing ``GET /audit/reveals-legacy`` — a read-only, paginated,
+newest-first view of this same table, kept for historical review now that
+``audit_log`` (``audit_service``) is the live sink (slice 8). Selects
+``reveal_audit``'s own columns ONLY — no join against ``resumes``, so nothing
+here can ever surface candidate PII.
 """
 
 from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+from src.schemas.audit import RevealAuditItem
 from src.services import DbConn
 
 _INSERT_SQL = """
@@ -40,3 +48,31 @@ async def record_reveal(
     audit_id = uuid4()
     await conn.execute(_INSERT_SQL, audit_id, resume_id, job_id, actor, context)
     return audit_id
+
+
+_LIST_SQL = """
+SELECT id, resume_id, job_id, actor, context, revealed_at
+FROM reveal_audit
+ORDER BY revealed_at DESC
+LIMIT $1 OFFSET $2
+"""
+
+
+async def list_reveal_audit(
+    conn: DbConn, *, limit: int = 100, offset: int = 0
+) -> list[RevealAuditItem]:
+    """Read-only, paginated, newest-first view of ``reveal_audit`` — the
+    frozen table's own columns, nothing joined in. No PII decryption, no
+    ``resumes`` join: see the module docstring."""
+    rows = await conn.fetch(_LIST_SQL, limit, offset)
+    return [
+        RevealAuditItem(
+            id=r["id"],
+            resume_id=r["resume_id"],
+            job_id=r["job_id"],
+            actor=r["actor"],
+            context=r["context"],
+            revealed_at=r["revealed_at"],
+        )
+        for r in rows
+    ]

@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
 
 from src.api.deps import log_auth_mode
-from src.api.routes import auth, jobs, resumes, shortlist
+from src.api.routes import audit, auth, jobs, resumes, shortlist
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
@@ -79,6 +79,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(jobs.router)
 app.include_router(resumes.router)
