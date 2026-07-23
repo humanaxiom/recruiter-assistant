@@ -25,6 +25,11 @@ ever logged, here or anywhere else.
 ``X-Actor-Name`` (:func:`resolve_actor`) stays an unverified display label for
 audit rows — it is NEVER an authorization input, and neither auth function
 above accepts it.
+
+**Session identity (FU-5 slice 6, ADR-019 §10/§10b).** :func:`resolve_user`
+is a SEPARATE, additive dependency — the cookie -> session -> user chain used
+by ``src.api.routes.auth`` and (in a later slice) route-level identity checks.
+It does not replace or modify :func:`resolve_role`/:func:`require_role`.
 """
 
 from __future__ import annotations
@@ -32,15 +37,30 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated
+from uuid import UUID
 
 from arq.connections import ArqRedis
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Cookie, Depends, Header, HTTPException, Request
 
+from src.models.pool import Db
+from src.schemas.auth import User
+from src.services import session_service, user_service
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# ADR-019 §10b — the dev-anonymous synthetic admin's fixed sentinel id.
+# Deliberately the all-zero UUID so it is instantly recognisable in logs/DB
+# dumps as "not a real user." This id is NEVER written to `users` and is
+# NEVER a valid `audit_log` FK target — auth-disabled actions are attributed
+# to a fixed "service" actor label at the audit layer (slice 8), not to this
+# id. A real DB-backed row (hris's `_ensure_dev_anonymous_user` upsert
+# pattern) was deliberately NOT ported: it would pollute `users` with an
+# account that never actually logged in.
+_DEV_ADMIN_SENTINEL_ID = UUID("00000000-0000-0000-0000-000000000000")
 
 # Cap the attacker-controlled ``X-Actor-Name`` header so an unbounded string
 # cannot fill the audit ``created_by``/``uploaded_by`` TEXT columns.
@@ -165,3 +185,51 @@ def log_auth_mode(settings: Settings) -> None:
         )
     else:
         logger.info("auth.enabled")
+
+
+async def resolve_user(
+    request: Request,
+    db: Db,
+    ra_session: str | None = Cookie(default=None),
+) -> User | None:
+    """Resolve the CAS session cookie to a :class:`~src.schemas.auth.User`.
+
+    ADR-019 §10b — CAS DISABLED: every request resolves a synthetic
+    in-memory dev-admin identity (``role="admin"``), regardless of
+    ``ra_session`` (a presented cookie is ignored, not even looked up). See
+    the module-level ``_DEV_ADMIN_SENTINEL_ID`` comment for why this is a
+    plain object, not a DB-backed row.
+
+    CAS ENABLED: no cookie, or a cookie that does not resolve to a live
+    (unrevoked, unexpired) session, or a session whose user no longer
+    exists, all return ``None`` — the caller cannot distinguish those cases
+    from this return value alone (no timing/existence oracle for a stolen
+    cookie, matching ``session_service.get_active_session``'s own
+    discipline).
+
+    ``request`` is accepted (unused) to match FastAPI's dependency-injection
+    shape and the port source's signature; a later slice may read
+    ``request.state``/headers here.
+    """
+    settings = get_settings()
+    if not settings.cas_enabled:
+        now = datetime.now(UTC)
+        return User(
+            id=_DEV_ADMIN_SENTINEL_ID,
+            cas_username="dev-anonymous",
+            display_name="Dev Anonymous (auth disabled)",
+            email=None,
+            role="admin",
+            active=True,
+            created_at=now,
+            last_seen_at=now,
+        )
+
+    if not ra_session:
+        return None
+
+    session = await session_service.get_active_session(db, ra_session)
+    if session is None:
+        return None
+
+    return await user_service.get_by_id(db, session.user_id)

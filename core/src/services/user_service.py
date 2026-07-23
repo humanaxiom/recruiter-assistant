@@ -23,6 +23,7 @@ the one place settings are read.
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 
 from src.schemas.auth import User
 from src.services import DbConn
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_ROLE = "recruiter"
 _ADMIN_ROLE = "admin"
+
+_GET_BY_ID_SQL = """
+SELECT id, cas_username, display_name, email, role, active, created_at,
+       last_seen_at
+FROM users WHERE id = $1
+"""
 
 # On conflict, refresh last_seen_at and (only when a non-null value was
 # supplied) display_name/email. ``role`` is deliberately absent from the SET
@@ -83,3 +90,13 @@ async def provision_or_get(
             user.role,
         )
     return user
+
+
+async def get_by_id(conn: DbConn, user_id: UUID) -> User | None:
+    """Look up one ``users`` row by id, or ``None`` if it does not exist.
+
+    Used by ``GET /auth/cas/user`` and ``src.api.deps.resolve_user`` to turn
+    an already-resolved session's ``user_id`` into the full row.
+    """
+    row = await conn.fetchrow(_GET_BY_ID_SQL, user_id)
+    return User(**dict(row)) if row is not None else None
