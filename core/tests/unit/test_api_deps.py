@@ -39,10 +39,21 @@ and is the exact mechanism every ``test_route_*.py`` file's ``_build_app``
 helper now relies on in place of the old
 ``app.dependency_overrides[require_api_key] = lambda: None`` bypass.
 
-``resolve_actor`` / ``get_arq`` are UNCHANGED from Phase 6 — kept here for
-regression coverage. ``log_auth_mode`` is updated: it now reads
-``settings.auth_enabled`` (not the retired ``settings.api_key`` truthiness)
-so it warns/informs consistently with the new four-key switch.
+``get_arq`` is UNCHANGED from Phase 6 — kept here for regression coverage.
+``log_auth_mode`` is updated: it now reads ``settings.auth_enabled`` (not the
+retired ``settings.api_key`` truthiness) so it warns/informs consistently
+with the new four-key switch.
+
+**RETIRED (FU-5 slice 7, ADR-019 §8.3).** ``resolve_actor`` and the
+``X-Actor-Name`` header it read are DELETED entirely — "the optional,
+unverified ``X-Actor-Name`` header ... is removed entirely". The five
+``resolve_actor`` regression tests that lived in this file under Phase 6 are
+deleted in this same commit (not left red pointing at a function the ADR says
+must not exist); ``test_resolve_actor_no_longer_exists`` below is the
+positive pin for the deletion. ``created_by``/``uploaded_by`` are now sourced
+from ``src.api.deps.resolve_user`` (ADR-019 §9.2/§10) — see
+``test_route_jobs.py``, ``test_route_jobs_bulk.py``, ``test_route_resumes.py``
+and ``test_route_reveal.py`` for the call-site coverage of that switch.
 """
 
 from __future__ import annotations
@@ -430,52 +441,46 @@ def test_resolve_role_never_logs_any_configured_role_key(
         assert leaked not in joined
 
 
-# ── resolve_actor (Phase 6, unchanged) ───────────────────────────────────
+# ── resolve_actor is RETIRED (FU-5 slice 7, ADR-019 §8.3) ────────────────
+#
+# DELETED (not rewritten): the five Phase-6 ``resolve_actor`` regression
+# tests that used to live here (``..._returns_the_header_value_when_present``,
+# ``..._defaults_to_api_when_absent``, ``..._defaults_to_api_for_an_empty_
+# header``, ``..._caps_an_overlong_header``,
+# ``..._is_never_consulted_by_resolve_role_or_require_role``). ADR-019 §8.3:
+# "the optional, unverified ``X-Actor-Name`` header ... is removed entirely
+# ... A spoofable identity-shaped header next to a cryptographically verified
+# one invites confusion and misconfiguration; removing ``X-Actor-Name``
+# closes that risk." Keeping those tests around (even rewritten) would pin a
+# function this ADR says must not exist. The positive replacement pin is
+# below; behavioural coverage of the new identity source
+# (``src.api.deps.resolve_user``) lives in ``test_route_auth.py`` (already
+# landed, slice 6) and the route-level call-site tests added in
+# ``test_route_jobs.py`` / ``test_route_jobs_bulk.py`` /
+# ``test_route_resumes.py`` / ``test_route_reveal.py`` (slice 7).
 
 
-def test_resolve_actor_returns_the_header_value_when_present() -> None:
+def test_resolve_actor_no_longer_exists() -> None:
+    """ADR-019 §8.3 — ``resolve_actor`` must not exist on ``src.api.deps`` at
+    all, not merely be unused. A future re-introduction (e.g. a well-meaning
+    revert, or a merge conflict resolution that resurrects it) fails this
+    test immediately instead of silently reopening the spoofable-header risk
+    the ADR closed."""
     from src.api import deps
 
-    assert deps.resolve_actor(x_actor_name="alice") == "alice"
+    assert not hasattr(deps, "resolve_actor")
 
 
-def test_resolve_actor_defaults_to_api_when_absent() -> None:
-    from src.api import deps
-
-    assert deps.resolve_actor(x_actor_name=None) == "api"
-
-
-def test_resolve_actor_defaults_to_api_for_an_empty_header() -> None:
-    from src.api import deps
-
-    assert deps.resolve_actor(x_actor_name="") == "api"
-
-
-def test_resolve_actor_caps_an_overlong_header() -> None:  # SEC-4
-    from src.api import deps
-
-    overlong = "z" * 5000
-    result = deps.resolve_actor(x_actor_name=overlong)
-    assert len(result) <= 128
-    assert result == overlong[:128]
-
-
-def test_resolve_actor_is_never_consulted_by_resolve_role_or_require_role() -> None:
-    """X-Actor-Name stays an unverified display label — it must NEVER become
-    an authorization input. Structural guard: neither auth function's
-    signature accepts an ``x_actor_name``/``actor`` parameter."""
+def test_x_actor_name_header_alias_appears_nowhere_in_deps_module_source() -> None:
+    """Belt-and-suspenders on the same ADR-019 §8.3 decision: even a
+    differently-named function must not still declare a FastAPI ``Header``
+    bound to the ``X-Actor-Name`` wire name anywhere in this module."""
     import inspect
 
     from src.api import deps
 
-    resolve_role_params = set(inspect.signature(deps.resolve_role).parameters)
-    assert "x_actor_name" not in resolve_role_params
-    assert "actor" not in resolve_role_params
-
-    checker = deps.require_role(deps.Role.ADMIN)
-    checker_params = set(inspect.signature(checker).parameters)
-    assert "x_actor_name" not in checker_params
-    assert "actor" not in checker_params
+    source = inspect.getsource(deps)
+    assert "X-Actor-Name" not in source
 
 
 # ── get_arq (Phase 6, unchanged) ─────────────────────────────────────────

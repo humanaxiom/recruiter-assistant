@@ -21,6 +21,11 @@ monkeypatching).
 **FU-4 (RBAC):** ``POST /jobs/bulk`` is admin/recruiter ONLY (same allowed
 set as ``POST /jobs``/``POST /jobs/jd-extract`` — see the route→role table in
 ``test_route_jobs.py``'s module docstring).
+
+**FU-5 slice 7 (ADR-019 §8.3/§9.2):** ``created_by`` here is sourced from
+``src.api.deps.resolve_user`` exactly like ``POST /jobs`` — see the dedicated
+section near the end of this file. The deleted ``resolve_actor``/
+``X-Actor-Name`` header is read nowhere.
 """
 
 from __future__ import annotations
@@ -38,10 +43,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import Role, get_arq, resolve_role
+from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import jobs as jobs_routes
 from src.errors import AppError
 from src.models.pool import get_db
+from src.schemas.auth import User
 
 _NOW = dt.datetime(2026, 7, 17, tzinfo=dt.UTC)
 _JD = "We are hiring a senior backend engineer with deep Python experience."
@@ -278,3 +284,63 @@ async def test_bulk_403s_for_hiring_manager_and_auditor(role: Role) -> None:
         resp = await client.post("/jobs/bulk", files=files)
     assert resp.status_code == 403
     arq.enqueue_job.assert_not_awaited()
+
+
+# ── FU-5 slice 7 (ADR-019 §8.3/§9.2): created_by sourced from resolve_user ──
+
+
+@pytest.mark.asyncio
+async def test_bulk_created_by_is_dev_anonymous_when_cas_disabled() -> None:
+    """Same identity source as ``POST /jobs`` — CAS disabled resolves the
+    synthetic dev-anonymous identity for every created job in the batch."""
+    conn = _mock_conn()
+    app = _build_app(conn)
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
+    async with await _client(app) as client:
+        resp = await client.post("/jobs/bulk", files=files)
+    assert resp.status_code == 202
+    assert any("dev-anonymous" in call.args for call in conn.fetchrow.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_bulk_ignores_an_x_actor_name_header_entirely() -> None:
+    conn = _mock_conn()
+    app = _build_app(conn)
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
+    async with await _client(app) as client:
+        resp = await client.post(
+            "/jobs/bulk",
+            files=files,
+            headers={"X-Actor-Name": "totally-ignored@example.test"},
+        )
+    assert resp.status_code == 202
+    all_args = [a for call in conn.fetchrow.await_args_list for a in call.args]
+    assert "totally-ignored@example.test" not in all_args
+    assert "dev-anonymous" in all_args
+
+
+@pytest.mark.asyncio
+async def test_bulk_created_by_is_the_resolved_users_cas_username() -> None:
+    conn = _mock_conn()
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: User(
+        id=uuid4(),
+        cas_username="priya",
+        display_name="priya",
+        email=None,
+        role="recruiter",
+        active=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+    files = [
+        ("files", ("Backend.txt", ("Backend role. " + _JD).encode(), "text/plain"))
+    ]
+    async with await _client(app) as client:
+        resp = await client.post("/jobs/bulk", files=files)
+    assert resp.status_code == 202
+    assert any("priya" in call.args for call in conn.fetchrow.await_args_list)
