@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 from flask import (
@@ -44,6 +45,46 @@ app = Flask(__name__)
 app.secret_key = _settings.flask_secret_key
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 API = _settings.api_base_url
+
+
+# Routes reachable with no CAS session even when `cas_enabled=True` — just
+# the liveness probe, so orchestration/health-checks never need a session.
+_CAS_GATE_EXEMPT_PATHS = frozenset({"/health"})
+
+
+@app.before_request
+def _cas_auth_gate() -> Any:
+    """FU-5 slice 11 (ADR-019 §10/§3/§10b) — gate unauthenticated browser
+    access when CAS is enabled.
+
+    Reads settings via a FRESH :func:`get_settings` call every request (never
+    the frozen ``_settings`` captured once at import time below) so tests —
+    and a real config reload — can flip ``cas_enabled`` without restarting the
+    process. ``cas_enabled=False`` is an unconditional passthrough (dev mode,
+    §10b) with NO call to the backend at all.
+
+    When enabled, delegates the actual session check to the backend's own
+    ``GET /auth/cas/user`` (never 401s) via :func:`api_client.get_cas_user` —
+    this hook holds no session-validity logic of its own, it only acts on the
+    backend's answer. A backend that cannot be reached fails CLOSED (503),
+    never silently lets the request through as if it were authenticated.
+    """
+    settings = get_settings()
+    if not settings.cas_enabled:
+        return None
+    if request.path in _CAS_GATE_EXEMPT_PATHS:
+        return None
+    try:
+        status = api_client.get_cas_user()
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    if status.get("authenticated"):
+        return None
+    login_url = (
+        f"{settings.cas_service_base_url.rstrip('/')}/auth/cas/login?"
+        + urlencode({"next": request.path})
+    )
+    return redirect(login_url)
 
 
 @app.get("/health")

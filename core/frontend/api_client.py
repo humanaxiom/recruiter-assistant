@@ -29,6 +29,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
+from flask import has_request_context, request
 
 from src.settings import get_settings
 
@@ -97,14 +98,34 @@ def build_client() -> httpx.Client:
     encoding for ``str`` values and raises ``UnicodeEncodeError`` on a
     non-ASCII one, so the header value is explicitly UTF-8-encoded here
     (mirroring ``resolve_role`` comparing UTF-8 bytes server-side).
+
+    **FU-5 slice 11 — also forwards the inbound browser session cookie.** The
+    backend's CAS session (``settings.session_cookie_name``, ``ra_session`` by
+    default) identifies WHO is acting, distinct from the fixed ``recruiter``
+    role key above which only grants WHAT authority the viewer has — both are
+    needed for ADR-019's human-attribution chain (``created_by``,
+    reveal-audit-as-user) to be reachable from the UI. Only THIS one cookie is
+    forwarded, read straight off the active Flask request (never from an
+    arbitrary/unrelated inbound cookie) and attached to this client's own
+    cookie jar so it rides on every request built through it — it is never
+    forwarded anywhere but this client's configured ``settings.api_base_url``.
+    Reading the inbound cookie is guarded by :func:`flask.has_request_context`
+    so this function stays safe to call with no active browser request (e.g.
+    a future non-browser caller).
     """
     settings = get_settings()
     headers: dict[str, str] = {}
     if settings.api_key_recruiter:
         headers["X-API-Key"] = settings.api_key_recruiter
+    cookies: dict[str, str] = {}
+    if has_request_context():
+        session_cookie = request.cookies.get(settings.session_cookie_name)
+        if session_cookie is not None:
+            cookies[settings.session_cookie_name] = session_cookie
     return httpx.Client(
         base_url=settings.api_base_url,
         headers=httpx.Headers(headers, encoding="utf-8"),
+        cookies=cookies,
         timeout=_HTTP_TIMEOUT,
     )
 
@@ -360,6 +381,17 @@ def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) ->
     return response.json()
 
 
+def get_cas_user(*, client: httpx.Client | None = None) -> Any:
+    """GET /auth/cas/user — the CAS session-status endpoint (slice 6). Never
+    401s server-side (returns ``{authenticated: False, ...}`` when there is no
+    valid session), so the ONLY typed failure this raises is
+    ``BackendUnavailable`` (a backend 5xx or a connect error) — consumed by
+    the frontend auth gate (``frontend.app``) to decide whether to redirect to
+    CAS login."""
+    response = _request("GET", "/auth/cas/user", client=client)
+    return response.json()
+
+
 def export_shortlist(
     job_id: UUID,
     *,
@@ -404,4 +436,5 @@ __all__ = [
     "trigger_reverse_match",
     "get_match_results",
     "export_shortlist",
+    "get_cas_user",
 ]
