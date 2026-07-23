@@ -80,6 +80,29 @@ class Settings(BaseSettings):
     api_key_hiring_manager: str = ""
     api_key_auditor: str = ""
 
+    # ── CAS + session auth (FU-5, ADR-019 §10/§10a/§10b) ──────────────────────
+    # §10 supersedes §8's HMAC X-Actor-Assertion design — no assertion secret
+    # exists in this model. Disabled by default (§10b); the all-disabled
+    # default configuration must boot clean (see `validate_startup_auth_config`
+    # below, which is unchanged by this slice — CAS adds no new startup-fatal
+    # check).
+    cas_enabled: bool = False
+    cas_server_url: str = "https://cas.sfu.ca/cas"
+    cas_validate_route: str = "/serviceValidate"
+    cas_service_base_url: str = "http://localhost:8000"
+    cas_service_from_request: bool = False
+    cas_verify_tls: bool = True
+    cas_dev_fake_user: str = ""
+    session_cookie_name: str = "ra_session"
+    session_ttl_hours: int = 8
+    session_idle_refresh_hours: int = 1
+    session_cookie_secure: bool = False
+    session_cookie_samesite: str = "lax"
+    # ADR-019 §10a — the ratified default-admin CAS allowlist value. A real
+    # operational identity, deliberately committed (not PII), env-overridable
+    # per deployment.
+    default_admin_cas_username: str = "asalah"
+
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
     blind_review_default: bool = True  # decision 4 — redaction ON by default
