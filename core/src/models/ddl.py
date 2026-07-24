@@ -302,6 +302,29 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS sessions_active_idx ON sessions (expires_at)
         WHERE revoked_at IS NULL
     """,
+    # ── job_assignees (ADR-020 §1, FU-6 slice 1) ─────────────────────────────
+    # Per-job assignment / row-level scoping: links a user to a single job,
+    # with an attributable ``assigned_by``. PK is the (job_id, user_id) pair —
+    # a user may be assigned to each job at most once. ``assigned_by`` uses
+    # ON DELETE RESTRICT (not CASCADE like job_id/user_id): if the assigning
+    # user is deleted, orphaned assignments are not silently cascaded away;
+    # the DELETE fails until the assignment is explicitly cleared first — a
+    # safety guard against accidental admin-account cleanup erasing
+    # delegation records.
+    """
+    CREATE TABLE IF NOT EXISTS job_assignees (
+        job_id       UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        user_id      UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        assigned_by  UUID NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+        assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (job_id, user_id)
+    )
+    """,
+    # ADR-020 §1: powers the fast "all jobs for this user" query.
+    """
+    CREATE INDEX IF NOT EXISTS job_assignees_user_idx
+        ON job_assignees (user_id, assigned_at DESC)
+    """,
 )
 
 
