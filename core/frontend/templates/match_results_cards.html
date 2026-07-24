@@ -50,8 +50,12 @@
         <td colspan="4" class="muted">
           {% if polling %}
           <span class="htmx-indicator spinner">polling…</span>
-          Finding matching jobs… ranked openings will appear here (the local
-          model can take a minute or two).
+          Finding matching jobs… ranked openings will appear here. The local
+          model runs on every candidate the run considers, so a full pass
+          realistically takes several minutes and scales with the number of
+          candidates and jobs involved.
+          <br>
+          <span class="elapsed">~{{ a * 3 }}s elapsed</span>
           {% elif done %}
           No matching open jobs for this candidate.
           {% else %}

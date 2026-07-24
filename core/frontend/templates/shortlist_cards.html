@@ -22,8 +22,11 @@
   {% elif polling %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Generating… ranked candidates will appear here (large PDFs can take a minute
-    or two to parse on the local model).
+    Generating… ranked candidates will appear here. The local model runs on
+    every candidate résumé the run considers, so a full pass realistically
+    takes several minutes and scales with the number of résumés involved.
+    <br>
+    <span class="elapsed">~{{ a * 3 }}s elapsed</span>
   </p>
   {% else %}
   <p class="muted">
