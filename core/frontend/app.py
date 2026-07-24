@@ -239,8 +239,22 @@ def _summarise_bulk(results: Any) -> dict[str, int]:
 
 
 def _format_error(detail: Any) -> str:
-    """Render a backend validation ``detail`` into a short human message."""
+    """Render a backend validation ``detail`` into a short human message.
+
+    FastAPI/pydantic 422 bodies carry ``detail`` as a list of error dicts
+    (``{"type": ..., "loc": [...], "msg": ..., "input": ...}``) — never show
+    that raw ``repr`` to a recruiter; join the human ``msg`` fields instead.
+    """
     if detail is None:
+        return "Please correct the highlighted fields and try again."
+    if isinstance(detail, list):
+        messages = [
+            str(item["msg"])
+            for item in detail
+            if isinstance(item, dict) and "msg" in item
+        ]
+        if messages:
+            return "The upload was rejected: " + "; ".join(messages)
         return "Please correct the highlighted fields and try again."
     if isinstance(detail, dict):
         inner = detail.get("detail", detail)
@@ -337,6 +351,12 @@ def upload_resumes(job_id: UUID) -> Any:
         for upload in uploads
         if upload.filename
     ]
+    if not files:
+        return _render_job_detail(
+            job_id,
+            error="Select at least one résumé file (PDF/DOCX, or a .zip of many).",
+            status_code=400,
+        )
     cover_letter_raw = request.form.get("cover_letter_text")
     cover_letter_text: str | None = None
     if cover_letter_raw:
