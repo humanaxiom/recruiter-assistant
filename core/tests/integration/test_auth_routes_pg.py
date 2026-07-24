@@ -25,6 +25,16 @@ tests structurally cannot:
   subsequent ``get_active_session`` lookup returns ``None`` — a mocked
   connection cannot observe a revoke actually taking effect against the
   ``WHERE revoked_at IS NULL AND expires_at > now()`` predicate.
+* (FU-5 slice 12, ADR-019 §10 step 5) the sliding-window refresh REALLY
+  extends a near-expiry ``sessions.expires_at`` row when the request path
+  resolves it — through both ``deps.resolve_user`` and the ``GET
+  /auth/cas/user`` status route — and REALLY leaves a fresh session's row
+  untouched. This is the reviewer-flagged gap: ``session_service.
+  refresh_if_needed`` (slice 5) was unit-tested in isolation but nothing on
+  the request path called it, so ``settings.session_idle_refresh_hours`` was
+  unread and sessions hard-expired instead of sliding. A mocked connection
+  cannot prove a real ``UPDATE ... SET expires_at`` actually lands (or does
+  not land) against a real row — only a real Postgres can.
 
 Follows the exact asyncpg/testcontainers fixture wiring already used in
 ``tests/integration/test_api_jobs_pg.py`` and
@@ -36,6 +46,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -51,7 +62,8 @@ from src.api.routes import auth as auth_routes
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import get_db
-from src.services import session_service
+from src.schemas.auth import User
+from src.services import session_service, user_service
 from src.settings import Settings
 
 DEFAULT_ADMIN = "asalah"
@@ -285,3 +297,179 @@ async def test_logout_revokes_the_session_so_it_no_longer_resolves(
             "SELECT revoked_at FROM sessions WHERE id = $1", sid
         )
     assert revoked_at is not None
+
+
+# ── sliding-window refresh wiring (FU-5 slice 12, ADR-019 §10 step 5) ─────
+#
+# The reviewer finding this closes: ``refresh_if_needed`` (slice 5) was
+# unit-tested in isolation but nothing on the request path called it —
+# ``resolve_user`` and ``GET /auth/cas/user`` both called ONLY
+# ``get_active_session``, so sessions hard-expired at the fixed TTL instead
+# of sliding. ``session_idle_refresh_hours`` was unread config. These tests
+# build a real session, force its ``expires_at`` to a known point (near or
+# far from expiry) with a direct SQL ``UPDATE`` — exactly as a real clock
+# tick would eventually do — then drive the real request path and re-read
+# the row.
+
+REFRESH_TTL_HOURS = 8
+REFRESH_IDLE_HOURS = 1
+
+
+def _refresh_settings(**overrides: Any) -> Settings:
+    return _settings(
+        session_ttl_hours=REFRESH_TTL_HOURS,
+        session_idle_refresh_hours=REFRESH_IDLE_HOURS,
+        **overrides,
+    )
+
+
+async def _provision_and_login(
+    pg_pool: asyncpg.Pool, username: str
+) -> tuple[User, str]:
+    """Provision a user + real session row directly against the pool (no
+    HTTP round trip through /auth/cas/validate), returning (user, sid).
+    The session is created with the full configured TTL — callers push it
+    near expiry themselves via ``_force_expires_at`` where the test needs
+    that."""
+    async with pg_pool.acquire() as conn:
+        user = await user_service.provision_or_get(
+            conn, cas_username=username, default_admin_cas_username=DEFAULT_ADMIN
+        )
+        session = await session_service.create_session(
+            conn, user_id=user.id, ttl_seconds=REFRESH_TTL_HOURS * 3600
+        )
+    return user, session.id
+
+
+async def _force_expires_at(
+    pg_pool: asyncpg.Pool, session_id: str, delta: timedelta
+) -> None:
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET expires_at = $1 WHERE id = $2",
+            datetime.now(UTC) + delta,
+            session_id,
+        )
+
+
+async def _read_expires_at(pg_pool: asyncpg.Pool, session_id: str) -> datetime:
+    async with pg_pool.acquire() as conn:
+        value: datetime = await conn.fetchval(
+            "SELECT expires_at FROM sessions WHERE id = $1", session_id
+        )
+    return value
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_extends_a_near_expiry_session_expires_at(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _refresh_settings()
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    _user, sid = await _provision_and_login(pg_pool, _unique_username("ivy"))
+    # Push it inside the 1-hour idle-refresh window.
+    await _force_expires_at(pg_pool, sid, timedelta(minutes=2))
+    before = await _read_expires_at(pg_pool, sid)
+
+    async with pg_pool.acquire() as conn:
+        resolved = await deps.resolve_user(request=MagicMock(), db=conn, ra_session=sid)
+
+    assert resolved is not None, "a near-expiry but still-live session must resolve"
+
+    after = await _read_expires_at(pg_pool, sid)
+    assert after > before, "a near-expiry session must be pushed further out"
+    assert after >= datetime.now(UTC) + timedelta(hours=REFRESH_TTL_HOURS - 1), (
+        "the extension must be roughly a full ttl_seconds from now, not a " "token bump"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_leaves_a_fresh_session_expires_at_unchanged(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _refresh_settings()
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    # Session created with the full 8h ttl — far outside the 1h idle window.
+    _user, sid = await _provision_and_login(pg_pool, _unique_username("jack"))
+    before = await _read_expires_at(pg_pool, sid)
+
+    async with pg_pool.acquire() as conn:
+        resolved = await deps.resolve_user(request=MagicMock(), db=conn, ra_session=sid)
+
+    assert resolved is not None
+
+    after = await _read_expires_at(pg_pool, sid)
+    assert after == before, "a session far from expiry must not be rewritten"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_route_extends_a_near_expiry_session_expires_at(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same behaviour, proved through the public ``/auth/cas/user`` status
+    route — which resolves cookie -> session -> user WITHOUT going through
+    ``deps.resolve_user`` at all, so the wiring must be added there too."""
+    settings = _refresh_settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _user, sid = await _provision_and_login(pg_pool, _unique_username("kim"))
+    await _force_expires_at(pg_pool, sid, timedelta(minutes=2))
+    before = await _read_expires_at(pg_pool, sid)
+    app = _build_app(pg_pool)
+
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/user", cookies={settings.session_cookie_name: sid}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["authenticated"] is True
+
+    after = await _read_expires_at(pg_pool, sid)
+    assert (
+        after > before
+    ), "a near-expiry session must be extended by /auth/cas/user too"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_route_leaves_a_fresh_session_expires_at_unchanged(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _refresh_settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _user, sid = await _provision_and_login(pg_pool, _unique_username("liam"))
+    before = await _read_expires_at(pg_pool, sid)
+    app = _build_app(pg_pool)
+
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/user", cookies={settings.session_cookie_name: sid}
+        )
+
+    assert resp.status_code == 200
+
+    after = await _read_expires_at(pg_pool, sid)
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_with_a_revoked_near_expiry_session_still_returns_none(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoked session must resolve to ``None`` — never refreshed, even if
+    it also happens to be near expiry."""
+    settings = _refresh_settings()
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    _user, sid = await _provision_and_login(pg_pool, _unique_username("mia"))
+    await _force_expires_at(pg_pool, sid, timedelta(minutes=2))
+
+    async with pg_pool.acquire() as conn:
+        await session_service.revoke_session(conn, sid)
+    before = await _read_expires_at(pg_pool, sid)
+
+    async with pg_pool.acquire() as conn:
+        resolved = await deps.resolve_user(request=MagicMock(), db=conn, ra_session=sid)
+
+    assert resolved is None, "a revoked session must never resolve to a user"
+
+    after = await _read_expires_at(pg_pool, sid)
+    assert after == before, "a revoked session's expires_at must never be touched"

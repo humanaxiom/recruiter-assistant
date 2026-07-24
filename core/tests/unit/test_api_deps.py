@@ -54,13 +54,27 @@ positive pin for the deletion. ``created_by``/``uploaded_by`` are now sourced
 from ``src.api.deps.resolve_user`` (ADR-019 §9.2/§10) — see
 ``test_route_jobs.py``, ``test_route_jobs_bulk.py``, ``test_route_resumes.py``
 and ``test_route_reveal.py`` for the call-site coverage of that switch.
+
+**FU-5 slice 12 (ADR-019 §10 step 5) — sliding-window refresh wiring.** The
+tests near the bottom of this file (``test_resolve_user_calls_refresh_if_
+needed_...`` and friends) pin that ``resolve_user`` calls
+``session_service.refresh_if_needed`` when a session resolves, with
+settings-derived ``ttl_seconds``/``idle_refresh_seconds`` — closing a
+reviewer finding that ``refresh_if_needed`` existed and was unit-tested in
+isolation (``tests/unit/test_session_service.py``) but nothing on the
+request path ever called it, so sessions hard-expired at the fixed TTL
+instead of sliding. Nothing here mocks a real database — the actual
+``expires_at`` extension is real-Postgres behaviour and is separately pinned
+in ``tests/integration/test_auth_routes_pg.py``.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
@@ -555,3 +569,205 @@ def test_log_auth_mode_never_logs_a_configured_role_key(
     log_auth_mode(_settings(api_key_admin="super-secret-admin-key"))
     joined = " ".join(r.getMessage() for r in caplog.records)
     assert "super-secret-admin-key" not in joined
+
+
+# ── resolve_user — sliding-window refresh wiring (FU-5 slice 12, ADR-019
+#    §10 step 5) ─────────────────────────────────────────────────────────
+#
+# ``resolve_user`` currently resolves a live session via
+# ``session_service.get_active_session`` and stops there — nothing on the
+# request path ever calls ``session_service.refresh_if_needed`` (already
+# implemented and unit-tested in isolation by
+# ``tests/unit/test_session_service.py``), so ``settings.
+# session_idle_refresh_hours`` is unread and every session hard-expires at
+# the fixed TTL instead of sliding, contradicting ADR-019 §10 step 5 ("with
+# a sliding-window refresh"). These tests spy on
+# ``session_service.refresh_if_needed`` to pin the WIRING — that
+# ``resolve_user`` calls it, with which conn/session/ttl/idle arguments, and
+# when it must NOT be called at all. The real ``expires_at`` extension is
+# genuine Postgres behaviour and is pinned separately in
+# ``tests/integration/test_auth_routes_pg.py`` — a mocked spy here cannot
+# prove the database write actually lands.
+
+
+def _cas_settings(
+    *, cas_enabled: bool = True, ttl_hours: int = 8, idle_hours: int = 1
+) -> Settings:
+    return Settings(
+        cas_enabled=cas_enabled,
+        session_ttl_hours=ttl_hours,
+        session_idle_refresh_hours=idle_hours,
+        skill_hash_salt="test-salt",
+        pii_key="test-key",
+    )
+
+
+def _live_session() -> Any:
+    from src.schemas.auth import Session
+
+    return Session(
+        id="tok-live-session",
+        user_id=uuid4(),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        revoked_at=None,
+        user_agent=None,
+        ip_addr=None,
+        created_at=datetime.now(UTC),
+    )
+
+
+def _live_user(user_id: Any) -> Any:
+    from src.schemas.auth import User
+
+    now = datetime.now(UTC)
+    return User(
+        id=user_id,
+        cas_username="alice",
+        display_name=None,
+        email=None,
+        role="recruiter",
+        active=True,
+        created_at=now,
+        last_seen_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_calls_refresh_if_needed_when_a_session_resolves(
+    monkeypatch: Any,
+) -> None:
+    from src.api import deps
+
+    settings = _cas_settings(ttl_hours=8, idle_hours=1)
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    session = _live_session()
+    user = _live_user(session.user_id)
+
+    monkeypatch.setattr(
+        deps.session_service, "get_active_session", AsyncMock(return_value=session)
+    )
+    refresh_spy = AsyncMock(return_value=session)
+    monkeypatch.setattr(deps.session_service, "refresh_if_needed", refresh_spy)
+    monkeypatch.setattr(deps.user_service, "get_by_id", AsyncMock(return_value=user))
+
+    db = MagicMock()
+    result = await deps.resolve_user(request=MagicMock(), db=db, ra_session=session.id)
+
+    assert result is not None
+    assert result.cas_username == "alice"
+    refresh_spy.assert_awaited_once()
+    call = refresh_spy.await_args
+    assert call is not None
+    assert call.args[0] is db
+    assert call.args[1] is session
+    assert call.kwargs["ttl_seconds"] == 8 * 3600
+    assert call.kwargs["idle_refresh_seconds"] == 1 * 3600
+
+
+@pytest.mark.parametrize(
+    "ttl_hours,idle_hours",
+    [(8, 1), (4, 2), (12, 3)],
+)
+@pytest.mark.asyncio
+async def test_resolve_user_derives_refresh_seconds_from_settings_not_hardcoded(
+    ttl_hours: int, idle_hours: int, monkeypatch: Any
+) -> None:
+    """``session_ttl_hours``/``session_idle_refresh_hours`` must be READ from
+    settings on every call, never a hard-coded value baked into
+    ``resolve_user`` — CLAUDE.md's "config only via src/settings.py"."""
+    from src.api import deps
+
+    settings = _cas_settings(ttl_hours=ttl_hours, idle_hours=idle_hours)
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    session = _live_session()
+    user = _live_user(session.user_id)
+
+    monkeypatch.setattr(
+        deps.session_service, "get_active_session", AsyncMock(return_value=session)
+    )
+    refresh_spy = AsyncMock(return_value=session)
+    monkeypatch.setattr(deps.session_service, "refresh_if_needed", refresh_spy)
+    monkeypatch.setattr(deps.user_service, "get_by_id", AsyncMock(return_value=user))
+
+    await deps.resolve_user(request=MagicMock(), db=MagicMock(), ra_session=session.id)
+
+    refresh_spy.assert_awaited_once()
+    call = refresh_spy.await_args
+    assert call is not None
+    assert call.kwargs["ttl_seconds"] == ttl_hours * 3600
+    assert call.kwargs["idle_refresh_seconds"] == idle_hours * 3600
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_with_no_cookie_never_calls_refresh_if_needed(
+    monkeypatch: Any,
+) -> None:
+    from src.api import deps
+
+    settings = _cas_settings()
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    refresh_spy = AsyncMock()
+    monkeypatch.setattr(deps.session_service, "refresh_if_needed", refresh_spy)
+    get_active_spy = AsyncMock()
+    monkeypatch.setattr(deps.session_service, "get_active_session", get_active_spy)
+
+    result = await deps.resolve_user(
+        request=MagicMock(), db=MagicMock(), ra_session=None
+    )
+
+    assert result is None
+    get_active_spy.assert_not_awaited()
+    refresh_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_with_no_live_session_never_calls_refresh_if_needed(
+    monkeypatch: Any,
+) -> None:
+    """A cookie present but resolving to nothing live (missing/revoked/
+    expired — ``get_active_session`` returns ``None`` for all three,
+    deliberately indistinguishable) must never reach ``refresh_if_needed``
+    at all."""
+    from src.api import deps
+
+    settings = _cas_settings()
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        deps.session_service, "get_active_session", AsyncMock(return_value=None)
+    )
+    refresh_spy = AsyncMock()
+    monkeypatch.setattr(deps.session_service, "refresh_if_needed", refresh_spy)
+
+    result = await deps.resolve_user(
+        request=MagicMock(), db=MagicMock(), ra_session="stale-or-revoked-token"
+    )
+
+    assert result is None
+    refresh_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_dev_anonymous_path_never_touches_sessions_at_all(
+    monkeypatch: Any,
+) -> None:
+    """CAS disabled: the synthetic dev-admin identity is returned without
+    ever consulting a session — no ``get_active_session`` call, and
+    therefore no ``refresh_if_needed`` call either. There is no session to
+    slide."""
+    from src.api import deps
+
+    settings = _cas_settings(cas_enabled=False)
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    get_active_spy = AsyncMock()
+    monkeypatch.setattr(deps.session_service, "get_active_session", get_active_spy)
+    refresh_spy = AsyncMock()
+    monkeypatch.setattr(deps.session_service, "refresh_if_needed", refresh_spy)
+
+    result = await deps.resolve_user(
+        request=MagicMock(), db=MagicMock(), ra_session="whatever-cookie-value"
+    )
+
+    assert result is not None
+    assert result.cas_username == "dev-anonymous"
+    get_active_spy.assert_not_awaited()
+    refresh_spy.assert_not_awaited()
