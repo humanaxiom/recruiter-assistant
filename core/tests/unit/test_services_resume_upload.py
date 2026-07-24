@@ -43,6 +43,25 @@ TDD cycle.
     ``current_setting('app.pii_key')`` GUC raising on an empty/unset key)
     propagates uncaught (fails loud), it is not swallowed into a "rejected"
     row.
+  - **Backend-robustness fix (diagnosed live):** a ``job_id`` with no
+    matching ``jobs`` row raises ``src.errors.NotFoundError`` — BEFORE any
+    blob write or résumé INSERT is attempted — rather than letting a real
+    ``asyncpg.exceptions.ForeignKeyViolationError`` from the INSERT escape
+    uncaught as an unhandled 500 at the route layer. The recommended fix is
+    a pre-INSERT existence check (``SELECT ... FROM jobs WHERE id = $1``,
+    mirroring every other job-scoped read in this codebase — see
+    ``job_service.get_job``/``resumes.py``'s own ``_EXISTS_SQL`` pattern),
+    not a catch of the FK violation itself: it is the same behaviour with no
+    reliance on the database driver's exception type or message text. This
+    file's ``_mock_conn`` answers that check via ``job_exists`` — any
+    ``fetchval`` query naming ``jobs`` returns a truthy id when
+    ``job_exists=True`` (the default, so every OTHER test in this file, all
+    written before this fix, is unaffected) and ``None`` when
+    ``job_exists=False``. The observable contract (404 + no side effects) is
+    also pinned end-to-end against a REAL Postgres in
+    ``tests/integration/test_api_resumes_pg.py`` — only a real FK violation
+    proves the 500 this fix removes; this file cannot reproduce it because
+    ``conn.execute`` here is a bare mock that never raises.
 """
 
 from __future__ import annotations
@@ -54,6 +73,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.errors import NotFoundError
 from src.pipeline.parsing import MIME_DOCX, MIME_PDF, MIME_RTF, MIME_TXT
 from src.schemas.resumes import ResumeUploadResult
 
@@ -72,14 +92,26 @@ def _acm(return_value: Any = None) -> MagicMock:
     return cm
 
 
-def _mock_conn(*, existing_sha: str | None = None) -> MagicMock:
-    """``fetchval`` answers the sha-dedup pre-check: returns a résumé id when
-    ``existing_sha`` matches the sha being checked, else None. Real
-    implementations key this off (job_id, sha256); the test only needs
-    "duplicate found" vs "not found" behaviour."""
+def _mock_conn(
+    *, existing_sha: str | None = None, job_exists: bool = True
+) -> MagicMock:
+    """``fetchval`` answers TWO independent pre-checks, distinguished by SQL
+    text, so a caller can flip either one without disturbing the other:
+
+    * a query naming ``jobs`` (the job-existence pre-check this file's
+      newest tests pin) -> a truthy id when ``job_exists`` (the default —
+      preserves every test written before that check existed), else
+      ``None``.
+    * the sha-dedup pre-check (``SELECT id FROM resumes WHERE job_id = $1
+      AND sha256 = $2`` — note: no literal ``"jobs"`` substring, so it can
+      never collide with the branch above) -> a résumé id when
+      ``existing_sha`` matches the sha being checked, else ``None``.
+    """
     conn = MagicMock(name="conn")
 
     async def _fetchval(query: str, *args: Any) -> Any:
+        if "jobs" in query.lower():
+            return uuid4() if job_exists else None
         if existing_sha is not None and existing_sha in args:
             return uuid4()
         return None
@@ -595,3 +627,89 @@ async def test_upload_resumes_no_map_falls_back_to_singular_cover() -> None:
         cover_letter_file=("cover.pdf", _PDF_MAGIC),
     )
     assert _insert_call_args(conn)[-1].startswith("cover_letters/")
+
+
+# ── upload_resumes: nonexistent job (backend-robustness fix) ────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_raises_not_found_when_job_does_not_exist() -> None:
+    """A ``job_id`` with no matching ``jobs`` row must be rejected with a
+    typed ``NotFoundError`` BEFORE any blob or row write is attempted — never
+    left to surface as a raw ``ForeignKeyViolationError`` from the INSERT."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn(job_exists=False)
+    store = _mock_blob_store()
+    with pytest.raises(NotFoundError):
+        await upload_resumes(
+            conn,
+            store,
+            job_id=uuid4(),
+            files=[("resume.pdf", _PDF_MAGIC)],
+            consent_acknowledged=True,
+        )
+    store.put.assert_not_called()
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_missing_job_wins_over_per_file_rejections() -> None:
+    """The missing-job check is a whole-request precondition, not a per-file
+    one: even a file that would otherwise be rejected (empty) must still
+    surface as ``NotFoundError`` — there is no per-file accounting to build
+    when the job itself doesn't exist."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn(job_exists=False)
+    store = _mock_blob_store()
+    with pytest.raises(NotFoundError):
+        await upload_resumes(
+            conn,
+            store,
+            job_id=uuid4(),
+            files=[("empty.pdf", b"")],
+            consent_acknowledged=True,
+        )
+    store.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_consent_false_wins_over_missing_job() -> None:
+    """Consent is checked FIRST, before any I/O at all (the pre-existing
+    contract) — a missing job must not short-circuit past the consent gate,
+    and the consent ``ValueError`` message must still be the one surfaced."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn(job_exists=False)
+    store = _mock_blob_store()
+    with pytest.raises(ValueError, match="(?i)consent"):
+        await upload_resumes(
+            conn,
+            store,
+            job_id=uuid4(),
+            files=[("resume.pdf", _PDF_MAGIC)],
+            consent_acknowledged=False,
+        )
+    store.put.assert_not_called()
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_existing_job_is_unaffected() -> None:
+    """Sanity/regression guard: a real job (``job_exists=True``, the default)
+    uploads exactly as before — guards against the fix being implemented
+    backwards (e.g. inverting the existence check)."""
+    from src.services.resume_service import upload_resumes
+
+    conn = _mock_conn()  # job_exists=True by default
+    store = _mock_blob_store()
+    results = await upload_resumes(
+        conn,
+        store,
+        job_id=uuid4(),
+        files=[("resume.pdf", _PDF_MAGIC)],
+        consent_acknowledged=True,
+    )
+    assert results[0].outcome == "accepted"
+    store.put.assert_awaited_once()
