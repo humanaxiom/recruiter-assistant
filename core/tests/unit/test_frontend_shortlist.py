@@ -45,6 +45,17 @@ def _client_with(
     return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
 
 
+def _norm(text: str) -> str:
+    """Collapse all whitespace and lowercase before a substring check.
+
+    A template line-wrap can split a phrase across a rendered newline (e.g.
+    "...a minute\\n    or two..."), which would let an absence assertion pass
+    merely because the phrase happens to wrap, not because it's actually
+    gone. Normalizing whitespace first closes that gap.
+    """
+    return " ".join(text.split()).lower()
+
+
 def _full_entry(entry_id: Any) -> dict[str, Any]:
     return {
         "id": str(entry_id),
@@ -296,6 +307,100 @@ def test_shortlist_cards_404s_when_job_missing(monkeypatch: Any, client: Any) ->
     )
     resp = client.get(f"/jobs/{uuid4()}/shortlist-cards")
     assert resp.status_code == 404
+
+
+# ── honest progress copy + elapsed indicator (fix/upload-and-progress-ux) ──
+#
+# Diagnosed live: shortlist ranking runs the evidence model on EVERY candidate
+# résumé it considers (per-candidate evidence calls on a local model, ~1-2 min
+# PER candidate), so a full run realistically takes several minutes, scaling
+# with the number of résumés — not "large PDFs can take a minute or two to
+# parse" as the old copy claimed (which in fact described résumé PARSING, a
+# different, already-finished step, not the ranking job itself). That undersell
+# reads as "not doing much" / broken. This fix is copy + a live elapsed-time
+# signal only (no backend/server-state change in this slice — a fully
+# server-durable timestamp, so the indicator survives a hard reload, stays out
+# of scope). Pure Flask/Jinja rendering over a mocked api_client — offline
+# suffices, no integration test needed. See the identical mirror in
+# test_frontend_reverse_match.py.
+
+
+def test_shortlist_cards_still_finding_shows_honest_multi_minute_copy(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "several minutes" in _norm(body)
+    assert "every candidate" in _norm(body)
+
+
+def test_shortlist_cards_still_finding_drops_the_old_minute_or_two_phrasing(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Whitespace-normalized so a template line-wrap can't hide the old phrase
+    (it currently wraps as '...a minute\\n    or two...')."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "minute or two" not in _norm(body)
+
+
+def test_shortlist_cards_elapsed_indicator_at_attempt_zero_shows_a_sane_start(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "elapsed" in _norm(body)
+    assert "0s" in _norm(body) or "just started" in _norm(body)
+
+
+def test_shortlist_cards_elapsed_indicator_scales_with_attempt(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The poll re-fires every 3s, so at attempt=40 roughly 120s (~2 min) have
+    passed — the fragment must reflect that moving figure, not a static hint."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards?attempt=40").get_data(
+        as_text=True
+    )
+    normalized = _norm(body)
+    assert "elapsed" in normalized
+    assert "120s" in normalized or "2 min" in normalized or "2:00" in normalized
+
+
+def test_shortlist_cards_non_empty_has_no_elapsed_or_poll_trigger(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Regression guard: once ranked entries exist, the fragment is terminal —
+    no elapsed line, no poll trigger."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "hx-trigger" not in body
+    assert "elapsed" not in _norm(body)
+    assert "still working" not in _norm(body)
+
+
+def test_shortlist_cards_gave_up_has_no_elapsed_or_poll_trigger(
+    monkeypatch: Any, client: Any
+) -> None:
+    from frontend.app import _MAX_SHORTLIST_POLL_ATTEMPTS
+
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    body = client.get(
+        f"/jobs/{job_id}/shortlist-cards?attempt={_MAX_SHORTLIST_POLL_ATTEMPTS}"
+    ).get_data(as_text=True)
+    assert "hx-trigger" not in body
+    assert "elapsed" not in _norm(body)
+    assert "still working" not in _norm(body)
 
 
 # ── ranked-card rendering ────────────────────────────────────────────────
