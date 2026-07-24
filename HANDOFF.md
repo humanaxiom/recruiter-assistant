@@ -1116,6 +1116,49 @@ haystack made a chunk fail to match *itself* at 0.838). Severity fell monotonica
 2 major → 5 medium/low → self-caught — which is why it was allowed to run five rounds rather than being
 split.
 
+### FU-5 status — BUILT, gates green, ON A PR (read this before starting FU-6)
+
+> **Resume here.** FU-5 (CAS identity + attributable audit, ADR-019) is **code-complete and gate-green**
+> on branch `feat/fu5-cas-identity` (13 TDD slices, each a `red:`→`green:` pair, off `main` @ `1f526f6`).
+> Both merge-blocking gates passed: **reviewer APPROVE** (8 security-critical guards mutation-verified),
+> **security PASS** (no critical/high). `./scripts/verify.sh all` green — 3358 unit @ ~91.9%, 202
+> integration vs real Postgres+Neo4j. `ranking-evals` n/a (no scoring code touched). **The next action is
+> to open the PR and hand the merge command to the human** (`gh pr merge` is classifier-blocked for the
+> agent — drive to green, hand over). **If you are resuming and FU-5 is already merged, skip to FU-6.**
+> Verify against origin first: `git fetch && gh pr list`.
+
+**Architecture pivot (human decision, 2026-07-22).** The build did NOT follow ADR-019 §8's original
+Flask+HMAC-assertion design. Reconnaissance found a production-proven CAS implementation in `C:\repos\hris`
+(FastAPI + Postgres-backed sessions + opaque httpOnly cookie), and the human directed FU-5 to **port it**.
+ADR-019 **§10/§10a/§10b** record the supersession and are the source of truth; §8 is marked superseded.
+Two ratified sub-decisions: **§10a** a settings-driven default-admin allowlist (`default_admin_cas_username`,
+default `"asalah"`) grants admin on that user's *first* login only (reverses §9's no-bootstrap-admin
+stance); **§10b** when `cas_enabled=False` (the shipped-compose default) a synthetic dev-admin is resolved
+and reveal's human gate is skipped (audited as `actor_kind='service'`) so dev/CI stay usable.
+
+**What shipped (13 slices):** `users`/`audit_log`/`sessions` DDL; CAS+session settings; the `cas_service`
+CAS 2.0 ticket-validation client (stdlib `ElementTree`, XXE-safe); `session_service`/`user_service`
+(provisioning + the default-admin grant, role-sticky `ON CONFLICT`); FastAPI CAS routes
+(`/auth/cas/{login,validate,logout,user}`) + `resolve_user` + dev-anonymous; **`X-Actor-Name` retired**
+(§8.3 — `created_by`/`uploaded_by`/reveal actor now come from the session, NULL for services);
+**reveal → `audit_log`** with the §7 human gate (403 for non-human, audit-row-before-decrypt so it
+survives a crash); **`blind_review` flips → `audit_log`** (atomic with the flip — opposite ordering to
+reveal); `GET /audit/reveals-legacy` (admin+auditor, §9.4 — the auditor's first capability); Flask
+forwards the `ra_session` cookie + a fail-closed session gate; sliding-window session refresh wired into
+the request path. Full detail: **ADR-019 §10/§10a/§10b/§10c** (§10c lists the build, the closed security
+findings, and the accepted residuals).
+
+**Security findings closed in-branch (slice 13):** a CONFIRMED-low open redirect (`next` now sanitized to
+safe relative paths at all six sinks) and an insecure-cookie startup warning. **Accepted residuals** (in
+ADR-019 §10c, hand to a hardener): `session_cookie_secure=False` default (now warns), `X-Forwarded-Host`
+trust behind `cas_service_from_request` (default off), the `httpx` log mute, the pre-existing weak
+`flask_secret_key` default, no role-provisioning path beyond §10a, and the dormant unwired
+`cas_dev_fake_user` setting.
+
+**Stacking note.** This branch is stacked on the two harness-hardening commits (`08ff27d`/`51f383e`) that
+are **also** open as **PR #28** (`chore/agent-harness-hardening`). If #28 merges first, the FU-5 diff
+against `main` cleans up; otherwise the FU-5 PR's diff will include them. Decide merge order with the human.
+
 ### Queued next work — FU-5, FU-6, FU-7 (user-scoped 2026-07-20)
 
 > **Status of this planning work: MERGED to `main` via PR #24 (squash `abb5d67`), 2026-07-21.** It was
@@ -1128,8 +1171,9 @@ split.
 >
 > **Build order changed on 2026-07-21, then completed the same day:** the ADR-022 evidence-verifier
 > hardening branch (ADR-023, see the section immediately above) was inserted **before** FU-5, and is now
-> **DONE** — gates green, deferred items recorded. **FU-5 is the next work item.** FU-5 → FU-6 → FU-7 is
-> otherwise unchanged.
+> **DONE** — gates green, deferred items recorded. ~~FU-5 is the next work item.~~ **FU-5 is now also
+> BUILT and gate-green on a PR (2026-07-24) — see the "FU-5 status" section immediately above; FU-6 is
+> the next work item once FU-5 merges.** FU-5 → FU-6 → FU-7 is otherwise unchanged.
 >
 > Still uncommitted-by-design: `compose.live-eval.yml` is gitignored and now carries
 > `LLM_TIMEOUT_S: "300"` for the worker. A fresh clone will not have it and will hit the 120s parse

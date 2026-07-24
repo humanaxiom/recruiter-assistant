@@ -232,6 +232,52 @@ and §7 therefore holds **only in configured (`cas_enabled=True`) deployments** 
 of every other auth check in this codebase. hris comments claiming "production refuses to start if
 cas_enabled is False" describe a check that was never implemented in hris and are **not** ported.
 
+### 10c. Build status and residuals (implemented 2026-07-24)
+
+FU-5 shipped in 13 TDD slices on `feat/fu5-cas-identity`, all gate-green
+(`./scripts/verify.sh all`): **users/audit_log/sessions DDL**, **CAS + session
+settings**, the **`cas_service` ticket-validation client** (CAS 2.0 XML, stdlib
+`ElementTree`), **`session_service`/`user_service`** (provisioning + the §10a
+default-admin grant), the **FastAPI CAS routes + `resolve_user`** (+ §10b
+dev-anonymous), the **`X-Actor-Name` retirement** (§8.3, identity now from the
+session), **reveal → `audit_log` with the §7 human gate**, **`blind_review` flips
+→ `audit_log`** (atomic with the flip), the **`GET /audit/reveals-legacy`**
+admin+auditor endpoint (§6/§9.4), the **Flask cookie-forward + session gate**
+(§10/§3), and the **sliding-window session refresh** wired into the request path
+(§10 step 5). Merge-blocking gates: **reviewer APPROVE** (8 security-critical
+guards mutation-verified), **security PASS** (no critical/high). `ranking-evals`
+n/a — no scoring code touched.
+
+**Security findings closed in-branch (slice 13):**
+- **Open redirect (CONFIRMED, low)** — the `next` param reached the post-auth
+  redirect / `service=` URL unsanitized. Closed: `auth._safe_next` rejects
+  protocol-relative / backslash / scheme-bearing values (falls back to `/`),
+  wired into all six `next` sinks.
+- **Insecure-cookie default (low)** — `log_auth_mode` now emits a startup WARNING
+  when `cas_enabled=True` and `session_cookie_secure=False`.
+- **Session hard-expiry (reviewer minor)** — `refresh_if_needed` existed but was
+  unwired; now called in both request-path resolvers, so §10 step 5's sliding
+  window is live and `session_idle_refresh_hours` is no longer dead config.
+
+**Accepted residuals (recorded, not fixed — hand-off to a hardener):**
+- **`session_cookie_secure=False` remains the default.** Env-overridable; a
+  `cas_enabled=True` deployment over plain HTTP now *warns* but still boots. A
+  future hardening pass may default it `True`. Fail-closed is a
+  configured-deployment property (§3), consistent with every other auth switch.
+- **`X-Forwarded-Host` trust when `cas_service_from_request=True`** (default off).
+  The CAS `service` URL is then derived from a request header; safe only behind a
+  trusted proxy + CAS-side service allowlist. Standard ported hris behaviour.
+- **Module-import `httpx` logger mute** (`cas_service.py`) — process-wide, to keep
+  the ticket out of httpx's access log. Intentional; documented.
+- **`flask_secret_key="dev-only"` default** (pre-existing, not FU-5) — now more
+  load-bearing since the Flask session backs the reveal CSRF token. Harden before
+  any non-local deploy.
+- **No role-provisioning path beyond §10a.** Every non-default-admin CAS login
+  lands as `recruiter`; promotion is manual SQL until an admin endpoint exists.
+- **`cas_dev_fake_user` setting is dormant** — the hris dev-fake-ticket bypass was
+  deliberately not ported (no test covers it; not shipping untested auth-bypass).
+  The setting is currently unread; a future slice can wire it with tests or drop it.
+
 ## Consequences
 
 - **Flask becomes the identity gateway.** Every human recruiter must authenticate via CAS before accessing the UI. The `/login` and `/login/callback` routes are new and public (unauthenticated). All other routes are protected by a session check, which redirects to `/login` on expiry.
