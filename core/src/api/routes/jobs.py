@@ -27,6 +27,7 @@ from src.api.deps import (
     get_arq,
     require_role,
     resolve_user,
+    scoped_user_id_or_403,
 )
 from src.errors import FileRejectedError
 from src.models.pool import Db
@@ -162,21 +163,36 @@ async def bulk_create_jobs(
     return results
 
 
-@router.get("/jobs", dependencies=[Depends(require_role(*_JOB_READERS))])
+@router.get("/jobs")
 async def list_jobs(
     db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     status_filter: Annotated[JobStatus | None, Query(alias="status")] = None,
 ) -> list[JobListItem]:
+    """FU-6 slice 5 (ADR-020 §3/§4) — row-scoped for a hiring_manager SESSION
+    (not the key role — see ``scoped_user_id_or_403``'s docstring for why),
+    unscoped (``user_id=None``) for admin/recruiter/auditor."""
+    user_id = await scoped_user_id_or_403(user, role)
     return await job_service.list_jobs(
-        db, limit=limit, offset=offset, status=status_filter
+        db, limit=limit, offset=offset, status=status_filter, user_id=user_id
     )
 
 
-@router.get("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_READERS))])
-async def get_job(job_id: UUID, db: Db) -> JobOut:
-    return await job_service.get_job(db, job_id)
+@router.get("/jobs/{job_id}")
+async def get_job(
+    job_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> JobOut:
+    """FU-6 slice 5 (ADR-020 §3/§5) — row-scoped for a hiring_manager
+    SESSION; an unassigned or nonexistent job both surface as 404 (never
+    403) via ``job_service.get_job``'s ``NotFoundError``."""
+    user_id = await scoped_user_id_or_403(user, role)
+    return await job_service.get_job(db, job_id, user_id=user_id)
 
 
 @router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])

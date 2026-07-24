@@ -387,9 +387,30 @@ async def create_jobs_bulk(
     return results
 
 
-async def get_job(conn: DbConn, job_id: UUID) -> JobOut:
-    """Fetch one job by id. Raises ``NotFoundError`` when it does not resolve."""
-    row = await conn.fetchrow(_GET_JOB_SQL, job_id)
+_JOB_ASSIGNEE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM job_assignees "
+    "WHERE job_assignees.job_id = jobs.id "
+    "AND job_assignees.user_id = ${n})"
+)
+
+
+async def get_job(conn: DbConn, job_id: UUID, *, user_id: UUID | None = None) -> JobOut:
+    """Fetch one job by id. Raises ``NotFoundError`` when it does not resolve.
+
+    FU-6 slice 5 (ADR-020 §3/§5) — ``user_id`` row-scopes the read. When
+    supplied (a hiring_manager session), the query gains an ``EXISTS``
+    predicate against ``job_assignees``; a job that exists but is not
+    assigned to ``user_id`` is filtered out at the SQL layer (0 rows), which
+    this function surfaces as ``NotFoundError`` — observationally identical
+    to a genuinely nonexistent job id (ADR-020 §5: 404, never 403). ``None``
+    (the default, unscoped callers) leaves the SQL byte-identical to before
+    this slice — no predicate, no extra bind arg.
+    """
+    if user_id is None:
+        row = await conn.fetchrow(_GET_JOB_SQL, job_id)
+    else:
+        query = f"{_GET_JOB_SQL} AND {_JOB_ASSIGNEE_EXISTS_SQL.format(n=2)}"
+        row = await conn.fetchrow(query, job_id, user_id)
     if row is None:
         raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
     return _row_to_jobout(row)
@@ -401,18 +422,33 @@ async def list_jobs(
     limit: int = 50,
     offset: int = 0,
     status: str | None = None,
+    user_id: UUID | None = None,
 ) -> list[JobListItem]:
     """Light rows for list views. ``status`` omitted means "every status" —
-    never silently scoped to one status when the filter is absent."""
+    never silently scoped to one status when the filter is absent.
+
+    FU-6 slice 5 (ADR-020 §3/§4) — ``user_id`` row-scopes the list to a
+    hiring_manager's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``. ``None`` (the default) leaves the SQL byte-identical
+    to before this slice for unscoped callers (admin/recruiter/auditor).
+    """
+    args: list[Any] = []
+    where_clauses: list[str] = []
     if status is not None:
-        query = (
-            f"{_LIST_JOBS_BASE_SQL} WHERE status = $1 "
-            "ORDER BY created_at DESC LIMIT $2 OFFSET $3"
-        )
-        rows = await conn.fetch(query, status, limit, offset)
-    else:
-        query = f"{_LIST_JOBS_BASE_SQL} ORDER BY created_at DESC LIMIT $1 OFFSET $2"
-        rows = await conn.fetch(query, limit, offset)
+        args.append(status)
+        where_clauses.append(f"status = ${len(args)}")
+    if user_id is not None:
+        args.append(user_id)
+        where_clauses.append(_JOB_ASSIGNEE_EXISTS_SQL.format(n=len(args)))
+
+    query = _LIST_JOBS_BASE_SQL
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+    args.append(limit)
+    query += f" ORDER BY created_at DESC LIMIT ${len(args)}"
+    args.append(offset)
+    query += f" OFFSET ${len(args)}"
+    rows = await conn.fetch(query, *args)
     # Explicit field-by-field projection (not `dict(r)`) — the real SQL only
     # selects these six columns, but a test double (or a future query that
     # widens its SELECT) may hand back a row carrying extra keys; JobListItem
