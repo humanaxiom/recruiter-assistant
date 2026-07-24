@@ -43,6 +43,25 @@ reveal."). Every disallowed-role test below asserts BOTH the 403 AND that no
 audit row was written and the résumé was never decrypted — a role check that
 runs AFTER the audit/decrypt would still 403 the HTTP response while having
 already performed the very de-anonymization it exists to prevent.
+
+**FU-6 slice 6 (ADR-020 §3/§5) — row-scoping for a hiring_manager SESSION.**
+``_REVEALERS`` (the API-KEY role gate) stays admin/recruiter ONLY — a raw
+``hiring_manager`` KEY is still rejected by ``require_role`` before this
+route body ever runs (see ``test_reveal_403s_for_hiring_manager_and_auditor``
+above). The scoping this slice adds targets a DIFFERENT, real scenario ADR-020
+§3/§4 documents explicitly: the Flask viewer presents the ONE shared
+``recruiter`` API key for every signed-in human, so a hiring_manager browsing
+through that shared key satisfies ``require_role`` as ``Role.RECRUITER`` —
+only the CAS SESSION identity (``resolve_user``'s resolved ``user.role ==
+"hiring_manager"``) can still scope such a caller to their own assigned
+jobs. Per the task's explicit ordering: human-gate -> scoping-404 -> audit ->
+decrypt. An unassigned (or nonexistent) résumé must 404 BEFORE any audit_log
+row is written and BEFORE any decryption — observationally identical to a
+genuinely nonexistent résumé (ADR-020 §5), so NO NEW distinguishable status
+code is introduced; only the WIRING (whether the scoping check blocks the
+audit/decrypt at all) is proven here. The real ``EXISTS``-against-
+``job_assignees`` filtering is ``test_resume_scoping_pg.py``'s job (real
+Postgres, ADR-020 §3, mandatory).
 """
 
 from __future__ import annotations
@@ -102,6 +121,33 @@ def _unblinded(resume_id: UUID) -> ResumeOut:
 def _mock_conn(*, exists: bool) -> MagicMock:
     conn = MagicMock(name="conn")
     conn.fetchval = AsyncMock(return_value=(uuid4() if exists else None))
+    conn.execute = AsyncMock(return_value="INSERT 0 1")
+    return conn
+
+
+def _mock_conn_scoped(*, assigned: bool, resume_id: UUID) -> MagicMock:
+    """A mocked conn whose ``fetchval`` mimics the two distinct existence
+    probes a scoped route must be able to issue: an UNSCOPED probe (bare
+    ``resume_id`` only, one positional bind arg) always finds the row, while
+    a SCOPED probe (``resume_id`` PLUS the caller's ``user_id``, two-or-more
+    positional bind args) returns ``None`` whenever ``assigned=False`` —
+    mirroring the ``EXISTS (... job_assignees ...)`` predicate ADR-020 §3
+    mandates without hard-coding its exact SQL text (that structural proof
+    against a real query planner belongs to ``test_resume_scoping_pg.py``).
+
+    Against the PRE-slice-6 route (which always issues a single-arg,
+    unscoped existence probe regardless of session), this always resolves
+    truthy — which is exactly the RED signal for the ``assigned=False``
+    tests below: they must see 404, but an unscoped route would 200.
+    """
+
+    async def _fetchval(_query: str, *args: Any) -> Any:
+        if len(args) >= 2 and not assigned:
+            return None
+        return resume_id
+
+    conn = MagicMock(name="conn")
+    conn.fetchval = AsyncMock(side_effect=_fetchval)
     conn.execute = AsyncMock(return_value="INSERT 0 1")
     return conn
 
@@ -508,3 +554,99 @@ async def test_reveal_403_for_auditor_even_though_auditor_can_read_blind(
         resp = await client.post(f"/resumes/{resume_id}/reveal")
 
     assert resp.status_code == 403
+
+
+# ── FU-6 slice 6 (ADR-020 §3/§5) — scoped hiring_manager SESSION reveal ────
+#
+# The RBAC key-role gate (``_REVEALERS = (admin, recruiter)``) is untouched —
+# see ``test_reveal_403s_for_hiring_manager_and_auditor`` above for the raw
+# hiring_manager-KEY 403, which stays exactly as it was. The scenario below
+# is the ADR-020 §3/§4 "shared browser key" trap: the caller's KEY resolves
+# to ``Role.RECRUITER`` (so RBAC alone lets the request through, satisfied by
+# ``_build_app``'s default ``role=Role.ADMIN``/``Role.RECRUITER``), but the
+# CAS SESSION identity is a real hiring_manager — only the row-scoping check
+# may still block such a caller, keyed on THEIR OWN assigned jobs.
+
+
+@pytest.mark.asyncio
+async def test_reveal_scoped_hiring_manager_unassigned_404s_writes_no_audit_no_decrypt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scoped hiring_manager session revealing a résumé under a job they
+    are NOT assigned to must 404 — and, critically, must write NO audit_log
+    row and never decrypt — even though an UNSCOPED existence probe alone
+    would find the résumé (``_mock_conn_scoped(assigned=False, ...)``
+    returns truthy for a bare, single-arg probe). Against the pre-slice-6
+    route (which never looks at the session for this check), the mocked
+    ``fetchval`` only ever receives a single positional arg and therefore
+    always resolves truthy — so this test is RED until the route forwards
+    the scoped identity into an existence check that can actually block it,
+    per the mandated order: human-gate -> scoping-404 -> audit -> decrypt."""
+    resume_id = uuid4()
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    audit, get_one, order = _tracking_mocks(resume_id)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+
+    conn = _mock_conn_scoped(assigned=False, resume_id=resume_id)
+    app = _build_app(conn, role=Role.RECRUITER)
+    app.dependency_overrides[resolve_user] = lambda: hm
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 404
+    audit.assert_not_awaited()
+    get_one.assert_not_awaited()
+    assert order == []
+
+
+@pytest.mark.asyncio
+async def test_reveal_scoped_hiring_manager_assigned_writes_audit_then_decrypts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pairing test to the one above: a scoped hiring_manager session
+    revealing a résumé under a job they ARE assigned to must still succeed —
+    exactly one audit row, written BEFORE the decrypting read."""
+    resume_id = uuid4()
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    audit, get_one, order = _tracking_mocks(resume_id)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+
+    conn = _mock_conn_scoped(assigned=True, resume_id=resume_id)
+    app = _build_app(conn, role=Role.RECRUITER)
+    app.dependency_overrides[resolve_user] = lambda: hm
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    get_one.assert_awaited_once()
+    assert order == ["audit", "get_one"]
+
+
+@pytest.mark.asyncio
+async def test_reveal_scoped_hiring_manager_unassigned_403s_before_human_gate_never_applies(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering pin: the EXISTING human-attribution gate (``user is None`` ->
+    403) still runs FIRST — a caller with no session at all must 403
+    regardless of scoping, and must never reach the scoping check, the audit
+    write, or the decrypt. Reuses the assigned=True mocked conn (so if the
+    human gate were accidentally skipped, this would incorrectly 200) to
+    prove the gate, not the scoping predicate, is what fires here."""
+    resume_id = uuid4()
+    audit, get_one, order = _tracking_mocks(resume_id)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
+
+    conn = _mock_conn_scoped(assigned=True, resume_id=resume_id)
+    app = _build_app(conn, role=Role.RECRUITER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    async with await _client(app) as client:
+        resp = await client.post(f"/resumes/{resume_id}/reveal")
+
+    assert resp.status_code == 403
+    audit.assert_not_awaited()
+    get_one.assert_not_awaited()
+    assert order == []
