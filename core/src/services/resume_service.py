@@ -391,7 +391,7 @@ async def upload_resumes(
 
 # ── read (Phase 5) ─────────────────────────────────────────────────────────
 
-_LIST_SQL = (
+_LIST_SQL_BASE = (
     "SELECT id, original_filename, status, uploaded_at, parsed_at, "
     "pgp_sym_decrypt(candidate_name, current_setting('app.pii_key')) "
     "AS candidate_name, "
@@ -399,8 +399,16 @@ _LIST_SQL = (
     # text) so the list can badge it. Cheap boolean, no PII.
     "(cover_letter_blob_key IS NOT NULL OR cover_letter_text IS NOT NULL) "
     "AS has_cover_letter "
-    "FROM resumes WHERE job_id = $1 "
-    "ORDER BY uploaded_at DESC LIMIT $2 OFFSET $3"
+    "FROM resumes WHERE job_id = $1"
+)
+
+# FU-6 slice 6 (ADR-020 §3) — the row-scoping predicate, keyed on
+# ``resumes.job_id`` (résumés have no assignee column of their own; scoping
+# rides the job they belong to). Mirrors ``job_service._JOB_ASSIGNEE_EXISTS_SQL``.
+_RESUME_ASSIGNEE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM job_assignees "
+    "WHERE job_assignees.job_id = resumes.job_id "
+    "AND job_assignees.user_id = ${n})"
 )
 
 _GET_SQL = """
@@ -422,15 +430,39 @@ _BLIND_CHECK_SQL = (
 
 
 async def list_for_job(
-    conn: DbConn, *, job_id: UUID, limit: int = 100, offset: int = 0
+    conn: DbConn,
+    *,
+    job_id: UUID,
+    limit: int = 100,
+    offset: int = 0,
+    user_id: UUID | None = None,
 ) -> list[ResumeListItem]:
     """List résumés for a job. Under blind review the candidate name is masked
     to ``None`` — NOT a pseudonym: a résumé list has no rank to build one from
-    (unlike the shortlist, which always carries a rank)."""
+    (unlike the shortlist, which always carries a rank).
+
+    FU-6 slice 6 (ADR-020 §3/§4) — ``user_id`` row-scopes the list to a
+    hiring_manager's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``, keyed on ``resumes.job_id`` (résumés carry no assignee
+    column of their own). ``None`` (the default) leaves the SQL byte-
+    identical to before this slice for unscoped callers (admin/recruiter/
+    auditor). An unassigned/nonexistent ``job_id`` yields an empty list —
+    never a 404 — matching this route's pre-existing behaviour for a
+    genuinely nonexistent job (ADR-020 §5).
+    """
     blind = await conn.fetchval("SELECT blind_review FROM jobs WHERE id = $1", job_id)
+    args: list[Any] = [job_id]
+    query = _LIST_SQL_BASE
+    if user_id is not None:
+        args.append(user_id)
+        query += f" AND {_RESUME_ASSIGNEE_EXISTS_SQL.format(n=len(args))}"
+    args.append(limit)
+    query += f" ORDER BY uploaded_at DESC LIMIT ${len(args)}"
+    args.append(offset)
+    query += f" OFFSET ${len(args)}"
     async with conn.transaction():
         await set_pii_key(conn)
-        rows = await conn.fetch(_LIST_SQL, job_id, limit, offset)
+        rows = await conn.fetch(query, *args)
     return [
         ResumeListItem(
             id=r["id"],
@@ -451,14 +483,34 @@ async def list_for_job(
     ]
 
 
-async def get_one(conn: DbConn, resume_id: UUID, *, reveal: bool = False) -> ResumeOut:
+async def get_one(
+    conn: DbConn,
+    resume_id: UUID,
+    *,
+    reveal: bool = False,
+    user_id: UUID | None = None,
+) -> ResumeOut:
     """Fetch + decrypt one résumé. Opens its own transaction and sets the PII
     key. ``reveal=True`` bypasses blind-review masking (the audited un-blind
     path). Under blind review, identity is redacted BEFORE the DTO is built
-    (ADR-006 §4) — no decrypted PII ever reaches ``ResumeOut``."""
+    (ADR-006 §4) — no decrypted PII ever reaches ``ResumeOut``.
+
+    FU-6 slice 6 (ADR-020 §3/§5) — ``user_id`` row-scopes the read via an
+    ``EXISTS`` predicate against ``job_assignees`` (keyed on
+    ``resumes.job_id``). A résumé that exists but is not assigned to
+    ``user_id`` is filtered out at the SQL layer (0 rows), which this
+    function surfaces as ``NotFoundError`` — observationally identical to a
+    genuinely nonexistent résumé id (ADR-020 §5: 404, never 403). ``None``
+    (the default, unscoped callers) leaves the SQL byte-identical to before
+    this slice — no predicate, no extra bind arg.
+    """
     async with conn.transaction():
         await set_pii_key(conn)
-        row = await conn.fetchrow(_GET_SQL, resume_id)
+        if user_id is None:
+            row = await conn.fetchrow(_GET_SQL, resume_id)
+        else:
+            query = f"{_GET_SQL} AND {_RESUME_ASSIGNEE_EXISTS_SQL.format(n=2)}"
+            row = await conn.fetchrow(query, resume_id, user_id)
     if row is None:
         raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
 
