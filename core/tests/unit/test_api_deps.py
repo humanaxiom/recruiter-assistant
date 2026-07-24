@@ -66,6 +66,17 @@ request path ever called it, so sessions hard-expired at the fixed TTL
 instead of sliding. Nothing here mocks a real database — the actual
 ``expires_at`` extension is real-Postgres behaviour and is separately pinned
 in ``tests/integration/test_auth_routes_pg.py``.
+
+**FU-5 slice 13 (security gate, FIX #1) — insecure-cookie startup warning.**
+``log_auth_mode`` gains a SECOND, independent warning: ``cas_enabled=True``
+combined with ``session_cookie_secure=False`` (the dev default) must emit a
+WARNING mentioning the insecure cookie at startup — not fatal (ADR-019
+§3/§10b frame fail-closed as a configured-deployment concern, and dev may
+legitimately run plain http), just loud enough that a misconfigured
+deployment cannot silently ship a session cookie that travels in the clear.
+``session_cookie_secure=True`` OR ``cas_enabled=False`` must NOT emit it.
+Pure settings/log-line logic, no DB — ``offline`` genuinely suffices; see the
+tests under "log_auth_mode — insecure-cookie startup warning" below.
 """
 
 from __future__ import annotations
@@ -89,12 +100,16 @@ def _settings(
     api_key_recruiter: str = "",
     api_key_hiring_manager: str = "",
     api_key_auditor: str = "",
+    cas_enabled: bool = False,
+    session_cookie_secure: bool = False,
 ) -> Settings:
     return Settings(
         api_key_admin=api_key_admin,
         api_key_recruiter=api_key_recruiter,
         api_key_hiring_manager=api_key_hiring_manager,
         api_key_auditor=api_key_auditor,
+        cas_enabled=cas_enabled,
+        session_cookie_secure=session_cookie_secure,
         skill_hash_salt="test-salt",
         pii_key="test-key",
     )
@@ -569,6 +584,96 @@ def test_log_auth_mode_never_logs_a_configured_role_key(
     log_auth_mode(_settings(api_key_admin="super-secret-admin-key"))
     joined = " ".join(r.getMessage() for r in caplog.records)
     assert "super-secret-admin-key" not in joined
+
+
+# ── log_auth_mode — insecure-cookie startup warning (security gate, FU-5
+#    slice 13, FIX #1). ``cas_enabled=True`` combined with
+#    ``session_cookie_secure=False`` (the dev default) must emit a SEPARATE
+#    WARNING mentioning the insecure cookie — not fatal (dev may legitimately
+#    run plain http, ADR-019 §3/§10b frame fail-closed as a configured-
+#    deployment concern only), just loud. ``session_cookie_secure=True`` OR
+#    ``cas_enabled=False`` must NOT emit it. ───────────────────────────────
+
+
+def test_log_auth_mode_warns_about_insecure_cookie_when_cas_enabled_and_cookie_insecure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.api.deps import log_auth_mode
+
+    caplog.set_level(logging.WARNING)
+    log_auth_mode(_settings(cas_enabled=True, session_cookie_secure=False))
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    joined = " ".join(r.getMessage().upper() for r in warnings)
+    assert "COOKIE" in joined
+    assert "INSECURE" in joined
+
+
+def test_log_auth_mode_does_not_warn_about_insecure_cookie_when_cookie_is_secure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.api.deps import log_auth_mode
+
+    caplog.set_level(logging.WARNING)
+    log_auth_mode(_settings(cas_enabled=True, session_cookie_secure=True))
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    joined = " ".join(r.getMessage().upper() for r in warnings)
+    assert "INSECURE" not in joined
+
+
+def test_log_auth_mode_does_not_warn_about_insecure_cookie_when_cas_disabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.api.deps import log_auth_mode
+
+    caplog.set_level(logging.WARNING)
+    log_auth_mode(_settings(cas_enabled=False, session_cookie_secure=False))
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    joined = " ".join(r.getMessage().upper() for r in warnings)
+    assert "INSECURE" not in joined
+
+
+@pytest.mark.parametrize(
+    "cas_enabled,session_cookie_secure,expect_warning",
+    [
+        (True, False, True),
+        (True, True, False),
+        (False, False, False),
+        (False, True, False),
+    ],
+)
+def test_log_auth_mode_insecure_cookie_warning_matrix(
+    cas_enabled: bool,
+    session_cookie_secure: bool,
+    expect_warning: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.api.deps import log_auth_mode
+
+    caplog.set_level(logging.WARNING)
+    log_auth_mode(
+        _settings(cas_enabled=cas_enabled, session_cookie_secure=session_cookie_secure)
+    )
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    joined = " ".join(r.getMessage().upper() for r in warnings)
+    assert ("INSECURE" in joined) is expect_warning
+
+
+def test_log_auth_mode_insecure_cookie_warning_is_independent_of_the_auth_disabled_warning(  # noqa: E501
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With CAS disabled (no insecure-cookie warning expected) and the role
+    keys ALSO all empty, the pre-existing "AUTH DISABLED" warning must still
+    fire — the two warnings are separate concerns and neither's absence/
+    presence should suppress the other."""
+    from src.api.deps import log_auth_mode
+
+    caplog.set_level(logging.WARNING)
+    log_auth_mode(_settings(cas_enabled=False, session_cookie_secure=False))
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    joined = " ".join(r.getMessage().upper() for r in warnings)
+    assert "AUTH" in joined
+    assert "DISABLED" in joined
+    assert "INSECURE" not in joined
 
 
 # ── resolve_user — sliding-window refresh wiring (FU-5 slice 12, ADR-019

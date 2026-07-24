@@ -49,12 +49,30 @@ standing in for the real ``httpx`` round trip to ``cas.sfu.ca``).
   (upserted, hris-style) or a plain in-memory object is explicitly left to
   the coder — these tests assert only the observable shape/role, never
   ``db.execute``/``db.fetchrow`` call counts for that branch.
+
+**FU-5 slice 13 (security gate, FIX #2) — open-redirect sanitization.** The
+``next`` query param was echoed unvalidated into a ``RedirectResponse`` in
+``cas_login``, ``cas_validate``, and the dev-mode passthrough — an attacker
+could craft ``/auth/cas/login?next=https://evil.com`` (or a protocol-relative
+``//evil.com``, or a scheme smuggled past a naive ``/``-prefix check via
+``javascript:``/backslash tricks browsers normalise to forward slashes) and
+have the browser land off-site right after authentication. The fix: ``next``
+must be a SAFE RELATIVE path — starts with exactly one ``/``, never ``//``,
+never contains a scheme (``http:``/``https:``/``javascript:``) or a
+backslash. An unsafe ``next`` is silently replaced with the safe default
+``"/"`` (not a 400 — the least-surprising fallback, mirroring mature CAS
+clients). See the "``next`` open-redirect sanitization" section near the
+bottom of this file. None of the PRE-EXISTING tests above use an unsafe
+``next`` value, so none needed adjusting for this fix — every legitimate
+relative ``next`` used above (``/jobs``, ``/jobs/42``, ``/``) round-trips
+unchanged under the new sanitization.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
@@ -445,3 +463,192 @@ async def test_resolve_user_resolves_the_real_user_for_a_live_session(
     assert user is not None
     assert user.cas_username == "bob"
     assert user.role == "admin"
+
+
+# ── `next` open-redirect sanitization (security gate, FU-5 slice 13, FIX #2)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# The `next` query param was echoed unvalidated into a `RedirectResponse` in
+# `cas_login`, `cas_validate`, and the dev-mode passthrough. `next` must be a
+# SAFE RELATIVE path — starts with exactly one `/`, never `//` (protocol-
+# relative), never contains a scheme (`http:`/`https:`/`javascript:`) or a
+# backslash (browsers normalise `\` to `/`, defeating a naive `/`-prefix-only
+# check). An unsafe `next` is silently replaced with the safe default `"/"` —
+# not a 400, the least-surprising fallback mirroring mature CAS clients.
+
+_MALICIOUS_NEXT_VALUES = [
+    "https://evil.com",
+    "//evil.com",
+    "http:evil",
+    "javascript:alert(1)",
+    "\\evil.com",
+    "/\\evil.com",
+]
+
+
+@pytest.mark.parametrize("malicious_next", _MALICIOUS_NEXT_VALUES)
+@pytest.mark.asyncio
+async def test_cas_login_sanitizes_an_unsafe_next_in_the_service_url(
+    malicious_next: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CAS enabled: the `next` embedded in the `service=` param handed to the
+    CAS server (and echoed straight back to us at /auth/cas/validate after a
+    successful login) must never carry an attacker-controlled off-site
+    target — the CAS server has no reason to reject an off-site `service`
+    sub-param, so this is the step that actually protects the browser."""
+    settings = _settings(cas_enabled=True, cas_server_url="https://cas.example.edu/cas")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": malicious_next})
+    location = resp.headers["location"]
+    outer_qs = parse_qs(urlparse(location).query)
+    service_url = outer_qs["service"][0]
+    service_qs = parse_qs(urlparse(service_url).query)
+    sanitized_next = service_qs.get("next", ["/"])[0]
+    assert sanitized_next == "/", (
+        f"unsafe next {malicious_next!r} must be replaced with the safe "
+        f"default '/', got {sanitized_next!r}"
+    )
+    assert "evil.com" not in sanitized_next
+
+
+@pytest.mark.parametrize("malicious_next", _MALICIOUS_NEXT_VALUES)
+@pytest.mark.asyncio
+async def test_cas_login_dev_passthrough_sanitizes_an_unsafe_next(
+    malicious_next: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CAS disabled (dev mode): `cas_login` 302s straight to `next` — the
+    MOST direct open-redirect path (no CAS round trip in between), so the
+    Location header itself must never carry the attacker's target."""
+    settings = _settings(cas_enabled=False)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": malicious_next})
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/", (
+        f"unsafe next {malicious_next!r} must fall back to '/', got "
+        f"{resp.headers['location']!r}"
+    )
+
+
+@pytest.mark.parametrize("malicious_next", _MALICIOUS_NEXT_VALUES)
+@pytest.mark.asyncio
+async def test_cas_validate_dev_passthrough_sanitizes_an_unsafe_next(
+    malicious_next: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CAS disabled: `cas_validate` also 302s straight to `next` before any
+    ticket handling — same direct open-redirect shape as the login
+    passthrough above."""
+    settings = _settings(cas_enabled=False)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/validate", params={"next": malicious_next})
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/", (
+        f"unsafe next {malicious_next!r} must fall back to '/', got "
+        f"{resp.headers['location']!r}"
+    )
+
+
+@pytest.mark.parametrize("malicious_next", _MALICIOUS_NEXT_VALUES)
+@pytest.mark.asyncio
+async def test_cas_validate_post_auth_redirect_sanitizes_an_unsafe_next(
+    malicious_next: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CAS enabled, a genuinely valid ticket: the post-auth redirect (issued
+    right after the session cookie is set) must not honour an unsafe `next`
+    either — this is the step a real attacker would exploit, chaining a
+    legitimate CAS login onto an off-site landing page."""
+    settings = _settings(cas_enabled=True)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        auth_routes.cas_service,
+        "validate_ticket",
+        AsyncMock(return_value="alice"),
+    )
+    user_id = uuid4()
+    monkeypatch.setattr(
+        auth_routes.user_service,
+        "provision_or_get",
+        AsyncMock(return_value=SimpleNamespace(id=user_id)),
+    )
+    monkeypatch.setattr(
+        auth_routes.session_service,
+        "create_session",
+        AsyncMock(return_value=SimpleNamespace(id="tok-new-session")),
+    )
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate",
+            params={"ticket": "ST-123", "next": malicious_next},
+        )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/", (
+        f"unsafe next {malicious_next!r} must fall back to '/', got "
+        f"{resp.headers['location']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cas_login_service_url_preserves_a_legitimate_relative_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely safe relative `next` must NOT be perturbed by the new
+    sanitization — only unsafe values fall back to '/'."""
+    settings = _settings(cas_enabled=True, cas_server_url="https://cas.example.edu/cas")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": "/jobs/123"})
+    location = resp.headers["location"]
+    outer_qs = parse_qs(urlparse(location).query)
+    service_url = outer_qs["service"][0]
+    service_qs = parse_qs(urlparse(service_url).query)
+    assert service_qs["next"] == ["/jobs/123"]
+
+
+@pytest.mark.asyncio
+async def test_cas_login_dev_passthrough_preserves_a_legitimate_relative_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=False)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": "/jobs/123"})
+    assert resp.headers["location"] == "/jobs/123"
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_post_auth_redirect_preserves_a_legitimate_relative_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        auth_routes.cas_service,
+        "validate_ticket",
+        AsyncMock(return_value="alice"),
+    )
+    user_id = uuid4()
+    monkeypatch.setattr(
+        auth_routes.user_service,
+        "provision_or_get",
+        AsyncMock(return_value=SimpleNamespace(id=user_id)),
+    )
+    monkeypatch.setattr(
+        auth_routes.session_service,
+        "create_session",
+        AsyncMock(return_value=SimpleNamespace(id="tok-new-session")),
+    )
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate",
+            params={"ticket": "ST-123", "next": "/jobs/123"},
+        )
+    assert resp.headers["location"] == "/jobs/123"
