@@ -103,6 +103,7 @@ from src.api.routes import jobs as jobs_routes
 from src.errors import AppError
 from src.models.pool import get_db
 from src.schemas.auth import User
+from src.schemas.jobs import JobOut
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
 
@@ -303,8 +304,18 @@ async def test_get_job_blind_review_false_from_a_false_row() -> None:
 @pytest.mark.parametrize("role", _ALL_ROLES)
 @pytest.mark.asyncio
 async def test_get_job_is_readable_by_every_role(role: Role) -> None:
+    """FU-6 slice 5 (ADR-020 §3, fail-closed): a ``hiring_manager`` KEY needs
+    a verifiable ``hiring_manager`` SESSION to be scoped-and-served — with no
+    session override it now 403s (see the dedicated slice-5 section below),
+    so this "every role can read" case supplies one for that role only. The
+    other three roles are unaffected by row-scoping (ADR-020 §4) and keep
+    relying on the ambient dev-anonymous-admin ``resolve_user`` default."""
     conn = _mock_conn(fetchrow=_job_row())
     app = _build_app(conn, role=role)
+    if role == Role.HIRING_MANAGER:
+        app.dependency_overrides[resolve_user] = lambda: _user(
+            cas_username="hm", role="hiring_manager"
+        )
     async with await _client(app) as client:
         resp = await client.get(f"/jobs/{uuid4()}")
     assert resp.status_code == 200
@@ -329,11 +340,226 @@ async def test_list_jobs_returns_the_trimmed_joblistitem_shape() -> None:
 @pytest.mark.parametrize("role", _ALL_ROLES)
 @pytest.mark.asyncio
 async def test_list_jobs_is_readable_by_every_role(role: Role) -> None:
+    """FU-6 slice 5 (ADR-020 §3, fail-closed): see the matching docstring on
+    ``test_get_job_is_readable_by_every_role`` — a ``hiring_manager`` KEY
+    needs a verifiable session to be served; supply one here so this case
+    keeps proving "every role, once properly authorized, can read"."""
     conn = _mock_conn(fetch=[_job_row()])
     app = _build_app(conn, role=role)
+    if role == Role.HIRING_MANAGER:
+        app.dependency_overrides[resolve_user] = lambda: _user(
+            cas_username="hm", role="hiring_manager"
+        )
     async with await _client(app) as client:
         resp = await client.get("/jobs")
     assert resp.status_code == 200
+
+
+# ── FU-6 slice 5 (ADR-020 §3/§5) — row-scoping WIRING for GET /jobs and
+#    GET /jobs/{job_id} ───────────────────────────────────────────────────
+#
+# These tests prove WIRING only: that the route resolves the caller's CAS
+# session identity (``resolve_user``) and key role (``require_role``'s
+# resolved ``Role``) and forwards the correct ``user_id`` to
+# ``job_service.list_jobs`` / ``job_service.get_job`` via
+# ``scoped_user_id_or_403`` (already unit-tested standalone in
+# ``test_api_deps.py``). They mock ``job_service`` entirely, so they cannot
+# prove the EXISTS predicate actually FILTERS rows — that structural proof
+# is ``test_job_scoping_pg.py``'s job (real Postgres, ADR-020 §3, mandatory).
+
+_UNSCOPED_KEY_ROLES: tuple[tuple[Role, str], ...] = (
+    (Role.ADMIN, "admin"),
+    (Role.RECRUITER, "recruiter"),
+    (Role.AUDITOR, "auditor"),
+)
+
+
+def _job_out(job_id: UUID | None = None) -> JobOut:
+    """A valid ``JobOut`` the mocked ``job_service.get_job`` can return —
+    the route's return-type annotation doubles as its response_model, so a
+    mocked return value must satisfy the real schema or FastAPI 500s before
+    the wiring assertion below ever runs."""
+    return JobOut(**_job_row(job_id=job_id))
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_passes_user_id_for_a_hiring_manager_even_with_the_shared_recruiter_key(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap ADR-020 §4/§3 calls out explicitly: the Flask viewer's
+    browser session presents the ONE shared ``recruiter`` API key for every
+    human, so ``key_role`` resolves to ``Role.RECRUITER`` even when the
+    signed-in human is a hiring_manager. Scoping must key off the SESSION
+    identity, not the key role."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.RECRUITER)
+    hm = _user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_list_jobs_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient default (no ``resolve_user`` override, ``cas_enabled=False``):
+    the synthetic dev-anonymous admin identity resolves. Must stay
+    unscoped."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-closed (ADR-020 §3 final paragraph): a hiring_manager key with no
+    verifiable session identity must 403 and must NEVER reach the service
+    layer unscoped."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 403
+    list_jobs_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_job_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    get_job_mock.assert_awaited_once()
+    assert get_job_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_get_job_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    get_job_mock.assert_awaited_once()
+    assert get_job_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_get_job_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    get_job_mock.assert_awaited_once()
+    assert get_job_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_get_job_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 403
+    get_job_mock.assert_not_awaited()
 
 
 # ── PATCH /jobs/{id}/status ──────────────────────────────────────────────
