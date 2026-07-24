@@ -85,6 +85,31 @@ def _service_url(settings: Settings, request: Request, next_path: str) -> str:
     return f"{base}/auth/cas/validate?{query}"
 
 
+def _safe_next(next_value: str) -> str:
+    """Sanitize a caller-supplied ``next`` redirect target (FU-5 slice 13,
+    security gate, FIX #2 — open-redirect prevention).
+
+    Returns ``next_value`` unchanged ONLY when it is a safe, in-app relative
+    path: starts with exactly one ``/`` (never ``//``, which browsers treat
+    as protocol-relative), never contains a backslash (browsers normalise
+    ``\\`` to ``/``, so ``/\\evil.com`` is equivalent to ``//evil.com``), and
+    never smuggles a URL scheme (a ``:`` appearing before the first ``/``
+    after the leading slash, e.g. ``javascript:...``). Any other value
+    silently falls back to ``"/"`` — never a 400, mirroring mature CAS
+    clients' least-surprising behaviour.
+    """
+    if not next_value.startswith("/") or next_value.startswith("//"):
+        return "/"
+    if "\\" in next_value:
+        return "/"
+    rest = next_value[1:]
+    colon_idx = rest.find(":")
+    slash_idx = rest.find("/")
+    if colon_idx != -1 and (slash_idx == -1 or colon_idx < slash_idx):
+        return "/"
+    return next_value
+
+
 def _set_session_cookie(
     response: RedirectResponse, settings: Settings, sid: str
 ) -> None:
@@ -102,12 +127,13 @@ def _set_session_cookie(
 @router.get("/cas/login")
 async def cas_login(request: Request, next: str = "/") -> RedirectResponse:
     settings = get_settings()
+    safe_next = _safe_next(next)
     if not settings.cas_enabled:
         logger.info("cas.login.dev_mode")
-        return RedirectResponse(url=next or "/", status_code=302)
+        return RedirectResponse(url=safe_next, status_code=302)
 
     cas_base = settings.cas_server_url.rstrip("/")
-    service_url = _service_url(settings, request, next)
+    service_url = _service_url(settings, request, safe_next)
     login_url = f"{cas_base}/login?" + urlencode({"service": service_url})
     logger.info("cas.login.redirect cas_server=%s", cas_base)
     return RedirectResponse(url=login_url, status_code=302)
@@ -121,19 +147,21 @@ async def cas_validate(
     next: str = "/",
 ) -> RedirectResponse:
     settings = get_settings()
+    safe_next = _safe_next(next)
     if not settings.cas_enabled:
-        return RedirectResponse(url=next or "/", status_code=302)
+        return RedirectResponse(url=safe_next, status_code=302)
 
     if not ticket:
         # CAS round-trip lost the ticket somehow — restart the dance.
-        return RedirectResponse(url=f"/auth/cas/login?next={next}", status_code=302)
+        restart_url = "/auth/cas/login?" + urlencode({"next": safe_next})
+        return RedirectResponse(url=restart_url, status_code=302)
 
     async with httpx.AsyncClient(verify=settings.cas_verify_tls) as http:
         try:
             cas_username = await cas_service.validate_ticket(
                 cas_server_url=settings.cas_server_url,
                 validate_route=settings.cas_validate_route,
-                service_url=_service_url(settings, request, next),
+                service_url=_service_url(settings, request, safe_next),
                 ticket=ticket,
                 http=http,
             )
@@ -154,7 +182,7 @@ async def cas_validate(
         ip=(request.client.host if request.client else None),
     )
 
-    response = RedirectResponse(url=next or "/", status_code=302)
+    response = RedirectResponse(url=safe_next, status_code=302)
     _set_session_cookie(response, settings, session.id)
     logger.info("cas.validate.ok user_id=%s", user.id)
     return response

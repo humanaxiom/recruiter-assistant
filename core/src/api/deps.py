@@ -163,7 +163,16 @@ def get_arq(request: Request) -> ArqRedis:
 
 def log_auth_mode(settings: Settings) -> None:
     """Called ONCE at API startup. Loud WARNING when auth is disabled, an
-    informational line otherwise. Never logs a key value."""
+    informational line otherwise. Never logs a key value.
+
+    Also emits a SEPARATE, independent WARNING (FU-5 slice 13, security
+    gate, FIX #1) when ``cas_enabled=True`` and ``session_cookie_secure=
+    False``: the session cookie would be sent over plain HTTP, letting it
+    leak to a network eavesdropper. Not fatal — a local dev CAS deployment
+    over http:// is a legitimate, if insecure, setup — just loud. This
+    warning is independent of the auth-disabled warning above: neither's
+    presence/absence suppresses the other.
+    """
     if not settings.auth_enabled:
         logger.warning(
             "AUTH DISABLED — all four role keys are empty; every route is "
@@ -173,6 +182,15 @@ def log_auth_mode(settings: Settings) -> None:
         )
     else:
         logger.info("auth.enabled")
+
+    if settings.cas_enabled and not settings.session_cookie_secure:
+        logger.warning(
+            "INSECURE SESSION COOKIE — cas_enabled=True but "
+            "session_cookie_secure=False; the CAS session cookie will be "
+            "sent over plain HTTP and can be intercepted. Set "
+            "SESSION_COOKIE_SECURE=true for any deployment reachable over "
+            "the network."
+        )
 
 
 async def resolve_user(
