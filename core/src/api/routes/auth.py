@@ -203,6 +203,13 @@ async def cas_user(request: Request, db: Db) -> JSONResponse:
             {"username": None, "authenticated": False, "cas_enabled": True}
         )
 
+    session = await session_service.refresh_if_needed(
+        db,
+        session,
+        ttl_seconds=settings.session_ttl_hours * 3600,
+        idle_refresh_seconds=settings.session_idle_refresh_hours * 3600,
+    )
+
     user = await user_service.get_by_id(db, session.user_id)
     return JSONResponse(
         {

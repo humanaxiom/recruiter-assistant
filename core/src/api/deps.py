@@ -220,6 +220,13 @@ async def resolve_user(
     if session is None:
         return None
 
+    session = await session_service.refresh_if_needed(
+        db,
+        session,
+        ttl_seconds=settings.session_ttl_hours * 3600,
+        idle_refresh_seconds=settings.session_idle_refresh_hours * 3600,
+    )
+
     return await user_service.get_by_id(db, session.user_id)
 
 
