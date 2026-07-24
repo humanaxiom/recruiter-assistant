@@ -78,6 +78,21 @@ class JobTransition(BaseModel):
     to: JobStatus
 
 
+class JobAssigneeCreate(BaseModel):
+    """POST /jobs/{job_id}/assignees body (ADR-020 §2, FU-6 slice 3).
+
+    ``user_id`` names the user being assigned to the job; ``note`` is an
+    optional free-text context string forwarded verbatim into the
+    ``assign_job`` audit row's ``details`` (never persisted anywhere else —
+    ``job_assignees`` itself has no note column).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+    note: str | None = None
+
+
 # ---------- HTTP responses ----------
 
 
