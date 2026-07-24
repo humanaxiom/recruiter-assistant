@@ -281,31 +281,100 @@ _BLIND_CHECK_QUERY = (
     "JOIN shortlist_entries se ON se.job_id = j.id WHERE se.id = $1"
 )
 
+# FU-6 slice 7 (ADR-020 §3) — the row-scoping predicate, mirroring
+# ``job_service._JOB_ASSIGNEE_EXISTS_SQL`` / ``resume_service.
+# _RESUME_ASSIGNEE_EXISTS_SQL``. Shortlist entries carry no assignee column
+# of their own; scoping rides the job they belong to via their own
+# ``job_id`` column (unscoped-column queries alias the table as
+# ``shortlist_entries``, blind-review queries as ``se`` — ``{table}`` picks
+# the right prefix). ``{n}`` is always ``2`` at every call site here: the
+# scoping arg is bound immediately after the existing single positional
+# arg ($1 = job_id/entry_id).
+_SHORTLIST_ASSIGNEE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM job_assignees "
+    "WHERE job_assignees.job_id = {table}.job_id "
+    "AND job_assignees.user_id = ${n})"
+)
 
-async def list_for_job(conn: DbConn, *, job_id: UUID) -> list[ShortlistEntry]:
+
+async def list_for_job(
+    conn: DbConn, *, job_id: UUID, user_id: UUID | None = None
+) -> list[ShortlistEntry]:
     """Ranked shortlist for a job. Under blind review, identity is masked and a
-    rank-based ``display_label`` is applied before any DTO is built."""
+    rank-based ``display_label`` is applied before any DTO is built.
+
+    FU-6 slice 7 (ADR-020 §3/§4) — ``user_id`` row-scopes the list to a
+    hiring_manager's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``, keyed on the shortlist entry's own ``job_id``.
+    ``None`` (the default) leaves the SQL byte-identical to before this
+    slice for unscoped callers (admin/recruiter/auditor). An
+    unassigned/nonexistent ``job_id`` yields an empty list — never a 404 —
+    matching this route's pre-existing behaviour for a genuinely
+    nonexistent job (ADR-020 §5).
+    """
     if await conn.fetchval("SELECT blind_review FROM jobs WHERE id = $1", job_id):
         async with conn.transaction():
             await set_pii_key(conn)
-            rows = await conn.fetch(_BLIND_LIST_QUERY, job_id)
+            if user_id is None:
+                rows = await conn.fetch(_BLIND_LIST_QUERY, job_id)
+            else:
+                query = _BLIND_LIST_QUERY.replace(
+                    "WHERE se.job_id = $1",
+                    "WHERE se.job_id = $1 AND "
+                    + _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table="se", n=2),
+                )
+                rows = await conn.fetch(query, job_id, user_id)
         return [_row_to_blind_entry(r) for r in rows]
-    rows = await conn.fetch(_LIST_QUERY, job_id)
+    if user_id is None:
+        rows = await conn.fetch(_LIST_QUERY, job_id)
+    else:
+        query = _LIST_QUERY.replace(
+            "WHERE job_id = $1",
+            "WHERE job_id = $1 AND "
+            + _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table="shortlist_entries", n=2),
+        )
+        rows = await conn.fetch(query, job_id, user_id)
     return [_row_to_entry(r) for r in rows]
 
 
-async def get_one(conn: DbConn, entry_id: UUID) -> ShortlistEntry:
-    """One shortlist entry by id, blind-masked when its job is blind."""
+async def get_one(
+    conn: DbConn, entry_id: UUID, *, user_id: UUID | None = None
+) -> ShortlistEntry:
+    """One shortlist entry by id, blind-masked when its job is blind.
+
+    FU-6 slice 7 (ADR-020 §3/§5) — ``user_id`` row-scopes the read via an
+    ``EXISTS`` predicate against ``job_assignees``, keyed on the entry's own
+    ``job_id``. An entry that exists but whose job is not assigned to
+    ``user_id`` is filtered out at the SQL layer (0 rows), which this
+    function surfaces as ``NotFoundError`` — observationally identical to a
+    genuinely nonexistent entry id (ADR-020 §5: 404, never 403). ``None``
+    (the default, unscoped callers) leaves the SQL byte-identical to before
+    this slice — no predicate, no extra bind arg.
+    """
     if await conn.fetchval(_BLIND_CHECK_QUERY, entry_id):
         async with conn.transaction():
             await set_pii_key(conn)
-            row = await conn.fetchrow(_BLIND_GET_QUERY, entry_id)
+            if user_id is None:
+                row = await conn.fetchrow(_BLIND_GET_QUERY, entry_id)
+            else:
+                query = (
+                    f"{_BLIND_GET_QUERY} AND "
+                    f"{_SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table='se', n=2)}"
+                )
+                row = await conn.fetchrow(query, entry_id, user_id)
         if row is None:
             raise NotFoundError(
                 f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
             )
         return _row_to_blind_entry(row)
-    row = await conn.fetchrow(_GET_QUERY, entry_id)
+    if user_id is None:
+        row = await conn.fetchrow(_GET_QUERY, entry_id)
+    else:
+        query = (
+            f"{_GET_QUERY} AND "
+            f"{_SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table='shortlist_entries', n=2)}"
+        )
+        row = await conn.fetchrow(query, entry_id, user_id)
     if row is None:
         raise NotFoundError(
             f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
@@ -674,12 +743,30 @@ def _apply_reveal(rows: list[dict[str, Any]], *, reveal: bool) -> None:
 
 
 async def export_rows(
-    conn: DbConn, *, job_id: UUID, reveal: bool
+    conn: DbConn, *, job_id: UUID, reveal: bool, user_id: UUID | None = None
 ) -> list[dict[str, Any]]:
     """Flat rows for CSV / JSON export, already reveal-applied. The caller MUST
     have run ``pii_service.set_pii_key(conn)`` inside an open transaction — the
-    raw-SQL ``pgp_sym_decrypt`` fails loud otherwise (it is NOT called here)."""
-    rows = await conn.fetch(_EXPORT_QUERY, job_id)
+    raw-SQL ``pgp_sym_decrypt`` fails loud otherwise (it is NOT called here).
+
+    FU-6 slice 7 (ADR-020 §3/§4) — ``user_id`` row-scopes the export to a
+    hiring_manager's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``, keyed on the shortlist entry's ``job_id`` (aliased
+    ``s`` in this query). ``None`` (the default) leaves the SQL byte-
+    identical to before this slice for unscoped callers (admin/recruiter/
+    auditor). An unassigned/nonexistent ``job_id`` yields an empty export —
+    never a 404 — matching the sibling by-job list route's behaviour
+    (ADR-020 §5).
+    """
+    if user_id is None:
+        rows = await conn.fetch(_EXPORT_QUERY, job_id)
+    else:
+        query = _EXPORT_QUERY.replace(
+            "WHERE s.job_id = $1",
+            "WHERE s.job_id = $1 AND "
+            + _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table="s", n=2),
+        )
+        rows = await conn.fetch(query, job_id, user_id)
     out: list[dict[str, Any]] = []
     for row in rows:
         d = dict(row)
