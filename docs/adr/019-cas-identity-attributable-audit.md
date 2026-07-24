@@ -3,6 +3,14 @@
 **Status:** Accepted (closes ADR-018's actor-attribution residual and its auditor-has-no-capability residual partially; makes ADR-016's R3 actionable; separates service-to-service identity from browser-user identity; adds SFU-hosted CAS as an internal runtime dependency outside the compose stack — fail-closed on outage, no effect on local model inference)
 **Date:** 2026-07-20
 
+> **Amended 2026-07-22 during the FU-5 build — see §10.** The authentication *architecture*
+> in §2 and §8 (Flask owns the CAS dance; an HMAC-signed `X-Actor-Assertion` header carries
+> identity to the API) is **superseded** by §10, which ports the proven CAS implementation from
+> `C:\repos\hris`: the FastAPI backend owns the CAS ticket dance and holds session state in a
+> Postgres `sessions` table behind an opaque httpOnly cookie; Flask forwards that cookie. This
+> deletes the HMAC assertion mechanism entirely (no `ACTOR_ASSERTION_SECRET`, no mint/verify
+> module, no per-request token). §1, §3, §4, §5, §6, §7, and §9 stand. Read §10 before building.
+
 ## Context
 
 ADR-018 shipped RBAC via keyed roles — `admin`, `recruiter`, `hiring_manager`, `auditor` — but the *actor* recorded in audit rows remains unresolved. `reveal_audit.actor` and `created_by`/`uploaded_by` are populated by the optional, unverified `X-Actor-Name` header (`core/src/api/deps.py:131-141`) or default to `"api"`. Worse: the Flask frontend never sends `X-Actor-Name` and presents one shared recruiter key for every browser (`core/frontend/api_client.py:101-109`), so every UI-driven reveal records `actor = "api"` — an auditor reviewing `reveal_audit` rows cannot name a person (ADR-018:284-287 recorded this).
@@ -133,6 +141,142 @@ The backend's `require_role` gate checks the presented API key (if any) and reso
 5. **New dependency: `resolve_user`.** The API's `require_role` dependency (checking API key and role) is orthogonal and unchanged. A new `resolve_user` dependency (or a companion to `require_role`) checks for a valid, non-expired `X-Actor-Assertion` header and returns the authenticated user's `id` and `role`. Routes that need human identity call this dependency. ADR-020's scoping predicates consume the result of `resolve_user`, not `require_role`'s `Role`.
 
 **Tradeoff and mitigation.** A compromised Flask process can forge any `X-Actor-Assertion`, since it holds the signing secret. An attacker with code execution on Flask can impersonate any user. Mitigations: short expiry (e.g., 15 minutes, renewed on each request), so a forged token's window is bounded; independent role validation by the API (the backend checks the `users` table and rejects requests from deactivated users, even if the assertion says otherwise); and separation of concerns (the API still validates role permissions for the resource being accessed, so a forged admin assertion against a recruiter-only route still 403s).
+
+### 9. Ratified build decisions (human, 2026-07-22)
+
+Four points this ADR left silent or ambiguous were ratified at the start of the FU-5 build. They are
+recorded here so the build does not re-litigate them, and so FU-6/FU-7 inherit settled ground.
+
+1. **Flask reaches Postgres through the backend, not directly.** §2 says Flask "upserts a `users` row"
+   without naming the boundary. Flask has never touched Postgres — every write today goes through
+   FastAPI via `core/frontend/api_client.py`. FU-5 preserves that layering: a new internal endpoint
+   (`POST /internal/users/upsert`) performs the upsert, called by Flask after CAS validation and
+   authenticated by the service key. Giving Flask its own asyncpg pool was rejected as a new
+   architectural precedent that would make Flask an owner of DB state.
+2. **`created_by` / `uploaded_by` carry human identity, `NULL` for services.** §8.3 removes
+   `resolve_actor` entirely, but `routes/jobs.py` consumes it today to populate these two descriptive
+   TEXT columns. They are now populated from the session's `cas_username` when a human assertion is
+   present, and written as `NULL` when a service key calls — making the columns meaningful for the
+   first time instead of recording the constant `"api"`. Note this changes `JobOut.created_by` /
+   `ResumeOut.uploaded_by` from always-populated to nullable.
+3. **`ACTOR_ASSERTION_SECRET` is startup-fatal only when auth is configured.** §8.1 invokes the
+   `PII_KEY` / `SKILL_HASH_SALT` discipline, which is an unconditional hard-fail. Applied
+   unconditionally here it would break every existing local-dev and CI boot, since the shipped compose
+   runs auth-disabled by ADR-018's own recorded default. The check therefore raises on an empty secret
+   **when auth/CAS is enabled**, and boots normally in the all-auth-disabled default.
+4. **`GET /audit/reveals-legacy` is admin + auditor.** §6 says only "an admin endpoint". Auditor is
+   included: reading an audit trail is that role's stated purpose, and this becomes the auditor's first
+   real capability, partially closing the ADR-018 residual restated above.
+
+**Related scope gap, accepted not patched.** FU-5 ships no role-provisioning path — every CAS login
+lands as `recruiter` (§2 step 3), and promotion to `admin`/`auditor`/`hiring_manager` requires manual
+SQL until an admin endpoint exists. This is stated in Consequences as a future feature; the practical
+consequence worth naming is that the admin+auditor endpoint in (4) is unreachable until someone runs
+that SQL. Deliberately not patched with an ad hoc bootstrap-admin mechanism.
+
+### 10. Architecture amendment — port hris's FastAPI + Postgres-session model (human, 2026-07-22)
+
+During the FU-5 build, read-only reconnaissance of the source system (`C:\repos\hris`) found a
+complete, production-proven CAS implementation running against real SFU CAS. The human directed FU-5
+to **port it** rather than build the bespoke Flask + HMAC design §2/§8 had specified. The ported model
+is simpler, has no forgeable-token surface, and is already validated against `https://cas.sfu.ca/cas`.
+
+**What is superseded.** §8 in full — the `X-Actor-Assertion` HMAC header, `ACTOR_ASSERTION_SECRET`,
+the mint/verify module, the 15-minute expiry, and the "compromised Flask can forge any assertion"
+tradeoff. §9.3 (the assertion-secret startup-fatal rule) is moot — there is no assertion secret.
+§2's "Flask upserts a users row / mints an assertion" flow is replaced by the flow below. §9.1 (Flask
+never touches Postgres directly) still holds and is honoured differently: Flask never gains a DB pool
+because the API — not Flask — owns the whole CAS dance and session store.
+
+**What stands unchanged.** §1 (the `users` table, already built in slice 1), §3 (CAS as internal
+infra, fail-closed on outage), §4 (roles are a `users.role` column, not hris's `user_roles` join
+table — we keep our schema, it is strictly better for role-as-data), §5 (service keys stay orthogonal
+to human identity), §6 (`audit_log` replaces `reveal_audit`, read-only migration posture), §7 (reveal
+requires an attributable human), §9.2 (`created_by`/`uploaded_by` carry human identity or NULL) and
+§9.4 (legacy-reveal endpoint is admin + auditor).
+
+**The ported flow (CAS 2.0, all config-driven).**
+1. Browser hits a protected route with no valid session cookie → Flask redirects to the API's
+   `GET /auth/cas/login`, which 302s to `{cas_server_url}/login?service={validate-url}`.
+2. CAS redirects back to the API's `GET /auth/cas/validate?ticket=…`. The API calls
+   `{cas_server_url}{cas_validate_route}` (`/serviceValidate`) over `httpx`, parses the CAS 2.0 XML
+   response with **stdlib `xml.etree.ElementTree`** (XXE-safe by construction — no external-entity
+   or DTD resolution, no new dependency), and reads the single `<cas:user>` element. SFU CAS releases
+   **no other attributes** — `display_name` defaults to the username, `email` stays NULL on the row.
+3. `provision_or_get` upserts the `users` row on `cas_username` conflict (refreshing `last_seen_at`),
+   creating it with `role='recruiter'` on first login — **except** the default-admin case in §10a.
+4. A `sessions` row is created (opaque `secrets.token_urlsafe(32)` id, `expires_at`, revocable) and set
+   as an httpOnly cookie. This is a **new schema addition** the slice-1 DDL did not anticipate — it
+   lands as its own idempotent `CREATE TABLE IF NOT EXISTS sessions (…)` slice.
+5. Every subsequent request resolves cookie → session row (`revoked_at IS NULL AND expires_at > now()`)
+   → `users` row, with a sliding-window refresh. An expired/absent session on a protected route → the
+   caller is sent back through `/auth/cas/login`.
+
+**§10a — Default-admin CAS allowlist (human, 2026-07-22). This reverses §9's "Deliberately not
+patched with an ad hoc bootstrap-admin mechanism."** FU-5 gains a single settings field,
+`default_admin_cas_username`, defaulting to `"asalah"`. On a user's **first** login (row creation
+only), if their `cas_username` equals this setting they are provisioned `role='admin'` instead of
+`'recruiter'`; existing rows are never re-promoted by this path (a later manual demotion must stick).
+It is a **settings default**, never a literal in application code — CLAUDE.md forbids scattered config
+and `test_no_scattered_os_environ.py` gates it. This gives a first admin without the manual-SQL step
+hris required (`scripts/create-admin.py`), at the cost of one config-driven identity the deployment
+must set correctly. Naming a real SFU id here is acceptable: it is an operational config default, not
+committed candidate PII, and is env-overridable per deployment.
+
+**§10b — Auth-disabled behaviour (human, 2026-07-22, ratifies the "skip the human gate when auth is
+disabled" decision).** When `cas_enabled=False` (the shipped compose default), there is no CAS and no
+session possible. Following hris, the API resolves a synthetic dev-admin identity for every request so
+dev/CI/demo stay usable, and the human-only reveal gate (§7) is skipped in this mode — the reveal
+audit row is written with `actor_kind='service'` rather than 403-ing. The fail-closed guarantee of §3
+and §7 therefore holds **only in configured (`cas_enabled=True`) deployments** — which is already true
+of every other auth check in this codebase. hris comments claiming "production refuses to start if
+cas_enabled is False" describe a check that was never implemented in hris and are **not** ported.
+
+### 10c. Build status and residuals (implemented 2026-07-24)
+
+FU-5 shipped in 13 TDD slices on `feat/fu5-cas-identity`, all gate-green
+(`./scripts/verify.sh all`): **users/audit_log/sessions DDL**, **CAS + session
+settings**, the **`cas_service` ticket-validation client** (CAS 2.0 XML, stdlib
+`ElementTree`), **`session_service`/`user_service`** (provisioning + the §10a
+default-admin grant), the **FastAPI CAS routes + `resolve_user`** (+ §10b
+dev-anonymous), the **`X-Actor-Name` retirement** (§8.3, identity now from the
+session), **reveal → `audit_log` with the §7 human gate**, **`blind_review` flips
+→ `audit_log`** (atomic with the flip), the **`GET /audit/reveals-legacy`**
+admin+auditor endpoint (§6/§9.4), the **Flask cookie-forward + session gate**
+(§10/§3), and the **sliding-window session refresh** wired into the request path
+(§10 step 5). Merge-blocking gates: **reviewer APPROVE** (8 security-critical
+guards mutation-verified), **security PASS** (no critical/high). `ranking-evals`
+n/a — no scoring code touched.
+
+**Security findings closed in-branch (slice 13):**
+- **Open redirect (CONFIRMED, low)** — the `next` param reached the post-auth
+  redirect / `service=` URL unsanitized. Closed: `auth._safe_next` rejects
+  protocol-relative / backslash / scheme-bearing values (falls back to `/`),
+  wired into all six `next` sinks.
+- **Insecure-cookie default (low)** — `log_auth_mode` now emits a startup WARNING
+  when `cas_enabled=True` and `session_cookie_secure=False`.
+- **Session hard-expiry (reviewer minor)** — `refresh_if_needed` existed but was
+  unwired; now called in both request-path resolvers, so §10 step 5's sliding
+  window is live and `session_idle_refresh_hours` is no longer dead config.
+
+**Accepted residuals (recorded, not fixed — hand-off to a hardener):**
+- **`session_cookie_secure=False` remains the default.** Env-overridable; a
+  `cas_enabled=True` deployment over plain HTTP now *warns* but still boots. A
+  future hardening pass may default it `True`. Fail-closed is a
+  configured-deployment property (§3), consistent with every other auth switch.
+- **`X-Forwarded-Host` trust when `cas_service_from_request=True`** (default off).
+  The CAS `service` URL is then derived from a request header; safe only behind a
+  trusted proxy + CAS-side service allowlist. Standard ported hris behaviour.
+- **Module-import `httpx` logger mute** (`cas_service.py`) — process-wide, to keep
+  the ticket out of httpx's access log. Intentional; documented.
+- **`flask_secret_key="dev-only"` default** (pre-existing, not FU-5) — now more
+  load-bearing since the Flask session backs the reveal CSRF token. Harden before
+  any non-local deploy.
+- **No role-provisioning path beyond §10a.** Every non-default-admin CAS login
+  lands as `recruiter`; promotion is manual SQL until an admin endpoint exists.
+- **`cas_dev_fake_user` setting is dormant** — the hris dev-fake-ticket bypass was
+  deliberately not ported (no test covers it; not shipping untested auth-bypass).
+  The setting is currently unread; a future slice can wire it with tests or drop it.
 
 ## Consequences
 

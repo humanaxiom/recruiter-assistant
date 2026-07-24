@@ -4,15 +4,28 @@ The DDL is the schema contract for the whole port. These tests pin:
 
 * **idempotency** — every ``CREATE`` carries ``IF NOT EXISTS`` so the app can
   run ``init_schema`` on every boot (integration proves it for real),
-* **scope** — the 5 ported tables exist and the cut ones (review workflow,
-  JD-Harmonizer, CAS users) cannot creep back in,
+* **scope** — the ported tables exist (now including ``users``/``audit_log``
+  per ADR-019, FU-5 slice 1 — schema only, and ``sessions`` per ADR-019 §10
+  step 4, FU-5 slice 3) and the still-cut ones (review workflow,
+  JD-Harmonizer) cannot creep back in,
 * **PII at rest** — name/email/phone/cover-letter-text are ``BYTEA``
   (pgcrypto), and only the email *hash* is plaintext,
-* **blind review ON by default** (decision 4).
+* **blind review ON by default** (decision 4),
+* **attributable audit** — ``audit_log`` carries an actor-identity CHECK
+  distinguishing a human actor from a service actor (ADR-019 §1.4/§6).
 
 Contract with the implementation: ``init_schema`` awaits ``.execute(stmt)`` on
 the object it is handed (an asyncpg ``Connection`` or ``Pool``) once per
 statement, in ``_STATEMENTS`` order.
+
+The ``sessions``-table tests below (ADR-019 §10 step 4) are, like the rest of
+this module, string-matches against the DDL source text: they can prove a
+column is *named* with a given type/constraint keyword, but NOT that
+Postgres actually enforces it (a real FK violation, a real CASCADE delete, a
+real INET-vs-TEXT distinction). That behavioural proof lives in
+``tests/integration/test_sessions_pg.py`` against a live testcontainers
+Postgres — this module and that one are deliberately complementary, not
+redundant.
 """
 
 from __future__ import annotations
@@ -34,15 +47,25 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "reverse_match_entries",
         "outbox",
         "reveal_audit",
+        "users",
+        "audit_log",
+        "sessions",
     }
 )
 
-# Explicitly out of scope: review workflow (hris 0004/0007), CAS auth, and the
+# Explicitly out of scope: review workflow (hris 0004/0007) and the
 # JD-Harmonizer (`jd_*`). See EXTRACTION_PLAN keep/cut boundary.
+#
+# NOTE: `users` was ALSO listed here originally — ddl.py's module docstring
+# (line 6) still says CAS auth tables were "deliberately excluded" from v1.
+# ADR-019 (FU-5) explicitly REVERSES that specific cut: a `users` table is
+# the foundation for attributable audit (per-person reveal/blind_review
+# actor identity). `users` therefore moves OUT of this cut-tables tuple and
+# INTO EXPECTED_TABLES above. This is a legitimate RED-phase update
+# authorized by ADR-019, not a weakening of an existing assertion.
 CUT_TABLES: tuple[str, ...] = (
     "shortlist_decisions",
     "stage_transitions",
-    "users",
     "jd_documents",
     "jd_harmonizations",
 )
@@ -89,7 +112,53 @@ EXPECTED_INDEXES: tuple[str, ...] = (
     "outbox_undelivered_idx",
     "outbox_aggregate_idx",
     "reveal_audit_resume_idx",
+    "sessions_user_id_idx",
+    "sessions_active_idx",
 )
+
+# ADR-019 §1: the minimum column set for `users` — real identity entity.
+USERS_EXPECTED_COLUMNS: tuple[str, ...] = (
+    "id",
+    "cas_username",
+    "display_name",
+    "email",
+    "role",
+    "active",
+    "created_at",
+    "last_seen_at",
+)
+
+# ADR-019 §1.4/§6: the minimum column set for the generalized `audit_log`,
+# which must be able to record both reveals and `blind_review` flips.
+AUDIT_LOG_EXPECTED_COLUMNS: tuple[str, ...] = (
+    "id",
+    "actor_kind",
+    "actor_user_id",
+    "actor_service",
+    "action",
+    "subject_type",
+    "subject_id",
+    "job_id",
+    "context",
+    "details",
+    "occurred_at",
+)
+
+# ADR-019 §10 step 4: the minimum column set for `sessions` — opaque,
+# server-held session state behind an httpOnly cookie, ported from hris.
+SESSIONS_EXPECTED_COLUMNS: tuple[str, ...] = (
+    "id",
+    "user_id",
+    "expires_at",
+    "revoked_at",
+    "user_agent",
+    "ip_addr",
+    "created_at",
+)
+
+# ADR-019 §4: the Role vocabulary — data now, not code. `recruiter` is the
+# default role on first CAS login (ADR-019 §2 step 3).
+ROLE_VALUES: tuple[str, ...] = ("admin", "recruiter", "hiring_manager", "auditor")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -201,10 +270,10 @@ def test_pgcrypto_extension_is_created_first() -> None:
     )
 
 
-# ── Scope: the 5 tables in, the cut ones out ───────────────────────────────
+# ── Scope: the expected tables in, the cut ones out ────────────────────────
 
 
-def test_exactly_the_five_expected_tables_are_created() -> None:
+def test_exactly_the_expected_tables_are_created() -> None:
     assert _created_tables() == EXPECTED_TABLES
 
 
@@ -432,6 +501,220 @@ def test_outbox_aggregate_id_has_no_foreign_key() -> None:
     assert re.search(r"aggregate_id\s+UUID\s+NOT\s+NULL", sql, re.IGNORECASE)
     assert "REFERENCES" not in sql.upper()
     assert re.search(r"id\s+BIGSERIAL\s+PRIMARY\s+KEY", sql, re.IGNORECASE)
+
+
+# ── users / audit_log (ADR-019, FU-5 slice 1: schema only) ─────────────────
+
+
+@pytest.mark.parametrize("column", USERS_EXPECTED_COLUMNS)
+def test_users_table_has_expected_columns(column: str) -> None:
+    assert re.search(rf"\b{column}\b", _table_sql("users"), re.IGNORECASE)
+
+
+def test_users_id_is_uuid_primary_key() -> None:
+    assert re.search(r"id\s+UUID\s+PRIMARY\s+KEY", _table_sql("users"), re.IGNORECASE)
+
+
+def test_users_cas_username_is_unique_and_not_null() -> None:
+    """ADR-019 §1 — the unique, immutable identity from CAS."""
+    sql = _table_sql("users")
+    assert re.search(r"cas_username\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"cas_username[^,]*\bUNIQUE\b", sql, re.IGNORECASE)
+
+
+def test_users_role_is_not_null() -> None:
+    """Roles become data (ADR-019 §4) — the column must always be populated."""
+    assert re.search(r"role\s+TEXT\s+NOT\s+NULL", _table_sql("users"), re.IGNORECASE)
+
+
+def test_users_active_flag_defaults_true() -> None:
+    """ADR-019 §1 — deprovisioning without deletion; new rows are active."""
+    assert re.search(
+        r"active\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+true",
+        _table_sql("users"),
+        re.IGNORECASE,
+    )
+
+
+def test_users_display_name_and_email_are_nullable() -> None:
+    """ADR-019 Accepted residuals — CAS may release neither attribute."""
+    sql = _table_sql("users")
+    assert not re.search(r"display_name\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert not re.search(r"\bemail\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+
+
+def test_users_last_seen_at_defaults_to_now() -> None:
+    """Refreshed on every login (ADR-019 §2 step 3); must default on create."""
+    assert re.search(
+        r"last_seen_at\s+TIMESTAMPTZ\s+NOT\s+NULL\s+DEFAULT\s+now\s*\(\s*\)",
+        _table_sql("users"),
+        re.IGNORECASE,
+    )
+
+
+@pytest.mark.parametrize("column", AUDIT_LOG_EXPECTED_COLUMNS)
+def test_audit_log_table_has_expected_columns(column: str) -> None:
+    assert re.search(rf"\b{column}\b", _table_sql("audit_log"), re.IGNORECASE)
+
+
+def test_audit_log_id_is_uuid_primary_key() -> None:
+    assert re.search(
+        r"id\s+UUID\s+PRIMARY\s+KEY", _table_sql("audit_log"), re.IGNORECASE
+    )
+
+
+def test_audit_log_action_and_subject_are_not_null() -> None:
+    """ADR-019 §6 — required for every row regardless of actor kind."""
+    sql = _table_sql("audit_log")
+    assert re.search(r"action\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"subject_type\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"subject_id\s+UUID\s+NOT\s+NULL", sql, re.IGNORECASE)
+
+
+def test_audit_log_actor_kind_is_not_null() -> None:
+    assert re.search(
+        r"actor_kind\s+TEXT\s+NOT\s+NULL", _table_sql("audit_log"), re.IGNORECASE
+    )
+
+
+def test_audit_log_actor_user_id_and_actor_service_are_nullable() -> None:
+    """ADR-019 §6 — nullable BY DESIGN; exactly one is set per row, enforced
+    by the CHECK constraint below, not by column-level NOT NULL."""
+    sql = _table_sql("audit_log")
+    assert not re.search(r"actor_user_id\s+UUID\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert not re.search(r"actor_service\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+
+
+def test_audit_log_details_is_jsonb_not_text() -> None:
+    """Accepted residual (ADR-019) — unvalidated JSONB, never a lossy TEXT."""
+    sql = _table_sql("audit_log")
+    assert re.search(r"\bdetails\s+JSONB\b", sql, re.IGNORECASE)
+    assert not re.search(r"\bdetails\s+TEXT\b", sql, re.IGNORECASE)
+
+
+def test_audit_log_occurred_at_defaults_to_now() -> None:
+    assert re.search(
+        r"occurred_at\s+TIMESTAMPTZ\s+NOT\s+NULL\s+DEFAULT\s+now\s*\(\s*\)",
+        _table_sql("audit_log"),
+        re.IGNORECASE,
+    )
+
+
+def test_audit_log_actor_identity_check_constraint_is_present() -> None:
+    """ADR-019 §1.4/§6 — a row must name EXACTLY ONE actor: a human
+    (actor_kind='user' AND actor_user_id set AND actor_service NULL) or a
+    service (actor_kind='service' AND actor_user_id NULL AND actor_service
+    set). This is the constraint that distinguishes attributable-human rows
+    from service rows and is the whole point of the generalized table."""
+    sql = _table_sql("audit_log")
+    assert re.search(r"CHECK\s*\(", sql, re.IGNORECASE), sql
+    assert re.search(r"actor_kind\s*=\s*'user'", sql, re.IGNORECASE)
+    assert re.search(r"actor_kind\s*=\s*'service'", sql, re.IGNORECASE)
+    assert re.search(r"actor_user_id\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"actor_user_id\s+IS\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"actor_service\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert re.search(r"actor_service\s+IS\s+NULL", sql, re.IGNORECASE)
+
+
+def test_users_table_is_created_before_audit_log() -> None:
+    """audit_log's actor_user_id is conceptually keyed to a users row
+    (ADR-019 §6); users must exist first."""
+    assert _statement_index("users") < _statement_index("audit_log")
+
+
+# ── sessions (ADR-019 §10 step 4, FU-5 slice 3) ─────────────────────────────
+#
+# The ported hris session store: an opaque server-held session row behind an
+# httpOnly cookie. NOTE (honesty about what this section can and cannot
+# prove): these are all string-matches against the DDL source. They can show
+# a column is *declared* TEXT/UUID/INET/NOT NULL/REFERENCES-with-CASCADE, but
+# NOT that Postgres actually enforces the FK, the CASCADE, the PK uniqueness,
+# or the INET type distinction at INSERT time. That behavioural proof is
+# integration-only — see tests/integration/test_sessions_pg.py.
+
+
+@pytest.mark.parametrize("column", SESSIONS_EXPECTED_COLUMNS)
+def test_sessions_table_has_expected_columns(column: str) -> None:
+    assert re.search(rf"\b{column}\b", _table_sql("sessions"), re.IGNORECASE)
+
+
+def test_sessions_id_is_a_text_primary_key() -> None:
+    """Opaque ``secrets.token_urlsafe(32)`` id — TEXT, not UUID (unlike every
+    other primary key in this schema)."""
+    assert re.search(
+        r"id\s+TEXT\s+PRIMARY\s+KEY", _table_sql("sessions"), re.IGNORECASE
+    )
+
+
+def test_sessions_user_id_references_users_with_cascade() -> None:
+    """ON DELETE CASCADE — deprovisioning/deleting a user revokes (removes)
+    their sessions, the behaviour hris relied on for revocation-on-deprovision
+    (ADR-019 §10 step 4)."""
+    assert re.search(
+        r"user_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+users\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+CASCADE",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_expires_at_is_not_null() -> None:
+    assert re.search(
+        r"expires_at\s+TIMESTAMPTZ\s+NOT\s+NULL",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_revoked_at_is_nullable() -> None:
+    """No NOT NULL — an active/live session has ``revoked_at IS NULL``; this
+    is exactly what the partial index below relies on."""
+    sql = _table_sql("sessions")
+    assert re.search(r"revoked_at\s+TIMESTAMPTZ\b", sql, re.IGNORECASE)
+    assert not re.search(r"revoked_at\s+TIMESTAMPTZ\s+NOT\s+NULL", sql, re.IGNORECASE)
+
+
+def test_sessions_ip_addr_is_inet_not_text() -> None:
+    """Must stay the real Postgres INET type, not a plain string — unit-level
+    this only proves the DDL says INET; integration proves the driver really
+    rejects a non-IP value."""
+    sql = _table_sql("sessions")
+    assert re.search(r"ip_addr\s+INET\b", sql, re.IGNORECASE)
+    assert not re.search(r"ip_addr\s+TEXT\b", sql, re.IGNORECASE)
+
+
+def test_sessions_created_at_defaults_to_now() -> None:
+    assert re.search(
+        r"created_at\s+TIMESTAMPTZ\s+NOT\s+NULL\s+DEFAULT\s+now\s*\(\s*\)",
+        _table_sql("sessions"),
+        re.IGNORECASE,
+    )
+
+
+def test_users_table_is_created_before_sessions() -> None:
+    """sessions.user_id FKs to users — users must exist first."""
+    assert _statement_index("users") < _statement_index("sessions")
+
+
+def test_sessions_active_idx_is_partial_on_unrevoked_sessions() -> None:
+    """The sliding-window active-session lookup index (ADR-019 §10 step 5):
+    ``ON sessions(expires_at) WHERE revoked_at IS NULL``."""
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+sessions_active_idx\s+"
+        r"ON\s+sessions\s*\(\s*expires_at\s*\)\s+"
+        r"WHERE\s+revoked_at\s+IS\s+NULL",
+        _all_sql(),
+        re.IGNORECASE,
+    )
+
+
+def test_sessions_user_id_idx_exists() -> None:
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+sessions_user_id_idx\s+"
+        r"ON\s+sessions\s*\(\s*user_id\s*\)",
+        _all_sql(),
+        re.IGNORECASE,
+    )
 
 
 # ── indexes ────────────────────────────────────────────────────────────────

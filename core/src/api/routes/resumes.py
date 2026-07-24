@@ -28,15 +28,30 @@ from fastapi import (
     status,
 )
 
-from src.api.deps import Role, get_arq, require_role, resolve_actor
+from src.api.deps import (
+    _DEV_ADMIN_SENTINEL_ID,
+    Role,
+    get_arq,
+    require_role,
+    resolve_user,
+)
 from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
+from src.schemas.auth import User
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
 from src.services import (
+    audit_service,
     bulk_ingest_service,
     resume_service,
-    reveal_service,
+    # FU-5 slice 8 (ADR-019 §6): no longer CALLED from this module — the
+    # reveal route now writes `audit_log` via `audit_service` instead. KEPT
+    # (not deleted): `reveal_audit`/`reveal_service` stay read-only per
+    # ADR-019 §6's migration posture, and tests assert this module's
+    # `reveal_service.record_reveal` is never awaited on the reveal path any
+    # more (proving the cutover, not merely assuming it) — see
+    # tests/unit/test_route_reveal.py.
+    reveal_service,  # noqa: F401
     shortlist_service,
 )
 from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
@@ -72,7 +87,7 @@ async def upload_resumes(
     db: Db,
     blob_store: Annotated[BlobStore, Depends(get_blob_store)],
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     files: Annotated[list[UploadFile], File()],
     consent_acknowledged: Annotated[str, Form()],
     cover_letter_text: Annotated[str | None, Form()] = None,
@@ -163,6 +178,7 @@ async def upload_resumes(
         )
 
     consent = consent_acknowledged.strip().lower() == "true"
+    uploaded_by = user.cas_username if user is not None else None
     try:
         results = await resume_service.upload_resumes(
             db,
@@ -170,7 +186,7 @@ async def upload_resumes(
             job_id=job_id,
             files=resume_files,
             consent_acknowledged=consent,
-            uploaded_by=actor,
+            uploaded_by=uploaded_by,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_file,
             cover_letter_map=cover_letter_map or None,
@@ -235,22 +251,80 @@ _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
 async def reveal_resume(
     resume_id: UUID,
     db: Db,
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     context: Annotated[str | None, Query(max_length=64)] = None,
 ) -> ResumeOut:
-    """AUDITED de-anonymization. Records exactly one ``reveal_audit`` row, then
-    returns the UN-blinded résumé. Existence is probed FIRST so a missing id
-    404s WITHOUT writing an audit row. Since FU-4/D3 removed the ``reveal``
-    query parameter from ``GET /resumes/{id}``, this is the ONLY un-blinding
-    path in the API — restricted to admin/recruiter, and the role check runs
-    as a dependency so a disallowed caller is rejected BEFORE the existence
-    probe, the audit write, or any decryption."""
+    """AUDITED de-anonymization. Records exactly one ``audit_log`` row, then
+    returns the UN-blinded résumé.
+
+    **FU-5 slice 8 (ADR-019 §6/§7/§10b) — the reveal -> ``audit_log`` cutover,
+    plus the human-attribution gate.** This route no longer writes
+    ``reveal_audit`` (via ``reveal_service.record_reveal``) at all — see
+    ``src.services.audit_service.record_audit``. Three cases, entirely
+    determined by the identity :func:`resolve_user` resolves (no separate
+    ``settings.cas_enabled`` read needed here — the dependency already
+    encodes it):
+
+    1. No identity resolves at all (``user is None`` — CAS enabled, no live
+       session) -> 403, immediately, BEFORE the existence probe. This is
+       deliberate: probing existence first would let an unauthenticated
+       caller distinguish "resume exists" (403) from "resume missing" (404)
+       — a existence oracle on a résumé collection that should require a
+       human session to query at all. Checking the human gate first means an
+       unauthenticated caller always gets the same 403 regardless of whether
+       ``resume_id`` is real.
+    2. A real human session resolves (``user.id`` is a real ``users`` row) ->
+       ``actor_kind='user'``, keyed on ``user.id``.
+    3. The synthetic dev-anonymous identity resolves (``resolve_user``'s
+       auth-disabled fallback, ``user.id == _DEV_ADMIN_SENTINEL_ID`` — ADR-019
+       §10b) -> ``actor_kind='service'`` / ``actor_service='dev-anonymous'``.
+       Never ``actor_kind='user'`` against the sentinel id: it is not a real
+       ``users`` row and would violate ``audit_log.actor_user_id``'s FK.
+
+    Since FU-4/D3 removed the ``reveal`` query parameter from ``GET
+    /resumes/{id}``, this is the ONLY un-blinding path in the API —
+    restricted to admin/recruiter, and the role check runs as a dependency
+    so a disallowed caller is rejected BEFORE the human gate, the existence
+    probe, the audit write, or any decryption.
+
+    ADR-016's ordering guarantee, restated ADR-019 §7: the audit row is
+    written — and, via ``audit_service.record_audit``'s bare (non-
+    transaction-wrapped) ``execute``, autocommitted — BEFORE the decrypting
+    read (``resume_service.get_one(..., reveal=True)``), so a crash during
+    decryption never leaves an un-audited reveal."""
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="reveal requires an attributable human session",
+        )
+
     exists = await db.fetchval(_EXISTS_SQL, resume_id)
     if exists is None:
         raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
-    await reveal_service.record_reveal(
-        db, resume_id=resume_id, actor=actor, context=context
-    )
+
+    if user.id == _DEV_ADMIN_SENTINEL_ID:
+        await audit_service.record_audit(
+            db,
+            actor_kind="service",
+            actor_user_id=None,
+            actor_service=user.cas_username,
+            action="reveal",
+            subject_type="resume",
+            subject_id=resume_id,
+            context=context,
+        )
+    else:
+        await audit_service.record_audit(
+            db,
+            actor_kind="user",
+            actor_user_id=user.id,
+            actor_service=None,
+            action="reveal",
+            subject_type="resume",
+            subject_id=resume_id,
+            context=context,
+        )
+
     return await resume_service.get_one(db, resume_id, reveal=True)
 
 

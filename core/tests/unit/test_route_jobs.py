@@ -42,8 +42,20 @@ mocked ``asyncpg`` connection (no service-internals monkeypatching).
   (``filename``/``text``/``chars``) and performs **NO** database write at
   all — ``db.execute``/``db.fetchrow``/``db.fetch`` are never called for
   this route.
-* The optional ``X-Actor-Name`` header populates ``created_by`` on job
-  create; absent, the actor defaults to the fixed label ``"api"``.
+* **FU-5 slice 7 (ADR-019 §8.3/§9.2, REVERSES the Phase-6 line this replaces
+  — the old ``X-Actor-Name`` header no longer exists anywhere).**
+  ``created_by`` on job create is sourced from ``src.api.deps.resolve_user``:
+  the resolved user's ``cas_username`` when a human/dev-anonymous identity
+  resolves, ``None`` when no identity resolves (a bare service-key caller).
+  A leftover ``X-Actor-Name`` header on the request is read nowhere and has
+  no effect. See the dedicated section near the end of this file.
+* **FU-5 slice 9 (ADR-019 §1.4/§6) — ``PATCH /jobs/{job_id}`` gains
+  attributable audit for the ``blind_review`` flip.** The route now also
+  depends on ``resolve_user`` and forwards a three-case-derived actor
+  identity into ``job_service.update_job`` (mirroring, but NOT identical to,
+  the reveal route's own actor derivation — see the dedicated section near
+  the end of this file for why blind_review has a THIRD actor case reveal
+  does not).
 
 **FU-4 (RBAC) — route→role table for this file, per the locked decisions:**
 
@@ -60,7 +72,7 @@ mocked ``asyncpg`` connection (no service-internals monkeypatching).
 ``/jobs/bulk`` is covered in ``test_route_jobs_bulk.py``. ``PATCH
 /jobs/{id}`` gets the most explicit coverage in this file (D5): that PATCH can
 set ``blind_review: false``, permanently un-blinding every résumé/shortlist
-under the job with NO audit row.
+under a job with NO audit row.
 
 Every route now goes through a per-route ``Depends(require_role(...))``
 (replacing the Phase-6 uniform router-level ``require_api_key``), which in
@@ -86,10 +98,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import Role, get_arq, resolve_role
+from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import jobs as jobs_routes
 from src.errors import AppError
 from src.models.pool import get_db
+from src.schemas.auth import User
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
 
@@ -571,3 +584,308 @@ async def test_jd_extract_403s_for_hiring_manager_and_auditor(role: Role) -> Non
             files={"file": ("jd.txt", content, "text/plain")},
         )
     assert resp.status_code == 403
+
+
+# ── FU-5 slice 7 (ADR-019 §8.3/§9.2): created_by sourced from resolve_user,
+#    NOT the deleted X-Actor-Name header ──────────────────────────────────
+#
+# ``resolve_actor``/``X-Actor-Name`` no longer exist (see ``test_api_deps.py``
+# for the deletion pin). ``created_by`` now comes from
+# ``src.api.deps.resolve_user`` — the session/dev-anonymous identity's
+# ``cas_username`` when a user resolves, ``None`` when it does not (a bare
+# service-key caller). These tests inspect the raw asyncpg call args (the
+# same technique ``test_services_job_write.py`` uses) rather than the
+# response body, because the mocked ``fetchrow`` always returns a canned row
+# regardless of what was inserted — the response body alone cannot prove
+# which value the route actually passed to the service layer.
+
+
+def _user(*, cas_username: str = "alice", role: str = "recruiter") -> User:
+    return User(
+        id=uuid4(),
+        cas_username=cas_username,
+        display_name=cas_username,
+        email=None,
+        role=role,
+        active=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+
+
+def _fully_populated_job_payload() -> dict[str, Any]:
+    """Every optional ``JobCreate`` field is non-None, so the raw asyncpg
+    ``fetchrow`` args tuple contains exactly ONE ``None`` when ``created_by``
+    is unresolved (a bare service-key caller) — a plain ``None in args``
+    assertion would otherwise false-pass against ``department``/
+    ``location``/etc. being left at their own ``None`` default."""
+    return {
+        "title": "Senior Backend Engineer",
+        "department": "Engineering",
+        "location": "Remote",
+        "employment_type": "full_time",
+        "seniority": "senior",
+        "min_years": 5,
+        "description_raw": "We need a senior backend engineer. " * 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_job_created_by_is_dev_anonymous_when_cas_disabled() -> None:
+    """ADR-019 §10b/§9.2: CAS disabled is this test suite's ambient default
+    (``Settings().cas_enabled is False``) — no ``resolve_user`` override is
+    installed, so the REAL dependency resolves the synthetic dev-anonymous
+    identity, and the newly created job's ``created_by`` is
+    ``"dev-anonymous"`` — never the retired ``"api"`` constant."""
+    conn = _mock_conn(fetchrow=_job_row())
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.post("/jobs", json=_fully_populated_job_payload())
+    assert resp.status_code == 201
+    assert "dev-anonymous" in conn.fetchrow.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_create_job_ignores_an_x_actor_name_header_entirely() -> None:
+    """A leftover ``X-Actor-Name`` header must be read nowhere — the
+    identity source is exclusively ``resolve_user``. Sending the header must
+    NOT change ``created_by`` at all: it stays ``"dev-anonymous"``, not the
+    header's value."""
+    conn = _mock_conn(fetchrow=_job_row())
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.post(
+            "/jobs",
+            json=_fully_populated_job_payload(),
+            headers={"X-Actor-Name": "totally-ignored@example.test"},
+        )
+    assert resp.status_code == 201
+    assert "totally-ignored@example.test" not in conn.fetchrow.await_args.args
+    assert "dev-anonymous" in conn.fetchrow.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_create_job_created_by_is_the_resolved_users_cas_username() -> None:
+    """A human session (or any non-``None`` ``resolve_user`` resolution)
+    populates ``created_by`` with THAT user's ``cas_username`` — not a fixed
+    label."""
+    conn = _mock_conn(fetchrow=_job_row())
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: _user(cas_username="priya")
+    async with await _client(app) as client:
+        resp = await client.post("/jobs", json=_fully_populated_job_payload())
+    assert resp.status_code == 201
+    assert "priya" in conn.fetchrow.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_create_job_created_by_is_null_when_no_user_resolves() -> None:
+    """ADR-019 §9.2: a bare service-key caller (``resolve_user`` resolves to
+    ``None``, e.g. CAS enabled with no session) writes ``created_by = NULL``
+    — never a placeholder string. Every OTHER optional field on this payload
+    is non-None (see ``_fully_populated_job_payload``), so the single
+    ``None`` in the raw insert args can only be ``created_by``."""
+    conn = _mock_conn(fetchrow=_job_row(created_by=None))
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: None
+    async with await _client(app) as client:
+        resp = await client.post("/jobs", json=_fully_populated_job_payload())
+    assert resp.status_code == 201
+    call_args = conn.fetchrow.await_args.args
+    assert call_args.count(None) == 1, (
+        "expected exactly one None (created_by) in the insert args when no "
+        f"user resolves; got {call_args!r}"
+    )
+
+
+# ── FU-5 slice 9 (ADR-019 §1.4/§6): PATCH /jobs/{id} blind_review flip audit
+#
+# ``blind_review`` is ADR-019 §1.4's "widest-blast-radius unaudited action" —
+# this PATCH permanently un-blinds every résumé/shortlist under a job. Every
+# test below runs through the REAL ``job_service.update_job`` against a
+# mocked ``asyncpg`` connection (never mocking ``job_service`` itself), and
+# monkeypatches only ``job_service.audit_service.record_audit`` — the same
+# boundary ``test_route_reveal.py`` mocks for the reveal route, and the same
+# reason: this isolates the ROUTE's actor-derivation and pass-through
+# contract from ``record_audit``'s own INSERT shape (covered by
+# ``test_audit_service.py``) and from the flip-detection logic inside
+# ``update_job`` itself (covered by ``test_services_job_write.py``).
+#
+# Unlike reveal, blind_review is NOT human-only (ADR-019 §1.4) — a bare
+# service-key caller may flip it too. This gives a THIRD actor case reveal's
+# 403 doesn't have:
+#   Case 1: a real human session resolves -> actor_kind='user',
+#           actor_user_id=user.id.
+#   Case 2: the CAS-disabled synthetic dev-anonymous identity resolves
+#           (this suite's ambient default, no resolve_user override) ->
+#           actor_kind='service', actor_service='dev-anonymous'.
+#   Case 3: no session resolves at all (resolve_user -> None, e.g. CAS
+#           enabled with no session) -> actor_kind='service',
+#           actor_service='api'. Reveal 403s here; this route must NOT.
+
+
+@pytest.mark.asyncio
+async def test_patch_job_blind_review_flip_writes_audit_row_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "blind_review_toggled"
+    assert kwargs["subject_type"] == "job"
+    assert kwargs["subject_id"] == job_id
+    assert kwargs["job_id"] == job_id
+    assert kwargs["details"] == {"old": True, "new": False}
+
+
+@pytest.mark.asyncio
+async def test_patch_job_no_blind_review_change_writes_no_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client resending the CURRENT value (True -> True) is not a flip."""
+    job_id = uuid4()
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=True), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": True})
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_job_blind_review_absent_from_payload_writes_no_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="New Title"))
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"title": "New Title"})
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_job_actor_case1_human_session_writes_user_actor_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    user = _user(cas_username="priya")
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: user
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
+
+    assert resp.status_code == 200
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == user.id
+    assert kwargs.get("actor_service") is None
+
+
+@pytest.mark.asyncio
+async def test_patch_job_actor_case2_dev_anonymous_writes_service_actor_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient default (no ``resolve_user`` override): CAS disabled resolves
+    the synthetic dev-anonymous identity -> ``actor_kind='service'`` /
+    ``actor_service='dev-anonymous'`` (never ``actor_kind='user'`` against
+    the sentinel id — see ``test_route_reveal.py``'s identical rule)."""
+    job_id = uuid4()
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
+
+    assert resp.status_code == 200
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "service"
+    assert kwargs["actor_service"] == "dev-anonymous"
+    assert kwargs.get("actor_user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_patch_job_actor_case3_no_session_writes_api_service_actor_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """blind_review is NOT human-only (unlike reveal) — a bare service-key
+    caller (``resolve_user`` -> ``None``) may flip it, and the audit row
+    records ``actor_kind='service'`` / ``actor_service='api'``. Reveal 403s
+    in this exact situation; this route must return 200 instead."""
+    job_id = uuid4()
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: None
+    async with await _client(app) as client:
+        resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
+
+    assert resp.status_code == 200
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "service"
+    assert kwargs["actor_service"] == "api"
+    assert kwargs.get("actor_user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_patch_job_blind_review_flip_ignores_x_actor_name_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leftover ``X-Actor-Name`` header (retired since slice 7) must be
+    read nowhere for the audit actor either: the ambient dev-anonymous
+    identity is used regardless of the header's value."""
+    job_id = uuid4()
+    conn = _mock_conn(
+        fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
+    )
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs_routes.job_service.audit_service, "record_audit", audit)
+
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.patch(
+            f"/jobs/{job_id}",
+            json={"blind_review": False},
+            headers={"X-Actor-Name": "alice@example.test"},
+        )
+
+    assert resp.status_code == 200
+    kwargs = audit.await_args.kwargs
+    assert kwargs["actor_kind"] == "service"
+    assert kwargs["actor_service"] == "dev-anonymous"

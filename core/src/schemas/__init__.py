@@ -1,11 +1,13 @@
 """Pydantic schemas for recruiter-assistant.
 
 Ported from hris ``packages/schemas`` with the review workflow and
-JD-Harmonizer/Taleo removed, and aligned to the Phase 0 DDL. Three modules:
+JD-Harmonizer/Taleo removed, and aligned to the Phase 0 DDL. Four modules:
 
 * ``jobs`` — job create/update/out + the LLM ``JDExtracted`` extraction schema
 * ``resumes`` — resume/cover-letter parse schemas (imports ``Skill`` from jobs)
 * ``matching`` — the ranking contract (``MatchWeights``), score/evidence shapes
+* ``auth`` — CAS identity (FU-5, ADR-019 §10): ``User`` / ``Session``
+* ``audit`` — FU-5 slice 10 (ADR-019 §6/§9.4): ``RevealAuditItem``
 
 The full KEEP public surface is re-exported here so callers can
 ``from src.schemas import JobCreate, ResumeParsed, MatchWeights``.
@@ -13,6 +15,8 @@ The full KEEP public surface is re-exported here so callers can
 
 from __future__ import annotations
 
+from src.schemas.audit import RevealAuditItem
+from src.schemas.auth import Session, User
 from src.schemas.jobs import (
     BulkJobResult,
     Education,
@@ -69,6 +73,11 @@ from src.schemas.resumes import (
 
 __all__ = [
     "DEFAULT_WEIGHTS",
+    # audit
+    "RevealAuditItem",
+    # auth
+    "Session",
+    "User",
     # jobs
     "BulkJobResult",
     "Education",

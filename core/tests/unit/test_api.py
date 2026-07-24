@@ -75,6 +75,25 @@ def test_template_demo_routes_are_gone(path: str) -> None:
 # still catches an ACCIDENTAL route addition/removal — it just no longer
 # claims /health is the ONLY business route, because that claim is no longer
 # true by design, not because the guard was weakened.
+#
+# FU-5 slice 6 (ADR-019 §10) widens this again: the CAS routes
+# (``src.api.routes.auth``) are mounted alongside the Phase-6 routes. This is
+# a RED-commit edit, not a coder green-ing a test — a coder is never allowed
+# to touch a test to make it pass; this closed positive set is the one
+# pre-existing assertion that would otherwise keep passing GREEN even while
+# the new auth routes sit unregistered, silently masking exactly the
+# "src.api.main forgot app.include_router(auth.router)" mistake this guard
+# exists to catch. Widening it here, before the routes exist, is what makes
+# it a real RED pin instead of a no-op.
+#
+# FU-5 slice 10 (ADR-019 §6 / §9.4) widens it a THIRD time, for the exact same
+# reason: ``GET /audit/reveals-legacy`` (a read-only paginated view of the
+# frozen ``reveal_audit`` table, gated admin+auditor per §9.4's ratified build
+# decision 4) is added to the closed positive set here, in the RED commit,
+# before ``src.api.routes.audit`` exists — the only way this guard actually
+# catches "the coder built the route but forgot
+# ``app.include_router(audit.router)`` in ``src.api.main``" instead of just
+# passing vacuously.
 _PHASE_6_ROUTES: frozenset[str] = frozenset(
     {
         "/health",
@@ -91,6 +110,15 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         "/jobs/{job_id}/shortlist",
         "/jobs/{job_id}/shortlist/export",
         "/shortlist/{entry_id}",
+        # FU-5 slice 6 (ADR-019 §10) — src.api.routes.auth, mounted with
+        # prefix="/auth" per test_route_auth.py's locked contract.
+        "/auth/cas/login",
+        "/auth/cas/validate",
+        "/auth/cas/logout",
+        "/auth/cas/user",
+        # FU-5 slice 10 (ADR-019 §6 / §9.4) — src.api.routes.audit, the
+        # read-only legacy reveal-audit viewer, admin + auditor.
+        "/audit/reveals-legacy",
     }
 )
 

@@ -33,10 +33,22 @@ RETURNING id
 """
 
 EXPECTED_TABLES: frozenset[str] = frozenset(
-    {"jobs", "resumes", "shortlist_entries", "reverse_match_entries", "outbox"}
+    {
+        "jobs",
+        "resumes",
+        "shortlist_entries",
+        "reverse_match_entries",
+        "outbox",
+        "users",
+        "audit_log",
+    }
 )
 
-CUT_TABLES: tuple[str, ...] = ("shortlist_decisions", "stage_transitions", "users")
+# `users` was listed here until FU-5. ADR-019 explicitly reverses the Phase-0
+# cut of the CAS auth tables, so it moves into EXPECTED_TABLES above; the
+# review-workflow tables stay cut. Mirrors the same change in
+# tests/unit/test_ddl.py.
+CUT_TABLES: tuple[str, ...] = ("shortlist_decisions", "stage_transitions")
 
 EXPECTED_INDEXES: tuple[str, ...] = (
     "jobs_status_open_idx",

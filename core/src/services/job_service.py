@@ -44,7 +44,7 @@ from src.schemas.jobs import (
     JobOut,
     JobUpdate,
 )
-from src.services import DbConn
+from src.services import DbConn, audit_service
 from src.services.bulk_ingest_service import (
     JobManifestRow,
     basename_lower,
@@ -446,7 +446,18 @@ async def transition_status(conn: DbConn, job_id: UUID, to: str) -> JobOut:
     return _row_to_jobout(row)
 
 
-async def update_job(conn: DbConn, job_id: UUID, payload: JobUpdate) -> JobOut:
+_JOB_BLIND_REVIEW_SQL = "SELECT blind_review FROM jobs WHERE id = $1"
+
+
+async def update_job(
+    conn: DbConn,
+    job_id: UUID,
+    payload: JobUpdate,
+    *,
+    actor_kind: str,
+    actor_user_id: UUID | None,
+    actor_service: str | None,
+) -> JobOut:
     """General partial update for ``PATCH /jobs/{id}``.
 
     Builds the SQL SET clause from ``payload.model_dump(exclude_unset=True)``
@@ -465,6 +476,21 @@ async def update_job(conn: DbConn, job_id: UUID, payload: JobUpdate) -> JobOut:
     payload (nothing sent, or everything filtered out) is a no-op that still
     returns the current row — it never issues an UPDATE with an empty SET
     clause, which is invalid SQL.
+
+    **FU-5 slice 9 (ADR-019 §1.4/§6) — attributable audit for the
+    ``blind_review`` flip.** ``actor_kind``/``actor_user_id``/
+    ``actor_service`` are the caller's (the route's) already-resolved audit
+    identity — this function forwards them verbatim into
+    ``audit_service.record_audit``, never inventing or overriding them. When
+    (and only when) the payload actually touches ``blind_review``, the
+    PRE-update value is read via ``fetchval`` and compared against the new
+    value; a real flip writes exactly one ``audit_log`` row
+    (``action='blind_review_toggled'``), a same-value resend or an omitted
+    field writes none. The UPDATE and the conditional audit INSERT run
+    inside the SAME ``conn.transaction()`` — SECURITY-CRITICAL: a crash
+    partway through must never leave the flip applied without an audit row
+    (the opposite ordering concern from reveal's audit-before-decrypt, whose
+    autocommit-first write must survive a crash in the *other* direction).
     """
     fields = {
         col: val
@@ -473,6 +499,8 @@ async def update_job(conn: DbConn, job_id: UUID, payload: JobUpdate) -> JobOut:
     }
     if not fields:
         return await get_job(conn, job_id)
+
+    blind_review_touched = "blind_review" in fields
 
     set_clauses = []
     args: list[Any] = [job_id]
@@ -483,7 +511,29 @@ async def update_job(conn: DbConn, job_id: UUID, payload: JobUpdate) -> JobOut:
         f"UPDATE jobs SET {', '.join(set_clauses)}, updated_at = now() "
         f"WHERE id = $1 RETURNING {_JOB_COLS}"
     )
-    row = await conn.fetchrow(query, *args)
-    if row is None:
-        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+
+    async with conn.transaction():
+        old_blind_review: bool | None = None
+        if blind_review_touched:
+            old_blind_review = await conn.fetchval(_JOB_BLIND_REVIEW_SQL, job_id)
+
+        row = await conn.fetchrow(query, *args)
+        if row is None:
+            raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+
+        if blind_review_touched:
+            new_blind_review = fields["blind_review"]
+            if old_blind_review != new_blind_review:
+                await audit_service.record_audit(
+                    conn,
+                    actor_kind=actor_kind,
+                    actor_user_id=actor_user_id,
+                    actor_service=actor_service,
+                    action="blind_review_toggled",
+                    subject_type="job",
+                    subject_id=job_id,
+                    job_id=job_id,
+                    details={"old": old_blind_review, "new": new_blind_review},
+                )
+
     return _row_to_jobout(row)

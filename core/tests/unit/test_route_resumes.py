@@ -79,10 +79,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import Role, get_arq, resolve_role
+from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import resumes as resumes_routes
 from src.errors import AppError
 from src.models.pool import get_db
+from src.schemas.auth import User
 from src.storage.blob_store import get_blob_store
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
@@ -838,3 +839,112 @@ async def test_get_resume_route_never_forwards_a_reveal_kwarg_to_the_service(
     spy.assert_awaited_once()
     _, kwargs = spy.await_args
     assert kwargs.get("reveal", False) is False
+
+
+# ── FU-5 slice 7 (ADR-019 §8.3/§9.2): uploaded_by sourced from resolve_user,
+#    NOT the deleted X-Actor-Name header ──────────────────────────────────
+#
+# ``resolve_actor``/``X-Actor-Name`` no longer exist (see ``test_api_deps.py``
+# for the deletion pin). ``uploaded_by`` on résumé upload now comes from
+# ``src.api.deps.resolve_user`` — the session/dev-anonymous identity's
+# ``cas_username`` when a user resolves, ``None`` when it does not (a bare
+# service-key caller). Only ONE résumé file is uploaded per test here, so
+# ``conn.execute.await_args`` unambiguously names the single INSERT call —
+# the response body cannot prove this (the route never round-trips
+# ``uploaded_by`` back out on the 202 accepted-batch shape).
+
+
+def _identity_user(*, cas_username: str = "alice", role: str = "recruiter") -> User:
+    return User(
+        id=uuid4(),
+        cas_username=cas_username,
+        display_name=cas_username,
+        email=None,
+        role=role,
+        active=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_uploaded_by_is_dev_anonymous_when_cas_disabled() -> None:
+    """ADR-019 §10b/§9.2: CAS disabled is this test suite's ambient default
+    — no ``resolve_user`` override is installed, so the REAL dependency
+    resolves the synthetic dev-anonymous identity, and the uploaded résumé's
+    ``uploaded_by`` is ``"dev-anonymous"`` — never the retired ``"api"``
+    constant."""
+    conn = _mock_conn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    assert "dev-anonymous" in conn.execute.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_ignores_an_x_actor_name_header_entirely() -> None:
+    """A leftover ``X-Actor-Name`` header must be read nowhere — the identity
+    source is exclusively ``resolve_user``."""
+    conn = _mock_conn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+            headers={"X-Actor-Name": "totally-ignored@example.test"},
+        )
+    assert resp.status_code == 202
+    assert "totally-ignored@example.test" not in conn.execute.await_args.args
+    assert "dev-anonymous" in conn.execute.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_uploaded_by_is_the_resolved_users_cas_username() -> None:
+    conn = _mock_conn()
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: _identity_user(
+        cas_username="priya"
+    )
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    assert "priya" in conn.execute.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_uploaded_by_is_null_when_no_user_resolves() -> None:
+    """ADR-019 §9.2: a bare service-key caller (``resolve_user`` resolves to
+    ``None``, e.g. CAS enabled with no session) writes ``uploaded_by = NULL``
+    — never a placeholder string. Uses the SAME asyncpg positional order as
+    ``resume_service.upload_resumes``'s ``_INSERT_UPLOADED_SQL`` call
+    (``resume_id, job_id, blob_key, filename, mime, size, sha256,
+    consent_acknowledged, uploaded_by, encrypted_cover, cover_blob_key``) —
+    ``uploaded_by`` is the ONLY one of those positions expected to be
+    ``None`` for a plain single-file upload with no cover letter and
+    ``consent_acknowledged=True``, so index 9 (0-based, after the SQL text at
+    index 0) is asserted directly."""
+    conn = _mock_conn()
+    app = _build_app(conn)
+    app.dependency_overrides[resolve_user] = lambda: None
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    call_args = conn.execute.await_args.args
+    assert call_args[9] is None, (
+        "expected uploaded_by (index 9) to be None when no user resolves; "
+        f"got {call_args!r}"
+    )

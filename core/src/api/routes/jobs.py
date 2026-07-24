@@ -21,9 +21,16 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from src.api.deps import Role, get_arq, require_role, resolve_actor
+from src.api.deps import (
+    Role,
+    actor_fields_from_user,
+    get_arq,
+    require_role,
+    resolve_user,
+)
 from src.errors import FileRejectedError
 from src.models.pool import Db
+from src.schemas.auth import User
 from src.schemas.jobs import (
     BulkJobResult,
     JDExtractText,
@@ -64,11 +71,16 @@ async def create_job(
     payload: JobCreate,
     db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
 ) -> JobOut:
     """Insert a draft job and enqueue its ``parse_job`` task with the newly
-    created (server-minted) id — never a client-supplied one."""
-    job = await job_service.create_job(db, payload, created_by=actor)
+    created (server-minted) id — never a client-supplied one.
+
+    ``created_by`` is sourced from the resolved session identity (ADR-019
+    §8.3/§9.2) — the user's ``cas_username`` when one resolves, ``None`` for
+    a bare service-key caller."""
+    created_by = user.cas_username if user is not None else None
+    job = await job_service.create_job(db, payload, created_by=created_by)
     await arq.enqueue_job("parse_job", str(job.id))
     return job
 
@@ -97,7 +109,7 @@ async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
 async def bulk_create_jobs(
     db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
-    actor: Annotated[str, Depends(resolve_actor)],
+    user: Annotated[User | None, Depends(resolve_user)],
     files: Annotated[list[UploadFile], File()],
     manifest: Annotated[UploadFile | None, File()] = None,
 ) -> list[BulkJobResult]:
@@ -140,8 +152,9 @@ async def bulk_create_jobs(
     if manifest is not None:
         parsed_manifest = bulk_ingest_service.parse_csv_manifest(await manifest.read())
 
+    created_by = user.cas_username if user is not None else None
     results = await job_service.create_jobs_bulk(
-        db, files=expanded, manifest=parsed_manifest, created_by=actor
+        db, files=expanded, manifest=parsed_manifest, created_by=created_by
     )
     for r in results:
         if r.outcome == "created" and r.job_id is not None:
@@ -167,15 +180,39 @@ async def get_job(job_id: UUID, db: Db) -> JobOut:
 
 
 @router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])
-async def update_job(job_id: UUID, payload: JobUpdate, db: Db) -> JobOut:
+async def update_job(
+    job_id: UUID,
+    payload: JobUpdate,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> JobOut:
     """General partial update. ``status`` is NOT settable here — ``JobUpdate``
     has no ``status`` field (``extra="forbid"`` 422s a client that tries), and
     status changes must go through ``PATCH /jobs/{job_id}/status`` so the
     forward-only state-machine guard always applies. Fields the client omits
     are left unchanged (see ``job_service.update_job`` for the merge
     semantics); 404 (via the global ``AppError`` handler) when the id does
-    not resolve."""
-    return await job_service.update_job(db, job_id, payload)
+    not resolve.
+
+    **FU-5 slice 9 (ADR-019 §1.4/§6).** ``blind_review`` is the widest-
+    blast-radius unaudited action in the codebase (it permanently un-blinds
+    every résumé/shortlist under this job) — this route now also depends on
+    ``resolve_user`` and forwards the derived actor identity
+    (``src.api.deps.actor_fields_from_user``) into ``job_service.update_job``,
+    which writes exactly one ``audit_log`` row when (and only when) the
+    payload actually flips ``blind_review``. Unlike ``POST
+    /resumes/{id}/reveal``, this route is NOT human-only: a bare service-key
+    caller (``user is None``) is forwarded as ``actor_kind='service'`` /
+    ``actor_service='api'`` rather than 403ing."""
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    return await job_service.update_job(
+        db,
+        job_id,
+        payload,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
 
 
 @router.patch(
