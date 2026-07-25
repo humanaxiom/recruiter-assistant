@@ -283,6 +283,38 @@ def actor_fields_from_user(
     return ("user", user.id, None)
 
 
+async def require_role_assigned(
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> None:
+    """Fail-closed gate (user-admin-roles slice 3, ADR-019 §10a/§10b reversal
+    follow-up) — blocks a REAL session whose ``role`` is ``None``.
+
+    Slice 2 stopped defaulting a non-default-admin CAS login to
+    ``role='recruiter'``; a first login now captures ``role=None``. Nothing
+    in slice 2 blocked that no-role user from then riding the Flask viewer's
+    single shared ``recruiter`` API key to full recruiter-equivalent,
+    company-wide access (``require_role`` only judges the KEY, never the
+    session). This dependency closes that hole at the router level.
+
+    Three cases:
+
+    * ``user is None`` — no session at all (a bare service-key caller, or
+      CAS disabled outside the sentinel path) — PASS. This gate never judges
+      the ABSENCE of a session, only a REAL session's role.
+    * ``user.role is None`` — a genuinely resolved session with no assigned
+      role — 403, fail-closed, before any route body runs. Uses the same
+      plain ``fastapi.HTTPException(status_code=403, ...)`` mechanism as
+      ``require_role``/the reveal-route 403, not a bespoke ``AppError``.
+    * any other resolved user (a real assigned role, or the CAS-disabled
+      synthetic dev-anonymous admin whose ``role='admin'``) — PASS.
+    """
+    if user is not None and user.role is None:
+        raise HTTPException(
+            status_code=403,
+            detail="no role assigned to this account — contact an administrator",
+        )
+
+
 async def scoped_user_id_or_403(user: User | None, key_role: Role) -> UUID | None:
     """Row-scoping identity helper (FU-6 slice 4, ADR-020 §3/§4/§5).
 
