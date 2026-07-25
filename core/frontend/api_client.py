@@ -196,6 +196,23 @@ def list_jobs(
     return response.json()
 
 
+def my_jobs(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """GET /my/jobs — the hiring_manager's scoped view of THEIR assigned
+    jobs (FU-6/ADR-020 §7). Mirrors :func:`list_jobs` exactly, including
+    error mapping, just against the scoped backend route."""
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if status is not None:
+        params["status"] = status
+    response = _request("GET", "/my/jobs", params=params, client=client)
+    return response.json()
+
+
 def create_job(payload: dict[str, Any], *, client: httpx.Client | None = None) -> Any:
     """POST /jobs (JSON ``JobCreate``). A backend 422 surfaces as
     ``BadRequest`` so the route can re-render the form with inputs intact."""
@@ -420,6 +437,7 @@ __all__ = [
     "Conflict",
     "build_client",
     "list_jobs",
+    "my_jobs",
     "create_job",
     "extract_jd",
     "bulk_create_jobs",
