@@ -85,6 +85,37 @@ key-derived ``Role`` (``resolve_role``) cannot identify a hiring_manager.
 Row-scoping therefore keys off the CAS SESSION identity (``resolve_user``'s
 ``User | None``), never the API-key role. See the dedicated section near the
 bottom of this file for the full decision-table coverage.
+
+**user-admin-roles slice 3 — ``require_role_assigned``, the fail-closed
+no-role gate.** Slice 2 (ADR-019 §10a/§2 reversal) stopped defaulting a
+non-default-admin CAS login to ``role='recruiter'`` — a first login now
+captures ``role=None``. But nothing yet BLOCKS that no-role user: the Flask
+viewer always presents the ONE shared ``recruiter`` API key for every
+browser, so ``require_role`` passes on the KEY alone regardless of who is
+signed in, and ``scoped_user_id_or_403`` returns ``None`` (UNSCOPED) for any
+non-hiring_manager SESSION role — including ``role=None`` — so a genuinely
+no-role human ends up with full recruiter-equivalent, company-wide access.
+``require_role_assigned`` closes this hole:
+
+* ``user is None`` (a bare service-key caller, no session at all) -> PASS,
+  unaffected — that caller is already governed by ``require_role`` alone;
+  this gate only judges a REAL resolved session's ``role``.
+* ``user is not None and user.role is None`` (a real, logged-in, no-role
+  human) -> ``HTTPException(403)``, fail-closed.
+* ``user is not None and user.role is not None`` (any real assigned role, OR
+  the CAS-disabled dev-anonymous synthetic sentinel whose ``role='admin'``)
+  -> PASS.
+
+Wired ONCE, at the ROUTER level (``app.include_router(..., dependencies=[
+Depends(require_role_assigned)])``) on every business router
+(``jobs``/``resumes``/``shortlist``/``job_assignees``/``audit``) in
+``src.api.main`` — deliberately NOT on ``auth``, so a no-role user can still
+reach ``/auth/cas/user``/``/auth/cas/logout`` to see their own status or log
+out. The end-to-end router-level wiring interaction (real session cookie +
+the real shared recruiter key, through a real FastAPI app) is proved in
+``tests/integration/test_no_role_fail_closed_pg.py`` — a mocked
+``resolve_user`` here cannot prove that wiring actually blocks a live
+request; this file pins only the pure gate LOGIC.
 """
 
 from __future__ import annotations
@@ -1165,3 +1196,146 @@ async def test_scoped_user_id_or_403_never_returns_a_non_none_value_for_a_non_hi
     user = _scoped_user(session_role)
     result = await scoped_user_id_or_403(user, key_role)
     assert result is None
+
+
+# ── require_role_assigned — the fail-closed no-role gate (user-admin-roles
+#    slice 3) ────────────────────────────────────────────────────────────
+#
+# See the module docstring section above for the full decision table. Pure
+# ``User | None`` branching logic — no I/O — mirroring
+# ``scoped_user_id_or_403``'s own "offline genuinely suffices for the LOGIC"
+# framing; the router-level WIRING interaction through a real session +
+# the real shared recruiter key is proved separately, against real
+# Postgres, in ``tests/integration/test_no_role_fail_closed_pg.py``.
+
+
+def _no_role_user() -> User:
+    """A real (non-sentinel) session ``User`` whose ``role`` is ``None`` --
+    exactly what slice 2's first-login reversal now produces for a
+    non-default-admin CAS username on their first login."""
+    now = datetime.now(UTC)
+    return User(
+        id=uuid4(),
+        cas_username="someone",
+        display_name=None,
+        email=None,
+        role=None,
+        active=True,
+        created_at=now,
+        last_seen_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_passes_a_bare_service_key_caller_with_no_session() -> (  # noqa: E501
+    None
+):
+    """``user is None`` — no session at all (a bare service-key caller with
+    CAS enabled, or any caller when CAS is disabled and the sentinel path
+    isn't reached in this unit) — must PASS. This gate never judges the
+    ABSENCE of a session, only a REAL session's role."""
+    from src.api.deps import require_role_assigned
+
+    await require_role_assigned(user=None)  # must not raise
+
+
+@pytest.mark.parametrize("role", ["admin", "recruiter", "hiring_manager", "auditor"])
+@pytest.mark.asyncio
+async def test_require_role_assigned_passes_every_real_assigned_role(
+    role: str,
+) -> None:
+    from src.api.deps import require_role_assigned
+
+    user = _scoped_user(role)
+    await require_role_assigned(user=user)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_403s_a_real_session_with_no_role() -> None:
+    """The core fix: a genuinely resolved session (``user is not None``)
+    whose ``role`` is ``None`` — exactly what slice 2's first-login reversal
+    now produces for a non-default-admin CAS username — must be blocked,
+    fail-closed, before any route body runs."""
+    from src.api.deps import require_role_assigned
+
+    user = _no_role_user()
+    with pytest.raises(HTTPException) as excinfo:
+        await require_role_assigned(user=user)
+    assert excinfo.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_403_has_a_non_empty_detail_message() -> None:
+    from src.api.deps import require_role_assigned
+
+    user = _no_role_user()
+    with pytest.raises(HTTPException) as excinfo:
+        await require_role_assigned(user=user)
+    assert excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_passes_the_dev_anonymous_sentinel() -> None:
+    """The CAS-disabled synthetic dev-admin identity (``role='admin'``) is
+    not a no-role human — it's the ambient dev/CI identity — so it must
+    PASS, exactly like ``scoped_user_id_or_403`` treats it as UNSCOPED
+    rather than blocked."""
+    from src.api.deps import require_role_assigned
+
+    user = _dev_anonymous_admin()
+    await require_role_assigned(user=user)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_403_matches_the_reveal_403_mechanism() -> None:
+    """Same 403 mechanism pin as ``scoped_user_id_or_403`` above — a plain
+    ``fastapi.HTTPException(status_code=403, ...)``, not a bespoke
+    ``AppError`` subclass, so the global exception machinery renders it
+    identically to every other 403 in this API."""
+    from src.api.deps import require_role_assigned
+
+    user = _no_role_user()
+    with pytest.raises(HTTPException) as excinfo:
+        await require_role_assigned(user=user)
+    assert isinstance(excinfo.value, HTTPException)
+    assert excinfo.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_role_assigned_composes_with_resolve_user_via_dependency_override() -> (  # noqa: E501
+    None
+):
+    """Proves the router-level override mechanism end-to-end through a real
+    (minimal) FastAPI app — mirroring
+    ``test_require_role_composes_with_resolve_role_via_dependency_override``
+    above exactly, but for the session-identity gate instead of the
+    key-role gate. Overriding the SHARED ``resolve_user`` dependency
+    propagates through ``require_role_assigned``'s check."""
+    from src.api import deps
+
+    app = FastAPI()
+
+    @app.get("/protected", dependencies=[Depends(deps.require_role_assigned)])
+    async def _protected() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.dependency_overrides[deps.resolve_user] = lambda: _no_role_user()
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/protected")
+    assert resp.status_code == 403
+
+    app.dependency_overrides[deps.resolve_user] = lambda: _scoped_user("recruiter")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/protected")
+    assert resp.status_code == 200
+
+    app.dependency_overrides[deps.resolve_user] = lambda: None
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/protected")
+    assert resp.status_code == 200
