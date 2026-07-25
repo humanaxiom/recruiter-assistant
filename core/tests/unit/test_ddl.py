@@ -176,8 +176,11 @@ JOB_ASSIGNEES_EXPECTED_COLUMNS: tuple[str, ...] = (
     "assigned_at",
 )
 
-# ADR-019 §4: the Role vocabulary — data now, not code. `recruiter` is the
-# default role on first CAS login (ADR-019 §2 step 3).
+# ADR-019 §4: the Role vocabulary — data now, not code. `recruiter` is what
+# provisioning inserts as of FU-5 slice 1 CODE (NOT the DDL default any
+# longer: ADR-019 §10a, a human-directed reversal of §2 step 3, drops the
+# schema-level DEFAULT/NOT NULL below so a first CAS login can capture NULL;
+# slice 2 flips the provisioning INSERT itself to match).
 ROLE_VALUES: tuple[str, ...] = ("admin", "recruiter", "hiring_manager", "auditor")
 
 
@@ -629,9 +632,81 @@ def test_users_cas_username_is_unique_and_not_null() -> None:
     assert re.search(r"cas_username[^,]*\bUNIQUE\b", sql, re.IGNORECASE)
 
 
-def test_users_role_is_not_null() -> None:
-    """Roles become data (ADR-019 §4) — the column must always be populated."""
-    assert re.search(r"role\s+TEXT\s+NOT\s+NULL", _table_sql("users"), re.IGNORECASE)
+def test_users_role_is_nullable_with_no_default() -> None:
+    """ADR-019 §10a — a human-directed reversal of this same ADR's §2 step 3
+    / §4, which originally required ``role TEXT NOT NULL DEFAULT
+    'recruiter'`` (asserted by this test's now-superseded prior version,
+    ``test_users_role_is_not_null``). First CAS login must be able to
+    capture a user with NO role, so the CREATE TABLE column for fresh
+    installs is bare ``role TEXT`` — nullable, no default. FU-5 slice 1 is
+    schema-only: provisioning itself (still inserting 'recruiter'/'admin'
+    explicitly) does not change until slice 2."""
+    sql = _table_sql("users")
+    assert re.search(r"\brole\s+TEXT\b", sql, re.IGNORECASE)
+    assert not re.search(r"role\s+TEXT\s+NOT\s+NULL", sql, re.IGNORECASE)
+    assert not re.search(r"role[^,]*DEFAULT\s+'recruiter'", sql, re.IGNORECASE)
+
+
+def test_users_role_drop_default_alter_is_present() -> None:
+    """ADR-019 §10a (FU-5 slice 1): a LIVE dev/CI volume already has
+    ``role TEXT NOT NULL DEFAULT 'recruiter'`` from before this reversal, and
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against it — the same
+    already-migrated-volume risk the ``description_sha256``/
+    ``shortlist_top_percent`` ALTERs above guard against. A separate
+    idempotent ``ALTER ... DROP DEFAULT`` is required so existing volumes'
+    columns are relaxed too, not just fresh installs' CREATE TABLE."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+users\s+ALTER\s+COLUMN\s+role\s+DROP\s+DEFAULT",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "exactly one idempotent DROP DEFAULT ALTER for role"
+
+
+def test_users_role_drop_not_null_alter_is_present() -> None:
+    """Companion to the DROP DEFAULT ALTER above — both are required to make
+    NULL actually insertable; dropping only the default would still reject a
+    NULL insert with a NOT NULL violation."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+users\s+ALTER\s+COLUMN\s+role\s+DROP\s+NOT\s+NULL",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "exactly one idempotent DROP NOT NULL ALTER for role"
+
+
+def test_users_role_alters_run_after_the_users_create_table() -> None:
+    """Postgres would reject ``ALTER TABLE users ...`` if the table did not
+    exist yet — the relaxation ALTERs must come after the CREATE TABLE."""
+    drop_default_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+users\s+ALTER\s+COLUMN\s+role\s+DROP\s+DEFAULT",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    drop_not_null_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+users\s+ALTER\s+COLUMN\s+role\s+DROP\s+NOT\s+NULL",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    users_idx = _statement_index("users")
+    assert users_idx < drop_default_idx
+    assert users_idx < drop_not_null_idx
 
 
 def test_users_active_flag_defaults_true() -> None:
