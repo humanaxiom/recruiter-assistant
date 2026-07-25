@@ -1,5 +1,6 @@
 """Unit tests for ``src.services.user_service`` (FU-5 slice 5, ADR-019 §10
-step 3, §10a).
+step 3, §10a; user-admin-roles slice 2 reverses §10a's provisioning default —
+see the module docstring note below).
 
 Nothing here exists yet (``core/src/services/user_service.py``,
 ``core/src/schemas/auth.py``), so every test is expected to FAIL (RED) as an
@@ -13,13 +14,25 @@ connection cannot prove — that is
 ``tests/integration/test_session_user_service_pg.py``'s job.
 
 What IS genuinely unit-provable without a database is the pure Python
-decision of *which role string* ``provision_or_get`` computes before it ever
+decision of *which role value* ``provision_or_get`` computes before it ever
 talks to Postgres — ADR-019 §10a's default-admin comparison
 (``cas_username == default_admin_cas_username``) — captured via the bound
 call args rather than by asserting on SQL text, plus the signature-level
 contract that ``default_admin_cas_username`` must be passed in explicitly
 (CLAUDE.md: "Config only via settings.py — never scattered"; this service
 must not reach into settings itself).
+
+**user-admin-roles slice 2 — human-directed reversal of ADR-019 §10a/§2
+(2026-07-25).** A first CAS login for a username other than the configured
+default-admin now captures NO role (``None``), not the old ``'recruiter'``
+default. The default-admin allowlist itself (``asalah`` → ``'admin'`` on
+first login) is UNCHANGED. The tests below that previously asserted
+``role == "recruiter"`` for a non-default first login are rewritten to
+assert ``role is None`` — this is the authorized reversal target, not a
+"modify tests to pass" violation (see the coordinator's task citation of
+this ADR reversal). Slice 3 adds the fail-closed gate that rejects a
+no-role user from doing anything; a no-role user existing but not yet
+blocked is this slice's intentional, known intermediate state.
 """
 
 from __future__ import annotations
@@ -61,11 +74,14 @@ class _FakeConn:
 
 
 def _build_row(username: str, *args: Any) -> dict[str, Any]:
-    """Echoes the computed role back, located by value rather than by a
-    hard-coded argument position — this test cares which role string
-    ``provision_or_get`` decided on, not the shape of its SQL."""
-    role = next((a for a in args if a in ("admin", "recruiter")), None)
-    assert role is not None, f"no role value found among bind args: {args}"
+    """Echoes the computed role back, located by its known *position* on the
+    INSERT's bind args (``cas_username, display_name, email, role`` — the
+    last positional arg is always ``role``) rather than by scanning for the
+    literal strings ``"admin"``/``"recruiter"``. That scan-by-value approach
+    cannot distinguish "role bound as None" (the slice-2 reversed default)
+    from "no role value present at all", so it is replaced with a
+    position-based read that captures ``None`` correctly."""
+    role = args[-1] if args else None
     now = datetime.now(UTC)
     return {
         "id": uuid4(),
@@ -95,7 +111,13 @@ async def test_admin_role_selected_for_default_admin_username() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recruiter_role_selected_for_non_default_username() -> None:
+async def test_no_role_selected_for_non_default_username() -> None:
+    """user-admin-roles slice 2 (ADR-019 §10a/§2 reversal, human directive
+    2026-07-25): a first CAS login for a username other than the configured
+    default-admin now captures NO role at all — previously ``'recruiter'``,
+    superseded here. Slice 3 will add the fail-closed gate that blocks a
+    no-role user; that a no-role user is merely *captured* and not yet
+    blocked is this slice's known, intentional intermediate state."""
     username = "someone-else"
     conn = _FakeConn(lambda *args: _build_row(username, *args))
 
@@ -103,13 +125,34 @@ async def test_recruiter_role_selected_for_non_default_username() -> None:
         conn, cas_username=username, default_admin_cas_username=DEFAULT_ADMIN
     )
 
-    assert user.role == "recruiter"
+    assert user.role is None
+
+
+@pytest.mark.asyncio
+async def test_non_default_login_binds_null_role_on_the_insert() -> None:
+    """Direct check of the bound INSERT argument (not just the returned
+    ``User.role``) — proves the ``None`` flows all the way to the SQL call
+    ``provision_or_get`` makes, not merely survives an echo through the fake
+    row builder."""
+    username = "someone-else"
+    conn = _FakeConn(lambda *args: _build_row(username, *args))
+
+    await user_service.provision_or_get(
+        conn, cas_username=username, default_admin_cas_username=DEFAULT_ADMIN
+    )
+
+    assert len(conn.fetchrow_calls) == 1
+    assert conn.fetchrow_calls[0][-1] is None, (
+        "the bound role bind-arg for a non-default-admin first login must "
+        "be None (ADR-019 §10a/§2 reversal), not 'recruiter'"
+    )
 
 
 @pytest.mark.asyncio
 async def test_default_admin_match_is_case_sensitive() -> None:
     """``"Asalah" != "asalah"`` — no case-folding surprise that would widen
-    the admin allowlist beyond the exact configured username."""
+    the admin allowlist beyond the exact configured username. The non-match
+    now yields ``None`` (slice 2's reversed default), not ``'recruiter'``."""
     username = "Asalah"
     conn = _FakeConn(lambda *args: _build_row(username, *args))
 
@@ -117,7 +160,7 @@ async def test_default_admin_match_is_case_sensitive() -> None:
         conn, cas_username=username, default_admin_cas_username=DEFAULT_ADMIN
     )
 
-    assert user.role == "recruiter"
+    assert user.role is None
 
 
 @pytest.mark.asyncio

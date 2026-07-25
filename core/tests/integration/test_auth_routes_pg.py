@@ -42,6 +42,18 @@ tests structurally cannot:
   never actually reads the DB; only a real Postgres proves the endpoint's
   ``role`` and the row's ``users.role`` cannot drift apart.
 
+**user-admin-roles slice 2 — human-directed reversal of ADR-019 §10a/§2
+(2026-07-25).** A first CAS login for a username other than the configured
+default-admin now captures NO role through the real HTTP route, not the
+old ``'recruiter'`` default. The default-admin (``asalah``) case is
+UNCHANGED — still provisioned ``'admin'`` on first login. Tests below that
+previously asserted ``role == "recruiter"`` through the real CAS-validate
+route are rewritten to assert ``role is None`` — this is the authorized
+reversal target the coordinator cited, not a "modify tests to pass"
+violation. Slice 3 adds the fail-closed gate; a no-role user reaching
+``/auth/cas/user`` without yet being blocked is this slice's intentional,
+known intermediate state.
+
 Follows the exact asyncpg/testcontainers fixture wiring already used in
 ``tests/integration/test_api_jobs_pg.py`` and
 ``tests/integration/test_session_user_service_pg.py`` — no new harness.
@@ -187,11 +199,13 @@ async def test_cas_validate_happy_path_creates_a_real_admin_user_and_session(
 
 
 @pytest.mark.asyncio
-async def test_cas_validate_for_a_non_default_username_creates_a_recruiter_row(
+async def test_cas_validate_for_a_non_default_username_creates_a_no_role_row(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-019 §10a through the real route — a username other than the
-    configured default admin is provisioned ``role='recruiter'``."""
+    """user-admin-roles slice 2 (ADR-019 §10a/§2 reversal, human directive
+    2026-07-25) through the real route — a username other than the
+    configured default admin is now provisioned with NO role at all,
+    previously ``'recruiter'``, superseded here."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     username = _unique_username("erin")
@@ -209,7 +223,7 @@ async def test_cas_validate_for_a_non_default_username_creates_a_recruiter_row(
             "SELECT role FROM users WHERE cas_username = $1", username
         )
     assert row is not None
-    assert row["role"] == "recruiter"
+    assert row["role"] is None
 
 
 # ── cookie -> session -> user, end-to-end through resolve_user ────────────
@@ -219,6 +233,9 @@ async def test_cas_validate_for_a_non_default_username_creates_a_recruiter_row(
 async def test_resolve_user_resolves_the_real_user_from_the_validate_response_cookie(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """user-admin-roles slice 2 — the resolved ``User.role`` for a
+    non-default-admin first login is now ``None`` end-to-end through
+    ``resolve_user``, not ``'recruiter'``."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
@@ -239,7 +256,7 @@ async def test_resolve_user_resolves_the_real_user_from_the_validate_response_co
 
     assert user is not None
     assert user.cas_username == username
-    assert user.role == "recruiter"
+    assert user.role is None
 
 
 @pytest.mark.asyncio
@@ -274,9 +291,13 @@ async def test_cas_user_endpoint_reflects_the_real_session_after_validate(
 
 
 @pytest.mark.asyncio
-async def test_cas_user_endpoint_reports_the_real_recruiter_role_after_validate(
+async def test_cas_user_endpoint_reports_no_role_for_a_non_default_login(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """user-admin-roles slice 2 (ADR-019 §10a/§2 reversal, human directive
+    2026-07-25) — a non-default-admin first login now reports ``role: null``
+    through ``GET /auth/cas/user``, previously ``'recruiter'``, superseded
+    here."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     username = _unique_username("nina")
@@ -292,13 +313,14 @@ async def test_cas_user_endpoint_reports_the_real_recruiter_role_after_validate(
     assert status_resp.status_code == 200
     body = status_resp.json()
     assert body["authenticated"] is True
-    assert body["role"] == "recruiter"
+    assert body["role"] is None
 
     async with pg_pool.acquire() as conn:
         db_role = await conn.fetchval(
             "SELECT role FROM users WHERE cas_username = $1", username
         )
     assert body["role"] == db_role, "endpoint role must match the real users.role row"
+    assert db_role is None
 
 
 @pytest.mark.asyncio
@@ -307,8 +329,10 @@ async def test_cas_user_endpoint_reports_a_seeded_hiring_manager_role(
 ) -> None:
     """ADR-020 §7 — the Flask viewer's `/my/jobs` default-view switch needs
     a real hiring_manager session's role surfaced end-to-end. Seed the role
-    directly (``user_service.provision_or_get`` only ever assigns
-    admin/recruiter), then re-read it through the real session chain."""
+    directly (``user_service.provision_or_get`` no longer assigns any
+    non-admin default role — see the slice-2 reversal — so a non-admin role
+    can only arrive via an explicit UPDATE, as here), then re-read it
+    through the real session chain."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     username = _unique_username("oscar")

@@ -13,8 +13,23 @@ only a real database can prove:
   role must survive a re-login.
 * ADR-019 §10a's default-admin allowlist: on a user's FIRST login only, a
   ``cas_username`` matching ``settings.default_admin_cas_username`` is
-  provisioned ``role='admin'`` instead of ``'recruiter'``. A SECOND login by
-  that same username must NOT re-promote a role that was since changed.
+  provisioned ``role='admin'`` instead of the non-default-admin default.
+  A SECOND login by that same username must NOT re-promote a role that was
+  since changed.
+
+**user-admin-roles slice 2 — human-directed reversal of ADR-019 §10a/§2
+(2026-07-25).** A first CAS login for a username other than the configured
+default-admin now captures NO role (``role IS NULL``), not the old
+``'recruiter'`` default recorded in §10a/§2. The default-admin allowlist
+itself (``asalah`` → ``'admin'`` on first login) is UNCHANGED, and role
+stickiness on the ``ON CONFLICT`` path (a manually-set role survives
+re-login) is UNCHANGED. Tests below that previously asserted
+``role == "recruiter"`` for a non-default first login are rewritten to
+assert ``role IS NULL`` — this is the authorized reversal target the
+coordinator cited, not a "modify tests to pass" violation. Slice 3 adds the
+fail-closed gate that rejects a no-role user from doing anything; a no-role
+user existing but not yet blocked is this slice's intentional, known
+intermediate state.
 
 Neither of these is provable by mocking a connection — the whole point is
 the ``INSERT ... ON CONFLICT (cas_username) DO UPDATE`` semantics, which only
@@ -83,19 +98,23 @@ async def _provision(
 
 
 @pytest.mark.asyncio
-async def test_provision_or_get_first_call_creates_row_with_recruiter_role(
+async def test_provision_or_get_first_call_creates_row_with_no_role(
     conn: asyncpg.Connection,
 ) -> None:
+    """user-admin-roles slice 2 (ADR-019 §10a/§2 reversal, human directive
+    2026-07-25): a first CAS login for a non-default-admin username now
+    captures NO role, in the real row — previously ``'recruiter'``,
+    superseded here."""
     username = _unique_username("alice")
     user = await _provision(conn, username)
     assert user.cas_username == username
-    assert user.role == "recruiter"
+    assert user.role is None
     assert user.active is True
 
     stored_role = await conn.fetchval(
         "SELECT role FROM users WHERE cas_username = $1", username
     )
-    assert stored_role == "recruiter"
+    assert stored_role is None
 
 
 @pytest.mark.asyncio
@@ -103,7 +122,8 @@ async def test_provision_or_get_first_call_for_default_admin_creates_admin_role(
     conn: asyncpg.Connection,
 ) -> None:
     """ADR-019 §10a — the default-admin allowlist. First login by the
-    configured ``default_admin_cas_username`` is provisioned as admin."""
+    configured ``default_admin_cas_username`` is provisioned as admin.
+    UNCHANGED by the slice-2 reversal."""
     user = await _provision(conn, DEFAULT_ADMIN)
     assert user.cas_username == DEFAULT_ADMIN
     assert user.role == "admin"
@@ -123,10 +143,13 @@ async def test_provision_or_get_second_call_bumps_last_seen_but_not_role(
 ) -> None:
     """Second call for an existing user must refresh ``last_seen_at`` and
     must NOT reset a role that was manually changed after first login — the
-    ``ON CONFLICT`` path in this schema updates last_seen_at only."""
+    ``ON CONFLICT`` path in this schema updates last_seen_at only.
+
+    ``first.role`` is asserted ``is None`` (not ``"recruiter"``) per the
+    slice-2 reversal — this user's first login captures no role at all."""
     username = _unique_username("carol")
     first = await _provision(conn, username)
-    assert first.role == "recruiter"
+    assert first.role is None
 
     # Manually promote — simulates an admin's out-of-band role change.
     await conn.execute("UPDATE users SET role = 'admin' WHERE id = $1", first.id)
@@ -143,11 +166,33 @@ async def test_provision_or_get_second_call_bumps_last_seen_but_not_role(
 
 
 @pytest.mark.asyncio
+async def test_provision_or_get_second_call_for_no_role_user_stays_null(
+    conn: asyncpg.Connection,
+) -> None:
+    """user-admin-roles slice 2 — a SECOND login of a user whose first login
+    captured no role must NOT gain a role from anywhere (no default is ever
+    applied on the ``ON CONFLICT`` path); the row stays ``role IS NULL``
+    unless an admin explicitly sets it (a later slice's concern)."""
+    username = _unique_username("nolan")
+    first = await _provision(conn, username)
+    assert first.role is None
+
+    await asyncio.sleep(0.05)
+
+    second = await _provision(conn, username)
+    assert second.id == first.id
+    assert second.role is None, "a no-role user must stay role-less across logins"
+    assert second.last_seen_at > first.last_seen_at
+
+
+@pytest.mark.asyncio
 async def test_default_admin_second_login_does_not_repromote_after_demotion(
     conn: asyncpg.Connection,
 ) -> None:
     """The default-admin path only fires on row CREATION. A later manual
-    demotion of the default-admin's own account must stick across logins."""
+    demotion of the default-admin's own account must stick across logins.
+    UNAFFECTED by the slice-2 reversal (this test sets role via an explicit
+    UPDATE, not the provisioning default)."""
     first = await _provision(conn, DEFAULT_ADMIN)
     assert first.role == "admin"
 
