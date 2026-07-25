@@ -211,14 +211,17 @@ async def cas_logout(request: Request, db: Db) -> RedirectResponse:
         await session_service.revoke_session(db, sid)
 
     if not settings.cas_enabled:
-        response = RedirectResponse(url="/", status_code=302)
+        response = RedirectResponse(url=_landing_url(settings, "/"), status_code=302)
         response.delete_cookie(settings.session_cookie_name, path="/")
         return response
 
     cas_base = settings.cas_server_url.rstrip("/")
-    logout_url = f"{cas_base}/logout?" + urlencode(
-        {"service": _service_base(settings, request)}
+    logout_service = (
+        settings.cas_frontend_base_url.rstrip("/")
+        if settings.cas_frontend_base_url
+        else _service_base(settings, request)
     )
+    logout_url = f"{cas_base}/logout?" + urlencode({"service": logout_service})
     response = RedirectResponse(url=logout_url, status_code=302)
     response.delete_cookie(settings.session_cookie_name, path="/")
     return response
