@@ -12,8 +12,12 @@ string-matching can only assert about the SQL text:
 * ``audit_log``'s actor-identity CHECK (ADR-019 §1.4/§6) rejects both
   malformed shapes (both actors set, neither actor set) and accepts both
   valid single-actor shapes (human XOR service),
-* ``users.role`` defaults to ``recruiter`` on first login (ADR-019 §2 step 3)
-  and accepts each of the four known role values (ADR-019 §4 — the DB does
+* ``users.role`` is NULLABLE with NO default (ADR-019 §10a — a
+  human-directed reversal of this same ADR's §2 step 3, which originally had
+  the DDL default a first login's row to ``recruiter``). FU-5 slice 1 is the
+  schema half only, so the ``_insert_user`` helper below still passes
+  ``role='recruiter'`` as an explicit Python kwarg, and Postgres itself
+  still accepts each of the four known role values (ADR-019 §4 — the DB does
   NOT constrain role to the vocabulary; that is application-enforced).
 """
 
@@ -157,11 +161,18 @@ async def test_distinct_cas_usernames_both_succeed(conn: asyncpg.Connection) -> 
 
 
 @pytest.mark.asyncio
-async def test_role_defaults_to_recruiter_on_first_login(
+async def test_role_is_null_when_omitted_on_insert(
     conn: asyncpg.Connection,
 ) -> None:
-    """ADR-019 §2 step 3 — 'creates a new row with role=recruiter by
-    default.' Omitting ``role`` entirely on INSERT must yield 'recruiter'."""
+    """ADR-019 §10a — a human-directed reversal of §2 step 3 ('creates a new
+    row with role=recruiter by default'). REWRITE of this test's prior
+    version (``test_role_defaults_to_recruiter_on_first_login``), which
+    asserted the now-superseded default: first CAS login must be able to
+    capture a user with NO role, so omitting ``role`` entirely on INSERT must
+    now yield NULL, not 'recruiter'. This is schema-only (FU-5 slice 1) — the
+    Python provisioning code that actually runs on first login does not flip
+    to omitting role until slice 2; this test proves the column itself no
+    longer forces a default so slice 2 can rely on it."""
     user_id: uuid.UUID = await conn.fetchval(
         """
         INSERT INTO users (cas_username, display_name, email)
@@ -173,7 +184,96 @@ async def test_role_defaults_to_recruiter_on_first_login(
         "ada@example.org",
     )
     role = await conn.fetchval("SELECT role FROM users WHERE id = $1", user_id)
-    assert role == "recruiter"
+    assert role is None
+
+
+@pytest.mark.asyncio
+async def test_users_role_column_is_nullable_per_information_schema(
+    conn: asyncpg.Connection,
+) -> None:
+    """The load-bearing proof ``tests/unit/test_ddl.py`` cannot give: that
+    Postgres itself, not just the DDL source text, considers the live
+    ``users.role`` column nullable after ``init_schema`` has run."""
+    is_nullable = await conn.fetchval("""
+        SELECT is_nullable FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'role'
+        """)
+    assert is_nullable == "YES"
+
+
+@pytest.mark.asyncio
+async def test_users_role_has_no_column_default_per_information_schema(
+    conn: asyncpg.Connection,
+) -> None:
+    """Companion to the nullability check above: the DROP DEFAULT ALTER must
+    actually clear ``pg_attrdef``, not just the NOT NULL flag."""
+    column_default = await conn.fetchval("""
+        SELECT column_default FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'role'
+        """)
+    assert column_default is None
+
+
+@pytest.mark.asyncio
+async def test_init_schema_twice_keeps_role_nullable(pg_dsn: str) -> None:
+    """ADR-019 §10a: on a volume that has already had ``init_schema`` run
+    once (this slice's own relaxation), running it again — the ordinary boot
+    sequence, no migration framework — must not error and must not silently
+    re-add the DEFAULT/NOT NULL the first run dropped."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+        is_nullable = await connection.fetchval("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name = 'users' AND column_name = 'role'
+            """)
+        assert is_nullable == "YES"
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_null_role_insert_succeeds(
+    conn: asyncpg.Connection,
+) -> None:
+    """An explicit NULL must not trip a NOT NULL violation now that the
+    column is nullable — the fail-closed gate that reads this NULL is a
+    later slice (slice 3); this slice only proves NULL is storable at all."""
+    user_id: uuid.UUID = await conn.fetchval(
+        """
+        INSERT INTO users (cas_username, display_name, email, role)
+        VALUES ($1, $2, $3, NULL)
+        RETURNING id
+        """,
+        f"netid-{uuid.uuid4().hex}",
+        "Ada Lovelace",
+        "ada@example.org",
+    )
+    role = await conn.fetchval("SELECT role FROM users WHERE id = $1", user_id)
+    assert role is None
+
+
+@pytest.mark.asyncio
+async def test_existing_explicit_roles_survive_the_relaxation(
+    conn: asyncpg.Connection,
+) -> None:
+    """``ALTER COLUMN role DROP DEFAULT`` / ``DROP NOT NULL`` touch only the
+    column's metadata, never existing row data — an explicitly-set
+    'recruiter'/'admin' role must still read back unchanged after
+    ``init_schema`` (which re-runs those ALTERs idempotently on every boot)
+    runs again over rows that already have a role."""
+    recruiter_id = await _insert_user(conn, role="recruiter")
+    admin_id = await _insert_user(conn, role="admin")
+
+    await init_schema(conn)  # boot-time re-run; the ALTERs are now no-ops
+
+    recruiter_role = await conn.fetchval(
+        "SELECT role FROM users WHERE id = $1", recruiter_id
+    )
+    admin_role = await conn.fetchval("SELECT role FROM users WHERE id = $1", admin_id)
+    assert recruiter_role == "recruiter"
+    assert admin_role == "admin"
 
 
 @pytest.mark.asyncio
