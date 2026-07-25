@@ -33,6 +33,23 @@ file intentionally does NOT test any such thing.
   the all-disabled default configuration must boot clean through
   ``validate_startup_auth_config`` (mirrors the existing FU-4 role-key
   disabled-by-default contract in ``test_settings_rbac.py``).
+
+**Post-login frontend redirect fix (branch
+``fix/cas-post-login-frontend-redirect``).** The Flask frontend (``:5000``)
+and the FastAPI backend (``:18000``) are different origins. Every existing
+CAS redirect target (``next``, sanitized by ``_safe_next`` to a relative
+path) is resolved by the BROWSER against whatever origin issued the
+``Location`` header — which today is always the API's own origin, so a
+successful login lands the user on the raw JSON API instead of the Flask
+UI. The fix adds one new field, ``cas_frontend_base_url: str = ""``
+(empty string = same-origin, i.e. today's behaviour is preserved exactly),
+which a "landing" redirect helper in ``src.api.routes.auth`` prefixes onto
+``safe_next`` only for redirects where the user actually LANDS on a page
+(the post-validate success redirect and the CAS-disabled dev passthrough) —
+NOT the login->CAS-server redirect or the no-ticket restart, both of which
+stay on the API by design. See ``test_route_auth.py``'s "frontend landing
+redirect" section for the route-level assertions; this file pins only the
+new field itself.
 """
 
 from __future__ import annotations
@@ -101,6 +118,22 @@ def test_default_admin_cas_username_defaults_to_asalah() -> None:
     placeholder, and must not silently drift (e.g. to an empty string, which
     would mean no default admin exists on first boot)."""
     assert Settings().default_admin_cas_username == "asalah"
+
+
+# ── `cas_frontend_base_url` (fix/cas-post-login-frontend-redirect) ───────
+
+
+def test_cas_frontend_base_url_defaults_to_empty_string() -> None:
+    """Empty string = same-origin = today's (buggy-for-cross-origin, but
+    UNCHANGED) relative-redirect behaviour is preserved for anyone who has
+    not set the new env var — this field must not silently change existing
+    deployments' behaviour on upgrade."""
+    assert Settings().cas_frontend_base_url == ""
+
+
+def test_env_override_cas_frontend_base_url(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("CAS_FRONTEND_BASE_URL", "http://localhost:5000")
+    assert Settings().cas_frontend_base_url == "http://localhost:5000"
 
 
 # ── Types / sanity ───────────────────────────────────────────────────────
