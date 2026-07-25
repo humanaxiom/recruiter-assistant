@@ -32,6 +32,16 @@ already-existing ``cas_username`` never touches ``role`` (`ON CONFLICT ...`
 deliberately excludes it) — so pre-seeding the row and then logging in as
 that same username is the only way to get a real, cookie-backed
 hiring_manager/auditor session.
+
+FU-6 slice 9 (ADR-020 §7) extends this file with ``GET /my/jobs`` — see the
+dedicated section near the end. This is the same load-bearing-proof
+reasoning as above, but for a DIFFERENT route with DIFFERENT scoping
+semantics: ``/my/jobs`` scopes to the calling session user's OWN id for
+EVERY role (not just hiring_manager), so it needs its own real-Postgres
+proof that an admin session with zero ``job_assignees`` rows really does see
+``[]`` (not "every job" — the trap a ``scoped_user_id_or_403``-reusing
+implementation would fall into) and that an admin WHO IS assigned sees
+exactly that one job.
 """
 
 from __future__ import annotations
@@ -426,3 +436,129 @@ async def test_auditor_is_unscoped_even_with_zero_assignments(
     assert resp.status_code == 200
     returned_ids = {item["id"] for item in resp.json()}
     assert returned_ids == {str(j) for j in job_ids}
+
+
+# ── FU-6 slice 9 (ADR-020 §7) — GET /my/jobs: the caller's own assigned set,
+#    for ANY role ─────────────────────────────────────────────────────────
+#
+# The load-bearing structural proof this slice needs: a mocked-service route
+# test (``test_route_jobs.py``) can only prove the route calls
+# ``job_service.list_jobs(user_id=<session user's own id>)`` — it cannot
+# prove that id actually filters real ``job_assignees`` rows for a
+# NON-hiring_manager role, since ``GET /jobs``'s existing scoping
+# (``scoped_user_id_or_403``) never exercises that path against real data
+# (admin/recruiter/auditor always resolve ``user_id=None`` there — "all
+# jobs"). Only a real Postgres, seeded with a real admin assignment, can
+# prove an admin sees exactly their own assignment through ``/my/jobs`` and
+# nothing else.
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_hiring_manager_sees_only_assigned_subset(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    assigned_1 = await _insert_job(pg_pool, title="Assigned One")
+    assigned_2 = await _insert_job(pg_pool, title="Assigned Two")
+    unassigned = await _insert_job(pg_pool, title="Not Assigned")
+
+    async with await _client(app) as client:
+        hm_id, sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="hiring_manager"
+        )
+        await _assign(pg_pool, job_id=assigned_1, user_id=hm_id, assigned_by=hm_id)
+        await _assign(pg_pool, job_id=assigned_2, user_id=hm_id, assigned_by=hm_id)
+
+        resp = await client.get("/my/jobs", cookies={settings.session_cookie_name: sid})
+
+    assert resp.status_code == 200
+    returned_ids = {item["id"] for item in resp.json()}
+    assert returned_ids == {str(assigned_1), str(assigned_2)}
+    assert str(unassigned) not in returned_ids
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_hiring_manager_with_zero_assignments_returns_empty_list(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    await _insert_job(pg_pool, title="Somebody Else's Job")
+
+    async with await _client(app) as client:
+        _, sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="hiring_manager"
+        )
+        resp = await client.get("/my/jobs", cookies={settings.session_cookie_name: sid})
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_admin_with_no_assignments_returns_empty_list_not_all_jobs(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The critical proof against reusing ``scoped_user_id_or_403`` (which
+    would resolve ``user_id=None`` for an admin session -> "all jobs"): a
+    real admin session with zero ``job_assignees`` rows must see ``[]``
+    through ``/my/jobs``, even though every seeded job exists and the SAME
+    admin session sees ALL of them through ``GET /jobs`` (proving the
+    difference is the route's scoping semantics, not the admin's actual
+    read permission)."""
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    await _insert_job(pg_pool, title="Job One")
+    await _insert_job(pg_pool, title="Job Two")
+
+    async with await _client(app) as client:
+        _, sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="admin"
+        )
+        my_jobs_resp = await client.get(
+            "/my/jobs", cookies={settings.session_cookie_name: sid}
+        )
+        all_jobs_resp = await client.get(
+            "/jobs", cookies={settings.session_cookie_name: sid}
+        )
+
+    assert my_jobs_resp.status_code == 200
+    assert my_jobs_resp.json() == []
+    assert all_jobs_resp.status_code == 200
+    assert len(all_jobs_resp.json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_admin_who_is_assigned_sees_exactly_that_one_job(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Role-agnostic personal scoping (ADR-020 §7): an admin IS a valid
+    ``job_assignees.user_id`` — if assigned, they see that one job through
+    ``/my/jobs``, proving the scope key is the session user's own id, not a
+    role-based branch that only ever considers hiring_managers."""
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    own_job = await _insert_job(pg_pool, title="My Own Job")
+    other_job = await _insert_job(pg_pool, title="Somebody Else's Job")
+
+    async with await _client(app) as client:
+        admin_id, sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="admin"
+        )
+        await _assign(pg_pool, job_id=own_job, user_id=admin_id, assigned_by=admin_id)
+
+        resp = await client.get("/my/jobs", cookies={settings.session_cookie_name: sid})
+
+    assert resp.status_code == 200
+    returned_ids = {item["id"] for item in resp.json()}
+    assert returned_ids == {str(own_job)}
+    assert str(other_job) not in returned_ids

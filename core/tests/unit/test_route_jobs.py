@@ -56,6 +56,17 @@ mocked ``asyncpg`` connection (no service-internals monkeypatching).
   the reveal route's own actor derivation — see the dedicated section near
   the end of this file for why blind_review has a THIRD actor case reveal
   does not).
+* **FU-6 slice 9 (ADR-020 §7)** — ``GET /my/jobs`` is a NEW route on this
+  same router: the caller's own assigned job set, for ANY role. It does
+  NOT reuse ``scoped_user_id_or_403`` (that helper returns ``None`` —
+  "all jobs" — for admin/recruiter/auditor sessions); instead it calls
+  ``job_service.list_jobs(user_id=<the resolved session user's own id>)``
+  directly, for every role including admin/recruiter/auditor. A caller
+  with no resolvable session (``resolve_user`` -> ``None``) gets 403 ("a
+  'my' view needs a 'me'"); the CAS-disabled dev-anonymous synthetic
+  admin is NOT "no session" (it resolves the fixed sentinel id) and gets
+  200 + ``[]`` instead. See the dedicated section near the end of this
+  file.
 
 **FU-4 (RBAC) — route→role table for this file, per the locked decisions:**
 
@@ -68,6 +79,7 @@ mocked ``asyncpg`` connection (no service-internals monkeypatching).
 | ``/jobs/{id}``                | GET    | all four                        |
 | ``/jobs/{id}``                | PATCH  | admin, recruiter ONLY (D5)      |
 | ``/jobs/{id}/status``         | PATCH  | admin, recruiter                |
+| ``/my/jobs``                  | GET    | all four (session-scoped to self)|
 
 ``/jobs/bulk`` is covered in ``test_route_jobs_bulk.py``. ``PATCH
 /jobs/{id}`` gets the most explicit coverage in this file (D5): that PATCH can
@@ -98,7 +110,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import Role, get_arq, resolve_role, resolve_user
+from src.api.deps import (
+    _DEV_ADMIN_SENTINEL_ID,
+    Role,
+    get_arq,
+    resolve_role,
+    resolve_user,
+)
 from src.api.routes import jobs as jobs_routes
 from src.errors import AppError, NotFoundError
 from src.models.pool import get_db
@@ -1279,3 +1297,147 @@ async def test_list_jobs_never_writes_a_read_log_even_for_an_auditor(
 
     assert resp.status_code == 200
     audit.assert_not_awaited()
+
+
+# ── FU-6 slice 9 (ADR-020 §7) — GET /my/jobs: the caller's own assigned set,
+#    for ANY role ─────────────────────────────────────────────────────────
+#
+# THIS DIFFERS FROM THE SCOPED READ ROUTES ABOVE. ``GET /jobs``/``GET
+# /jobs/{id}`` use ``scoped_user_id_or_403``, which returns ``None`` — "all
+# jobs" — for admin/recruiter/auditor sessions (ADR-020 §4's global-read
+# roles). ``GET /my/jobs`` is a PERSONAL "my assignments" view: it must scope
+# to the calling session user's OWN id directly, regardless of role — an
+# admin session here still gets back only THAT admin's own assignments
+# (typically none), never every job in the company. A route that reuses
+# ``scoped_user_id_or_403`` would fail every "non-hiring_manager role still
+# scopes to self" test below (they would all get ``user_id=None``, i.e. "all
+# jobs", instead of the caller's own id).
+#
+# Identity is REQUIRED: no session (``resolve_user`` -> ``None``, the
+# CAS-enabled-no-cookie case) -> 403, service never called ("a 'my' view
+# needs a 'me'"). The CAS-disabled dev-anonymous synthetic admin is
+# DIFFERENT: it resolves a real (sentinel) id via ``resolve_user``, so it is
+# NOT "no session" — it scopes to the sentinel id (an empty result set,
+# since the sentinel is never a real assignee) and returns 200 + [], not
+# 403.
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_route_exists_and_returns_the_trimmed_joblistitem_shape() -> None:
+    conn = _mock_conn(fetch=[_job_row(title="A"), _job_row(title="B")])
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 2
+    expected_keys = {"id", "title", "department", "status", "created_at", "parsed_at"}
+    assert set(body[0].keys()) == expected_keys
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_my_jobs_passes_the_session_users_own_id_for_admin_recruiter_and_auditor(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The load-bearing negative pin against ``scoped_user_id_or_403`` reuse:
+    for THESE roles, ``GET /jobs`` passes ``user_id=None`` (see
+    ``test_list_jobs_passes_user_id_none_for_unscoped_roles`` above) —
+    ``GET /my/jobs`` must NOT: it passes the CALLER'S OWN id, proving it
+    scopes to the session user directly rather than delegating to the
+    all-jobs-for-unscoped-roles helper."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+
+    assert resp.status_code == 200
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") == session_user.id
+    assert list_jobs_mock.await_args.kwargs.get("user_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_403s_and_never_calls_the_service_when_no_session_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 'my' view needs a 'me' — a bare service-key caller with no
+    verifiable session (``resolve_user`` -> ``None``, e.g. CAS enabled with
+    no cookie) gets 403 and the service is never reached."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    app.dependency_overrides[resolve_user] = lambda: None
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+
+    assert resp.status_code == 403
+    list_jobs_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_dev_anonymous_scopes_to_the_sentinel_id_and_returns_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CAS-disabled synthetic dev-admin identity is NOT 'no session' — it
+    IS a resolved (sentinel) identity, so ``resolve_user`` never returns
+    ``None`` for it. It must scope to the sentinel id (an empty result,
+    since the sentinel is never a real assignee) and return 200 + [], never
+    403. Ambient default: no ``resolve_user`` override needed."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+    list_jobs_mock.assert_awaited_once()
+    assert list_jobs_mock.await_args.kwargs.get("user_id") == _DEV_ADMIN_SENTINEL_ID
+
+
+@pytest.mark.asyncio
+async def test_my_jobs_requires_auth_like_sibling_routes() -> None:
+    """The standard RBAC key gate still applies (``require_role``) —
+    removing the ``resolve_role`` bypass override must surface a 401,
+    exactly like the other job routes."""
+    from fastapi import HTTPException
+
+    conn = _mock_conn()
+    app = _build_app(conn)
+
+    def _deny() -> None:
+        raise HTTPException(status_code=401, detail="missing api key")
+
+    app.dependency_overrides[resolve_role] = _deny
+    async with await _client(app) as client:
+        resp = await client.get("/my/jobs")
+    assert resp.status_code == 401
