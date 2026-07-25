@@ -1116,6 +1116,37 @@ haystack made a chunk fail to match *itself* at 0.838). Severity fell monotonica
 2 major → 5 medium/low → self-caught — which is why it was allowed to run five rounds rather than being
 split.
 
+### ⚠️ LOCAL-INTEGRATION STATE (2026-07-25) — local `main` is AHEAD of origin; GitHub CI is billing-blocked
+
+> **Read this FIRST.** GitHub Actions is **billing-blocked** for the `humanaxiom` org (jobs fail at "Set up
+> job" with `BlobNotFound`; the failure annotation reads "recent account payments have failed or your
+> spending limit needs to be increased"). Fix in the org's **Settings → Billing & plans**. Until then, CI
+> cannot run — but `./scripts/verify.sh all` runs the **same Makefile targets** locally against real
+> Postgres/Neo4j/Redis and is the source of truth.
+>
+> Because of that block, **four finished, fully-gated features were squash-integrated into LOCAL `main`**
+> (not pushed), each verified `./scripts/verify.sh all` green:
+> - `202c9ac` — UX bugfixes (was **PR #30**): zip-upload friendly error, upload-missing-job 404, slow-job
+>   progress honesty + elapsed, advisory-lock dedupe of concurrent runs. reviewer APPROVE, security PASS.
+> - `1dfa590` — **FU-6** (was **PR #31**): per-job assignment + row-level scoping (ADR-020). reviewer
+>   APPROVE (12 mutations), security PASS.
+> - `2e2da05` — configurable shortlist size (ADR-024): per-job `shortlist_top_percent` (1-100, default 100).
+>   reviewer APPROVE, security PASS, **ranking-evals PASS** (default byte-identical).
+> - `f3b2998` — hiring_manager `/my/jobs` default view (ADR-020 §7 viewer half). reviewer APPROVE.
+>
+> **`origin/main` is still at `ae18687` (FU-5).** PRs #30 and #31 are OPEN on origin but their work is now in
+> local `main`. **GitHub reconciliation, once billing clears:** push local `main` (`git push origin main`)
+> and CLOSE #30/#31 as superseded (their commits are integrated), OR if you prefer the PR flow, reset local
+> `main` to origin and merge the PRs on GitHub instead — but do NOT do both (double-merge). The feature
+> BRANCHES (`fix/upload-and-progress-ux`, `feat/fu6-job-assignment-scoping`, `feat/configurable-shortlist-size`,
+> `feat/hiring-manager-my-jobs-view`) still exist locally/on origin for reference.
+>
+> **CAS is built + merged (FU-5) but NEITHER deployed NOR enabled** — running containers predate FU-5;
+> `cas_enabled` defaults False. Rebuild off `main` + `CAS_ENABLED=true` to activate; `asalah` is the §10a
+> default-admin.
+>
+> **No open follow-ups from this session remain** — the two ADR-020/shortlist follow-ups were both built.
+
 ### FU-6 status — BUILT, gates green, ON A PR (read this before starting FU-7)
 
 > **Resume here.** FU-6 (per-job assignment + row-level scoping, ADR-020) is **code-complete and
