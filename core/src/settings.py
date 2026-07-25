@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     # operational identity, deliberately committed (not PII), env-overridable
     # per deployment.
     default_admin_cas_username: str = "asalah"
+    # fix/cas-post-login-frontend-redirect — the Flask frontend and the
+    # FastAPI backend are different origins, so a bare relative `Location`
+    # header resolves against the API's own origin, not the UI. Empty
+    # (default) = same-origin = today's behaviour, unchanged. When set, the
+    # "landing" redirects (post-validate success; the CAS-disabled dev
+    # passthroughs) are prefixed with this base — see
+    # `src.api.routes.auth._landing_url`.
+    cas_frontend_base_url: str = ""
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC

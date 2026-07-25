@@ -84,6 +84,37 @@ values in dev mode are UNCHANGED by this slice (see the dev-mode section of
 ``cas_user`` — it currently reports ``authenticated: False`` even though a
 synthetic admin identity is what ``resolve_user`` would resolve; this slice
 does not touch that field, only adds ``role``).
+
+**Post-login frontend redirect fix (branch
+``fix/cas-post-login-frontend-redirect``, bug observed live).** The Flask
+frontend (``:5000``) and the FastAPI backend (``:18000``) are different
+origins. After a successful CAS validate, the API redirects the browser to
+``next`` (a relative path like ``/``); the browser resolves a relative
+``Location`` against the origin that ISSUED the redirect, i.e. the API's own
+``:18000`` origin — so the user lands on the raw JSON API (``:18000/jobs``)
+instead of the Flask UI (``:5000/jobs``). The fix adds a new setting,
+``Settings.cas_frontend_base_url: str = ""`` (empty = same-origin, preserving
+today's behaviour exactly), and a "landing" redirect helper that prefixes it
+onto ``safe_next`` ONLY for the two redirects where the browser actually
+LANDS on a page for the human to look at:
+
+* the ``cas_validate`` SUCCESS redirect (issued right after the session
+  cookie is set), and
+* the CAS-disabled dev passthrough in both ``cas_login`` and ``cas_validate``.
+
+It must NOT be applied to the login->CAS-server redirect (which uses
+``cas_service_base_url``/``_service_url`` for the API's OWN ``/auth/cas/
+validate`` callback — CAS must call us back, not the frontend) or to the
+no-ticket->``/auth/cas/login`` restart (which deliberately stays on the API
+to redo the CAS dance). See the "frontend landing redirect" section near the
+bottom of this file.
+
+Security note pinned by the malicious-``next`` test below: ``safe_next`` is
+already sanitized to a safe relative path by ``_safe_next`` BEFORE the
+frontend base is prefixed, so ``f"{cas_frontend_base_url}{safe_next}"``
+introduces no new open-redirect surface — a malicious ``next`` still
+collapses to ``"/"`` first, so the final Location is
+``f"{cas_frontend_base_url}/"``, never an attacker-controlled host.
 """
 
 from __future__ import annotations
@@ -170,6 +201,7 @@ def _settings(
     cas_validate_route: str = "/serviceValidate",
     session_cookie_name: str = "ra_session",
     default_admin_cas_username: str = "asalah",
+    cas_frontend_base_url: str = "",
 ) -> Settings:
     return Settings(
         cas_enabled=cas_enabled,
@@ -177,6 +209,7 @@ def _settings(
         cas_validate_route=cas_validate_route,
         session_cookie_name=session_cookie_name,
         default_admin_cas_username=default_admin_cas_username,
+        cas_frontend_base_url=cas_frontend_base_url,
         skill_hash_salt="test-salt",
         pii_key="test-key",
     )
@@ -229,6 +262,28 @@ def _build_app(conn: _FakeAuthConn) -> FastAPI:
 
 async def _client(app: FastAPI) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def _mock_successful_validate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wires the three service calls a successful ``cas_validate`` makes so
+    the route reaches its final redirect without hitting a real DB/CAS
+    server — shared by several tests in the "frontend landing redirect"
+    section below."""
+    monkeypatch.setattr(
+        auth_routes.cas_service,
+        "validate_ticket",
+        AsyncMock(return_value="alice"),
+    )
+    monkeypatch.setattr(
+        auth_routes.user_service,
+        "provision_or_get",
+        AsyncMock(return_value=SimpleNamespace(id=uuid4())),
+    )
+    monkeypatch.setattr(
+        auth_routes.session_service,
+        "create_session",
+        AsyncMock(return_value=SimpleNamespace(id="tok-new-session")),
+    )
 
 
 # ── GET /auth/cas/login ──────────────────────────────────────────────────
@@ -777,3 +832,204 @@ async def test_cas_validate_post_auth_redirect_preserves_a_legitimate_relative_n
             params={"ticket": "ST-123", "next": "/jobs/123"},
         )
     assert resp.headers["location"] == "/jobs/123"
+
+
+# ── frontend landing redirect (fix/cas-post-login-frontend-redirect) ─────
+#
+# Bug (observed live): the Flask frontend (:5000) and the FastAPI backend
+# (:18000) are different origins. A relative `Location` header issued by the
+# API is resolved by the BROWSER against the API's OWN origin — so a bare
+# `next=/` (or `/jobs`) lands the user on the raw JSON API, not the Flask
+# UI. The fix: when `settings.cas_frontend_base_url` is non-empty, the two
+# "landing" redirects (post-validate success, and the CAS-disabled dev
+# passthrough in both `cas_login` and `cas_validate`) prefix it onto the
+# already-sanitized `safe_next`. The login->CAS-server redirect and the
+# no-ticket restart are UNCHANGED (asserted below too) — both must keep
+# using the API's own origin.
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_success_redirects_to_frontend_origin_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, pinned directly: a successful CAS validate with
+    `cas_frontend_base_url` configured must land the browser on the FRONTEND
+    origin, not the bare relative path the API would otherwise resolve
+    against itself."""
+    settings = _settings(
+        cas_enabled=True, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/jobs"}
+        )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://localhost:5000/jobs"
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_success_redirects_to_frontend_root_for_default_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        cas_enabled=True, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/"}
+        )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://localhost:5000/"
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_success_still_sets_the_session_cookie_with_frontend_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend-origin redirect must not come at the cost of the session
+    cookie — the whole point of the redirect is to land an authenticated
+    browser on the UI."""
+    settings = _settings(
+        cas_enabled=True, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/jobs"}
+        )
+    assert resp.headers["location"] == "http://localhost:5000/jobs"
+    assert "ra_session=tok-new-session" in resp.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_success_redirect_is_unchanged_when_frontend_base_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default `cas_frontend_base_url=""` must preserve today's relative
+    redirect exactly — this is the same-origin (no bug) deployment shape and
+    must not regress for anyone who has not opted in to the new setting."""
+    settings = _settings(cas_enabled=True, cas_frontend_base_url="")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/jobs"}
+        )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/jobs"
+
+
+@pytest.mark.parametrize("malicious_next", _MALICIOUS_NEXT_VALUES)
+@pytest.mark.asyncio
+async def test_cas_validate_success_frontend_redirect_never_honours_a_malicious_next(
+    malicious_next: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`safe_next` sanitization must still run BEFORE the frontend base is
+    prefixed — a malicious `next` combined with a configured frontend base
+    must never produce a Location containing the attacker's host; it must
+    collapse to the frontend base's root, exactly like the same-origin case
+    collapses to '/'."""
+    settings = _settings(
+        cas_enabled=True, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate",
+            params={"ticket": "ST-123", "next": malicious_next},
+        )
+    assert resp.headers["location"] == "http://localhost:5000/"
+    assert "evil.com" not in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_dev_passthrough_redirects_to_frontend_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CAS-disabled dev passthrough in `cas_validate` must also land on the
+    frontend origin when configured — this is the local-dev, CAS-disabled
+    equivalent of the same bug."""
+    settings = _settings(
+        cas_enabled=False, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/validate", params={"next": "/jobs"})
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://localhost:5000/jobs"
+
+
+@pytest.mark.asyncio
+async def test_cas_login_dev_passthrough_redirects_to_frontend_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CAS-disabled dev passthrough in `cas_login` must also land on the
+    frontend origin when configured."""
+    settings = _settings(
+        cas_enabled=False, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": "/jobs"})
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://localhost:5000/jobs"
+
+
+@pytest.mark.asyncio
+async def test_cas_login_to_cas_server_is_unchanged_by_frontend_base_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The login->CAS-server redirect (and the `service=` callback URL
+    embedded in it) must keep using `cas_service_base_url`/`_service_url` —
+    the API's OWN callback — completely independent of
+    `cas_frontend_base_url`. CAS must call back to the API, never the
+    frontend, so this redirect target must not gain the frontend prefix even
+    when one is configured."""
+    settings = _settings(
+        cas_enabled=True,
+        cas_server_url="https://cas.example.edu/cas",
+        cas_frontend_base_url="http://localhost:5000",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/login", params={"next": "/jobs"})
+    location = resp.headers["location"]
+    assert location.startswith("https://cas.example.edu/cas/login?")
+    outer_qs = parse_qs(urlparse(location).query)
+    service_url = outer_qs["service"][0]
+    assert "localhost:5000" not in service_url
+    service_parsed = urlparse(service_url)
+    assert service_parsed.path.endswith("/auth/cas/validate")
+
+
+@pytest.mark.asyncio
+async def test_cas_validate_no_ticket_restart_is_unchanged_by_frontend_base_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-ticket restart (`/auth/cas/login?next=...`) deliberately stays
+    on the API to redo the CAS dance — it must NOT gain the frontend prefix
+    even when `cas_frontend_base_url` is configured."""
+    settings = _settings(
+        cas_enabled=True, cas_frontend_base_url="http://localhost:5000"
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/validate", params={"next": "/jobs"})
+    location = resp.headers["location"]
+    assert location.startswith("/auth/cas/login")
+    assert "localhost:5000" not in location

@@ -110,6 +110,21 @@ def _safe_next(next_value: str) -> str:
     return next_value
 
 
+def _landing_url(settings: Settings, safe_next: str) -> str:
+    """Resolve a "landing" redirect target — a page the browser actually ends
+    up on, as opposed to a hop back to the CAS server or a restart of the
+    login dance (see the "frontend landing redirect" note in this module's
+    docstring).
+
+    ``safe_next`` must already be sanitized by ``_safe_next`` before this is
+    called — this function only ever prefixes a base URL onto it, it never
+    re-validates it.
+    """
+    if not settings.cas_frontend_base_url:
+        return safe_next
+    return f"{settings.cas_frontend_base_url.rstrip('/')}{safe_next}"
+
+
 def _set_session_cookie(
     response: RedirectResponse, settings: Settings, sid: str
 ) -> None:
@@ -130,7 +145,7 @@ async def cas_login(request: Request, next: str = "/") -> RedirectResponse:
     safe_next = _safe_next(next)
     if not settings.cas_enabled:
         logger.info("cas.login.dev_mode")
-        return RedirectResponse(url=safe_next, status_code=302)
+        return RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
 
     cas_base = settings.cas_server_url.rstrip("/")
     service_url = _service_url(settings, request, safe_next)
@@ -149,7 +164,7 @@ async def cas_validate(
     settings = get_settings()
     safe_next = _safe_next(next)
     if not settings.cas_enabled:
-        return RedirectResponse(url=safe_next, status_code=302)
+        return RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
 
     if not ticket:
         # CAS round-trip lost the ticket somehow — restart the dance.
@@ -182,7 +197,7 @@ async def cas_validate(
         ip=(request.client.host if request.client else None),
     )
 
-    response = RedirectResponse(url=safe_next, status_code=302)
+    response = RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
     _set_session_cookie(response, settings, session.id)
     logger.info("cas.validate.ok user_id=%s", user.id)
     return response
