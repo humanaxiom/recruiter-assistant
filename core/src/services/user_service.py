@@ -8,16 +8,27 @@ INSERT rather than a second statement against a roles table, and the
 
 ADR-019 §10a — the default-admin allowlist: on a user's FIRST login only, a
 ``cas_username`` that matches the caller-supplied ``default_admin_cas_username``
-is provisioned ``role='admin'`` instead of ``'recruiter'``. This is decided in
-plain Python BEFORE the INSERT and only takes effect on row creation — the
-Postgres ``(xmax = 0)`` trick tells us whether THIS statement created the row
-(never re-promoting/re-applying on a later login, including one that raced a
-concurrent first login for the same username down to a single row).
+is provisioned ``role='admin'`` instead of the non-default-admin default. This
+is decided in plain Python BEFORE the INSERT and only takes effect on row
+creation — the Postgres ``(xmax = 0)`` trick tells us whether THIS statement
+created the row (never re-promoting/re-applying on a later login, including
+one that raced a concurrent first login for the same username down to a
+single row).
 
 ``default_admin_cas_username`` is a required keyword argument, never read
 from ``settings`` inside this module — CLAUDE.md's "config only via
 settings.py, never scattered" rule; the caller (the CAS callback route) is
 the one place settings are read.
+
+**user-admin-roles slice 2 — human-directed reversal of ADR-019 §10a/§2
+(2026-07-25).** A first CAS login for a username other than the configured
+default-admin now captures NO role (``role IS NULL``) instead of the old
+``'recruiter'`` default — ``_DEFAULT_ROLE`` is retired. The default-admin
+allowlist itself (``asalah`` -> ``'admin'`` on first login) and the
+``ON CONFLICT`` role-sticky behaviour are UNCHANGED. Slice 3 adds the
+fail-closed gate that rejects a no-role user from doing anything; a no-role
+user existing but not yet blocked is this slice's intentional, known
+intermediate state.
 """
 
 from __future__ import annotations
@@ -30,7 +41,6 @@ from src.services import DbConn
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ROLE = "recruiter"
 _ADMIN_ROLE = "admin"
 
 _GET_BY_ID_SQL = """
@@ -70,7 +80,7 @@ async def provision_or_get(
     unknown username collapse to exactly one row (the ``xmax = 0`` trick
     identifies which statement — if any — actually inserted).
     """
-    role = _ADMIN_ROLE if cas_username == default_admin_cas_username else _DEFAULT_ROLE
+    role = _ADMIN_ROLE if cas_username == default_admin_cas_username else None
     row = await conn.fetchrow(
         _PROVISION_SQL,
         cas_username,

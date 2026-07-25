@@ -31,7 +31,7 @@ class User(BaseModel):
     cas_username: str
     display_name: str | None
     email: str | None
-    role: str
+    role: str | None
     active: bool
     created_at: dt.datetime
     last_seen_at: dt.datetime
