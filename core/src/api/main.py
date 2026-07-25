@@ -13,11 +13,11 @@ from contextlib import asynccontextmanager
 
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
 
-from src.api.deps import log_auth_mode
+from src.api.deps import log_auth_mode, require_role_assigned
 from src.api.routes import audit, auth, job_assignees, jobs, resumes, shortlist
 from src.errors import AppError
 from src.models.ddl import init_schema
@@ -79,12 +79,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(audit.router)
+# auth stays UNGATED — a no-role user must still be able to see their own
+# status (GET /auth/cas/user) and log out; every business router below is
+# gated by require_role_assigned (user-admin-roles slice 3, ADR-019 §10a/
+# §10b reversal follow-up) so a real no-role session fail-closed 403s before
+# any route body runs, regardless of the shared API key it presents.
+app.include_router(audit.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(auth.router)
-app.include_router(job_assignees.router)
-app.include_router(jobs.router)
-app.include_router(resumes.router)
-app.include_router(shortlist.router)
+app.include_router(job_assignees.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(jobs.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(resumes.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(shortlist.router, dependencies=[Depends(require_role_assigned)])
 
 
 @app.exception_handler(AppError)
