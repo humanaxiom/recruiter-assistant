@@ -129,6 +129,7 @@ def _job_row(
             ),
             "status": status,
             "retention_days": 180,
+            "shortlist_top_percent": 100,
             "blind_review": blind_review,
             "failure_reason": None,
             "created_by": created_by,
@@ -715,3 +716,105 @@ async def test_update_job_missing_id_blind_review_touched_raises_not_found(
         )
 
     audit.assert_not_awaited()
+
+
+# ── FU-configurable-shortlist-size slice B: shortlist_top_percent persistence
+#
+# Slice A (already GREEN on this branch) added ``jobs.shortlist_top_percent``
+# to the DDL + ``_JOB_COLS`` SELECT/RETURNING list and to ``JobCreate`` /
+# ``JobUpdate`` -- but NEITHER ``_insert_job`` nor ``_UPDATABLE_JOB_COLUMNS``
+# were updated, so a caller's chosen value silently never reaches Postgres:
+# create relies entirely on the column DEFAULT (100), and a PATCH touching
+# ONLY ``shortlist_top_percent`` is filtered out of ``update_job``'s
+# ``fields`` dict entirely -- an empty ``fields`` short-circuits to
+# ``get_job`` (a pure read), so the PATCH is a silent no-op. These tests pin
+# that both paths must actually write the value.
+
+
+@pytest.mark.asyncio
+async def test_create_job_persists_a_custom_shortlist_top_percent_value() -> None:
+    """``JobCreate(shortlist_top_percent=30)`` must flow into the INSERT's
+    bound arguments -- today ``_insert_job`` never reads this field at all,
+    relying entirely on the column's own DEFAULT (100), so 30 never appears
+    among the args this mock captures."""
+    from src.services import job_service
+
+    row = _job_row()
+    row["shortlist_top_percent"] = 30
+    conn = _mock_conn(fetchrow=row)
+    await job_service.create_job(
+        conn, _payload(shortlist_top_percent=30), created_by="alice"
+    )
+    args = conn.fetchrow.await_args.args
+    assert 30 in args, (
+        "create_job must pass payload.shortlist_top_percent into the INSERT "
+        f"-- got args={args!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_job_default_shortlist_top_percent_is_explicitly_passed() -> None:
+    """Even the SCHEMA default (100, when the caller sends nothing) must be
+    passed through explicitly once slice B lands -- ``JobCreate`` always
+    carries a concrete value (never truly "unset"), so the INSERT should not
+    depend on the column DEFAULT to reproduce it."""
+    from src.services import job_service
+
+    row = _job_row()
+    row["shortlist_top_percent"] = 100
+    conn = _mock_conn(fetchrow=row)
+    await job_service.create_job(conn, _payload(), created_by="alice")
+    args = conn.fetchrow.await_args.args
+    assert 100 in args, (
+        "create_job must pass the default shortlist_top_percent=100 into "
+        f"the INSERT explicitly -- got args={args!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_job_shortlist_top_percent_is_updatable() -> None:
+    """A PATCH touching ONLY ``shortlist_top_percent`` must actually issue an
+    UPDATE that assigns the new value -- today ``_UPDATABLE_JOB_COLUMNS``
+    omits it, so ``fields`` ends up empty and ``update_job`` short-circuits
+    to a plain ``get_job`` read: the PATCH silently never reaches Postgres."""
+    from src.services import job_service
+
+    job_id = uuid4()
+    row = _job_row(job_id=job_id)
+    row["shortlist_top_percent"] = 50
+    conn = _mock_conn(fetchrow=row)
+    out = await job_service.update_job(
+        conn,
+        job_id,
+        JobUpdate.model_validate({"shortlist_top_percent": 50}),
+        **_ACTOR_KWARGS,
+    )
+    assert out.shortlist_top_percent == 50
+    query, *args = conn.fetchrow.await_args.args
+    assert 50 in args, (
+        "update_job must bind the new shortlist_top_percent value -- got "
+        f"args={args!r}"
+    )
+    assert "shortlist_top_percent =" in query.lower(), (
+        "update_job must assign shortlist_top_percent in its SET clause -- "
+        f"got query={query!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_job_omitted_shortlist_top_percent_leaves_it_unchanged() -> None:
+    """Sending only ``title`` must NOT assign ``shortlist_top_percent`` in
+    the SQL SET clause -- a PATCH omit means "unchanged", the same
+    convention as every other ``JobUpdate`` field."""
+    from src.services import job_service
+
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, title="New Title"))
+    await job_service.update_job(
+        conn,
+        job_id,
+        JobUpdate.model_validate({"title": "New Title"}),
+        **_ACTOR_KWARGS,
+    )
+    query = conn.fetchrow.await_args.args[0]
+    assert "shortlist_top_percent =" not in query.lower()

@@ -128,6 +128,14 @@ def _job_create_payload(form: Any) -> dict[str, Any]:
         min_years = int(min_years_raw) if min_years_raw else None
     except ValueError:
         min_years = None
+    shortlist_top_percent_raw = (form.get("shortlist_top_percent") or "").strip()
+    shortlist_top_percent: int
+    try:
+        shortlist_top_percent = (
+            int(shortlist_top_percent_raw) if shortlist_top_percent_raw else 100
+        )
+    except ValueError:
+        shortlist_top_percent = 100
     return {
         "title": (form.get("title") or "").strip(),
         "department": (form.get("department") or "").strip() or None,
@@ -135,6 +143,7 @@ def _job_create_payload(form: Any) -> dict[str, Any]:
         "min_years": min_years,
         "description_raw": form.get("description_raw") or "",
         "blind_review": "blind_review" in form,
+        "shortlist_top_percent": shortlist_top_percent,
     }
 
 

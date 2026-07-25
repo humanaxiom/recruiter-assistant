@@ -411,6 +411,93 @@ def test_jobs_description_sha256_index_is_partial() -> None:
     )
 
 
+# ── jobs.shortlist_top_percent (per-job configurable shortlist cap, slice A) ─
+# Today the shortlist persists ALL ranked candidates up to match_coarse_k=50 —
+# no fixed cap. shortlist_top_percent (1-100, default 100 = today's "keep
+# all") caps the persisted shortlist to the top P% of the ranked pool. THIS
+# SLICE is schema-only (the engine cap and the form land in slices B/C). Like
+# description_sha256 above, this is a NEW COLUMN on an EXISTING table: both
+# the CREATE TABLE column (fresh installs) AND a matching idempotent ALTER
+# (already-migrated dev/CI volumes) are required by the FU-3 convention.
+#
+# There is no idempotent-CHECK precedent anywhere in this DDL (no
+# ``ADD CONSTRAINT IF NOT EXISTS`` — that clause does not exist in Postgres
+# for CHECK constraints pre-15, and this codebase does not use the DO-block
+# guard style for constraints the way it does for enums). So the 1-100 CHECK
+# rides inline on the ADD COLUMN clause itself: the WHOLE clause — including
+# the constraint — is skipped by IF NOT EXISTS once the column exists, which
+# keeps the statement safely idempotent without a separate guarded ALTER.
+
+
+def test_jobs_shortlist_top_percent_in_create_table() -> None:
+    """Fresh installs get the column straight from the CREATE TABLE."""
+    assert re.search(
+        r"shortlist_top_percent\s+INTEGER\s+NOT\s+NULL\s+DEFAULT\s+100",
+        _table_sql("jobs"),
+        re.IGNORECASE,
+    )
+
+
+def test_jobs_shortlist_top_percent_check_in_create_table() -> None:
+    assert re.search(
+        r"shortlist_top_percent\s+BETWEEN\s+1\s+AND\s+100",
+        _table_sql("jobs"),
+        re.IGNORECASE,
+    )
+
+
+def test_jobs_shortlist_top_percent_has_an_idempotent_alter() -> None:
+    """Existing dev/CI volumes already have a `jobs` table — CREATE TABLE IF
+    NOT EXISTS is a no-op against them, so only a separate idempotent ALTER
+    lands the column there (mirrors description_sha256 above)."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"shortlist_top_percent\s+INTEGER\s+NOT\s+NULL\s+DEFAULT\s+100",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one idempotent ALTER for the column"
+
+
+def test_jobs_shortlist_top_percent_alter_includes_the_check() -> None:
+    """No idempotent-CHECK precedent exists in this DDL, so the CHECK must
+    ride inline on the ADD COLUMN clause — see the section note above."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"shortlist_top_percent",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert alters, "no ALTER for shortlist_top_percent"
+    assert re.search(
+        r"CHECK\s*\(\s*shortlist_top_percent\s+BETWEEN\s+1\s+AND\s+100\s*\)",
+        alters[0],
+        re.IGNORECASE,
+    ), alters[0]
+
+
+def test_jobs_shortlist_top_percent_alter_runs_after_the_create_table() -> None:
+    alter_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"shortlist_top_percent",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    assert _statement_index("jobs") < alter_idx
+
+
 # ── resumes / PII ──────────────────────────────────────────────────────────
 
 

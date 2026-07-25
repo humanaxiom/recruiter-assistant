@@ -49,7 +49,9 @@ from src.worker.job_lock import release_job_lock, try_job_lock
 
 log = logging.getLogger(__name__)
 
-_JOB_META_SQL = "SELECT description_parsed FROM jobs WHERE id = $1"
+_JOB_META_SQL = (
+    "SELECT description_parsed, shortlist_top_percent FROM jobs WHERE id = $1"
+)
 _RESUME_STATUS_SQL = "SELECT status FROM resumes WHERE id = $1"
 _PARSED_JOB_IDS_SQL = "SELECT id FROM jobs WHERE description_parsed IS NOT NULL"
 
@@ -87,6 +89,7 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
                 weights=weights_from_settings(settings),
                 coarse_k=settings.match_coarse_k,
                 evidence_k=settings.match_evidence_k,
+                top_percent=row["shortlist_top_percent"],
             )
 
             async with conn.transaction():

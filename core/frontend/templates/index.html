@@ -31,6 +31,11 @@
              value="{{ form.get('min_years', '') }}">
     </div>
     <div class="form-group">
+      <label class="label" for="shortlist_top_percent">Shortlist size (% of ranked candidates)</label>
+      <input class="input" id="shortlist_top_percent" name="shortlist_top_percent" type="number" min="1" max="100"
+             value="{{ form.get('shortlist_top_percent') or 100 }}">
+    </div>
+    <div class="form-group">
       <label class="label" for="jd-file">Prefill from a JD file</label>
       <input class="input" id="jd-file" name="file" type="file"
              hx-post="/jobs/jd-extract" hx-target="#description"
