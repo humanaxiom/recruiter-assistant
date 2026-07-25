@@ -32,6 +32,7 @@ from src.api.deps import (
     _DEV_ADMIN_SENTINEL_ID,
     Role,
     get_arq,
+    log_auditor_read,
     require_role,
     resolve_user,
     scoped_user_id_or_403,
@@ -252,9 +253,17 @@ async def get_resume(
 
     FU-6 slice 6 (ADR-020 §3/§5) — row-scoped for a hiring_manager SESSION;
     an unassigned or nonexistent résumé both surface as 404 (never 403) via
-    ``resume_service.get_one``'s ``NotFoundError``."""
+    ``resume_service.get_one``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
     user_id = await scoped_user_id_or_403(user, role)
-    return await resume_service.get_one(db, resume_id, user_id=user_id)
+    resume = await resume_service.get_one(db, resume_id, user_id=user_id)
+    await log_auditor_read(
+        db, user, action="read_resume", subject_type="resume", subject_id=resume_id
+    )
+    return resume
 
 
 _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"

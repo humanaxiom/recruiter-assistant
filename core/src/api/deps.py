@@ -52,7 +52,7 @@ from fastapi import Cookie, Depends, Header, HTTPException, Request
 
 from src.models.pool import Db
 from src.schemas.auth import User
-from src.services import session_service, user_service
+from src.services import DbConn, audit_service, session_service, user_service
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -324,3 +324,50 @@ async def scoped_user_id_or_403(user: User | None, key_role: Role) -> UUID | Non
         )
 
     return None
+
+
+async def log_auditor_read(
+    db: DbConn,
+    user: User | None,
+    *,
+    action: str,
+    subject_type: str,
+    subject_id: UUID,
+    job_id: UUID | None = None,
+) -> None:
+    """FU-6 slice 8 (ADR-020 §6) — "the watchers are watched."
+
+    Auditors keep GLOBAL, unscoped read access (ADR-020 §4); the
+    compensating control is that every auditor READ is itself logged to
+    ``audit_log``. This helper is the single auditor-check shared by the four
+    deliberate single-subject/bulk read routes (``GET /jobs/{id}``, ``GET
+    /resumes/{id}``, ``GET /shortlist/{id}``, ``GET
+    /jobs/{id}/shortlist/export``) — the polled list-index routes never call
+    this at all.
+
+    Fires ONLY for a REAL auditor session: ``user is not None and user.role
+    == "auditor"`` AND ``user.id != _DEV_ADMIN_SENTINEL_ID`` (the ambient
+    CAS-disabled synthetic identity resolves ``role="admin"``, so it is
+    already excluded by the role check alone — the sentinel check is a
+    defense-in-depth belt-and-suspenders, since it can never be a real
+    ``users`` row and would violate ``audit_log.actor_user_id``'s FK if it
+    somehow reached here as ``actor_kind='user'``).
+
+    Callers MUST invoke this only AFTER the underlying read has already
+    resolved successfully (a 200) — a 404/``NotFoundError`` means nothing was
+    read, so nothing is logged. This function does not itself catch
+    exceptions; ordering is the caller's responsibility, matching
+    ``reveal_resume``'s audit-then-decrypt discipline.
+    """
+    if user is None or user.role != "auditor" or user.id == _DEV_ADMIN_SENTINEL_ID:
+        return
+    await audit_service.record_audit(
+        db,
+        actor_kind="user",
+        actor_user_id=user.id,
+        actor_service=None,
+        action=action,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        job_id=job_id,
+    )

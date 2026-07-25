@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from src.api.deps import (
     Role,
     get_arq,
+    log_auditor_read,
     require_role,
     resolve_user,
     scoped_user_id_or_403,
@@ -79,6 +80,12 @@ async def export_shortlist(
     or nonexistent job both surface as a 200 + empty export (never 404) —
     this is a by-``job_id`` LIST subresource, matching ``list_shortlist``'s
     own ADR-020 §5 behaviour.
+
+    FU-6 slice 8 (ADR-020 §6) — a deliberate BULK read, logged for a real
+    auditor session exactly like the single-subject reads (``log_auditor_read``),
+    AFTER the service call resolves and before the response returns. This
+    route never 404s (see above), so there is no 404-writes-nothing case to
+    special-case here.
     """
     user_id = await scoped_user_id_or_403(user, role)
     async with db.transaction():
@@ -86,6 +93,14 @@ async def export_shortlist(
         rows = await shortlist_service.export_rows(
             db, job_id=job_id, reveal=False, user_id=user_id
         )
+    await log_auditor_read(
+        db,
+        user,
+        action="read_shortlist_export",
+        subject_type="job",
+        subject_id=job_id,
+        job_id=job_id,
+    )
 
     if format == "csv":
         content = shortlist_service.shortlist_csv(rows)
@@ -133,9 +148,21 @@ async def get_shortlist_entry(
 ) -> ShortlistEntry:
     """FU-6 slice 7 (ADR-020 §3/§5) — row-scoped for a hiring_manager
     SESSION; an unassigned or nonexistent entry both surface as 404 (never
-    403) via ``shortlist_service.get_one``'s ``NotFoundError``."""
+    403) via ``shortlist_service.get_one``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
     user_id = await scoped_user_id_or_403(user, role)
-    return await shortlist_service.get_one(db, entry_id, user_id=user_id)
+    entry = await shortlist_service.get_one(db, entry_id, user_id=user_id)
+    await log_auditor_read(
+        db,
+        user,
+        action="read_shortlist_entry",
+        subject_type="shortlist_entry",
+        subject_id=entry_id,
+    )
+    return entry
 
 
 __all__ = ["router"]

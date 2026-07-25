@@ -25,6 +25,7 @@ from src.api.deps import (
     Role,
     actor_fields_from_user,
     get_arq,
+    log_auditor_read,
     require_role,
     resolve_user,
     scoped_user_id_or_403,
@@ -190,9 +191,22 @@ async def get_job(
 ) -> JobOut:
     """FU-6 slice 5 (ADR-020 §3/§5) — row-scoped for a hiring_manager
     SESSION; an unassigned or nonexistent job both surface as 404 (never
-    403) via ``job_service.get_job``'s ``NotFoundError``."""
+    403) via ``job_service.get_job``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
     user_id = await scoped_user_id_or_403(user, role)
-    return await job_service.get_job(db, job_id, user_id=user_id)
+    job = await job_service.get_job(db, job_id, user_id=user_id)
+    await log_auditor_read(
+        db,
+        user,
+        action="read_job",
+        subject_type="job",
+        subject_id=job_id,
+        job_id=job_id,
+    )
+    return job
 
 
 @router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])
