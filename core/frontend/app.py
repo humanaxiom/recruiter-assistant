@@ -23,6 +23,7 @@ from flask import (
     Response,
     abort,
     flash,
+    g,
     redirect,
     render_template,
     request,
@@ -78,6 +79,7 @@ def _cas_auth_gate() -> Any:
         status = api_client.get_cas_user()
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    g.cas_user = status
     if status.get("authenticated"):
         return None
     login_url = (
@@ -85,6 +87,25 @@ def _cas_auth_gate() -> Any:
         + urlencode({"next": request.path})
     )
     return redirect(login_url)
+
+
+@app.context_processor
+def inject_current_user() -> dict[str, Any]:
+    """Injects the header auth widget's context into every template render.
+
+    ``current_user`` is the ``g.cas_user`` status dict stashed by
+    ``_cas_auth_gate`` above (reused, never re-fetched) — ``None`` when CAS is
+    disabled (dev mode, no gate call at all). ``logout_url``/``login_url`` are
+    built from a FRESH :func:`get_settings` call, mirroring the gate's own
+    settings-reload discipline.
+    """
+    settings = get_settings()
+    base = settings.cas_service_base_url.rstrip("/")
+    return {
+        "current_user": getattr(g, "cas_user", None),
+        "logout_url": f"{base}/auth/cas/logout",
+        "login_url": f"{base}/auth/cas/login?next=/",
+    }
 
 
 @app.get("/health")

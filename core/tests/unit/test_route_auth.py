@@ -1033,3 +1033,146 @@ async def test_cas_validate_no_ticket_restart_is_unchanged_by_frontend_base_sett
     location = resp.headers["location"]
     assert location.startswith("/auth/cas/login")
     assert "localhost:5000" not in location
+
+
+# ── GET /auth/cas/logout — the `service`/landing param lands the browser on
+# the FRONTEND, not the API (branch feat/frontend-auth-widget, part 2 of the
+# two-part CAS-UI fix; same split-origin cause as the post-LOGIN redirect
+# fixed above, now for post-LOGOUT) ────────────────────────────────────────
+#
+# Bug (observed live): CAS's own `/logout?service=...` redirects the browser
+# to whatever `service` URL `cas_logout` hands it. Today that is always
+# `_service_base(settings, request)` — the API's OWN origin
+# (`cas_service_base_url`, :18000) — so after CAS logout the browser lands on
+# the raw JSON API, never back on the Flask UI (:5000). Likewise the
+# CAS-disabled dev-mode landing is a hardcoded `"/"`, resolved by the browser
+# against the API's own origin. The fix: when
+# `settings.cas_frontend_base_url` is configured, `cas_logout` hands CAS the
+# FRONTEND origin as `service` instead (CAS-enabled branch), and uses
+# `_landing_url(settings, "/")` for the dev-mode branch — mirroring the
+# post-login fix's `_landing_url` helper exactly. The session cookie is still
+# deleted in both branches, unconditionally, regardless of this setting.
+
+
+@pytest.mark.asyncio
+async def test_cas_logout_service_is_the_frontend_origin_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, pinned directly: CAS-enabled logout with
+    `cas_frontend_base_url` configured must hand CAS the FRONTEND origin as
+    `service=`, not the API's own `cas_service_base_url` — so the browser
+    lands back on the Flask UI once CAS's own logout redirect fires."""
+    settings = _settings(
+        cas_enabled=True,
+        cas_server_url="https://cas.example.edu/cas",
+        cas_frontend_base_url="http://localhost:5000",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/logout",
+            cookies={settings.session_cookie_name: "tok-live"},
+        )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith("https://cas.example.edu/cas/logout?")
+    outer_qs = parse_qs(urlparse(location).query)
+    assert outer_qs["service"][0] == "http://localhost:5000", (
+        "the service handed to CAS's own /logout must be the FRONTEND "
+        f"origin, not the API base; got {outer_qs['service'][0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cas_logout_deletes_the_session_cookie_with_frontend_base_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        cas_enabled=True,
+        cas_frontend_base_url="http://localhost:5000",
+        session_cookie_name="ra_session",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/logout", cookies={"ra_session": "tok-live"})
+    assert "ra_session" in resp.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_cas_logout_still_revokes_the_session_with_frontend_base_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend-origin fix must not come at the cost of actually revoking
+    the session — the local double records an `execute` touching the
+    `sessions`/`revoked_at` predicate."""
+    settings = _settings(
+        cas_enabled=True,
+        cas_frontend_base_url="http://localhost:5000",
+        session_cookie_name="ra_session",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        await client.get("/auth/cas/logout", cookies={"ra_session": "tok-live"})
+    assert any(
+        "revoked_at" in query.lower() and "sessions" in query.lower()
+        for query, _ in conn.execute_calls
+    ), "logout must still revoke the session row"
+
+
+@pytest.mark.asyncio
+async def test_cas_logout_service_is_unchanged_when_frontend_base_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default `cas_frontend_base_url=""` must preserve today's behaviour
+    exactly: the service handed to CAS stays `_service_base` (the API's own
+    origin) — this is the same-origin (no bug) deployment shape and must not
+    regress for anyone who has not opted in to the new setting."""
+    settings = _settings(
+        cas_enabled=True,
+        cas_server_url="https://cas.example.edu/cas",
+        cas_frontend_base_url="",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/logout",
+            cookies={settings.session_cookie_name: "tok-live"},
+        )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    outer_qs = parse_qs(urlparse(location).query)
+    assert outer_qs["service"][0] == "http://localhost:8000", (
+        "with no frontend base configured, the service must stay the API's "
+        f"own default origin; got {outer_qs['service'][0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cas_disabled_logout_lands_on_the_frontend_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CAS-disabled dev-mode logout must also land on the FRONTEND origin
+    when configured — the local-dev, CAS-disabled equivalent of the same
+    bug, mirroring `_landing_url`'s existing use in `cas_login`/
+    `cas_validate`."""
+    settings = _settings(
+        cas_enabled=False,
+        cas_frontend_base_url="http://localhost:5000",
+        session_cookie_name="ra_session",
+    )
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn()
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/logout", cookies={"ra_session": "tok-live"})
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "http://localhost:5000/"
+    assert "ra_session" in resp.headers.get("set-cookie", "")
