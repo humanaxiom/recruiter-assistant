@@ -90,7 +90,11 @@ class JobAssigneeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: UUID
-    note: str | None = None
+    # Capped like the other free-text job fields (department/location) — ``note``
+    # rides verbatim into the ``assign_job`` audit_log.details JSONB, so an
+    # unbounded value is an at-rest storage-growth vector (reviewer + security,
+    # FU-6 gates). 200 chars is ample for operational context.
+    note: str | None = Field(default=None, max_length=200)
 
 
 # ---------- HTTP responses ----------
