@@ -182,6 +182,37 @@ async def list_jobs(
     )
 
 
+@router.get("/my/jobs")
+async def my_jobs(
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    status_filter: Annotated[JobStatus | None, Query(alias="status")] = None,
+) -> list[JobListItem]:
+    """FU-6 slice 9 (ADR-020 §7) — the caller's OWN assigned job set, for
+    ANY role. Unlike ``GET /jobs``/``GET /jobs/{job_id}``, this does NOT use
+    ``scoped_user_id_or_403`` (which resolves ``None`` — "all jobs" — for
+    admin/recruiter/auditor sessions): it always scopes to the resolved
+    session user's own id directly, so an admin session here still only
+    sees THAT admin's own assignments.
+
+    Identity is REQUIRED: no resolvable session (``resolve_user`` -> ``None``)
+    raises 403 before ``job_service.list_jobs`` is ever called ("a 'my' view
+    needs a 'me'"). The CAS-disabled dev-anonymous synthetic admin IS a
+    resolved (sentinel) identity, not "no session" — it scopes to the
+    sentinel id and returns 200 + ``[]`` (the sentinel is never a real
+    assignee row)."""
+    if user is None:
+        raise HTTPException(
+            status_code=403, detail="a session identity is required for /my/jobs"
+        )
+    return await job_service.list_jobs(
+        db, limit=limit, offset=offset, status=status_filter, user_id=user.id
+    )
+
+
 @router.get("/jobs/{job_id}")
 async def get_job(
     job_id: UUID,
