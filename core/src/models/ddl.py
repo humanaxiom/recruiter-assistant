@@ -255,12 +255,25 @@ _STATEMENTS: tuple[str, ...] = (
         cas_username TEXT NOT NULL UNIQUE,
         display_name TEXT,
         email        TEXT,
-        role         TEXT NOT NULL DEFAULT 'recruiter',
+        role         TEXT,
         active       BOOLEAN NOT NULL DEFAULT true,
         created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
         last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # ADR-019 §10a: a human-directed reversal of this same ADR's §2 step 3 /
+    # §4, which originally required ``role TEXT NOT NULL DEFAULT 'recruiter'``
+    # so a first CAS login would default to the recruiter role. The
+    # provisioning INSERT still writes 'recruiter'/'admin' explicitly today
+    # (FU-5 slice 1 is schema-only; flipping provisioning to omit role is
+    # slice 2) — this pair of ALTERs only makes storing NULL *possible*. Same
+    # already-migrated-volume risk as description_sha256/shortlist_top_percent
+    # above: CREATE TABLE IF NOT EXISTS is a no-op against an existing dev/CI
+    # volume that already has the NOT NULL DEFAULT 'recruiter' column, so both
+    # ALTERs are required to relax it there too. Both are no-ops on re-run and
+    # never touch existing row data.
+    "ALTER TABLE users ALTER COLUMN role DROP DEFAULT",
+    "ALTER TABLE users ALTER COLUMN role DROP NOT NULL",
     # ── audit_log (ADR-019 §1.4/§6, FU-5 slice 1: schema only) ───────────────
     # Generalized, append-only audit sink replacing reveal-only reveal_audit.
     # Every row names EXACTLY ONE actor: a human (actor_kind='user', with
