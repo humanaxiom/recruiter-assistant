@@ -112,6 +112,7 @@ async def record_parse_failure(conn: DbConn, job_id: UUID, reason: str) -> None:
 _JOB_COLS = (
     "id, title, department, location, employment_type, seniority, min_years, "
     "description_raw, description_parsed, status, retention_days, "
+    "shortlist_top_percent, "
     "blind_review, failure_reason, created_by, created_at, updated_at, "
     "parsed_at, closed_at"
 )
@@ -119,8 +120,9 @@ _JOB_COLS = (
 _INSERT_JOB_SQL = f"""
 INSERT INTO jobs (
     title, department, location, employment_type, seniority, min_years,
-    description_raw, retention_days, blind_review, created_by, description_sha256
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    description_raw, retention_days, shortlist_top_percent, blind_review,
+    created_by, description_sha256
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING {_JOB_COLS}
 """
 
@@ -154,6 +156,7 @@ async def _insert_job(
         payload.min_years,
         payload.description_raw,
         payload.retention_days,
+        payload.shortlist_top_percent,
         payload.blind_review,
         created_by,
         description_sha256,
@@ -195,6 +198,7 @@ _UPDATABLE_JOB_COLUMNS: frozenset[str] = frozenset(
         "min_years",
         "description_raw",
         "retention_days",
+        "shortlist_top_percent",
         "blind_review",
     }
 )
@@ -229,6 +233,7 @@ def _row_to_jobout(row: Any) -> JobOut:
         description_parsed=description_parsed,
         status=raw["status"],
         retention_days=raw["retention_days"],
+        shortlist_top_percent=raw["shortlist_top_percent"],
         blind_review=raw["blind_review"],
         failure_reason=raw["failure_reason"],
         created_by=raw["created_by"],

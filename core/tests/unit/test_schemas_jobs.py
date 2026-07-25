@@ -87,6 +87,7 @@ def _job_out_kwargs(**over: object) -> dict[str, object]:
         "description_parsed": None,
         "status": "open",
         "retention_days": 180,
+        "shortlist_top_percent": 100,
         "blind_review": True,
         "failure_reason": None,
         "created_by": "recruiter@sfu.ca",
@@ -304,3 +305,55 @@ def test_job_assignee_create_note_allows_none() -> None:
 def test_job_assignee_create_note_rejects_an_overlong_value() -> None:
     with pytest.raises(ValidationError):
         JobAssigneeCreate(user_id=uuid4(), note="x" * 201)
+
+
+# ── shortlist_top_percent (per-job configurable shortlist cap, slice A) ─────
+# Schema-foundation slice: engine cap (slice B) and form (slice C) come later.
+# 1-100, default 100 == today's "keep all ranked candidates" behaviour.
+
+
+def test_job_create_shortlist_top_percent_defaults_100() -> None:
+    job = JobCreate(title="Dev", description_raw=_DESC)
+    assert job.shortlist_top_percent == 100
+
+
+@pytest.mark.parametrize("value", [1, 100])
+def test_job_create_shortlist_top_percent_accepts_bounds(value: int) -> None:
+    job = JobCreate(title="Dev", description_raw=_DESC, shortlist_top_percent=value)
+    assert job.shortlist_top_percent == value
+
+
+@pytest.mark.parametrize("bad", [0, 101])
+def test_job_create_shortlist_top_percent_rejects_out_of_range(bad: int) -> None:
+    with pytest.raises(ValidationError):
+        JobCreate(title="Dev", description_raw=_DESC, shortlist_top_percent=bad)
+
+
+def test_job_update_shortlist_top_percent_defaults_none() -> None:
+    """PATCH omit ⇒ 'unchanged', same convention as every other JobUpdate field."""
+    upd = JobUpdate()
+    assert upd.shortlist_top_percent is None
+
+
+def test_job_update_shortlist_top_percent_accepts_a_valid_value() -> None:
+    upd = JobUpdate(shortlist_top_percent=42)
+    assert upd.shortlist_top_percent == 42
+
+
+@pytest.mark.parametrize("bad", [0, 101])
+def test_job_update_shortlist_top_percent_rejects_out_of_range(bad: int) -> None:
+    with pytest.raises(ValidationError):
+        JobUpdate(shortlist_top_percent=bad)
+
+
+def test_job_out_shortlist_top_percent_round_trips() -> None:
+    job = JobOut(**_job_out_kwargs(shortlist_top_percent=55))
+    assert job.shortlist_top_percent == 55
+
+
+def test_job_out_shortlist_top_percent_is_required() -> None:
+    """No default on JobOut — every read must carry the persisted value."""
+    kwargs = _job_out_kwargs()
+    del kwargs["shortlist_top_percent"]
+    with pytest.raises(ValidationError):
+        JobOut(**kwargs)

@@ -51,6 +51,7 @@ def _job_row(*, job_id: UUID, title: str) -> _Row:
             "description_parsed": None,
             "status": "draft",
             "retention_days": 180,
+            "shortlist_top_percent": 100,
             "blind_review": True,
             "failure_reason": None,
             "created_by": "api",

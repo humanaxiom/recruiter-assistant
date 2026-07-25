@@ -446,3 +446,125 @@ async def test_missing_job_row_still_releases_the_lock() -> None:
 
     assert result == "missing"
     release_lock.assert_awaited_once()
+
+
+# ── FU-configurable-shortlist-size slice B: shortlist_top_percent wiring ───
+#
+# Slice A (already GREEN on this branch) added ``jobs.shortlist_top_percent``
+# (1-100, default 100) as a schema-only column. ``shortlist_job`` does not
+# read it yet -- the job-status row fetch (``_JOB_META_SQL``) selects only
+# ``description_parsed``, and ``generate_shortlist`` is called with no
+# ``top_percent`` argument at all. Slice B requires ``shortlist_job`` to read
+# the column off the SAME row fetch and forward it as ``top_percent`` into
+# ``generate_shortlist`` -- these tests fail today because the forwarded
+# kwarg is simply absent (``generate.await_args.kwargs`` has no
+# ``"top_percent"`` key), even though the mock itself would silently accept
+# any kwargs.
+
+
+@pytest.mark.asyncio
+async def test_shortlist_job_forwards_the_jobs_shortlist_top_percent_column() -> None:
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(
+        _Row(
+            {
+                "description_parsed": {"required_skills": []},
+                "shortlist_top_percent": 30,
+            }
+        )
+    )
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=ShortlistResult(job_id=job_id, entries=[]),
+        ) as generate,
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+    ):
+        await shortlist_job(ctx, str(job_id))
+
+    assert generate.await_args is not None
+    assert generate.await_args.kwargs.get("top_percent") == 30, (
+        "shortlist_job must read shortlist_top_percent off the job row and "
+        "forward it as generate_shortlist(..., top_percent=<value>) -- got "
+        f"kwargs={generate.await_args.kwargs!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shortlist_job_forwards_a_non_default_shortlist_top_percent() -> None:
+    """A second, DIFFERENT value from the test above -- a builder that
+    hardcodes 30 (or any other single literal) instead of actually reading
+    the row would pass the first test but fail this one."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(
+        _Row(
+            {
+                "description_parsed": {"required_skills": []},
+                "shortlist_top_percent": 75,
+            }
+        )
+    )
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=ShortlistResult(job_id=job_id, entries=[]),
+        ) as generate,
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+    ):
+        await shortlist_job(ctx, str(job_id))
+
+    assert generate.await_args.kwargs.get("top_percent") == 75
+
+
+@pytest.mark.asyncio
+async def test_shortlist_job_forwards_the_default_top_percent_of_100() -> None:
+    """A job that never customised its shortlist size (the DDL default, 100)
+    must forward exactly 100 -- the value that keeps generate_shortlist's
+    cap a no-op, so the eval corpus (which never sets this column) sees
+    byte-identical behaviour."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(
+        _Row(
+            {
+                "description_parsed": {"required_skills": []},
+                "shortlist_top_percent": 100,
+            }
+        )
+    )
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=ShortlistResult(job_id=job_id, entries=[]),
+        ) as generate,
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+    ):
+        await shortlist_job(ctx, str(job_id))
+
+    assert generate.await_args.kwargs.get("top_percent") == 100

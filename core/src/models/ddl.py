@@ -75,6 +75,8 @@ _STATEMENTS: tuple[str, ...] = (
         status            job_status NOT NULL DEFAULT 'draft',
         retention_days    INTEGER NOT NULL DEFAULT 180
                           CHECK (retention_days BETWEEN 30 AND 730),
+        shortlist_top_percent INTEGER NOT NULL DEFAULT 100
+                          CHECK (shortlist_top_percent BETWEEN 1 AND 100),
         blind_review      BOOLEAN NOT NULL DEFAULT TRUE,
         failure_reason    TEXT,
         created_by        TEXT,
@@ -105,6 +107,16 @@ _STATEMENTS: tuple[str, ...] = (
         ON jobs (description_sha256)
         WHERE description_sha256 IS NOT NULL
     """,
+    # Per-job configurable shortlist cap (slice A, schema only). Same
+    # already-migrated-volume risk as description_sha256 above: CREATE TABLE
+    # IF NOT EXISTS is a no-op against an existing dev/CI volume, so a
+    # separate idempotent ALTER guarantees the column lands there too. There
+    # is no idempotent-CHECK clause in Postgres pre-15 (no
+    # ``ADD CONSTRAINT IF NOT EXISTS``), so the 1-100 CHECK rides inline on
+    # the ADD COLUMN clause itself — the whole clause is skipped once the
+    # column exists, which keeps this statement safely re-runnable.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_top_percent INTEGER "
+    "NOT NULL DEFAULT 100 CHECK (shortlist_top_percent BETWEEN 1 AND 100)",
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (

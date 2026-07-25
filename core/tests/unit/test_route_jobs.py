@@ -158,6 +158,7 @@ def _job_row(
             "description_parsed": None,
             "status": status,
             "retention_days": 180,
+            "shortlist_top_percent": 100,
             "blind_review": blind_review,
             "failure_reason": None,
             "created_by": created_by,

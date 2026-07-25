@@ -32,6 +32,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -577,6 +578,21 @@ async def stage3_evidence(
 # ---------------- orchestrator ----------------
 
 
+def _apply_top_percent_cap(
+    entries: Sequence[ShortlistResultEntry], top_percent: int
+) -> list[ShortlistResultEntry]:
+    """Prefix-slice a rank-ordered ``entries`` list (rank 1 first) down to the
+    top ``top_percent``% — ``n_keep = ceil(len(entries) * top_percent / 100)``,
+    floored at 1 for a non-empty pool (never 0, which would silently produce
+    an empty shortlist from a nonzero percent), but exactly 0 when ``entries``
+    is empty (a floor of 1 there would fabricate a candidate out of nothing).
+    Never re-sorts — the caller already hands this a rank-ordered list."""
+    if not entries:
+        return []
+    n_keep = max(1, math.ceil(len(entries) * top_percent / 100))
+    return list(entries[:n_keep])
+
+
 async def generate_shortlist(
     job_id: UUID,
     ctx: MatchingContext,
@@ -584,6 +600,7 @@ async def generate_shortlist(
     weights: MatchWeights = DEFAULT_WEIGHTS,
     coarse_k: int = _COARSE_K,
     evidence_k: int = _EVIDENCE_K,
+    top_percent: int = 100,
 ) -> ShortlistResult:
     started = dt.datetime.now(dt.UTC)
     timings: dict[str, int] = {}
@@ -646,6 +663,7 @@ async def generate_shortlist(
         )
         for e in combined
     ]
+    entries = _apply_top_percent_cap(entries, top_percent)
 
     return ShortlistResult(
         job_id=job_id,

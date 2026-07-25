@@ -44,6 +44,10 @@ class JobCreate(BaseModel):
     min_years: int | None = Field(default=None, ge=0, le=50)
     description_raw: str = Field(min_length=50, max_length=200_000)
     retention_days: int = Field(default=180, ge=30, le=730)
+    # Per-job configurable shortlist cap (slice A, schema foundation only —
+    # the engine cap and the form land in slices B/C). 1-100, default 100 ==
+    # today's "keep all ranked candidates" behaviour.
+    shortlist_top_percent: int = Field(default=100, ge=1, le=100)
     # DEVIATION: dropped hris ``approval_required_2nd_review`` — the 2nd-review
     # workflow is cut and the Phase 0 DDL has no such column.
     # When true, the review surfaces hide candidate identity (blind review).
@@ -65,6 +69,8 @@ class JobUpdate(BaseModel):
     min_years: int | None = Field(default=None, ge=0, le=50)
     description_raw: str | None = Field(default=None, min_length=50, max_length=200_000)
     retention_days: int | None = Field(default=None, ge=30, le=730)
+    # PATCH omit ⇒ "unchanged", same convention as every other JobUpdate field.
+    shortlist_top_percent: int | None = Field(default=None, ge=1, le=100)
     # DEVIATION: dropped hris ``approval_required_2nd_review`` — review workflow cut.
     # A PATCH omit (None) means "unchanged".
     blind_review: bool | None = None
@@ -116,6 +122,8 @@ class JobOut(BaseModel):
     description_parsed: JDExtracted | None
     status: JobStatus
     retention_days: int
+    # Required (no default) — every read must carry the persisted value.
+    shortlist_top_percent: int
     # DEVIATION: dropped hris ``approval_required_2nd_review`` — review workflow cut.
     blind_review: bool = False
     failure_reason: str | None
