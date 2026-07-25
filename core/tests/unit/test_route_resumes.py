@@ -81,7 +81,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import resumes as resumes_routes
-from src.errors import AppError
+from src.errors import AppError, NotFoundError
 from src.models.pool import get_db
 from src.schemas.auth import User
 from src.schemas.resumes import CandidateInfo, ResumeOut
@@ -1198,3 +1198,146 @@ async def test_get_resume_403s_and_never_calls_the_service_for_hiring_manager_ke
 
     assert resp.status_code == 403
     get_mock.assert_not_awaited()
+
+
+# ── FU-6 slice 8 (ADR-020 §6) — auditor read-logging: "the watchers are
+#    watched", GET /resumes/{id} ─────────────────────────────────────────────
+#
+# Scope decision mirrored from ``test_route_jobs.py`` (see that file's
+# matching section header for the full rationale): only the single-subject
+# ``GET /resumes/{id}`` is logged here — the polled list route ``GET
+# /jobs/{id}/resumes`` is deliberately NOT logged (dedicated negative test
+# below). The read-log fires ONLY for a REAL auditor session (``user.role ==
+# "auditor"`` and not the dev-anonymous sentinel), and only on a SUCCESSFUL
+# (200) read. Patches ``resumes_routes.audit_service`` directly — that
+# module is ALREADY imported into ``resumes.py`` (used by the reveal route),
+# so this is the exact same attribute ``test_route_reveal.py`` patches for
+# reveal's own audit row; this slice's read-log is a SEPARATE call, never a
+# duplicate of the reveal audit (the reveal route is untouched by this
+# slice).
+
+
+def _auditor_identity_user(*, cas_username: str = "audrey") -> User:
+    return _identity_user(cas_username=cas_username, role="auditor")
+
+
+@pytest.mark.asyncio
+async def test_get_resume_real_auditor_session_writes_exactly_one_read_resume_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_identity_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(return_value=_resume_out(resume_id=resume_id))
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_resume"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "resume"
+    assert kwargs["subject_id"] == resume_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_resume_non_auditor_session_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_mock = AsyncMock(return_value=_resume_out(resume_id=resume_id))
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_resume_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_mock = AsyncMock(return_value=_resume_out(resume_id=resume_id))
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_resume_404_writes_no_read_log_even_for_a_real_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_identity_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(
+        side_effect=NotFoundError(
+            f"resume {resume_id} not found", resume_id=str(resume_id)
+        )
+    )
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/resumes/{resume_id}")
+
+    assert resp.status_code == 404
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_resumes_never_writes_a_read_log_even_for_an_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope decision: the polled list route ``GET /jobs/{id}/resumes`` is
+    never read-logged, even for a real auditor session."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_identity_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(resumes_routes.resume_service, "list_for_job", list_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(resumes_routes.audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/resumes")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()

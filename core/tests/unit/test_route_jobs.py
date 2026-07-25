@@ -100,10 +100,11 @@ from httpx import ASGITransport, AsyncClient
 
 from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import jobs as jobs_routes
-from src.errors import AppError
+from src.errors import AppError, NotFoundError
 from src.models.pool import get_db
 from src.schemas.auth import User
 from src.schemas.jobs import JobOut
+from src.services import audit_service
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
 
@@ -1115,3 +1116,166 @@ async def test_patch_job_blind_review_flip_ignores_x_actor_name_header(
     kwargs = audit.await_args.kwargs
     assert kwargs["actor_kind"] == "service"
     assert kwargs["actor_service"] == "dev-anonymous"
+
+
+# ── FU-6 slice 8 (ADR-020 §6) — auditor read-logging: "the watchers are
+#    watched" ───────────────────────────────────────────────────────────────
+#
+# Auditors keep GLOBAL, unscoped read access (ADR-020 §4) — the compensating
+# control is that every auditor READ is itself logged to ``audit_log``
+# (ADR-020 §6). Scope decision (a coordinator judgment, pinned here): only
+# the DELIBERATE single-subject read ``GET /jobs/{id}`` is logged — the
+# polled list-index route ``GET /jobs`` (hit by the Flask frontend every
+# ~3s, carrying no specific subject) is deliberately NOT logged; logging
+# every poll would flood ``audit_log`` with noise that names no particular
+# job. See ``test_list_jobs_never_writes_a_read_log_even_for_an_auditor``
+# below for the negative pin.
+#
+# The read-log fires ONLY for a REAL auditor session — ``user is not None
+# and user.role == "auditor"`` AND ``user.id != _DEV_ADMIN_SENTINEL_ID`` (the
+# ambient CAS-disabled default resolves a SYNTHETIC identity with
+# ``role="admin"``, never ``"auditor"``, so it is excluded by the role check
+# alone — a dedicated test below pins it explicitly anyway). Written only on
+# a SUCCESSFUL (200) read — a 404 means nothing was read, so no row.
+#
+# These tests patch the SHARED ``src.services.audit_service`` module object
+# directly (imported fresh at the top of this file), not a
+# ``jobs_routes``-local alias — this makes the pin agnostic to whether the
+# coder's implementation imports it as ``from src.services import
+# audit_service`` directly into ``jobs.py``, or reuses ``job_service``'s
+# existing import (``jobs_routes.job_service.audit_service`` is the SAME
+# module object, per Python's module cache, as already proven by the
+# ``blind_review`` audit tests above patching it that exact way). Either
+# implementation choice is intercepted identically by patching the shared
+# module.
+
+
+def _auditor_session_user(*, cas_username: str = "audrey") -> User:
+    return _user(cas_username=cas_username, role="auditor")
+
+
+@pytest.mark.asyncio
+async def test_get_job_real_auditor_session_writes_exactly_one_read_job_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_session_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_job"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "job"
+    assert kwargs["subject_id"] == job_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_job_non_auditor_session_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_job_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient default (no ``resolve_user`` override, CAS disabled): the
+    synthetic dev-anonymous identity resolves with ``role="admin"``, never
+    ``"auditor"`` — must never write a read-log row."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_job_mock = AsyncMock(return_value=_job_out(job_id=job_id))
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_job_404_writes_no_read_log_even_for_a_real_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 means nothing was read — no audit row, even for a genuine
+    auditor session. (Auditor is unscoped per ADR-020 §4, so in practice this
+    fires only for a genuinely nonexistent job id.)"""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_session_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_job_mock = AsyncMock(
+        side_effect=NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+    )
+    monkeypatch.setattr(jobs_routes.job_service, "get_job", get_job_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 404
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_never_writes_a_read_log_even_for_an_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope decision pinned above: the polled list-index route ``GET
+    /jobs`` is NEVER read-logged, even for a real auditor session — it
+    carries no specific subject and the frontend polls it every ~3s."""
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_session_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    list_jobs_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(jobs_routes.job_service, "list_jobs", list_jobs_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get("/jobs")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()

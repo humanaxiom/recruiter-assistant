@@ -107,10 +107,11 @@ from httpx import ASGITransport, AsyncClient
 
 from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import shortlist as shortlist_routes
-from src.errors import AppError
+from src.errors import AppError, NotFoundError
 from src.models.pool import get_db
 from src.schemas.auth import User
 from src.schemas.matching import EvidenceObject, ScoreBreakdown, ShortlistEntry
+from src.services import audit_service
 from src.services.shortlist_service import _CSV_FIELDS
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
@@ -861,3 +862,229 @@ async def test_export_shortlist_403s_and_never_calls_the_service_for_hiring_mana
 
     assert resp.status_code == 403
     export_mock.assert_not_awaited()
+
+
+# ── FU-6 slice 8 (ADR-020 §6) — auditor read-logging: "the watchers are
+#    watched", GET /shortlist/{id} and GET /jobs/{job_id}/shortlist/export ──
+#
+# Scope decision mirrored from test_route_jobs.py / test_route_resumes.py
+# (see those files' section headers for the full rationale): the
+# single-subject GET /shortlist/{entry_id} AND the bulk-candidate-pull
+# GET /jobs/{job_id}/shortlist/export are BOTH logged -- export is a
+# deliberate bulk read worth auditing even though it is keyed by job_id, not
+# a single-entry id. The polled list route GET /jobs/{job_id}/shortlist is
+# deliberately NOT logged (dedicated negative test below). The read-log
+# fires ONLY for a REAL auditor session, and only on success (200; for
+# GET /shortlist/{id} that means the entry exists -- the export route never
+# 404s at all, see its own docstring, so it has no 404-no-audit case).
+# Patches a FRESH "from src.services import audit_service" import at the top
+# of this file (this routes module does not import it yet) -- see
+# test_route_jobs.py's identical note on why patching the shared module
+# object directly is implementation-agnostic.
+
+
+def _auditor_shortlist_user(*, cas_username: str = "audrey") -> User:
+    return _identity_user(cas_username=cas_username, role="auditor")
+
+
+# ── GET /shortlist/{entry_id} ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_real_auditor_writes_one_read_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_shortlist_entry"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "shortlist_entry"
+    assert kwargs["subject_id"] == entry_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_non_auditor_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_404_writes_no_read_log_even_for_a_real_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(
+        side_effect=NotFoundError(
+            f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
+        )
+    )
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 404
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_never_writes_a_read_log_even_for_an_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope decision: the polled list route GET /jobs/{job_id}/shortlist
+    is never read-logged, even for a real auditor session."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+# ── GET /jobs/{job_id}/shortlist/export — a deliberate bulk read ─────────
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_real_auditor_writes_one_read_export_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_shortlist_export"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "job"
+    assert kwargs["subject_id"] == job_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_export_shortlist_non_auditor_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.ADMIN)
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
