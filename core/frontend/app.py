@@ -101,9 +101,28 @@ _JOB_STATUSES = ("draft", "open", "closed", "archived")
 
 @app.get("/")
 def index() -> Any:
+    """FU-6/ADR-020 §7 default-view switch: a hiring_manager sees THEIR
+    assigned jobs (``GET /my/jobs``) by default; every other role (and the
+    CAS-disabled dev-anonymous default) keeps the global ``GET /jobs`` list,
+    unchanged.
+
+    Reads a FRESH :func:`get_settings` every request (mirroring
+    ``_cas_auth_gate`` above) and calls :func:`api_client.get_cas_user` ONLY
+    when ``cas_enabled`` is True — an unconditional call would turn every
+    existing CAS-disabled test (which relies on ``get_cas_user`` never being
+    called) into a real, unmocked outbound HTTP attempt.
+    """
     status = request.args.get("status") or None
+    settings = get_settings()
+    scoped_view = False
+    if settings.cas_enabled:
+        cas_status = api_client.get_cas_user()
+        scoped_view = cas_status.get("role") == "hiring_manager"
     try:
-        jobs = api_client.list_jobs(status=status)
+        if scoped_view:
+            jobs = api_client.my_jobs(status=status)
+        else:
+            jobs = api_client.list_jobs(status=status)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     return render_template(
@@ -114,6 +133,7 @@ def index() -> Any:
         form={},
         errors=None,
         show_form=False,
+        scoped_view=scoped_view,
     )
 
 

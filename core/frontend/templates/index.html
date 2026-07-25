@@ -3,6 +3,10 @@
 {% block content %}
 <h1>Jobs</h1>
 
+{% if scoped_view %}
+<p class="muted">Showing your assigned requisitions only — your requisitions, not the full job list.</p>
+{% endif %}
+
 {% if errors %}
 <p class="error">{{ errors }}</p>
 {% endif %}
