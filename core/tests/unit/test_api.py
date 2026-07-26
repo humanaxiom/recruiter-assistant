@@ -159,6 +159,10 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # user listing, gated on the CAS session role (see the comment block
         # above this frozenset).
         "/users",
+        # user-admin-roles slice 6 — PATCH /users/{user_id}/role, same
+        # router/gate as the listing above: an admin assigns a role, with a
+        # role_changed audit row and a last-admin-lockout guard.
+        "/users/{user_id}/role",
     }
 )
 
