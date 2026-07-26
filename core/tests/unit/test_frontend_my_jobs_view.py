@@ -231,32 +231,37 @@ def test_other_roles_see_the_global_job_list(
     my_jobs_guard.assert_not_called()
 
 
-def test_missing_or_none_role_falls_back_to_the_global_list(
+def test_none_role_authenticated_user_is_intercepted_with_pending_access(
     monkeypatch: Any, client: Any
 ) -> None:
-    """Edge case distinct from the parametrized roles above: an authenticated
-    session whose ``role`` is ``None`` (e.g. a malformed/edge status payload)
-    must still default to ``list_jobs()``, never crash and never call
-    ``my_jobs``."""
+    """SUPERSEDED by user-admin slice 4 (ADR-019 §10a reversal): this test
+    previously asserted an authenticated ``role=None`` session fell back to the
+    global ``list_jobs()`` — modelling None as a malformed/edge status. Slice 4
+    redefines an authenticated ``role=None`` as a first-class "no role assigned
+    yet" state that ``_cas_auth_gate`` intercepts BEFORE ``index()`` runs, so
+    the fallback path is now unreachable via the client. The correct behaviour
+    is: the pending-access page renders, and NEITHER ``list_jobs`` nor
+    ``my_jobs`` is called."""
     monkeypatch.setattr(
         frontend_app_module, "get_settings", lambda: _cas_enabled_settings()
     )
     monkeypatch.setattr(
         api_client, "get_cas_user", MagicMock(return_value=_authenticated(None))
     )
-    job_id = uuid4()
-    list_jobs_mock = MagicMock(return_value=[_job(job_id, title="Global Fallback Job")])
-    my_jobs_guard = MagicMock(
-        side_effect=AssertionError("my_jobs must not be called when role is None")
+    list_jobs_guard = MagicMock(
+        side_effect=AssertionError("list_jobs must not run for a no-role user")
     )
-    monkeypatch.setattr(api_client, "list_jobs", list_jobs_mock)
+    my_jobs_guard = MagicMock(
+        side_effect=AssertionError("my_jobs must not run for a no-role user")
+    )
+    monkeypatch.setattr(api_client, "list_jobs", list_jobs_guard)
     monkeypatch.setattr(api_client, "my_jobs", my_jobs_guard)
 
     resp = client.get("/", headers={"Cookie": "ra_session=tok-live"})
 
     assert resp.status_code == 200
-    assert b"Global Fallback Job" in resp.data
-    list_jobs_mock.assert_called()
+    assert b"no role" in resp.data.lower()
+    list_jobs_guard.assert_not_called()
     my_jobs_guard.assert_not_called()
 
 
