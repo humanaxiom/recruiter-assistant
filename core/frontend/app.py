@@ -81,6 +81,8 @@ def _cas_auth_gate() -> Any:
         return _unavailable(exc)
     g.cas_user = status
     if status.get("authenticated"):
+        if status.get("role") is None:
+            return render_template("pending_access.html"), 200
         return None
     login_url = (
         f"{settings.cas_service_base_url.rstrip('/')}/auth/cas/login?"
