@@ -33,6 +33,17 @@ assert ``role is None`` — this is the authorized reversal target, not a
 this ADR reversal). Slice 3 adds the fail-closed gate that rejects a
 no-role user from doing anything; a no-role user existing but not yet
 blocked is this slice's intentional, known intermediate state.
+
+**user-admin-roles slice 5 — ``list_users``, the ``GET /users`` admin-listing
+backend.** ``core/src/services/user_service.py`` does not have this function
+yet — every ``list_users`` test below fails with ``AttributeError: module
+'src.services.user_service' has no attribute 'list_users'``, RED. Purely a
+pass-through-and-shape contract: whether a real Postgres actually orders by
+``created_at`` is proved against a live database in
+``tests/integration/test_users_admin_routes_pg.py`` — a fake connection
+cannot prove a real ``ORDER BY`` clause; it can only prove ``list_users``
+does not itself re-sort/drop/mutate whatever ``conn.fetch`` hands back, and
+that it maps each row into a real ``User``.
 """
 
 from __future__ import annotations
@@ -189,3 +200,140 @@ def test_provision_or_get_requires_default_admin_cas_username_kwarg() -> None:
 
     with pytest.raises(TypeError):
         user_service.provision_or_get(conn, cas_username="whoever")  # type: ignore[call-arg]
+
+
+# ── list_users — the GET /users admin-listing backend (user-admin-roles
+#    slice 5) ─────────────────────────────────────────────────────────────
+
+
+class _FakeFetchConn:
+    """Mirrors ``_FakeConn`` above but for ``.fetch`` (many rows) rather than
+    ``.fetchrow`` (one row) — ``list_users`` is a plain SELECT-many, not an
+    INSERT ... RETURNING."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.fetch_calls: list[tuple[Any, ...]] = []
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append(args)
+        return self._rows
+
+
+def _user_row(
+    *,
+    cas_username: str,
+    role: str | None,
+    display_name: str | None = "Someone",
+    email: str | None = "someone@example.org",
+    active: bool = True,
+) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    return {
+        "id": uuid4(),
+        "cas_username": cas_username,
+        "display_name": display_name,
+        "email": email,
+        "role": role,
+        "active": active,
+        "created_at": now,
+        "last_seen_at": now,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_users_returns_a_user_for_every_row() -> None:
+    from src.schemas.auth import User as _User
+
+    rows = [
+        _user_row(cas_username="alice", role="admin"),
+        _user_row(cas_username="bob", role="recruiter"),
+        _user_row(cas_username="carol", role=None),
+    ]
+    conn = _FakeFetchConn(rows)
+
+    result = await user_service.list_users(conn)
+
+    assert len(result) == 3
+    assert all(isinstance(u, _User) for u in result)
+
+
+@pytest.mark.asyncio
+async def test_list_users_preserves_fetch_order() -> None:
+    """``list_users`` must not itself re-sort — whatever order ``conn.fetch``
+    hands back (the real ORDER BY clause, proved against Postgres in the
+    integration file) is the order the caller sees."""
+    rows = [
+        _user_row(cas_username="zeta", role="admin"),
+        _user_row(cas_username="alpha", role="recruiter"),
+        _user_row(cas_username="mid", role=None),
+    ]
+    conn = _FakeFetchConn(rows)
+
+    result = await user_service.list_users(conn)
+
+    assert [u.cas_username for u in result] == ["zeta", "alpha", "mid"]
+
+
+@pytest.mark.asyncio
+async def test_list_users_maps_a_no_role_row_to_a_none_role() -> None:
+    """The whole point of the admin surface (user-admin-roles slice 5,
+    feeding slice 6's role assignment): a no-role user must show up with
+    ``role: None``, not be silently dropped or coerced to a string."""
+    rows = [_user_row(cas_username="no-role-dana", role=None)]
+    conn = _FakeFetchConn(rows)
+
+    result = await user_service.list_users(conn)
+
+    assert len(result) == 1
+    assert result[0].cas_username == "no-role-dana"
+    assert result[0].role is None
+
+
+@pytest.mark.asyncio
+async def test_list_users_returns_empty_list_when_no_users_exist() -> None:
+    conn = _FakeFetchConn([])
+
+    result = await user_service.list_users(conn)
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_users_maps_every_expected_field() -> None:
+    row = _user_row(
+        cas_username="frank",
+        role="hiring_manager",
+        display_name="Frank N. Stein",
+        email="frank@example.org",
+        active=False,
+    )
+    conn = _FakeFetchConn([row])
+
+    result = await user_service.list_users(conn)
+
+    assert len(result) == 1
+    user = result[0]
+    assert user.id == row["id"]
+    assert user.cas_username == "frank"
+    assert user.display_name == "Frank N. Stein"
+    assert user.email == "frank@example.org"
+    assert user.role == "hiring_manager"
+    assert user.active is False
+    assert user.created_at == row["created_at"]
+    assert user.last_seen_at == row["last_seen_at"]
+
+
+@pytest.mark.asyncio
+async def test_list_users_calls_fetch_exactly_once() -> None:
+    """No N+1 — one SELECT for the whole listing, not one per row."""
+    conn = _FakeFetchConn(
+        [
+            _user_row(cas_username="one", role="admin"),
+            _user_row(cas_username="two", role="recruiter"),
+        ]
+    )
+
+    await user_service.list_users(conn)
+
+    assert len(conn.fetch_calls) == 1

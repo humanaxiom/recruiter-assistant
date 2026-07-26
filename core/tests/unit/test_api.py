@@ -108,6 +108,21 @@ def test_template_demo_routes_are_gone(path: str) -> None:
 # ``src.api.routes.jobs.router`` — the only way this guard actually catches
 # "the coder implemented the route function but never decorated it (or
 # decorated it under a different path)" instead of just passing vacuously.
+#
+# user-admin-roles slice 5 widens it a SIXTH time, same reason again:
+# ``GET /users`` (the new ``src.api.routes.users`` admin-only user listing,
+# gated by the CAS SESSION role — ``_require_admin_session`` — not by
+# ``require_role``/an API key; see ``test_route_users.py`` for the route-level
+# contract) is added to the closed positive set here, in the RED commit,
+# before ``src.api.routes.users`` exists — the only way this guard actually
+# catches "the coder built the route but forgot
+# ``app.include_router(users.router)`` in ``src.api.main``" instead of just
+# passing vacuously. Deliberately NOT added to
+# ``test_router_role_gate.py``'s ``require_role_assigned`` business-router
+# positive set: the admin session-gate this route carries is STRICTER than
+# ``require_role_assigned`` (a no-role session is already 403'd by
+# ``_require_admin_session`` alone), so there is nothing for that separate
+# guard to additionally prove here.
 _PHASE_6_ROUTES: frozenset[str] = frozenset(
     {
         "/health",
@@ -140,6 +155,10 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # FU-6 slice 9 (ADR-020 §7) — GET /my/jobs, on src.api.routes.jobs's
         # existing router: the caller's own assigned job set, for any role.
         "/my/jobs",
+        # user-admin-roles slice 5 — src.api.routes.users, the admin-only
+        # user listing, gated on the CAS session role (see the comment block
+        # above this frozenset).
+        "/users",
     }
 )
 
