@@ -41,3 +41,12 @@ class FileRejectedError(AppError):
 
     code = "upload.rejected"
     status = 413
+
+
+class ConflictError(AppError):
+    """The request is well-formed and authorized but conflicts with the
+    resource's current state — e.g. ``PATCH /users/{id}/role`` demoting the
+    last active admin (user-admin-roles slice 6)."""
+
+    code = "resource.conflict"
+    status = 409
