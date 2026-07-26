@@ -110,3 +110,22 @@ async def get_by_id(conn: DbConn, user_id: UUID) -> User | None:
     """
     row = await conn.fetchrow(_GET_BY_ID_SQL, user_id)
     return User(**dict(row)) if row is not None else None
+
+
+_LIST_USERS_SQL = """
+SELECT id, cas_username, display_name, email, role, active, created_at,
+       last_seen_at
+FROM users ORDER BY created_at
+"""
+
+
+async def list_users(conn: DbConn) -> list[User]:
+    """Return every ``users`` row, ordered by ``created_at`` (user-admin-roles
+    slice 5) — the ``GET /users`` admin-listing backend.
+
+    A plain pass-through: one ``SELECT`` (no N+1), no re-sorting/filtering of
+    whatever ``conn.fetch`` hands back, mapping each row straight into a
+    :class:`~src.schemas.auth.User` (``role`` may be ``None``).
+    """
+    rows = await conn.fetch(_LIST_USERS_SQL)
+    return [User(**dict(row)) for row in rows]
