@@ -129,3 +129,34 @@ async def list_users(conn: DbConn) -> list[User]:
     """
     rows = await conn.fetch(_LIST_USERS_SQL)
     return [User(**dict(row)) for row in rows]
+
+
+_SET_ROLE_SQL = "UPDATE users SET role = $2 WHERE id = $1"
+
+
+async def set_role(conn: DbConn, user_id: UUID, role: str) -> None:
+    """Assign ``role`` to ``users.id = user_id`` (user-admin-roles slice 6) —
+    the ``PATCH /users/{id}/role`` backend.
+
+    A plain ``.execute``-and-forget UPDATE, mirroring
+    ``job_assignee_service.assign``'s own shape: no ``RETURNING`` clause, the
+    caller (the route) already holds the pre-update row (from ``get_by_id``)
+    and does not need one back here. The caller is responsible for running
+    this inside the SAME ``conn.transaction()`` as the paired
+    ``audit_service.record_audit`` call — this function does not open one
+    itself.
+    """
+    await conn.execute(_SET_ROLE_SQL, user_id, role)
+
+
+_COUNT_ACTIVE_ADMINS_SQL = "SELECT count(*) FROM users WHERE role = 'admin' AND active"
+
+
+async def count_active_admins(conn: DbConn) -> int:
+    """Count currently-active ``role='admin'`` users — the last-admin-lockout
+    guard's arithmetic (user-admin-roles slice 6).
+
+    A fixed, parameter-free query: nothing caller-supplied is bound into it.
+    """
+    count: int = await conn.fetchval(_COUNT_ACTIVE_ADMINS_SQL)
+    return count

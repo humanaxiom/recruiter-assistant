@@ -35,6 +35,13 @@ verified session invited confusion and misconfiguration.
 ``created_by``/``uploaded_by``/the reveal actor are now sourced exclusively
 from :func:`resolve_user`'s resolved ``cas_username`` (``None`` when no
 identity resolves, e.g. a bare service-key caller with CAS enabled).
+
+**Role now lives in ``src.schemas.auth`` (user-admin-roles slice 6).**
+``Role`` moved there so ``schemas.auth.RoleAssignment`` (``PATCH
+/users/{id}/role``'s request body) can use it as a field type without an
+import cycle — this module previously defined it and now just re-exports it
+(``from src.schemas.auth import Role``), so every existing ``from
+src.api.deps import Role`` / ``deps.Role`` call site is unaffected.
 """
 
 from __future__ import annotations
@@ -43,7 +50,6 @@ import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -51,6 +57,12 @@ from arq.connections import ArqRedis
 from fastapi import Cookie, Depends, Header, HTTPException, Request
 
 from src.models.pool import Db
+
+# ``Role as Role`` — mypy --strict's implicit-reexport check requires this
+# exact "as"-form for a re-exported name (see the module docstring's "Role
+# now lives in src.schemas.auth" note): every existing ``from src.api.deps
+# import Role`` call site needs this to keep resolving.
+from src.schemas.auth import Role as Role
 from src.schemas.auth import User
 from src.services import DbConn, audit_service, session_service, user_service
 from src.settings import Settings, get_settings
@@ -66,20 +78,6 @@ logger = logging.getLogger(__name__)
 # pattern) was deliberately NOT ported: it would pollute `users` with an
 # account that never actually logged in.
 _DEV_ADMIN_SENTINEL_ID = UUID("00000000-0000-0000-0000-000000000000")
-
-
-class Role(StrEnum):
-    """The four keyed roles (``StrEnum``, so each member IS its wire string —
-    ``Role.ADMIN == "admin"``).
-
-    Role-level, NOT row-level (FU-4/D6): there is no
-    per-job owner column, so a hiring-manager or auditor key grants its read
-    access across every job company-wide."""
-
-    ADMIN = "admin"
-    RECRUITER = "recruiter"
-    HIRING_MANAGER = "hiring_manager"
-    AUDITOR = "auditor"
 
 
 def _configured_role_keys(settings: Settings) -> tuple[tuple[Role, str], ...]:

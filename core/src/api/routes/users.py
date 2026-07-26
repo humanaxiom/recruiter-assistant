@@ -1,6 +1,7 @@
-"""user-admin-roles slice 5 — ``GET /users``, an admin-only listing of every
-``users`` row (the surface slice 6 will use to pick a target for a role
-change).
+"""user-admin-roles slice 5/6 — ``GET /users``, an admin-only listing of every
+``users`` row, and ``PATCH /users/{user_id}/role``, the admin role-assignment
+route (the merge-blocking payoff slice), with a ``role_changed`` audit row and
+a last-admin-lockout guard.
 
 **The core design decision this module pins (planner decision #3).** The gate
 is on the CAS SESSION role (``resolve_user().role == "admin"``), NOT the
@@ -22,13 +23,15 @@ is already 403'd by it alone), so stacking the two would be redundant.
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.api.deps import resolve_user
+from src.api.deps import actor_fields_from_user, resolve_user
+from src.errors import ConflictError, NotFoundError
 from src.models.pool import Db
-from src.schemas.auth import User
-from src.services import user_service
+from src.schemas.auth import RoleAssignment, User
+from src.services import audit_service, user_service
 
 router = APIRouter()
 
@@ -53,6 +56,60 @@ async def list_users(
     _admin: Annotated[User, Depends(_require_admin_session)],
 ) -> list[User]:
     return await user_service.list_users(db)
+
+
+@router.patch("/users/{user_id}/role")
+async def set_user_role(
+    user_id: UUID,
+    payload: RoleAssignment,
+    db: Db,
+    acting_admin: Annotated[User, Depends(_require_admin_session)],
+) -> User:
+    """An admin session assigns ``user_id`` a new role.
+
+    Gated by the same ``_require_admin_session`` as ``GET /users`` (the CAS
+    session role, never an API key). ATOMIC — the role ``UPDATE`` and the
+    ``role_changed`` audit row run inside ONE ``conn.transaction()``, mirroring
+    ``job_service.update_job``'s ``blind_review``-flip pattern and
+    ``job_assignees``'s assign/unassign atomicity: a crash or exception in the
+    audit write must roll back the role change too, so a
+    changed-but-unaudited row is never observable.
+
+    LAST-ADMIN LOCKOUT (SECURITY-CRITICAL): if the target is currently
+    ``role='admin'`` AND the new role is not ``'admin'`` AND exactly one
+    active admin exists, this raises ``ConflictError`` (409) BEFORE the
+    ``UPDATE``/audit write — the last active admin can never demote
+    themselves (or be demoted) into a state where nobody can administer the
+    system. No audit row is written for this rejected attempt, mirroring
+    ``job_assignees``'s "a no-op gets no audit row" discipline.
+    """
+    async with db.transaction():
+        target = await user_service.get_by_id(db, user_id)
+        if target is None:
+            raise NotFoundError(f"user {user_id} not found", user_id=str(user_id))
+
+        new_role = payload.role.value
+        if target.role == "admin" and new_role != "admin":
+            if await user_service.count_active_admins(db) == 1:
+                raise ConflictError(
+                    "cannot demote the last active admin", user_id=str(user_id)
+                )
+
+        await user_service.set_role(db, user_id, new_role)
+
+        actor_kind, actor_user_id, actor_service = actor_fields_from_user(acting_admin)
+        await audit_service.record_audit(
+            db,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="role_changed",
+            subject_type="user",
+            subject_id=user_id,
+            details={"old_role": target.role, "new_role": new_role},
+        )
+
+    return target.model_copy(update={"role": new_role})
 
 
 __all__ = ["router"]
