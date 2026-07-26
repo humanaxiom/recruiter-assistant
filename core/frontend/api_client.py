@@ -398,6 +398,27 @@ def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) ->
     return response.json()
 
 
+def list_users(*, client: httpx.Client | None = None) -> Any:
+    """GET /users — the admin-only user roster (user-admin-roles slice 6/7).
+    Same ``_request``/error-mapping plumbing as :func:`list_jobs`."""
+    response = _request("GET", "/users", client=client)
+    return response.json()
+
+
+def set_user_role(
+    user_id: UUID, role: str, *, client: httpx.Client | None = None
+) -> Any:
+    """PATCH /users/{id}/role (JSON ``{role}``) — assign a new role to a user.
+    A backend 409 (last-admin lockout) surfaces as ``Conflict`` so the route
+    can show a friendly message; a 404 as ``NotFound``; other 4xx (e.g. an
+    invalid role) as ``BadRequest`` — identical error mapping to
+    :func:`transition_status`."""
+    response = _request(
+        "PATCH", f"/users/{user_id}/role", json={"role": role}, client=client
+    )
+    return response.json()
+
+
 def get_cas_user(*, client: httpx.Client | None = None) -> Any:
     """GET /auth/cas/user — the CAS session-status endpoint (slice 6). Never
     401s server-side (returns ``{authenticated: False, ...}`` when there is no
@@ -454,5 +475,7 @@ __all__ = [
     "trigger_reverse_match",
     "get_match_results",
     "export_shortlist",
+    "list_users",
+    "set_user_role",
     "get_cas_user",
 ]
