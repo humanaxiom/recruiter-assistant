@@ -44,6 +44,18 @@ pass-through-and-shape contract: whether a real Postgres actually orders by
 cannot prove a real ``ORDER BY`` clause; it can only prove ``list_users``
 does not itself re-sort/drop/mutate whatever ``conn.fetch`` hands back, and
 that it maps each row into a real ``User``.
+
+**user-admin-roles slice 6 — ``set_role``/``count_active_admins``, the
+``PATCH /users/{id}/role`` backend (the merge-blocking payoff slice).**
+Neither function exists yet on ``src.services.user_service`` — every test in
+the two new sections below fails with ``AttributeError``, RED. Both are
+plain pass-through SQL, same discipline as ``list_users`` above: whether the
+real ``UPDATE``/``COUNT`` actually behave against Postgres (including the
+atomicity of ``set_role`` + the paired ``audit_log`` write, and the real
+admin-count lockout arithmetic) is proved only in
+``tests/integration/test_users_admin_routes_pg.py`` — these unit tests only
+pin that neither function mangles its arguments or the shape of what
+``conn.execute``/``conn.fetchval`` hands back.
 """
 
 from __future__ import annotations
@@ -337,3 +349,111 @@ async def test_list_users_calls_fetch_exactly_once() -> None:
     await user_service.list_users(conn)
 
     assert len(conn.fetch_calls) == 1
+
+
+# ── set_role / count_active_admins — the PATCH /users/{id}/role backend
+#    (user-admin-roles slice 6, the merge-blocking payoff slice) ───────────
+
+
+class _FakeExecuteConn:
+    """A bare ``.execute``-only fake — ``set_role`` is a plain UPDATE, no
+    RETURNING clause, mirroring ``job_assignee_service.assign``'s own
+    ``.execute``-and-forget shape."""
+
+    def __init__(self, status: str = "UPDATE 1") -> None:
+        self._status = status
+        self.execute_calls: list[tuple[Any, ...]] = []
+
+    async def execute(self, query: str, *args: Any) -> str:
+        self.execute_calls.append(args)
+        return self._status
+
+
+class _FakeFetchvalConn:
+    def __init__(self, value: Any) -> None:
+        self._value = value
+        self.fetchval_calls: list[tuple[Any, ...]] = []
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        self.fetchval_calls.append(args)
+        return self._value
+
+
+@pytest.mark.asyncio
+async def test_set_role_calls_execute_exactly_once() -> None:
+    user_id = uuid4()
+    conn = _FakeExecuteConn()
+
+    await user_service.set_role(conn, user_id, "recruiter")
+
+    assert len(conn.execute_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_role_passes_the_user_id_and_role_through() -> None:
+    """Proves the bound args reach the UPDATE, not merely that *some*
+    ``.execute`` call happened — mirrors ``test_non_default_login_binds_
+    null_role_on_the_insert``'s discipline of checking the actual bind args."""
+    user_id = uuid4()
+    conn = _FakeExecuteConn()
+
+    await user_service.set_role(conn, user_id, "hiring_manager")
+
+    args = conn.execute_calls[0]
+    assert user_id in args
+    assert "hiring_manager" in args
+
+
+@pytest.mark.asyncio
+async def test_set_role_does_not_mutate_its_arguments() -> None:
+    user_id = uuid4()
+    conn = _FakeExecuteConn()
+
+    await user_service.set_role(conn, user_id, "auditor")
+
+    # the UUID/str objects passed in must be exactly the ones bound, not
+    # copies/re-derived values.
+    args = conn.execute_calls[0]
+    assert any(a == user_id for a in args)
+    assert any(a == "auditor" for a in args)
+
+
+@pytest.mark.asyncio
+async def test_count_active_admins_returns_the_fetchval_result() -> None:
+    conn = _FakeFetchvalConn(3)
+
+    result = await user_service.count_active_admins(conn)
+
+    assert result == 3
+
+
+@pytest.mark.asyncio
+async def test_count_active_admins_returns_zero_when_none_exist() -> None:
+    conn = _FakeFetchvalConn(0)
+
+    result = await user_service.count_active_admins(conn)
+
+    assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_count_active_admins_calls_fetchval_exactly_once() -> None:
+    conn = _FakeFetchvalConn(1)
+
+    await user_service.count_active_admins(conn)
+
+    assert len(conn.fetchval_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_count_active_admins_takes_no_positional_query_args() -> None:
+    """A fixed, parameter-free query (``role='admin' AND active``) — nothing
+    caller-supplied is bound into it."""
+    conn = _FakeFetchvalConn(2)
+
+    await user_service.count_active_admins(conn)
+
+    assert conn.fetchval_calls[0] == ()
+
+
+__all__: list[str] = []
