@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
 
 from src.api.deps import log_auth_mode, require_role_assigned
-from src.api.routes import audit, auth, job_assignees, jobs, resumes, shortlist
+from src.api.routes import audit, auth, job_assignees, jobs, resumes, shortlist, users
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
@@ -90,6 +90,10 @@ app.include_router(job_assignees.router, dependencies=[Depends(require_role_assi
 app.include_router(jobs.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(resumes.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(shortlist.router, dependencies=[Depends(require_role_assigned)])
+# /users is gated by its own, stricter _require_admin_session (the CAS
+# session role) — see src.api.routes.users's module docstring — so it is
+# deliberately NOT wrapped in require_role_assigned here.
+app.include_router(users.router)
 
 
 @app.exception_handler(AppError)
