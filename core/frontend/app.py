@@ -119,6 +119,36 @@ def _unavailable(exc: api_client.BackendUnavailable) -> Any:
     return render_template("error.html"), 503
 
 
+_ASSIGNABLE_ROLES = ("admin", "recruiter", "hiring_manager", "auditor")
+
+
+def _require_admin_page() -> None:
+    """user-admin-roles slice 7 — the admin-only gate shared by the
+    ``/admin/users`` GET/POST routes, mirroring the backend's own
+    ``_require_admin_session`` (``src/api/routes/users.py``).
+
+    ``cas_enabled=False`` (dev mode): unconditional passthrough, with NO call
+    to ``api_client.get_cas_user`` — dev-anonymous IS the backend's own
+    synthetic admin sentinel, so the page is always reachable in dev mode
+    (mirrors ``index()``'s "only call ``get_cas_user`` when ``cas_enabled``"
+    discipline).
+
+    ``cas_enabled=True``: reuses the status ``_cas_auth_gate`` already
+    stashed on ``flask.g.cas_user`` for THIS request — never re-fetched.
+    A ``role`` other than ``"admin"`` aborts 403 before any
+    ``list_users``/``set_user_role`` call. A ``role=None`` session never
+    reaches here at all: ``_cas_auth_gate`` already intercepts it with
+    ``pending_access.html`` before this route's body ever runs.
+    """
+    settings = get_settings()
+    if not settings.cas_enabled:
+        return None
+    cas_status = getattr(g, "cas_user", None) or {}
+    if cas_status.get("role") != "admin":
+        abort(403)
+    return None
+
+
 _JOB_STATUSES = ("draft", "open", "closed", "archived")
 
 
@@ -839,3 +869,49 @@ def shortlist_export(job_id: UUID) -> Any:
         ),
         headers=headers,
     )
+
+
+@app.get("/admin/users")
+def admin_users() -> Any:
+    """user-admin-roles slice 7 — the admin-only user roster + role-assignment
+    page. Gated by :func:`_require_admin_page`; ``BackendUnavailable`` maps to
+    the shared 503 error page."""
+    _require_admin_page()
+    try:
+        users = api_client.list_users()
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "admin_users.html", users=users, roles=_ASSIGNABLE_ROLES, error=None
+    )
+
+
+@app.post("/admin/users/<uuid:user_id>/role")
+def admin_set_user_role(user_id: UUID) -> Any:
+    """user-admin-roles slice 7 — assign a new role to a user. A backend 409
+    (last-admin lockout) re-renders ``admin_users.html`` with a friendly
+    message instead of redirecting; ``NotFound``/``BackendUnavailable`` map to
+    404/503 respectively."""
+    _require_admin_page()
+    role = (request.form.get("role") or "").strip()
+    try:
+        api_client.set_user_role(user_id, role)
+    except api_client.Conflict as exc:
+        try:
+            users = api_client.list_users()
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        return (
+            render_template(
+                "admin_users.html",
+                users=users,
+                roles=_ASSIGNABLE_ROLES,
+                error=_format_error(exc.detail),
+            ),
+            409,
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("admin_users"))
