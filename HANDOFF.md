@@ -1750,3 +1750,58 @@ CURRENT STATE AS OF 2026-07-22 — read HANDOFF.md's "ADR-022 status" and
 See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.
 ```
+
+### user-admin-roles status — built, gates green, not yet on main
+
+Built on branch `feat/user-admin-roles` (HEAD `63ae662`), off `feat/fu5-cas-identity`'s completed FU-5
+work, across eight TDD slices (DDL nullable-role reversal → provisioning default reversal →
+`require_role_assigned` fail-closed gate → the Flask `pending_access.html` gate → `GET /users` →
+`PATCH /users/{id}/role` (+ `Role` enum move to `schemas.auth` + last-admin lockout) → the Flask admin
+UI → a security-hardening fix round). **All offline gates green** and **both merge-blocking reviews
+recorded APPROVE** (a first-round APPROVE followed by a second confirming APPROVE after the security
+round's fixes were folded in); **security PASS**. Full decision record: [ADR-025](docs/adr/025-user-admin-roles.md);
+the superseded ADR-019 §10a default (`role='recruiter'` on first login) is annotated in place, not
+rewritten — see ADR-019's inline supersession note and its §10c residuals list.
+
+**The headline change: no-role-by-default first login.** ADR-019 §10a's "every non-default-admin CAS
+login lands as `recruiter`" is reversed — `users.role` is now nullable with no DB default
+(`core/src/models/ddl.py`, two idempotent `ALTER ... DROP DEFAULT` / `DROP NOT NULL` statements, same
+already-migrated-volume discipline as every other schema change in this repo), and
+`user_service.provision_or_get` writes `role = NULL` for anyone except the configured
+`default_admin_cas_username` (`asalah`, unchanged). A brand-new user now gets **no access at all** until
+an admin grants a role, closing the fail-open gap ADR-019 §9 recorded and deferred.
+
+**The fail-closed gate that makes the reversal actually bite.** `require_role_assigned`
+(`core/src/api/deps.py`) is wired on all 5 business routers (`jobs`, `resumes`, `shortlist`,
+`job_assignees`, `audit` — `core/src/api/main.py`) and 403s a real, resolved session with `role is None`
+before any route body runs — closing the hole where a no-role user could otherwise ride the Flask
+viewer's one shared `recruiter` API key to full access, since `require_role`/`resolve_role` only ever
+judge the *key*, never the session. The Flask frontend mirrors this one hop up: `_cas_auth_gate`
+intercepts an authenticated no-role status and renders `pending_access.html` (200) instead of the
+requested page.
+
+**The admin surface.** `GET /users` (list) and `PATCH /users/{id}/role` (assign) —
+`core/src/api/routes/users.py` — are gated by their own `_require_admin_session`, keyed off the **CAS
+session's** `role == "admin"`, deliberately NOT the API-key role the Flask viewer's shared `recruiter`
+key would otherwise present for every browser user. The `role_changed` audit row is written in the SAME
+transaction as the role `UPDATE` (atomic — a failed audit write rolls back the role change), and demoting
+the last active admin is refused with a 409 `ConflictError` before any write (the last-admin lockout
+guard). A Flask admin UI (`/admin/users`, `core/frontend/templates/admin_users.html`, an admin-only
+"Users" nav link) gives an admin a role-assignment surface without SQL.
+
+**Accepted residual, carried forward, not fixed (both reviewer and security flagged it
+independently).** The last-admin lockout guard's `count_active_admins()` read and the role `UPDATE` run
+under asyncpg's default READ COMMITTED with no row lock — two concurrent demote requests against two
+*different* admin rows, from exactly 2 active admins, can each observe `count == 2`, each pass the guard,
+and both commit, leaving 0 admins. Deliberately deferred (an offline, effectively-single-admin tool
+today); ADR-025's Accepted residuals section has the exact remediation (`SELECT ... FOR UPDATE` or
+SERIALIZABLE) for when multi-admin becomes real.
+
+**Exact next step:** integrate `feat/user-admin-roles` to local `main` (merge or rebase-and-fast-forward;
+`gh pr merge` remains classifier-blocked per the standing note above, so this is a human-driven command,
+not something to attempt unattended) and apply the schema/behaviour change to the running stack via the
+existing CAS compose overrides (`docker compose ... up -d` after a pull — the nullable-role ALTERs and the
+new routes come up idempotently on API boot, no separate migration step). **The GitHub-Actions billing
+block noted elsewhere in this file means CI cannot run for this branch right now — integration is
+local-only**: verify with `./scripts/verify.sh all` against the merged tree before treating this as done,
+do not rely on a CI badge that cannot execute.

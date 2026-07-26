@@ -212,6 +212,14 @@ requires an attributable human), §9.2 (`created_by`/`uploaded_by` carry human i
    → `users` row, with a sliding-window refresh. An expired/absent session on a protected route → the
    caller is sent back through `/auth/cas/login`.
 
+> **SUPERSEDED by [ADR-025](025-user-admin-roles.md) §1 (2026-07-25).** The "provisioned `role='recruiter'`
+> on first login" default described in §10a immediately below (and in §10 step 3 above) was reversed by the
+> `feat/user-admin-roles` build: a non-default-admin's first CAS login now captures `role = NULL` (no
+> access) instead of `'recruiter'`. The default-admin allowlist itself — a `cas_username` matching
+> `default_admin_cas_username` provisioned `role='admin'` on first login — is **unchanged** by ADR-025 and
+> stands as written below. Text left as originally written for the historical record; do not edit it to
+> match current behaviour.
+
 **§10a — Default-admin CAS allowlist (human, 2026-07-22). This reverses §9's "Deliberately not
 patched with an ad hoc bootstrap-admin mechanism."** FU-5 gains a single settings field,
 `default_admin_cas_username`, defaulting to `"asalah"`. On a user's **first** login (row creation
@@ -274,6 +282,10 @@ n/a — no scoring code touched.
   any non-local deploy.
 - **No role-provisioning path beyond §10a.** Every non-default-admin CAS login
   lands as `recruiter`; promotion is manual SQL until an admin endpoint exists.
+  **CLOSED by [ADR-025](025-user-admin-roles.md)** (`feat/user-admin-roles`, 2026-07-25): first login now
+  captures no role at all (fail-closed) instead of `recruiter`, and `GET /users` / `PATCH /users/{id}/role`
+  (+ a Flask admin UI) replace the manual-SQL promotion path. See ADR-025 for the full decision and its
+  accepted residuals (a low-severity concurrent-double-demote race).
 - **`cas_dev_fake_user` setting is dormant** — the hris dev-fake-ticket bypass was
   deliberately not ported (no test covers it; not shipping untested auth-bypass).
   The setting is currently unread; a future slice can wire it with tests or drop it.
