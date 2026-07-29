@@ -1199,6 +1199,66 @@ split.
 
 </details>
 
+### FU-8 status — DONE, gate-green on branch (awaiting push/PR)
+
+FU-8 (résumé withdrawal + stale-résumé lifecycle, ADR-026 exclude-and-retain slice) is **code-complete and
+gate-green** on branch `feat/fu8-resume-withdrawal`. FU-8 sits atop the local/origin reconciliation
+recorded in the "⚠️ LOCAL-INTEGRATION STATE (2026-07-28)" banner above — it was branched after that
+reconciliation state was recorded, so it carries the same four-features-local-only backdrop as context,
+not as part of its own diff.
+
+**The branch is NOT yet pushed.** As with every prior feature in this repo, pushing/opening the PR is
+classifier-blocked for the agent — a human runs `git push` (and opens the PR) next. Verify against origin
+first: `git fetch && gh pr list`.
+
+**What shipped (ADR-026 decisions 1–3, 5 — decision 4's revoke-and-purge path is still DEFERRED, not
+built):**
+- Nullable `withdrawn_at TIMESTAMPTZ` + `withdrawal_reason TEXT` on `resumes` (idempotent
+  `ALTER … ADD COLUMN IF NOT EXISTS` + partial index `resumes_withdrawn_idx`) — not a new `resume_status`
+  enum value.
+- `POST /resumes/{id}/withdraw` + `/reinstate` (`admin`/`recruiter`, `require_role`), audited via FU-5's
+  `audit_log` (ADR-019) — audit + outbox written atomically inside one `conn.transaction()` with the flag
+  flip. Withdraw is idempotent (repeat is a no-op, zero extra audit/outbox rows).
+- Exclusion via ADR-026 decision 3's **option 1**: on withdraw, `unproject_resume` DETACH-DELETEs the
+  `Resume` + `ResumeChunk` nodes from Neo4j (`resume_summary_idx` recall left in place) via a
+  `resume.withdrawn` outbox event + drainer branch. **`stages.py`/`orchestrator.py` are byte-unchanged**
+  (ranking-evals confirmed an empty diff). Reverse-match now returns `"withdrawn"` and writes zero entries.
+- **Reinstate = replay (human decision this session, not in the original scoping doc):** re-enqueues the
+  last delivered `resume.parsed` outbox payload — no re-embed/LLM call — restoring byte-identical recall.
+- **Withdrawn-during-parse race fixed in-scope (human decision this session):** `parse_resume` now skips
+  the `resume.parsed` outbox enqueue when `withdrawn_at` is already set, while still reaching
+  `status='parsed'`.
+- Per-job status breakdown `GET /jobs/{id}/resume-status` (all roles, integer counts only) + a frontend
+  HTMX widget.
+- Frontend: withdraw/reinstate buttons on the résumé detail page and shortlist cards (blind posture
+  unchanged); **CSRF token is now action-keyed** `(resume_id, action)` so the reveal button and the
+  withdraw button coexist without invalidating each other's one-shot token.
+
+**Gate verdicts, all green:** reviewer APPROVE (8/8 load-bearing mutations killed: idempotency no-op,
+atomic-transaction rollback, Neo4j un-projection exclusion, reinstate recall restoration, reverse-match
+zero-rows, parse-race skip, CSRF action-keying, RBAC 403); security PASS; ranking-evals PASS (scoring
+byte-unchanged, corpus exits 0). Coordinator-independent `./scripts/verify.sh all`: **3958 unit tests @
+92.63% coverage, 422 integration tests**, exit 0.
+
+**Commit chain:** `cd540ef` (ADR scope) → `fc46cea` (ratify FU-8) → `9ea8a27` red backend → `a2e5437`
+green backend → `0c51b8a` red frontend → `ed7701c` green frontend.
+
+**Accepted residuals (from security, record them):**
+- **R-1 (low)** — `withdrawal_reason` at-rest cleartext in `resumes.withdrawal_reason` +
+  `audit_log.details`, same accepted boundary as `failure_reason`/ADR-007 §6, never embedded or written to
+  Neo4j.
+- **R-2 (low)** — `GET /jobs/{id}/resume-status` is an all-role aggregate count oracle (integers only, no
+  PII), per ADR-026 decision 5.
+- **R-3 (info)** — `withdrawal_reason` does not flow into CSV export (a pre-existing CSV residual, not
+  extended by FU-8).
+- Ranking-evals recommendation (non-blocking): a withdrawal-aware end-to-end check belongs in the live
+  eval, not the offline corpus.
+- Still-open, unchanged by FU-8: `jd.education.fields` remains decorative (ADR-009 §7).
+
+Full decision record: [ADR-026](docs/adr/026-resume-withdrawal-lifecycle.md) (see its "Built (FU-8,
+2026-07-29)" section). **Next action:** human pushes the branch and opens the PR; FU-7 (ADR-021, LLM
+failover + fail-closed ranking) remains the next unbuilt, scoped item after FU-8 merges.
+
 ### FU-6 status — BUILT, gates green, ON A PR (read this before starting FU-7)
 
 > **SUPERSEDED 2026-07-28 — FU-6 merged.** PR #31 merged to `origin/main` (squash `c2f6a57`), CI green.

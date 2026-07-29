@@ -1,10 +1,69 @@
 # ADR-026: Résumé lifecycle — candidate withdrawal and stale-résumé tracking
 
-**Status:** Accepted as **FU-8** (2026-07-29) — building the **exclude-and-retain** slice (decisions 1–3, 5).
+**Status:** Accepted as **FU-8** (2026-07-29) — the **exclude-and-retain** slice (decisions 1–3, 5) is
+**built, gate-green** on branch `feat/fu8-resume-withdrawal` (not yet merged/pushed — see "Built" below).
 The §4 **revoke-and-purge** (destructive consent-erasure) path remains **deferred** to a separate follow-up
 so the destructive operation is never the accidental default of a routine withdraw; decisions 1–3 ship the
 reversible `withdrawn_at` flag, un-project exclusion, reverse-match filter, audit, and per-job status breakdown.
-**Date:** 2026-07-28 (scoped) · 2026-07-29 (ratified as FU-8)
+**Date:** 2026-07-28 (scoped) · 2026-07-29 (ratified as FU-8) · 2026-07-29 (built, gate-green)
+
+## Built (FU-8, 2026-07-29)
+
+The exclude-and-retain slice (decisions 1–3, 5) is built and gate-green on branch
+`feat/fu8-resume-withdrawal`. **The §4 revoke-and-purge (destructive consent-erasure) path is still
+DEFERRED** — not built, no code exists for it. What actually shipped, including three decisions made
+during the build session that this scoping document left open:
+
+- **Decision 1 (schema) built as scoped:** nullable `withdrawn_at TIMESTAMPTZ` + `withdrawal_reason TEXT`
+  on `resumes`, idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` plus a partial index
+  `resumes_withdrawn_idx`. No `resume_status` enum change.
+- **Decision 2 (API + audit) built as scoped:** `POST /resumes/{id}/withdraw` and `/reinstate`
+  (`admin`/`recruiter` via `require_role`), audited through FU-5's `audit_log` (ADR-019). Audit row and
+  outbox write happen atomically inside one `conn.transaction()` with the flag flip. Withdraw is
+  idempotent — repeating it is a no-op with zero extra audit/outbox rows.
+- **Decision 3 (exclusion point) — option 1 (un-project on withdrawal) was chosen**, as recommended. On
+  withdraw, `unproject_resume` DETACH-DELETEs the `Resume` + `ResumeChunk` nodes from Neo4j via a
+  `resume.withdrawn` outbox event and drainer branch. `resume_summary_idx` recall is left as-is (the
+  vector index does not need separate cleanup). This kept the promise from decision 3's rationale: scoring
+  code (`stages.py`/`orchestrator.py`) is byte-unchanged, confirmed by an empty diff in ranking-evals.
+  Reverse-match now returns `"withdrawn"` and writes zero entries, per the reverse-match predicate change
+  already scoped above.
+- **Reinstate = replay, not re-embed (human decision made during the build session, not scoped above).**
+  Reinstating re-enqueues the *last delivered* `resume.parsed` outbox payload rather than re-running
+  `project_to_graph` from a fresh parse. This restores byte-identical recall without a second LLM/embedding
+  call, at the cost of reinstatement depending on that payload still being available (it is — outbox rows
+  are retained, not deleted, per Phase 3's outbox pattern).
+- **Withdrawn-during-parse race fixed in-scope (human decision made during the build session, not
+  originally scoped).** If a résumé is withdrawn while its parse is in flight, `parse_resume` now skips
+  the `resume.parsed` outbox enqueue when `withdrawn_at` is already set, while still transitioning the row
+  to `status='parsed'` in Postgres. Without this, a withdrawal that raced a slow parse could still get
+  projected into Neo4j moments later.
+- **Decision 5 (per-job status breakdown) built as scoped:** `GET /jobs/{id}/resume-status` (all roles),
+  returning integer counts only, plus a frontend HTMX widget on the job detail page.
+- **Frontend:** withdraw/reinstate buttons on the résumé detail page and each shortlist card, mirroring the
+  audited-reveal UI pattern (ADR-016). Blind-review posture is unchanged. Making the reveal button and the
+  withdraw button coexist required keying the one-shot CSRF token by `(resume_id, action)` instead of just
+  `resume_id` — the original per-résumé token would have invalidated itself across the two buttons.
+
+**Gate verdicts, all green:** reviewer APPROVE (8/8 load-bearing mutations killed — idempotency no-op,
+atomic-transaction rollback, Neo4j un-projection exclusion, reinstate recall restoration, reverse-match
+zero-rows, parse-race skip, CSRF action-keying, RBAC 403); security PASS; ranking-evals PASS (scoring
+byte-unchanged, corpus exits 0). Coordinator-independent `./scripts/verify.sh all`: 3958 unit tests @
+92.63% coverage, 422 integration tests, exit 0.
+
+**Accepted residuals from the security gate (record here, not fixed):**
+- **R-1 (low).** `withdrawal_reason` is stored at-rest cleartext in `resumes.withdrawal_reason` and
+  `audit_log.details` — the same accepted boundary as `failure_reason` (ADR-007 §6). It is never embedded
+  or written to Neo4j.
+- **R-2 (low).** `GET /jobs/{id}/resume-status` is an all-role aggregate-count oracle. It returns integers
+  only (no PII), which is the intended scope of decision 5 above.
+- **R-3 (info).** `withdrawal_reason` does not flow into CSV export — a pre-existing CSV residual (fields
+  not surfaced in export) that FU-8 does not extend.
+- Ranking-evals recommendation (non-blocking): a withdrawal-aware end-to-end check belongs in the live
+  eval, not the offline corpus.
+
+Commit chain: `cd540ef` (ADR scope) → `fc46cea` (ratify FU-8) → `9ea8a27` red backend → `a2e5437` green
+backend → `0c51b8a` red frontend → `ed7701c` green frontend.
 
 ## Context
 
