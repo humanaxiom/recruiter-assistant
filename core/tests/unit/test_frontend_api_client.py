@@ -42,6 +42,13 @@ mirroring the established pattern in ``test_route_shortlist.py`` /
     shortlist; exports are unconditionally blind now). Returns the raw
     ``httpx.Response`` so the Flask route can proxy
     ``Content-Disposition``/body straight through.
+  - ``withdraw_resume(resume_id, *, reason=None, client=None)`` — POST
+    ``/resumes/{id}/withdraw`` (ADR-026/FU-8), JSON body ``{"reason": ...}``.
+  - ``reinstate_resume(resume_id, *, client=None)`` — POST
+    ``/resumes/{id}/reinstate`` (ADR-026/FU-8), no body required.
+  - ``get_resume_status_breakdown(job_id, *, client=None)`` — GET
+    ``/jobs/{id}/resume-status`` (ADR-026 decision 5/FU-8), returns the
+    5-bucket status count dict.
 * Typed error mapping: a backend 404 raises ``NotFound``; a backend 5xx OR
   ``httpx.ConnectError`` raises ``BackendUnavailable``. Both subclass a common
   ``BackendError``.
@@ -50,6 +57,7 @@ mirroring the established pattern in ``test_route_shortlist.py`` /
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -486,3 +494,127 @@ def test_export_shortlist_raises_not_found_on_404() -> None:
     client = _client_with(_json_handler(404, {"detail": "no such job"}))
     with pytest.raises(api_client.NotFound):
         api_client.export_shortlist(job_id, client=client)
+
+
+# ── withdrawal lifecycle (ADR-026, FU-8) ─────────────────────────────────
+#
+# `withdraw_resume`/`reinstate_resume` mirror the reveal client functions:
+# POST to a dedicated per-resume route, JSON body (withdraw only), typed
+# error mapping shared with every other client function.
+# `get_resume_status_breakdown` mirrors a plain GET-one style read.
+
+
+def test_withdraw_resume_posts_to_withdraw_with_the_reason() -> None:
+    captured: dict[str, Any] = {}
+    resume_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={"id": str(resume_id), "withdrawn_at": "2026-07-28T00:00:00Z"},
+        )
+
+    result = api_client.withdraw_resume(
+        resume_id, reason="Accepted another offer", client=_client_with(handler)
+    )
+    assert captured["method"] == "POST"
+    assert captured["url"].path == f"/resumes/{resume_id}/withdraw"
+    payload = json.loads(captured["body"])
+    assert payload == {"reason": "Accepted another offer"}
+    assert result["withdrawn_at"] == "2026-07-28T00:00:00Z"
+
+
+def test_withdraw_resume_reason_defaults_to_none() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={})
+
+    api_client.withdraw_resume(uuid4(), client=_client_with(handler))
+    payload = json.loads(captured["body"])
+    assert payload.get("reason") is None
+
+
+def test_withdraw_resume_raises_not_found_on_404() -> None:
+    client = _client_with(_json_handler(404, {"detail": "no such resume"}))
+    with pytest.raises(api_client.NotFound):
+        api_client.withdraw_resume(uuid4(), client=client)
+
+
+def test_withdraw_resume_raises_backend_unavailable_on_5xx() -> None:
+    client = _client_with(_json_handler(500, {"detail": "boom"}))
+    with pytest.raises(api_client.BackendUnavailable):
+        api_client.withdraw_resume(uuid4(), client=client)
+
+
+def test_reinstate_resume_posts_to_reinstate_and_returns_json() -> None:
+    captured: dict[str, Any] = {}
+    resume_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        return httpx.Response(200, json={"id": str(resume_id), "withdrawn_at": None})
+
+    result = api_client.reinstate_resume(resume_id, client=_client_with(handler))
+    assert captured["method"] == "POST"
+    assert captured["url"].path == f"/resumes/{resume_id}/reinstate"
+    assert result["withdrawn_at"] is None
+
+
+def test_reinstate_resume_raises_not_found_on_404() -> None:
+    client = _client_with(_json_handler(404, {"detail": "no such resume"}))
+    with pytest.raises(api_client.NotFound):
+        api_client.reinstate_resume(uuid4(), client=client)
+
+
+def test_reinstate_resume_raises_backend_unavailable_on_5xx() -> None:
+    client = _client_with(_json_handler(500, {"detail": "boom"}))
+    with pytest.raises(api_client.BackendUnavailable):
+        api_client.reinstate_resume(uuid4(), client=client)
+
+
+def test_get_resume_status_breakdown_hits_the_resume_status_route() -> None:
+    job_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        captured["method"] = request.method
+        return httpx.Response(
+            200,
+            json={
+                "uploaded": 1,
+                "parsing": 0,
+                "parsed": 3,
+                "failed": 0,
+                "withdrawn": 2,
+            },
+        )
+
+    result = api_client.get_resume_status_breakdown(job_id, client=_client_with(handler))
+    assert captured["method"] == "GET"
+    assert captured["url"].path == f"/jobs/{job_id}/resume-status"
+    assert result == {
+        "uploaded": 1,
+        "parsing": 0,
+        "parsed": 3,
+        "failed": 0,
+        "withdrawn": 2,
+    }
+
+
+def test_get_resume_status_breakdown_raises_not_found_on_404() -> None:
+    client = _client_with(_json_handler(404, {"detail": "no such job"}))
+    with pytest.raises(api_client.NotFound):
+        api_client.get_resume_status_breakdown(uuid4(), client=client)
+
+
+def test_get_resume_status_breakdown_raises_backend_unavailable_on_5xx() -> None:
+    client = _client_with(_json_handler(503, {"detail": "down"}))
+    with pytest.raises(api_client.BackendUnavailable):
+        api_client.get_resume_status_breakdown(uuid4(), client=client)

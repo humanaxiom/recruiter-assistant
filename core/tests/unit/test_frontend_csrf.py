@@ -1,4 +1,5 @@
-"""Unit tests for ``frontend.csrf`` (FU-4/D4, amended twice).
+"""Unit tests for ``frontend.csrf`` (FU-4/D4, amended twice; FU-8/ADR-026
+amends it a third time — see the section near the bottom of this file).
 
 **FU-4/D4 — the threat this module closes.** Classic CSRF does NOT apply to
 the FastAPI backend: it authenticates on the ``X-API-Key`` header, and a
@@ -607,3 +608,190 @@ def test_csrf_module_uses_token_urlsafe_and_compare_digest_by_name() -> None:
 def test_csrf_module_uses_hashlib_sha256_by_name() -> None:
     src = Path(csrf.__file__).read_text(encoding="utf-8")
     assert "hashlib.sha256(" in src
+
+
+# ── FU-8/ADR-026 amendment — tokens scoped by (résumé id, action) ──────────
+#
+# **The regression this section exists to catch.** FU-8 adds a SECOND audited
+# action on the résumé-detail page — "Withdraw candidate" / "Reinstate" —
+# rendered ALONGSIDE the existing FU-1 reveal button, both posting for the
+# SAME résumé id. Under the résumé-id-only keying `_session_key_for` used
+# before this amendment, minting the withdraw button's token would land in
+# the EXACT SAME mapping slot as the reveal button's token (both hash to
+# `sha256(str(resume_id))[:12]`), so minting one silently invalidates the
+# other — precisely the FU-1/Amendment-1 bug this module was already fixed
+# for once, reintroduced by a second action sharing the same résumé id. No
+# EXISTING test in this file catches it: every test above only ever exercises
+# ONE implicit action (the reveal flow), so two actions colliding on the same
+# résumé id was never exercised.
+#
+# **The fix under test:** `issue_token`/`verify_and_consume` accept an
+# ``action: str = "reveal"`` keyword-only parameter. The default value is
+# ``"reveal"`` so every EXISTING call site/test above (which never passes
+# `action`) is completely unaffected — same signature-compatible call, same
+# observable mapping-key behaviour for the reveal flow specifically. A NEW
+# action value (e.g. ``"withdraw"``) must mint into an INDEPENDENT slot: for
+# the same résumé id, a "reveal" token and a "withdraw" token coexist
+# simultaneously, minting/consuming one never disturbs the other, and a token
+# minted for one action never validates a verify call for a different action
+# (even for the SAME résumé id).
+
+
+def test_issue_token_accepts_an_action_keyword_argument() -> None:
+    resume_id = uuid4()
+    with app.test_request_context():
+        token = csrf.issue_token(resume_id, action="withdraw")
+    assert isinstance(token, str)
+    assert len(token) >= 16
+
+
+def test_verify_and_consume_accepts_an_action_keyword_argument() -> None:
+    resume_id = uuid4()
+    with app.test_request_context():
+        token = csrf.issue_token(resume_id, action="withdraw")
+        assert csrf.verify_and_consume(resume_id, token, action="withdraw") is True
+
+
+def test_default_action_is_reveal_explicit_and_implicit_calls_agree() -> None:
+    """Calling with no `action` at all must be indistinguishable from calling
+    with `action="reveal"` explicitly — this is what keeps every pre-existing
+    call site (which never passes `action`) working unmodified."""
+    resume_id = uuid4()
+    with app.test_request_context():
+        token = csrf.issue_token(resume_id)  # implicit default
+        assert csrf.verify_and_consume(resume_id, token, action="reveal") is True
+
+
+def test_reveal_and_withdraw_tokens_for_the_same_resume_are_independent_values() -> (
+    None
+):
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        withdraw_token = csrf.issue_token(resume_id, action="withdraw")
+    assert reveal_token != withdraw_token
+
+
+def test_minting_a_withdraw_token_does_not_invalidate_an_already_minted_reveal_token() -> (
+    None
+):
+    """THE load-bearing regression test: minting the SECOND audited action's
+    token for a résumé that already has a live reveal token must not disturb
+    it — this is exactly the FU-1 shortlist-multi-card bug, reintroduced
+    across actions instead of across résumé ids."""
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        csrf.issue_token(resume_id, action="withdraw")
+        assert csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
+
+
+def test_minting_a_reveal_token_does_not_invalidate_an_already_minted_withdraw_token() -> (
+    None
+):
+    resume_id = uuid4()
+    with app.test_request_context():
+        withdraw_token = csrf.issue_token(resume_id, action="withdraw")
+        csrf.issue_token(resume_id, action="reveal")
+        assert (
+            csrf.verify_and_consume(resume_id, withdraw_token, action="withdraw")
+            is True
+        )
+
+
+def test_a_token_minted_for_reveal_fails_verification_for_withdraw_same_resume() -> (
+    None
+):
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        assert (
+            csrf.verify_and_consume(resume_id, reveal_token, action="withdraw")
+            is False
+        )
+
+
+def test_a_token_minted_for_withdraw_fails_verification_for_reveal_same_resume() -> (
+    None
+):
+    resume_id = uuid4()
+    with app.test_request_context():
+        withdraw_token = csrf.issue_token(resume_id, action="withdraw")
+        assert (
+            csrf.verify_and_consume(resume_id, withdraw_token, action="reveal")
+            is False
+        )
+
+
+def test_a_misdirected_cross_action_verify_does_not_burn_the_rightful_actions_slot() -> (
+    None
+):
+    """A wrong-action attempt (right résumé, right token, wrong action) must
+    not consume the token's RIGHTFUL action slot — mirrors the existing
+    cross-résumé non-consumption guarantee, one dimension over."""
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        misdirected = csrf.verify_and_consume(
+            resume_id, reveal_token, action="withdraw"
+        )
+        assert misdirected is False
+        # The reveal token is still valid afterwards, for its OWN action.
+        assert (
+            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
+        )
+
+
+def test_consuming_the_withdraw_token_does_not_consume_the_reveal_slot() -> None:
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        withdraw_token = csrf.issue_token(resume_id, action="withdraw")
+        assert (
+            csrf.verify_and_consume(resume_id, withdraw_token, action="withdraw")
+            is True
+        )
+        # Reveal's slot for the SAME résumé is untouched by consuming withdraw's.
+        assert (
+            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
+        )
+
+
+def test_both_actions_on_one_resume_can_be_used_back_to_back_with_no_reissue() -> None:
+    """Mirrors the FU-1 multi-card regression test above, one dimension over:
+    both the reveal button and the withdraw button on ONE rendered résumé-
+    detail page must be independently usable without an intervening reload."""
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        withdraw_token = csrf.issue_token(resume_id, action="withdraw")
+        first = csrf.verify_and_consume(resume_id, reveal_token, action="reveal")
+        second = csrf.verify_and_consume(resume_id, withdraw_token, action="withdraw")
+    assert first is True
+    assert second is True
+
+
+def test_withdraw_action_is_one_shot_like_reveal() -> None:
+    resume_id = uuid4()
+    with app.test_request_context():
+        token = csrf.issue_token(resume_id, action="withdraw")
+        first = csrf.verify_and_consume(resume_id, token, action="withdraw")
+        second = csrf.verify_and_consume(resume_id, token, action="withdraw")
+    assert first is True
+    assert second is False
+
+
+def test_reissuing_the_withdraw_token_overwrites_only_its_own_action_slot() -> None:
+    """Re-minting résumé A's withdraw token twice must overwrite ITS slot, not
+    grow the mapping, and must leave résumé A's reveal slot untouched —
+    mirrors the same-résumé re-issue guarantee, restricted to one action."""
+    resume_id = uuid4()
+    with app.test_request_context():
+        reveal_token = csrf.issue_token(resume_id, action="reveal")
+        csrf.issue_token(resume_id, action="withdraw")
+        csrf.issue_token(resume_id, action="withdraw")
+        mapping = flask.session[csrf.SESSION_KEY]
+        assert len(mapping) == 2  # one reveal slot + one withdraw slot, no more
+        assert (
+            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
+        )
