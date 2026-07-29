@@ -92,3 +92,22 @@ convention for adding columns to an existing table without a migration framework
   résumé and jobs aren't candidate PII. No résumé PII is on that path.
 - **Consent stays batch-level** (one `consent_acknowledged` per upload request), unchanged from Phase 6 —
   per-résumé consent was not requested.
+
+## Amendment 2026-07-29 — separator-agnostic pairing + ReDoS guard (branch `fix/cover-letter-pairing-separators`)
+
+The filename-convention pairing (decision 2) originally recognized only **underscore**-joined suffixes
+(`str.endswith` on `_cover_letter`/`_cover`/`_resume`/`_cv`). Real-world uploads use spaces or dashes —
+`Jane Smith Cover Letter.pdf`, `jane-cover-letter.pdf` — which were NOT recognized, so a cover letter in a
+zip was silently demoted to a standalone résumé and parsed **as a résumé** (the "resumes parse but not
+cover letters" bug). Fixed: `_classify` now treats **space / dash / underscore as equivalent separators**
+(case-insensitive) via two anchored regexes, with a normalized pairing `base` so a résumé and its cover
+share a key regardless of separator style. The false-hit guards are preserved (a real separator is required
+before the suffix, so `discover.pdf` stays a résumé; a non-empty name is required, so a bare `Cover.pdf` /
+leading-separator stem stays a résumé).
+
+**Security (ReDoS).** The suffix regexes have two adjacent ambiguous quantifiers → O(n²) backtracking on a
+pathological, attacker-controllable filename (zip entry names can be tens of KB), and pairing runs
+synchronously inside the async upload route. `_classify` now **caps the stem at 256 chars** before the
+regexes (over-length names short-circuit to a plain résumé; no real name is that long) — restoring linear
+behaviour. Gates green: reviewer APPROVE, security PASS, `./scripts/verify.sh all` = 3977 unit @ 92.64% +
+422 integration. Scoring/ranking code untouched (ranking-evals N/A).
