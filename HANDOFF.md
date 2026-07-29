@@ -2,6 +2,46 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
+### ⚠️⚠️ READ FIRST — ORG MOVE + VISIBILITY + CI RECONCILE (2026-07-29) — supersedes the "billing CLEARED" banner below
+
+> **The 2026-07-28 "billing CLEARED" claim (in the `⚠️ LOCAL-INTEGRATION STATE` banner further down) is WRONG.**
+> GitHub Actions is **still billing-blocked on `humanaxiom`** — confirmed this session by the run annotation:
+> *"The job was not started because recent account payments have failed or your spending limit needs to be
+> increased."* Every run, including on `main`, fails at *Set-up-job* with zero steps executed. It is NOT a
+> branch-name-gate failure (the regex accepts all the branch names; `main` is exempted and still fails).
+>
+> **What this session did:**
+> 1. **Rebased local `main`** onto `origin/main` (dropped the two redundant #30/#31 local commits — content
+>    already on origin as `22db93f`/`c2f6a57`; replayed the 23 real commits). Result: local `main` = **`5cab283`**,
+>    **0 behind / 23 ahead** of `humanaxiom/main` (`c2f6a57`), a clean fast-forward. **Tree is byte-identical to
+>    the pre-rebase tip** (verified `git diff` empty). **SHAs of the four local-only features CHANGED** — old
+>    `2b2f291`/`eb5533f` tips are gone; backups at `backup/main-pre-reconcile` and `backup/chore-pre-reconcile`.
+> 2. **Forked to `sfu-aria/recruiter-assistant`** and pushed reconciled `main` there (`5cab283`, tree-identical).
+>    Making it private later **detached it** from the parent (`fork: false, parent: null`) — it is now a
+>    standalone repo, NOT a fork. Syncing back to `humanaxiom` is still a plain `git push origin main`
+>    fast-forward (shared history), just not a fork-PR.
+> 3. **Visibility, final state: BOTH repos are PUBLIC** (`humanaxiom` + `sfu-aria`), by explicit user decision,
+>    **temporary until finance sorts the org billing.** Rationale: **public repos get free unlimited Actions;
+>    private repos draw on paid/quota minutes** — so public is the only way to run CI for free while
+>    `humanaxiom`'s payment is failed. **PII exposure is live while public** (`recruiter@sfu.ca` in
+>    `test_schemas_{jobs,resumes}.py`; owner email in git history) — re-privatize or scrub before this settles.
+> 4. **Added `workflow_dispatch`** to `.github/workflows/ci.yml` (branch **`chore/ci-workflow-dispatch`**, commit
+>    `fdaac68`, not yet pushed) so CI is triggerable on demand — the workflow previously had no manual trigger,
+>    and a fresh fork suppresses its first push run.
+>
+> **Exact next steps — all are `git push` / `gh` commands the AGENT CANNOT run (classifier-blocked); a human runs them:**
+> - `git push origin main` — brings **`humanaxiom` up to date** (`c2f6a57..5cab283`, clean ff). Now that it's
+>   public, this also triggers **free** CI on the canonical repo — likely the simplest full fix.
+> - `git push sfu-aria chore/ci-workflow-dispatch` — triggers the first free CI run on `sfu-aria` and lands the
+>   dispatch trigger (if you keep the `sfu-aria` track).
+> - `git push sfu-aria main` was already done this session; `sfu-aria/main` = `5cab283`.
+> - **Do NOT re-merge #29/#30/#31** — already on `origin`. Backups let you `git reset --hard backup/main-pre-reconcile`.
+>
+> **Still local-only, rebased onto the new `main` this session (unchanged in intent):** `chore/resume-withdrawal-lifecycle-adr`
+> (ADR-026, backlog scoping — needs the human §4 consent-vs-purge decision before build) and `chore/ci-workflow-dispatch`
+> (the CI fix above). The four feature branches (#32–#35) still have OPEN PRs on `humanaxiom` whose CI is red
+> **only** because of the billing block, not a gate failure.
+
 ## What we're doing
 
 Building a **local-first recruiter assistant**: evidence-backed resume ranking → shortlists, fully offline. We are **porting the resume-ranking feature out of `C:\repos\hris`** onto a golden template, stripping the review workflow and JD-Harmonizer, and replacing MinIO with filesystem storage. See the plan for the keep/cut boundary and the 4-stage ranking algorithm.
