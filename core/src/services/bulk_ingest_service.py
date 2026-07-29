@@ -42,6 +42,30 @@ UploadedFile = tuple[str, bytes]
 _COVER_SUFFIXES: Final = ("_cover_letter", "_coverletter", "_cover_note", "_cover")
 _RESUME_SUFFIXES: Final = ("_resume", "_cv")
 
+# Space / dash / underscore are equivalent separators (bug fix:
+# fix/cover-letter-pairing-separators). ``[\s_-]*`` between "cover" and
+# "letter"/"note" lets a real-world name like "Jane Smith Cover Letter.pdf"
+# match; the mandatory ``[\s_-]+`` between the base and the suffix (anchored
+# at the end with ``$``) preserves the false-hit guard — "discover.pdf" has no
+# separator before "cover" so it never matches, and a bare "Cover.pdf" has no
+# non-empty base before a separator so it stays a résumé too. Alternatives are
+# ordered longest-first so "cover letter" wins over a bare "cover".
+_COVER_SUFFIX_RE: Final = re.compile(
+    r"^(?P<base>.*\S)[\s_-]+"
+    r"(?:cover[\s_-]*letter|coverletter|cover[\s_-]*note|cover)$",
+    re.IGNORECASE,
+)
+_RESUME_SUFFIX_RE: Final = re.compile(
+    r"^(?P<base>.*\S)[\s_-]+(?:resume|cv)$", re.IGNORECASE
+)
+
+
+def _norm_base(s: str) -> str:
+    """Collapse runs of space/underscore/dash into a single space so a base
+    built from any separator convention normalizes to the same pairing key."""
+    return re.sub(r"[\s_-]+", " ", s).strip()
+
+
 # STATIC English pairing notes — never interpolate a filename (blind invariant).
 _DEMOTED_COVER_NOTE: Final = (
     "looked like a cover letter but had no matching résumé; ingested as a résumé"
@@ -141,16 +165,20 @@ def basename_lower(filename: str) -> str:
 def _classify(filename: str) -> tuple[str, str]:
     """Classify a filename by its stem suffix. Returns ``(role, base)`` where
     ``role`` is ``"cover"`` or ``"resume"`` and ``base`` is the shared key two
-    paired files have in common (the stem minus the role suffix). A stem with
-    no known suffix is a résumé whose base is the whole stem."""
+    paired files have in common (the stem minus the role suffix). Space, dash,
+    and underscore are equivalent separators (case-insensitive) both in
+    matching the suffix and in the returned ``base``, so filenames using
+    different separator conventions still share the same pairing key. A stem
+    with no known suffix is a résumé whose base is the whole (normalized)
+    stem."""
     stem = Path(basename_lower(filename)).stem
-    for suf in _COVER_SUFFIXES:
-        if stem.endswith(suf):
-            return "cover", stem[: -len(suf)].rstrip("_- ")
-    for suf in _RESUME_SUFFIXES:
-        if stem.endswith(suf):
-            return "resume", stem[: -len(suf)].rstrip("_- ")
-    return "resume", stem
+    cover_match = _COVER_SUFFIX_RE.match(stem)
+    if cover_match:
+        return "cover", _norm_base(cover_match.group("base"))
+    resume_match = _RESUME_SUFFIX_RE.match(stem)
+    if resume_match:
+        return "resume", _norm_base(resume_match.group("base"))
+    return "resume", _norm_base(stem)
 
 
 @dataclass(frozen=True)
