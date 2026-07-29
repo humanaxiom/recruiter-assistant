@@ -5,9 +5,10 @@ The DDL is the schema contract for the whole port. These tests pin:
 * **idempotency** — every ``CREATE`` carries ``IF NOT EXISTS`` so the app can
   run ``init_schema`` on every boot (integration proves it for real),
 * **scope** — the ported tables exist (now including ``users``/``audit_log``
-  per ADR-019, FU-5 slice 1 — schema only, and ``sessions`` per ADR-019 §10
-  step 4, FU-5 slice 3) and the still-cut ones (review workflow,
-  JD-Harmonizer) cannot creep back in,
+  per ADR-019, FU-5 slice 1 — schema only, ``sessions`` per ADR-019 §10
+  step 4, FU-5 slice 3, and ``job_assignees`` per ADR-020 §1, FU-6 slice 1)
+  and the still-cut ones (review workflow, JD-Harmonizer) cannot creep back
+  in,
 * **PII at rest** — name/email/phone/cover-letter-text are ``BYTEA``
   (pgcrypto), and only the email *hash* is plaintext,
 * **blind review ON by default** (decision 4),
@@ -26,6 +27,14 @@ real INET-vs-TEXT distinction). That behavioural proof lives in
 ``tests/integration/test_sessions_pg.py`` against a live testcontainers
 Postgres — this module and that one are deliberately complementary, not
 redundant.
+
+The ``job_assignees``-table tests below (ADR-020 §1, FU-6 slice 1) are the
+same kind of string-match: they can prove a column is declared with a given
+type/PK/FK/DEFAULT keyword, but NOT that Postgres actually enforces the
+composite PK, the CASCADE on ``job_id``/``user_id``, or the RESTRICT on
+``assigned_by`` at INSERT/DELETE time. That behavioural proof lives in
+``tests/integration/test_job_assignees_pg.py`` against a live testcontainers
+Postgres.
 """
 
 from __future__ import annotations
@@ -50,6 +59,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "users",
         "audit_log",
         "sessions",
+        "job_assignees",
     }
 )
 
@@ -114,6 +124,7 @@ EXPECTED_INDEXES: tuple[str, ...] = (
     "reveal_audit_resume_idx",
     "sessions_user_id_idx",
     "sessions_active_idx",
+    "job_assignees_user_idx",
 )
 
 # ADR-019 §1: the minimum column set for `users` — real identity entity.
@@ -154,6 +165,15 @@ SESSIONS_EXPECTED_COLUMNS: tuple[str, ...] = (
     "user_agent",
     "ip_addr",
     "created_at",
+)
+
+# ADR-020 §1: the minimum column set for `job_assignees` — links a user to a
+# single job, with an attributable `assigned_by`.
+JOB_ASSIGNEES_EXPECTED_COLUMNS: tuple[str, ...] = (
+    "job_id",
+    "user_id",
+    "assigned_by",
+    "assigned_at",
 )
 
 # ADR-019 §4: the Role vocabulary — data now, not code. `recruiter` is the
@@ -715,6 +735,103 @@ def test_sessions_user_id_idx_exists() -> None:
         _all_sql(),
         re.IGNORECASE,
     )
+
+
+# ── job_assignees (ADR-020 §1, FU-6 slice 1) ────────────────────────────────
+#
+# Links a user to a single job, with an attributable `assigned_by`. NOTE
+# (honesty about what this section can and cannot prove): these are all
+# string-matches against the DDL source text. They can show a column is
+# *declared* UUID/NOT NULL/REFERENCES-with-CASCADE-or-RESTRICT/DEFAULT, and
+# that the composite PRIMARY KEY clause is textually present, but NOT that
+# Postgres actually enforces the composite-PK uniqueness, the CASCADE on
+# job_id/user_id, or the RESTRICT on assigned_by at INSERT/DELETE time. That
+# behavioural proof is integration-only — see
+# tests/integration/test_job_assignees_pg.py.
+
+
+@pytest.mark.parametrize("column", JOB_ASSIGNEES_EXPECTED_COLUMNS)
+def test_job_assignees_table_has_expected_columns(column: str) -> None:
+    assert re.search(rf"\b{column}\b", _table_sql("job_assignees"), re.IGNORECASE)
+
+
+def test_job_assignees_primary_key_is_composite_job_and_user() -> None:
+    """ADR-020 §1 — a user may be assigned to each job at most once; the PK
+    is the pair, not a surrogate id column."""
+    sql = _table_sql("job_assignees")
+    assert re.search(
+        r"PRIMARY\s+KEY\s*\(\s*job_id\s*,\s*user_id\s*\)", sql, re.IGNORECASE
+    )
+    # And no surrogate `id` column pretending to be the identity.
+    assert not re.search(r"\bid\s+UUID\s+PRIMARY\s+KEY\b", sql, re.IGNORECASE)
+
+
+def test_job_assignees_job_id_references_jobs_with_cascade() -> None:
+    """ADR-020 §1 — a job has no hiring managers if it doesn't exist."""
+    assert re.search(
+        r"job_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+jobs\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+CASCADE",
+        _table_sql("job_assignees"),
+        re.IGNORECASE,
+    )
+
+
+def test_job_assignees_user_id_references_users_with_cascade() -> None:
+    """ADR-020 §1 — deleting/deprovisioning the assigned user removes their
+    assignment (mirrors the sessions.user_id CASCADE convention)."""
+    assert re.search(
+        r"user_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+users\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+CASCADE",
+        _table_sql("job_assignees"),
+        re.IGNORECASE,
+    )
+
+
+def test_job_assignees_assigned_by_references_users_with_restrict() -> None:
+    """ADR-020 §1 — the safety guard: if the assigning admin/recruiter is
+    deleted, the assignment record must not be silently cascaded away; the
+    DELETE on `users` must fail until the assignment is explicitly cleared."""
+    sql = _table_sql("job_assignees")
+    assert re.search(
+        r"assigned_by\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+users\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+RESTRICT",
+        sql,
+        re.IGNORECASE,
+    )
+    # Distinct from job_id/user_id — this FK must NOT cascade.
+    assert not re.search(
+        r"assigned_by\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+users\s*\(\s*id\s*\)"
+        r"\s+ON\s+DELETE\s+CASCADE",
+        sql,
+        re.IGNORECASE,
+    )
+
+
+def test_job_assignees_assigned_at_defaults_to_now() -> None:
+    assert re.search(
+        r"assigned_at\s+TIMESTAMPTZ\s+NOT\s+NULL\s+DEFAULT\s+now\s*\(\s*\)",
+        _table_sql("job_assignees"),
+        re.IGNORECASE,
+    )
+
+
+def test_job_assignees_user_idx_covers_user_id_and_assigned_at_desc() -> None:
+    """ADR-020 §1 — powers the fast 'all jobs for this user' query:
+    ``ON job_assignees (user_id, assigned_at DESC)``."""
+    assert re.search(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+job_assignees_user_idx\s+"
+        r"ON\s+job_assignees\s*\(\s*user_id\s*,\s*assigned_at\s+DESC\s*\)",
+        _all_sql(),
+        re.IGNORECASE,
+    )
+
+
+def test_jobs_and_users_tables_are_created_before_job_assignees() -> None:
+    """ADR-020 §1 — job_assignees FKs to BOTH jobs(id) and users(id); both
+    parent tables must exist before Postgres can create the child's FKs."""
+    job_assignees_idx = _statement_index("job_assignees")
+    assert _statement_index("jobs") < job_assignees_idx
+    assert _statement_index("users") < job_assignees_idx
 
 
 # ── indexes ────────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ from src.schemas.jobs import (
     Education,
     JDExtracted,
     JDExtractText,
+    JobAssigneeCreate,
     JobCreate,
     JobDeleteOut,
     JobListItem,
@@ -284,3 +285,22 @@ def test_education_ignores_unknown_key() -> None:
 def test_jd_extracted_ignores_unknown_key() -> None:
     jd = JDExtracted.model_validate({"title": "Dev", "bogus": 1})
     assert "bogus" not in jd.model_dump()
+
+
+# ── FU-6 hardening: JobAssigneeCreate.note is length-capped ──────────────
+# Reviewer + security both flagged that ``note`` was uncapped while flowing
+# verbatim into audit_log.details JSONB (ADR-020 §Accepted residuals).
+
+
+def test_job_assignee_create_note_accepts_a_normal_value() -> None:
+    m = JobAssigneeCreate(user_id=uuid4(), note="reviewing for the EMEA req")
+    assert m.note == "reviewing for the EMEA req"
+
+
+def test_job_assignee_create_note_allows_none() -> None:
+    assert JobAssigneeCreate(user_id=uuid4()).note is None
+
+
+def test_job_assignee_create_note_rejects_an_overlong_value() -> None:
+    with pytest.raises(ValidationError):
+        JobAssigneeCreate(user_id=uuid4(), note="x" * 201)

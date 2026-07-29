@@ -215,20 +215,39 @@ async def cas_user(request: Request, db: Db) -> JSONResponse:
     a web client can render a "log in" button without an error round-trip."""
     settings = get_settings()
     if not settings.cas_enabled:
+        # ADR-020 §7 — dev-anonymous mode resolves the same synthetic admin
+        # identity `resolve_user` would (role="admin"); hardcoded here rather
+        # than calling `resolve_user` again, since it is a constant in this
+        # branch and would otherwise add a needless second resolution.
         return JSONResponse(
-            {"username": None, "authenticated": False, "cas_enabled": False}
+            {
+                "username": None,
+                "authenticated": False,
+                "cas_enabled": False,
+                "role": "admin",
+            }
         )
 
     sid = request.cookies.get(settings.session_cookie_name)
     if not sid:
         return JSONResponse(
-            {"username": None, "authenticated": False, "cas_enabled": True}
+            {
+                "username": None,
+                "authenticated": False,
+                "cas_enabled": True,
+                "role": None,
+            }
         )
 
     session = await session_service.get_active_session(db, sid)
     if session is None:
         return JSONResponse(
-            {"username": None, "authenticated": False, "cas_enabled": True}
+            {
+                "username": None,
+                "authenticated": False,
+                "cas_enabled": True,
+                "role": None,
+            }
         )
 
     session = await session_service.refresh_if_needed(
@@ -244,5 +263,6 @@ async def cas_user(request: Request, db: Db) -> JSONResponse:
             "username": user.cas_username if user else None,
             "authenticated": user is not None,
             "cas_enabled": True,
+            "role": user.role if user else None,
         }
     )

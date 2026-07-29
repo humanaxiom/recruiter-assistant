@@ -66,6 +66,24 @@ bottom of this file. None of the PRE-EXISTING tests above use an unsafe
 ``next`` value, so none needed adjusting for this fix — every legitimate
 relative ``next`` used above (``/jobs``, ``/jobs/42``, ``/``) round-trips
 unchanged under the new sanitization.
+
+**FU-6 slice 10 (ADR-020 §7) — ``role`` on ``GET /auth/cas/user``.** The Flask
+viewer needs the logged-in user's ``role`` to decide whether to default a
+hiring_manager to the ``/my/jobs`` scoped view. This is purely additive to
+the status endpoint's existing shape (``username``/``authenticated``/
+``cas_enabled``): an authenticated session now also carries ``role`` (the
+resolved ``users.role`` value, e.g. ``"hiring_manager"``/``"admin"``); an
+unauthenticated caller (no valid session, ``cas_enabled=True``) gets
+``role: null`` — PRESENT but ``None``, deliberately mirroring how
+``username`` is already handled in that same anonymous branch (also present,
+also ``None``) rather than omitting the key, so a client never has to
+special-case "key missing" vs "key null". Dev-anonymous mode
+(``cas_enabled=False``) resolves the synthetic admin identity, so
+``role: "admin"`` there too — the existing ``authenticated``/``cas_enabled``
+values in dev mode are UNCHANGED by this slice (see the dev-mode section of
+``cas_user`` — it currently reports ``authenticated: False`` even though a
+synthetic admin identity is what ``resolve_user`` would resolve; this slice
+does not touch that field, only adds ``role``).
 """
 
 from __future__ import annotations
@@ -374,6 +392,113 @@ async def test_cas_user_never_401s_for_an_expired_or_unknown_cookie(
         )
     assert resp.status_code == 200
     assert resp.json()["authenticated"] is False
+
+
+# ── GET /auth/cas/user — `role` (FU-6 slice 10, ADR-020 §7) ────────────────
+#
+# Purely additive: an authenticated session's resolved ``users.role`` is
+# surfaced alongside the existing fields; an unauthenticated caller gets
+# ``role: null`` (PRESENT, not omitted — matching how ``username`` is
+# already handled in that branch); dev-anonymous mode reports the synthetic
+# admin's role.
+
+
+@pytest.mark.asyncio
+async def test_cas_user_authenticated_hiring_manager_reports_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True, session_cookie_name="ra_session")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    user_id = uuid4()
+    conn = _FakeAuthConn(
+        session_row=_session_row(id="tok-hm", user_id=user_id),
+        user_row=_user_row(id=user_id, cas_username="hank", role="hiring_manager"),
+    )
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/user", cookies={"ra_session": "tok-hm"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["authenticated"] is True
+    assert body["username"] == "hank"
+    assert body["role"] == "hiring_manager"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_authenticated_admin_reports_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True, session_cookie_name="ra_session")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    user_id = uuid4()
+    conn = _FakeAuthConn(
+        session_row=_session_row(id="tok-admin", user_id=user_id),
+        user_row=_user_row(id=user_id, cas_username="adminuser", role="admin"),
+    )
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/user", cookies={"ra_session": "tok-admin"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["authenticated"] is True
+    assert body["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_anonymous_role_is_null_but_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unauthenticated (CAS enabled, no cookie): ``role`` must be PRESENT
+    and ``null`` — the same shape ``username`` already uses in this branch —
+    so a client never has to special-case "key missing" vs "key null"."""
+    settings = _settings(cas_enabled=True)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/user")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["authenticated"] is False
+    assert "role" in body, "role must be present (null), matching username's shape"
+    assert body["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_cas_user_role_is_null_for_an_expired_or_unknown_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True, session_cookie_name="ra_session")
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    conn = _FakeAuthConn(session_row=None)  # no active session found
+    app = _build_app(conn)
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/user", cookies={"ra_session": "bogus-or-expired"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["authenticated"] is False
+    assert body["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_cas_user_dev_anonymous_mode_reports_admin_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-019 §10b / ADR-020 §7 — CAS disabled resolves the synthetic
+    dev-admin identity (``resolve_user``'s ``role="admin"``); the status
+    endpoint must surface that role too. This does NOT change the existing
+    ``authenticated``/``cas_enabled`` values the dev-mode branch already
+    reports — only adds ``role``."""
+    settings = _settings(cas_enabled=False)
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/user")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cas_enabled"] is False
+    assert body["role"] == "admin"
 
 
 # ── src.api.deps.resolve_user ────────────────────────────────────────────

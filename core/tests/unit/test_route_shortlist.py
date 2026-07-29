@@ -57,6 +57,36 @@ not merely the filename suffix), the same byte-scan discipline
 | ``/jobs/{id}/shortlist`` (list)      | GET    | all four |
 | ``/shortlist/{id}``                  | GET    | all four |
 | ``/jobs/{id}/shortlist/export``      | GET    | all four (blind only) |
+
+**FU-6 slice 7 (ADR-020 §3/§5) — row-scoping WIRING for
+``GET /jobs/{job_id}/shortlist``, ``GET /shortlist/{entry_id}``, and
+``GET /jobs/{job_id}/shortlist/export``.**
+
+These tests prove WIRING only: that each route resolves the caller's CAS
+session identity (``resolve_user``) and forwards the correct ``user_id``
+kwarg to ``shortlist_service.list_for_job`` / ``.get_one`` / ``.export_rows``
+via ``scoped_user_id_or_403`` (already unit-tested standalone in
+``test_api_deps.py``, and exercised identically for the sibling
+jobs/resumes routes in ``test_route_jobs.py`` / ``test_route_resumes.py``).
+They mock the service layer entirely, so they cannot prove the ``EXISTS``
+predicate actually FILTERS rows in a real query planner against real data —
+that structural proof, plus the unassigned-vs-nonexistent-job
+list/export/get distinction, is ``test_shortlist_scoping_pg.py``'s job (real
+Postgres, ADR-020 §3, mandatory).
+
+**Fix to a pre-existing contradicted assumption (ADR-020 §3, fail-closed).**
+``test_list_shortlist_is_readable_by_every_role``,
+``test_get_shortlist_entry_is_readable_by_every_role``, and
+``test_export_is_readable_by_every_role`` previously asserted 200 for EVERY
+role — including ``Role.HIRING_MANAGER`` — with no session identity
+supplied at all. Per ADR-020 §3's fail-closed rule (mirrored verbatim from
+``test_route_jobs.py``/``test_route_resumes.py``'s own fix), a
+``hiring_manager`` KEY now requires a verifiable ``hiring_manager`` SESSION
+to be served; with no session override that case now 403s. Each of the
+three tests below supplies a real hiring_manager session override for the
+``Role.HIRING_MANAGER`` parametrize case ONLY — the other three roles are
+unaffected by row-scoping (ADR-020 §4) and keep relying on the ambient
+dev-anonymous-admin ``resolve_user`` default, exactly as before.
 """
 
 from __future__ import annotations
@@ -75,10 +105,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from src.api.deps import Role, get_arq, resolve_role
+from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import shortlist as shortlist_routes
-from src.errors import AppError
+from src.errors import AppError, NotFoundError
 from src.models.pool import get_db
+from src.schemas.auth import User
+from src.schemas.matching import EvidenceObject, ScoreBreakdown, ShortlistEntry
+from src.services import audit_service
 from src.services.shortlist_service import _CSV_FIELDS
 
 _NOW = dt.datetime(2026, 7, 16, tzinfo=dt.UTC)
@@ -214,6 +247,19 @@ async def _client(app: FastAPI) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+def _identity_user(*, cas_username: str = "alice", role: str = "recruiter") -> User:
+    return User(
+        id=uuid4(),
+        cas_username=cas_username,
+        display_name=cas_username,
+        email=None,
+        role=role,
+        active=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+
+
 # ── POST /jobs/{job_id}/shortlist ────────────────────────────────────────
 
 
@@ -274,6 +320,13 @@ async def test_list_shortlist_is_readable_by_every_role(role: Role) -> None:
     job_id = uuid4()
     conn = _mock_conn(fetchval=False, fetch=[_entry_row(job_id=job_id)])
     app = _build_app(conn, role=role)
+    if role == Role.HIRING_MANAGER:
+        # ADR-020 §3, fail-closed: a hiring_manager KEY needs a verifiable
+        # hiring_manager SESSION to be scoped-and-served; supply one for this
+        # case only (mirrors test_route_resumes.py's identical fix).
+        app.dependency_overrides[resolve_user] = lambda: _identity_user(
+            cas_username="hm", role="hiring_manager"
+        )
     async with await _client(app) as client:
         resp = await client.get(f"/jobs/{job_id}/shortlist")
     assert resp.status_code == 200
@@ -307,6 +360,10 @@ async def test_get_shortlist_entry_is_readable_by_every_role(role: Role) -> None
     entry_id = uuid4()
     conn = _mock_conn(fetchval=False, fetchrow=_entry_row(entry_id=entry_id))
     app = _build_app(conn, role=role)
+    if role == Role.HIRING_MANAGER:
+        app.dependency_overrides[resolve_user] = lambda: _identity_user(
+            cas_username="hm", role="hiring_manager"
+        )
     async with await _client(app) as client:
         resp = await client.get(f"/shortlist/{entry_id}")
     assert resp.status_code == 200
@@ -381,6 +438,10 @@ async def test_export_is_readable_by_every_role(role: Role) -> None:
     job_id = uuid4()
     conn = _mock_conn(fetch=[_export_row(job_id=job_id)])
     app = _build_app(conn, role=role)
+    if role == Role.HIRING_MANAGER:
+        app.dependency_overrides[resolve_user] = lambda: _identity_user(
+            cas_username="hm", role="hiring_manager"
+        )
     async with await _client(app) as client:
         resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
     assert resp.status_code == 200
@@ -470,3 +531,560 @@ async def test_stage_route_does_not_exist_returns_plain_404() -> None:
         resp = await client.post(f"/shortlist/{uuid4()}/stage", json={})
     assert resp.status_code == 404
     assert resp.status_code not in (401, 403)
+
+
+# ── FU-6 slice 7 (ADR-020 §3/§5) — row-scoping WIRING for
+#    GET /jobs/{job_id}/shortlist, GET /shortlist/{entry_id}, and
+#    GET /jobs/{job_id}/shortlist/export ─────────────────────────────────
+#
+# These tests prove WIRING only: that each route resolves the caller's CAS
+# session identity (``resolve_user``) and forwards the correct ``user_id``
+# kwarg to ``shortlist_service.list_for_job`` / ``.get_one`` / ``.export_rows``
+# via ``scoped_user_id_or_403``. They mock ``shortlist_service`` entirely, so
+# they cannot prove the ``EXISTS`` predicate actually FILTERS rows in a real
+# query planner against real data — that structural proof is
+# ``test_shortlist_scoping_pg.py``'s job (real Postgres, ADR-020 §3,
+# mandatory).
+
+_UNSCOPED_KEY_ROLES: tuple[tuple[Role, str], ...] = (
+    (Role.ADMIN, "admin"),
+    (Role.RECRUITER, "recruiter"),
+    (Role.AUDITOR, "auditor"),
+)
+
+
+def _entry_stub(*, entry_id: UUID | None = None, job_id: UUID | None = None) -> Any:
+    """A valid ``ShortlistEntry`` the mocked ``shortlist_service.list_for_job``
+    / ``.get_one`` can return — the route's return-type annotation doubles as
+    its response_model."""
+    return ShortlistEntry(
+        id=entry_id or uuid4(),
+        job_id=job_id or uuid4(),
+        resume_id=uuid4(),
+        rank=1,
+        score_final=0.87,
+        score_breakdown=ScoreBreakdown(
+            skill=0.8,
+            experience=0.6,
+            education=0.4,
+            seniority=0.5,
+            vector=0.3,
+            structured=0.55,
+        ),
+        evidence=EvidenceObject(
+            requirements=[],
+            overall_summary="Strong candidate.",
+            cover_letter_presence=False,
+            cover_letter_evidence=[],
+            overall_motivation="",
+        ),
+        generated_at=_NOW,
+    )
+
+
+# ── GET /jobs/{job_id}/shortlist — user_id wiring ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_passes_user_id_for_a_hiring_manager_even_with_the_shared_recruiter_key(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap ADR-020 §4/§3 calls out explicitly: the Flask viewer's
+    browser session presents the ONE shared "recruiter" API key for every
+    human, so ``key_role`` resolves to ``Role.RECRUITER`` even when the
+    signed-in human is a hiring_manager. Scoping must key off the SESSION
+    identity, not the key role (mirrors ``test_route_resumes.py``'s
+    identically-named test)."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.RECRUITER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_list_shortlist_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient default (no ``resolve_user`` override, ``cas_enabled=False``):
+    the synthetic dev-anonymous admin identity resolves. Must stay
+    unscoped."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.ADMIN)
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-closed (ADR-020 §3 final paragraph): a hiring_manager KEY with no
+    verifiable session identity must 403 and must NEVER reach the service
+    layer unscoped."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 403
+    list_mock.assert_not_awaited()
+
+
+# ── GET /shortlist/{entry_id} — user_id wiring ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    get_mock.assert_awaited_once()
+    assert get_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    get_mock.assert_awaited_once()
+    assert get_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    get_mock.assert_awaited_once()
+    assert get_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 403
+    get_mock.assert_not_awaited()
+
+
+# ── GET /jobs/{job_id}/shortlist/export — user_id wiring ────────────────
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    export_mock.assert_awaited_once()
+    assert export_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_passes_user_id_for_a_hiring_manager_even_with_the_shared_recruiter_key(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.RECRUITER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    export_mock.assert_awaited_once()
+    assert export_mock.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_export_shortlist_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    export_mock.assert_awaited_once()
+    assert export_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.ADMIN)
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    export_mock.assert_awaited_once()
+    assert export_mock.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist/export?format=csv")
+
+    assert resp.status_code == 403
+    export_mock.assert_not_awaited()
+
+
+# ── FU-6 slice 8 (ADR-020 §6) — auditor read-logging: "the watchers are
+#    watched", GET /shortlist/{id} and GET /jobs/{job_id}/shortlist/export ──
+#
+# Scope decision mirrored from test_route_jobs.py / test_route_resumes.py
+# (see those files' section headers for the full rationale): the
+# single-subject GET /shortlist/{entry_id} AND the bulk-candidate-pull
+# GET /jobs/{job_id}/shortlist/export are BOTH logged -- export is a
+# deliberate bulk read worth auditing even though it is keyed by job_id, not
+# a single-entry id. The polled list route GET /jobs/{job_id}/shortlist is
+# deliberately NOT logged (dedicated negative test below). The read-log
+# fires ONLY for a REAL auditor session, and only on success (200; for
+# GET /shortlist/{id} that means the entry exists -- the export route never
+# 404s at all, see its own docstring, so it has no 404-no-audit case).
+# Patches a FRESH "from src.services import audit_service" import at the top
+# of this file (this routes module does not import it yet) -- see
+# test_route_jobs.py's identical note on why patching the shared module
+# object directly is implementation-agnostic.
+
+
+def _auditor_shortlist_user(*, cas_username: str = "audrey") -> User:
+    return _identity_user(cas_username=cas_username, role="auditor")
+
+
+# ── GET /shortlist/{entry_id} ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_real_auditor_writes_one_read_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_shortlist_entry"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "shortlist_entry"
+    assert kwargs["subject_id"] == entry_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_non_auditor_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_mock = AsyncMock(return_value=_entry_stub(entry_id=entry_id))
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_entry_404_writes_no_read_log_even_for_a_real_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    get_mock = AsyncMock(
+        side_effect=NotFoundError(
+            f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
+        )
+    )
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "get_one", get_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 404
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_shortlist_never_writes_a_read_log_even_for_an_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope decision: the polled list route GET /jobs/{job_id}/shortlist
+    is never read-logged, even for a real auditor session."""
+    conn = _mock_conn(fetchval=False, fetch=[])
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "list_for_job", list_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/shortlist")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+# ── GET /jobs/{job_id}/shortlist/export — a deliberate bulk read ─────────
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_real_auditor_writes_one_read_export_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.AUDITOR)
+    auditor = _auditor_shortlist_user()
+    app.dependency_overrides[resolve_user] = lambda: auditor
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_awaited_once()
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "read_shortlist_export"
+    assert kwargs["actor_kind"] == "user"
+    assert kwargs["actor_user_id"] == auditor.id
+    assert kwargs["subject_type"] == "job"
+    assert kwargs["subject_id"] == job_id
+
+
+@pytest.mark.parametrize(
+    "key_role,session_role",
+    [
+        (Role.ADMIN, "admin"),
+        (Role.RECRUITER, "recruiter"),
+        (Role.HIRING_MANAGER, "hiring_manager"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_export_shortlist_non_auditor_writes_no_read_log(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_export_shortlist_dev_anonymous_admin_writes_no_read_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetch=[])
+    app = _build_app(conn, role=Role.ADMIN)
+    export_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(shortlist_routes.shortlist_service, "export_rows", export_mock)
+    audit = AsyncMock(return_value=None)
+    monkeypatch.setattr(audit_service, "record_audit", audit)
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/export?format=csv")
+
+    assert resp.status_code == 200
+    audit.assert_not_awaited()

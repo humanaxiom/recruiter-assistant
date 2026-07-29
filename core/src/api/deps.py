@@ -52,7 +52,7 @@ from fastapi import Cookie, Depends, Header, HTTPException, Request
 
 from src.models.pool import Db
 from src.schemas.auth import User
-from src.services import session_service, user_service
+from src.services import DbConn, audit_service, session_service, user_service
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -281,3 +281,93 @@ def actor_fields_from_user(
     if user.id == _DEV_ADMIN_SENTINEL_ID:
         return ("service", None, user.cas_username)
     return ("user", user.id, None)
+
+
+async def scoped_user_id_or_403(user: User | None, key_role: Role) -> UUID | None:
+    """Row-scoping identity helper (FU-6 slice 4, ADR-020 §3/§4/§5).
+
+    Scoping keys off the CAS SESSION identity (``user``, ``resolve_user``'s
+    resolved ``User | None``), never the API-key ``Role``. The Flask viewer
+    presents ONE shared ``recruiter`` API key for every browser user
+    (``core/frontend/api_client.py``), so ``key_role`` resolves to
+    ``Role.RECRUITER`` for every browser request regardless of which human is
+    actually signed in — a hiring_manager browsing through the shared key
+    would look, to ``key_role`` alone, indistinguishable from a recruiter.
+    Keying scope off ``key_role`` would silently serve that hiring_manager
+    company-wide data instead of scoping them to their own requisitions
+    (ADR-020 §4). The session's ``user.role`` is cryptographically tied to a
+    real login and cannot be spoofed by the shared browser key, so it — not
+    ``key_role`` — decides whether the caller is actually a hiring_manager.
+
+    Returns:
+        * a real ``UUID`` (``user.id``) — a genuine hiring_manager session;
+          the caller is scoped, filter every query by this id.
+        * ``None`` — the caller is UNSCOPED: an admin/recruiter/auditor
+          session, the dev-anonymous synthetic admin, or no session at all
+          paired with a non-hiring_manager ``key_role`` (a bare service/admin
+          key) — see every row.
+        * raises ``HTTPException(403)`` — ``key_role == Role.HIRING_MANAGER``
+          (the caller CLAIMS a scoped role) but there is no verifiable
+          session identity to scope against, or the session resolves to a
+          different role. Fail-closed (ADR-020 §3, final paragraph): never
+          silently serve company-wide data to a caller who should see one
+          requisition. Uses the same ``fastapi.HTTPException(status_code=
+          403, ...)`` mechanism as ``require_role`` and the reveal-route 403.
+    """
+    if user is not None and user.role == "hiring_manager":
+        return user.id
+
+    if key_role == Role.HIRING_MANAGER:
+        raise HTTPException(
+            status_code=403,
+            detail="hiring_manager key requires a verified hiring_manager session",
+        )
+
+    return None
+
+
+async def log_auditor_read(
+    db: DbConn,
+    user: User | None,
+    *,
+    action: str,
+    subject_type: str,
+    subject_id: UUID,
+    job_id: UUID | None = None,
+) -> None:
+    """FU-6 slice 8 (ADR-020 §6) — "the watchers are watched."
+
+    Auditors keep GLOBAL, unscoped read access (ADR-020 §4); the
+    compensating control is that every auditor READ is itself logged to
+    ``audit_log``. This helper is the single auditor-check shared by the four
+    deliberate single-subject/bulk read routes (``GET /jobs/{id}``, ``GET
+    /resumes/{id}``, ``GET /shortlist/{id}``, ``GET
+    /jobs/{id}/shortlist/export``) — the polled list-index routes never call
+    this at all.
+
+    Fires ONLY for a REAL auditor session: ``user is not None and user.role
+    == "auditor"`` AND ``user.id != _DEV_ADMIN_SENTINEL_ID`` (the ambient
+    CAS-disabled synthetic identity resolves ``role="admin"``, so it is
+    already excluded by the role check alone — the sentinel check is a
+    defense-in-depth belt-and-suspenders, since it can never be a real
+    ``users`` row and would violate ``audit_log.actor_user_id``'s FK if it
+    somehow reached here as ``actor_kind='user'``).
+
+    Callers MUST invoke this only AFTER the underlying read has already
+    resolved successfully (a 200) — a 404/``NotFoundError`` means nothing was
+    read, so nothing is logged. This function does not itself catch
+    exceptions; ordering is the caller's responsibility, matching
+    ``reveal_resume``'s audit-then-decrypt discipline.
+    """
+    if user is None or user.role != "auditor" or user.id == _DEV_ADMIN_SENTINEL_ID:
+        return
+    await audit_service.record_audit(
+        db,
+        actor_kind="user",
+        actor_user_id=user.id,
+        actor_service=None,
+        action=action,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        job_id=job_id,
+    )

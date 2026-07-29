@@ -35,6 +35,12 @@ tests structurally cannot:
   unread and sessions hard-expired instead of sliding. A mocked connection
   cannot prove a real ``UPDATE ... SET expires_at`` actually lands (or does
   not land) against a real row — only a real Postgres can.
+* (FU-6 slice 10, ADR-020 §7) the ``role`` reported by ``GET /auth/cas/user``
+  REALLY comes from the real ``users.role`` column via the real session
+  resolution chain — not just that the route echoed a field on a mocked
+  row. A mocked connection would let ``role`` be a hardcoded literal that
+  never actually reads the DB; only a real Postgres proves the endpoint's
+  ``role`` and the row's ``users.role`` cannot drift apart.
 
 Follows the exact asyncpg/testcontainers fixture wiring already used in
 ``tests/integration/test_api_jobs_pg.py`` and
@@ -258,6 +264,91 @@ async def test_cas_user_endpoint_reflects_the_real_session_after_validate(
     body = status_resp.json()
     assert body["authenticated"] is True
     assert body["username"] == username
+
+
+# ── GET /auth/cas/user — real `role` (FU-6 slice 10, ADR-020 §7) ──────────
+#
+# The Flask viewer's `/my/jobs` default-view switch needs the logged-in
+# user's ROLE, sourced from the real `users.role` row via the real
+# cookie -> session -> user chain — not a hardcoded literal on the route.
+
+
+@pytest.mark.asyncio
+async def test_cas_user_endpoint_reports_the_real_recruiter_role_after_validate(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    username = _unique_username("nina")
+    monkeypatch.setattr(
+        auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
+    )
+    app = _build_app(pg_pool)
+
+    async with await _client(app) as client:
+        await client.get("/auth/cas/validate", params={"ticket": "any-ticket"})
+        status_resp = await client.get("/auth/cas/user")
+
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["authenticated"] is True
+    assert body["role"] == "recruiter"
+
+    async with pg_pool.acquire() as conn:
+        db_role = await conn.fetchval(
+            "SELECT role FROM users WHERE cas_username = $1", username
+        )
+    assert body["role"] == db_role, "endpoint role must match the real users.role row"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_endpoint_reports_a_seeded_hiring_manager_role(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-020 §7 — the Flask viewer's `/my/jobs` default-view switch needs
+    a real hiring_manager session's role surfaced end-to-end. Seed the role
+    directly (``user_service.provision_or_get`` only ever assigns
+    admin/recruiter), then re-read it through the real session chain."""
+    settings = _settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    username = _unique_username("oscar")
+    monkeypatch.setattr(
+        auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
+    )
+    app = _build_app(pg_pool)
+
+    async with await _client(app) as client:
+        await client.get("/auth/cas/validate", params={"ticket": "any-ticket"})
+
+        async with pg_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET role = 'hiring_manager' WHERE cas_username = $1",
+                username,
+            )
+
+        status_resp = await client.get("/auth/cas/user")
+
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["authenticated"] is True
+    assert body["role"] == "hiring_manager"
+
+
+@pytest.mark.asyncio
+async def test_cas_user_endpoint_role_is_null_with_no_cookie(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    app = _build_app(pg_pool)
+
+    async with await _client(app) as client:
+        resp = await client.get("/auth/cas/user")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["authenticated"] is False
+    assert body["role"] is None
 
 
 # ── GET /auth/cas/logout — revokes the real session row ───────────────────

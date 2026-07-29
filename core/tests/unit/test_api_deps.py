@@ -77,6 +77,14 @@ deployment cannot silently ship a session cookie that travels in the clear.
 ``session_cookie_secure=True`` OR ``cas_enabled=False`` must NOT emit it.
 Pure settings/log-line logic, no DB — ``offline`` genuinely suffices; see the
 tests under "log_auth_mode — insecure-cookie startup warning" below.
+
+**FU-6 slice 4 (ADR-020 §3/§4/§5) — ``scoped_user_id_or_403``, the row-
+scoping identity helper.** The Flask viewer presents ONE shared ``recruiter``
+API key for every browser user (``core/frontend/api_client.py``), so the
+key-derived ``Role`` (``resolve_role``) cannot identify a hiring_manager.
+Row-scoping therefore keys off the CAS SESSION identity (``resolve_user``'s
+``User | None``), never the API-key role. See the dedicated section near the
+bottom of this file for the full decision-table coverage.
 """
 
 from __future__ import annotations
@@ -91,6 +99,7 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from src.schemas.auth import User
 from src.settings import Settings
 
 
@@ -722,10 +731,10 @@ def _live_session() -> Any:
 
 
 def _live_user(user_id: Any) -> Any:
-    from src.schemas.auth import User
+    from src.schemas.auth import User as _User
 
     now = datetime.now(UTC)
-    return User(
+    return _User(
         id=user_id,
         cas_username="alice",
         display_name=None,
@@ -876,3 +885,283 @@ async def test_resolve_user_dev_anonymous_path_never_touches_sessions_at_all(
     assert result.cas_username == "dev-anonymous"
     get_active_spy.assert_not_awaited()
     refresh_spy.assert_not_awaited()
+
+
+# ── scoped_user_id_or_403 — CAS-identity row-scoping helper (FU-6 slice 4,
+#    ADR-020 §3/§4/§5) ─────────────────────────────────────────────────────
+#
+# The Flask viewer presents ONE shared ``recruiter`` API key for every
+# browser user (``core/frontend/api_client.py``), so the key-derived
+# ``Role`` (``resolve_role``) cannot identify a hiring_manager — every
+# browser request "looks like" ``Role.RECRUITER`` regardless of which human
+# is actually signed in. Row-scoping therefore keys off the CAS SESSION
+# identity (``resolve_user``, a real ``User | None`` with ``.id``/``.role``),
+# never the API-key role.
+#
+# ``scoped_user_id_or_403(user: User | None, key_role: Role) -> UUID | None``
+# returns:
+#   * a real ``UUID`` — the caller is scoped, filter every query by this id
+#   * ``None`` — the caller is UNSCOPED (admin/recruiter/auditor, or the
+#     dev-anonymous synthetic admin, or a bare service/admin key with no
+#     session at all) — see every row
+#   * raises ``HTTPException(403)`` — a caller CLAIMS a scoped role
+#     (``key_role == Role.HIRING_MANAGER``) but has no verifiable session
+#     identity to scope against, or a mismatched one. Fail-closed: never
+#     silently serve company-wide data to a caller who should see one
+#     requisition (ADR-020 §3, final paragraph).
+#
+# This is PURE branching logic over ``Role``/``User | None`` — no I/O, no
+# database, no network. ``offline`` genuinely suffices AND is the only layer
+# that can fully prove the decision table below; the actual row-filtering
+# behaviour (the WHERE/EXISTS predicate hitting a real Postgres table) is
+# proved later, per ADR-020 §3's affected-route matrix, by the scoping
+# slices' integration tests — NOT here. No integration test is added in this
+# slice; it would not exercise anything an integration harness can prove that
+# this in-memory decision table doesn't already prove more cheaply.
+
+
+def _scoped_user(role: str, user_id: Any = None) -> User:
+    """Build a real (non-sentinel) ``User`` with the given ``.role``."""
+    now = datetime.now(UTC)
+    return User(
+        id=user_id if user_id is not None else uuid4(),
+        cas_username="someone",
+        display_name=None,
+        email=None,
+        role=role,
+        active=True,
+        created_at=now,
+        last_seen_at=now,
+    )
+
+
+def _dev_anonymous_admin() -> User:
+    """The exact synthetic identity ``resolve_user`` returns when
+    ``cas_enabled=False`` — see ``deps._DEV_ADMIN_SENTINEL_ID``."""
+    from src.api.deps import _DEV_ADMIN_SENTINEL_ID
+
+    now = datetime.now(UTC)
+    return User(
+        id=_DEV_ADMIN_SENTINEL_ID,
+        cas_username="dev-anonymous",
+        display_name="Dev Anonymous (auth disabled)",
+        email=None,
+        role="admin",
+        active=True,
+        created_at=now,
+        last_seen_at=now,
+    )
+
+
+# 1. A real hiring_manager session -> SCOPED to their own id, regardless of
+#    which key_role the (shared, browser-wide) API key resolved to. This is
+#    the actual Flask-browser path: the browser always presents the shared
+#    ``recruiter`` key, so ``key_role`` is almost always ``Role.RECRUITER``
+#    even for a hiring-manager human — the "browser always looks like
+#    recruiter" trap this helper exists to avoid.
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_scopes_a_real_hiring_manager_with_hiring_manager_key() -> (  # noqa: E501
+    None
+):
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("hiring_manager")
+    result = await scoped_user_id_or_403(user, Role.HIRING_MANAGER)
+    assert result == user.id
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_scopes_a_real_hiring_manager_even_with_the_shared_recruiter_key() -> (  # noqa: E501
+    None
+):
+    """The critical trap test: the Flask viewer's browser session always
+    presents the ONE shared ``recruiter`` API key, so ``key_role`` resolves
+    to ``Role.RECRUITER`` even when the signed-in human is a
+    hiring_manager. Scoping MUST key off the session identity, not the key
+    role, or this exact combination silently serves unscoped data to every
+    hiring-manager browser user."""
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("hiring_manager")
+    result = await scoped_user_id_or_403(user, Role.RECRUITER)
+    assert result == user.id
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_scopes_a_real_hiring_manager_with_admin_key() -> (
+    None
+):
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("hiring_manager")
+    result = await scoped_user_id_or_403(user, Role.ADMIN)
+    assert result == user.id
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_scopes_a_real_hiring_manager_with_auditor_key() -> (  # noqa: E501
+    None
+):
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("hiring_manager")
+    result = await scoped_user_id_or_403(user, Role.AUDITOR)
+    assert result == user.id
+
+
+# 2. A hiring_manager API key with NO verifiable session identity -> 403,
+#    never unscoped. Fail-closed.
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_403s_hiring_manager_key_with_no_session_user() -> (
+    None
+):
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    with pytest.raises(HTTPException) as excinfo:
+        await scoped_user_id_or_403(None, Role.HIRING_MANAGER)
+    assert excinfo.value.status_code == 403
+
+
+# 3. A hiring_manager API key with a session that resolves to a DIFFERENT
+#    (mismatched) role -> 403, never granted that other identity's scope.
+
+
+@pytest.mark.parametrize("mismatched_role", ["admin", "recruiter", "auditor"])
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_403s_hiring_manager_key_with_mismatched_session_role(  # noqa: E501
+    mismatched_role: str,
+) -> None:
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user(mismatched_role)
+    with pytest.raises(HTTPException) as excinfo:
+        await scoped_user_id_or_403(user, Role.HIRING_MANAGER)
+    assert excinfo.value.status_code == 403
+
+
+# 4. admin/recruiter/auditor session identity, key_role NOT hiring_manager
+#    -> None (UNSCOPED). Auditor is DELIBERATELY unscoped per ADR-020 §4
+#    ("auditor: NOT scoped — retains global read access across all jobs").
+
+
+@pytest.mark.parametrize("session_role", ["admin", "recruiter", "auditor"])
+@pytest.mark.parametrize("key_role_name", ["ADMIN", "RECRUITER", "AUDITOR"])
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_returns_none_for_unscoped_session_roles(
+    session_role: str, key_role_name: str
+) -> None:
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    key_role = getattr(Role, key_role_name)
+    user = _scoped_user(session_role)
+    result = await scoped_user_id_or_403(user, key_role)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_returns_none_for_auditor_session_explicitly() -> (
+    None
+):
+    """ADR-020 §4 pin, standalone from the parametrized matrix above: an
+    auditor session is unscoped even when presented with its own auditor
+    key — auditors keep global read, compensated by audit-log-everything
+    (ADR-020 §6), not by row scoping."""
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("auditor")
+    result = await scoped_user_id_or_403(user, Role.AUDITOR)
+    assert result is None
+
+
+# 5. dev-anonymous synthetic admin (cas_enabled=False path) -> None
+#    (UNSCOPED — dev/CI unaffected by row scoping).
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_returns_none_for_dev_anonymous_admin() -> None:
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _dev_anonymous_admin()
+    result = await scoped_user_id_or_403(user, Role.ADMIN)
+    assert result is None
+
+
+# 6. user is None AND key_role in {admin, recruiter, auditor} -> None
+#    (UNSCOPED, not 403 — a bare service/admin key with no session is simply
+#    not a scoped role; only a HIRING_MANAGER key with no session fails
+#    closed).
+
+
+@pytest.mark.parametrize("key_role_name", ["ADMIN", "RECRUITER", "AUDITOR"])
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_returns_none_for_no_session_with_unscoped_key(
+    key_role_name: str,
+) -> None:
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    key_role = getattr(Role, key_role_name)
+    result = await scoped_user_id_or_403(None, key_role)
+    assert result is None
+
+
+# ── return-type and mechanism pins ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_return_type_is_a_real_uuid_when_scoped() -> None:
+    from uuid import UUID
+
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    user = _scoped_user("hiring_manager")
+    result = await scoped_user_id_or_403(user, Role.HIRING_MANAGER)
+    assert isinstance(result, UUID)
+
+
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_403_matches_the_reveal_403_mechanism() -> None:
+    """Pin the exact 403 mechanism to what the rest of the codebase already
+    uses for an authorization-scope failure (``require_role``'s 403 and
+    ``routes.resumes.reveal_resume``'s "reveal requires an attributable
+    human session" 403) — a plain ``fastapi.HTTPException(status_code=403,
+    ...)``, not a ``src.errors.AppError`` subclass or a bespoke exception
+    type, so the global FastAPI exception machinery renders it identically
+    to every other 403 in this API without any new handler."""
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    with pytest.raises(HTTPException) as excinfo:
+        await scoped_user_id_or_403(None, Role.HIRING_MANAGER)
+    assert isinstance(excinfo.value, HTTPException)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail, "expected a non-empty detail message on the 403"
+
+
+@pytest.mark.parametrize(
+    ("session_role", "key_role_name"),
+    [
+        ("admin", "ADMIN"),
+        ("recruiter", "RECRUITER"),
+        ("auditor", "AUDITOR"),
+        ("admin", "RECRUITER"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_scoped_user_id_or_403_never_returns_a_non_none_value_for_a_non_hiring_manager_session(  # noqa: E501
+    session_role: str, key_role_name: str
+) -> None:
+    """Belt-and-suspenders: for every session whose ``.role`` is not
+    ``"hiring_manager"``, the helper must return exactly ``None`` — never a
+    ``UUID`` — regardless of which unscoped key_role is presented. A
+    non-``None`` return for a non-hiring_manager session would mean some
+    other role is being silently row-scoped, which ADR-020 §4 never asks
+    for."""
+    from src.api.deps import Role, scoped_user_id_or_403
+
+    key_role = getattr(Role, key_role_name)
+    user = _scoped_user(session_role)
+    result = await scoped_user_id_or_403(user, key_role)
+    assert result is None

@@ -25,8 +25,10 @@ from src.api.deps import (
     Role,
     actor_fields_from_user,
     get_arq,
+    log_auditor_read,
     require_role,
     resolve_user,
+    scoped_user_id_or_403,
 )
 from src.errors import FileRejectedError
 from src.models.pool import Db
@@ -162,21 +164,80 @@ async def bulk_create_jobs(
     return results
 
 
-@router.get("/jobs", dependencies=[Depends(require_role(*_JOB_READERS))])
+@router.get("/jobs")
 async def list_jobs(
     db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     status_filter: Annotated[JobStatus | None, Query(alias="status")] = None,
 ) -> list[JobListItem]:
+    """FU-6 slice 5 (ADR-020 §3/§4) — row-scoped for a hiring_manager SESSION
+    (not the key role — see ``scoped_user_id_or_403``'s docstring for why),
+    unscoped (``user_id=None``) for admin/recruiter/auditor."""
+    user_id = await scoped_user_id_or_403(user, role)
     return await job_service.list_jobs(
-        db, limit=limit, offset=offset, status=status_filter
+        db, limit=limit, offset=offset, status=status_filter, user_id=user_id
     )
 
 
-@router.get("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_READERS))])
-async def get_job(job_id: UUID, db: Db) -> JobOut:
-    return await job_service.get_job(db, job_id)
+@router.get("/my/jobs")
+async def my_jobs(
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    status_filter: Annotated[JobStatus | None, Query(alias="status")] = None,
+) -> list[JobListItem]:
+    """FU-6 slice 9 (ADR-020 §7) — the caller's OWN assigned job set, for
+    ANY role. Unlike ``GET /jobs``/``GET /jobs/{job_id}``, this does NOT use
+    ``scoped_user_id_or_403`` (which resolves ``None`` — "all jobs" — for
+    admin/recruiter/auditor sessions): it always scopes to the resolved
+    session user's own id directly, so an admin session here still only
+    sees THAT admin's own assignments.
+
+    Identity is REQUIRED: no resolvable session (``resolve_user`` -> ``None``)
+    raises 403 before ``job_service.list_jobs`` is ever called ("a 'my' view
+    needs a 'me'"). The CAS-disabled dev-anonymous synthetic admin IS a
+    resolved (sentinel) identity, not "no session" — it scopes to the
+    sentinel id and returns 200 + ``[]`` (the sentinel is never a real
+    assignee row)."""
+    if user is None:
+        raise HTTPException(
+            status_code=403, detail="a session identity is required for /my/jobs"
+        )
+    return await job_service.list_jobs(
+        db, limit=limit, offset=offset, status=status_filter, user_id=user.id
+    )
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(
+    job_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_JOB_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> JobOut:
+    """FU-6 slice 5 (ADR-020 §3/§5) — row-scoped for a hiring_manager
+    SESSION; an unassigned or nonexistent job both surface as 404 (never
+    403) via ``job_service.get_job``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
+    user_id = await scoped_user_id_or_403(user, role)
+    job = await job_service.get_job(db, job_id, user_id=user_id)
+    await log_auditor_read(
+        db,
+        user,
+        action="read_job",
+        subject_type="job",
+        subject_id=job_id,
+        job_id=job_id,
+    )
+    return job
 
 
 @router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])

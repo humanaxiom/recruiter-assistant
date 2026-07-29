@@ -94,6 +94,20 @@ def test_template_demo_routes_are_gone(path: str) -> None:
 # catches "the coder built the route but forgot
 # ``app.include_router(audit.router)`` in ``src.api.main``" instead of just
 # passing vacuously.
+#
+# FU-6 slice 3 (ADR-020 §2) widens it a FOURTH time, same reason again: the
+# assign/unassign routes (``src.api.routes.job_assignees``, admin/recruiter
+# only — auditor may never assign) are added to the closed positive set here,
+# in the RED commit, before ``src.api.routes.job_assignees`` exists.
+#
+# FU-6 slice 9 (ADR-020 §7) widens it a FIFTH time, same reason again:
+# ``GET /my/jobs`` (the caller's own assigned job set, on the SAME
+# ``src.api.routes.jobs`` router as the rest of the job routes — see
+# ``test_route_jobs.py`` for the route-level contract) is added to the
+# closed positive set here, in the RED commit, before the route exists on
+# ``src.api.routes.jobs.router`` — the only way this guard actually catches
+# "the coder implemented the route function but never decorated it (or
+# decorated it under a different path)" instead of just passing vacuously.
 _PHASE_6_ROUTES: frozenset[str] = frozenset(
     {
         "/health",
@@ -119,6 +133,13 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # FU-5 slice 10 (ADR-019 §6 / §9.4) — src.api.routes.audit, the
         # read-only legacy reveal-audit viewer, admin + auditor.
         "/audit/reveals-legacy",
+        # FU-6 slice 3 (ADR-020 §2) — src.api.routes.job_assignees, the
+        # assign/unassign routes, admin + recruiter only.
+        "/jobs/{job_id}/assignees",
+        "/jobs/{job_id}/assignees/{user_id}",
+        # FU-6 slice 9 (ADR-020 §7) — GET /my/jobs, on src.api.routes.jobs's
+        # existing router: the caller's own assigned job set, for any role.
+        "/my/jobs",
     }
 )
 

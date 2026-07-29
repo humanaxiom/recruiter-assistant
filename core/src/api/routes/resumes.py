@@ -32,8 +32,10 @@ from src.api.deps import (
     _DEV_ADMIN_SENTINEL_ID,
     Role,
     get_arq,
+    log_auditor_read,
     require_role,
     resolve_user,
+    scoped_user_id_or_403,
 )
 from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
@@ -211,24 +213,34 @@ async def upload_resumes(
     return results
 
 
-@router.get(
-    "/jobs/{job_id}/resumes", dependencies=[Depends(require_role(*_RESUME_READERS))]
-)
+@router.get("/jobs/{job_id}/resumes")
 async def list_resumes(
     job_id: UUID,
     db: Db,
+    role: Annotated[Role, Depends(require_role(*_RESUME_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[ResumeListItem]:
+    """FU-6 slice 6 (ADR-020 §3/§4) — row-scoped for a hiring_manager SESSION
+    (not the key role — see ``scoped_user_id_or_403``'s docstring for why),
+    unscoped (``user_id=None``) for admin/recruiter/auditor. An unassigned or
+    nonexistent job both surface as 200 + an empty list (never 404) — this
+    is a LIST subresource, matching its pre-existing behaviour for a
+    genuinely nonexistent ``job_id``."""
+    user_id = await scoped_user_id_or_403(user, role)
     return await resume_service.list_for_job(
-        db, job_id=job_id, limit=limit, offset=offset
+        db, job_id=job_id, limit=limit, offset=offset, user_id=user_id
     )
 
 
-@router.get(
-    "/resumes/{resume_id}", dependencies=[Depends(require_role(*_RESUME_READERS))]
-)
-async def get_resume(resume_id: UUID, db: Db) -> ResumeOut:
+@router.get("/resumes/{resume_id}")
+async def get_resume(
+    resume_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_RESUME_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> ResumeOut:
     """Redaction happens INSIDE ``resume_service.get_one`` (ADR-006 §4) — the
     route never re-queries raw, so the blind-review boundary always applies.
 
@@ -238,19 +250,41 @@ async def get_resume(resume_id: UUID, db: Db) -> ResumeOut:
     query-params behaviour and a fully blind response — this route has no code
     path left capable of un-blinding. ``POST /resumes/{id}/reveal`` is the only
     un-blinding path.
-    """
-    return await resume_service.get_one(db, resume_id)
+
+    FU-6 slice 6 (ADR-020 §3/§5) — row-scoped for a hiring_manager SESSION;
+    an unassigned or nonexistent résumé both surface as 404 (never 403) via
+    ``resume_service.get_one``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
+    user_id = await scoped_user_id_or_403(user, role)
+    resume = await resume_service.get_one(db, resume_id, user_id=user_id)
+    await log_auditor_read(
+        db, user, action="read_resume", subject_type="resume", subject_id=resume_id
+    )
+    return resume
 
 
 _EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
 
-
-@router.post(
-    "/resumes/{resume_id}/reveal", dependencies=[Depends(require_role(*_REVEALERS))]
+# FU-6 slice 6 (ADR-020 §3/§5) — the scoped visibility probe used by
+# ``reveal_resume`` BEFORE any audit write/decrypt, mirroring
+# ``resume_service._RESUME_ASSIGNEE_EXISTS_SQL`` but issued directly against
+# ``db`` here (not through ``resume_service.get_one``) so the probe never
+# decrypts anything.
+_EXISTS_SCOPED_SQL = (
+    "SELECT id FROM resumes WHERE id = $1 AND EXISTS ("
+    "SELECT 1 FROM job_assignees WHERE job_assignees.job_id = resumes.job_id "
+    "AND job_assignees.user_id = $2)"
 )
+
+
+@router.post("/resumes/{resume_id}/reveal")
 async def reveal_resume(
     resume_id: UUID,
     db: Db,
+    role: Annotated[Role, Depends(require_role(*_REVEALERS))],
     user: Annotated[User | None, Depends(resolve_user)],
     context: Annotated[str | None, Query(max_length=64)] = None,
 ) -> ResumeOut:
@@ -291,14 +325,33 @@ async def reveal_resume(
     written — and, via ``audit_service.record_audit``'s bare (non-
     transaction-wrapped) ``execute``, autocommitted — BEFORE the decrypting
     read (``resume_service.get_one(..., reveal=True)``), so a crash during
-    decryption never leaves an un-audited reveal."""
+    decryption never leaves an un-audited reveal.
+
+    **FU-6 slice 6 (ADR-020 §3/§5) — row-scoping for a hiring_manager
+    SESSION, inserted BETWEEN the human gate and the audit write.**
+    ``_REVEALERS`` (the API-KEY role gate) is unchanged; scoping targets the
+    "shared browser key" case ADR-020 §3/§4 documents — the Flask viewer
+    presents one shared ``recruiter`` key for every human, so only the CAS
+    session's resolved ``user.role`` (via ``scoped_user_id_or_403``) can
+    still confine such a caller to their own assigned jobs. The full order is
+    now: human-gate -> scoping-404 -> audit -> decrypt. A résumé under a job
+    the caller is not assigned to 404s exactly like a genuinely nonexistent
+    résumé (ADR-020 §5) — NO audit row is written and NO decryption occurs
+    for a blocked reveal; the scoped existence probe
+    (``_EXISTS_SCOPED_SQL``) runs in place of the unscoped one and never
+    itself decrypts anything."""
     if user is None:
         raise HTTPException(
             status_code=403,
             detail="reveal requires an attributable human session",
         )
 
-    exists = await db.fetchval(_EXISTS_SQL, resume_id)
+    user_id = await scoped_user_id_or_403(user, role)
+
+    if user_id is None:
+        exists = await db.fetchval(_EXISTS_SQL, resume_id)
+    else:
+        exists = await db.fetchval(_EXISTS_SCOPED_SQL, resume_id, user_id)
     if exists is None:
         raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
 
@@ -325,7 +378,7 @@ async def reveal_resume(
             context=context,
         )
 
-    return await resume_service.get_one(db, resume_id, reveal=True)
+    return await resume_service.get_one(db, resume_id, reveal=True, user_id=user_id)
 
 
 # ── reverse-match subresource ────────────────────────────────────────────────

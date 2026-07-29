@@ -15,8 +15,16 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from src.api.deps import Role, get_arq, require_role
+from src.api.deps import (
+    Role,
+    get_arq,
+    log_auditor_read,
+    require_role,
+    resolve_user,
+    scoped_user_id_or_403,
+)
 from src.models.pool import Db
+from src.schemas.auth import User
 from src.schemas.matching import ShortlistEntry
 from src.services import shortlist_service
 from src.services.pii import set_pii_key
@@ -48,13 +56,12 @@ async def generate_shortlist(
 # Declared BEFORE /jobs/{job_id}/shortlist's own path shape is unambiguous
 # (export is a THIRD path segment) so no ordering hazard exists, but kept
 # adjacent for readability.
-@router.get(
-    "/jobs/{job_id}/shortlist/export",
-    dependencies=[Depends(require_role(*_SHORTLIST_READERS))],
-)
+@router.get("/jobs/{job_id}/shortlist/export")
 async def export_shortlist(
     job_id: UUID,
     db: Db,
+    role: Annotated[Role, Depends(require_role(*_SHORTLIST_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
     format: Annotated[ExportFormat, Query()] = "csv",
 ) -> Response:
     """``pii_service.set_pii_key`` runs inside an open ``db.transaction()``
@@ -66,10 +73,34 @@ async def export_shortlist(
     in ADR-016), so it is gone — ``reveal=False`` is hardcoded below and the
     ``-anon`` filename suffix is now unconditional. If a bulk reveal export
     ever becomes a real need it gets its own audited POST route.
+
+    FU-6 slice 7 (ADR-020 §3/§4) — row-scoped for a hiring_manager SESSION
+    (not the key role — see ``scoped_user_id_or_403``'s docstring for why),
+    unscoped (``user_id=None``) for admin/recruiter/auditor. An unassigned
+    or nonexistent job both surface as a 200 + empty export (never 404) —
+    this is a by-``job_id`` LIST subresource, matching ``list_shortlist``'s
+    own ADR-020 §5 behaviour.
+
+    FU-6 slice 8 (ADR-020 §6) — a deliberate BULK read, logged for a real
+    auditor session exactly like the single-subject reads (``log_auditor_read``),
+    AFTER the service call resolves and before the response returns. This
+    route never 404s (see above), so there is no 404-writes-nothing case to
+    special-case here.
     """
+    user_id = await scoped_user_id_or_403(user, role)
     async with db.transaction():
         await set_pii_key(db)
-        rows = await shortlist_service.export_rows(db, job_id=job_id, reveal=False)
+        rows = await shortlist_service.export_rows(
+            db, job_id=job_id, reveal=False, user_id=user_id
+        )
+    await log_auditor_read(
+        db,
+        user,
+        action="read_shortlist_export",
+        subject_type="job",
+        subject_id=job_id,
+        job_id=job_id,
+    )
 
     if format == "csv":
         content = shortlist_service.shortlist_csv(rows)
@@ -91,19 +122,47 @@ async def export_shortlist(
     )
 
 
-@router.get(
-    "/jobs/{job_id}/shortlist",
-    dependencies=[Depends(require_role(*_SHORTLIST_READERS))],
-)
-async def list_shortlist(job_id: UUID, db: Db) -> list[ShortlistEntry]:
-    return await shortlist_service.list_for_job(db, job_id=job_id)
+@router.get("/jobs/{job_id}/shortlist")
+async def list_shortlist(
+    job_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_SHORTLIST_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> list[ShortlistEntry]:
+    """FU-6 slice 7 (ADR-020 §3/§4) — row-scoped for a hiring_manager SESSION
+    (not the key role — see ``scoped_user_id_or_403``'s docstring for why),
+    unscoped (``user_id=None``) for admin/recruiter/auditor. An unassigned
+    or nonexistent job both surface as 200 + an empty list (never 404) —
+    this is a LIST subresource, matching its pre-existing behaviour for a
+    genuinely nonexistent ``job_id``."""
+    user_id = await scoped_user_id_or_403(user, role)
+    return await shortlist_service.list_for_job(db, job_id=job_id, user_id=user_id)
 
 
-@router.get(
-    "/shortlist/{entry_id}", dependencies=[Depends(require_role(*_SHORTLIST_READERS))]
-)
-async def get_shortlist_entry(entry_id: UUID, db: Db) -> ShortlistEntry:
-    return await shortlist_service.get_one(db, entry_id)
+@router.get("/shortlist/{entry_id}")
+async def get_shortlist_entry(
+    entry_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_SHORTLIST_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> ShortlistEntry:
+    """FU-6 slice 7 (ADR-020 §3/§5) — row-scoped for a hiring_manager
+    SESSION; an unassigned or nonexistent entry both surface as 404 (never
+    403) via ``shortlist_service.get_one``'s ``NotFoundError``.
+
+    FU-6 slice 8 (ADR-020 §6) — a real auditor session's successful read is
+    itself logged (``log_auditor_read``), AFTER the service call resolves
+    (so a 404 writes no row) and before the response returns."""
+    user_id = await scoped_user_id_or_403(user, role)
+    entry = await shortlist_service.get_one(db, entry_id, user_id=user_id)
+    await log_auditor_read(
+        db,
+        user,
+        action="read_shortlist_entry",
+        subject_type="shortlist_entry",
+        subject_id=entry_id,
+    )
+    return entry
 
 
 __all__ = ["router"]

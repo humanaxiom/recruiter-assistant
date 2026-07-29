@@ -1116,6 +1116,50 @@ haystack made a chunk fail to match *itself* at 0.838). Severity fell monotonica
 2 major → 5 medium/low → self-caught — which is why it was allowed to run five rounds rather than being
 split.
 
+### FU-6 status — BUILT, gates green, ON A PR (read this before starting FU-7)
+
+> **Resume here.** FU-6 (per-job assignment + row-level scoping, ADR-020) is **code-complete and
+> gate-green** on branch `feat/fu6-job-assignment-scoping` (10 TDD slices + a note-cap hardening, each a
+> `red:`→`green:` pair, off `main` @ `ae18687`). Both merge-blocking gates passed: **reviewer APPROVE**
+> (12 mutations caught across the scoping predicates / helper / reveal ordering / `/my/jobs` / auditor
+> logging), **security PASS** (no critical/high — IDOR, fail-open, existence-oracle, assignment-privilege
+> all cleared). `./scripts/verify.sh all` green — ~3523 unit @ ~92%, 308 integration vs real
+> Postgres+Neo4j. Next action: **open/verify the PR and hand the merge to the human** (`gh pr merge` is
+> classifier-blocked). If FU-6 is already merged, skip to FU-7. Verify against origin: `git fetch && gh pr list`.
+
+**FU-6 keys off the CAS SESSION role, not the API key** (ADR-020 §8, the crux reconciliation). ADR-020
+predates FU-5's CAS pivot and assumed the key carried identity; the Flask viewer actually sends one shared
+`recruiter` key for every browser user, so scoping keys off `resolve_user().role` via
+`scoped_user_id_or_403`. A real hiring_manager session scopes to `user.id` even under the shared recruiter
+key; a hiring_manager *key* with no/mismatched session **403s** (fail-closed). admin/recruiter/auditor +
+dev-anonymous are unscoped (auditor unscoped per §4, with read-logging as the compensating control).
+
+**What shipped (10 slices):** `job_assignees` table; `job_assignee_service`; assign/unassign routes
+(admin/recruiter only, real-assigner gate, atomic audit); `scoped_user_id_or_403`; row-scoping on the jobs/
+résumé(+reveal)/shortlist reads (an `EXISTS` on `job_assignees`, present only when `user_id` set, SQL
+byte-identical when None; a blocked reveal 404s with ZERO audit rows and no decrypt); auditor read-logging
+on the 4 deliberate reads (not the polled lists); `GET /my/jobs` (scopes to the caller directly); `role`
+on `GET /auth/cas/user`. Unassigned resources 404 (not 403 — §5, no existence oracle). Full detail +
+residuals: **ADR-020 §8**.
+
+**Deferred follow-ups (post-merge, flagged for the human):**
+1. **Flask viewer default-view switch** — the API side (`role` on `/auth/cas/user`) shipped; the Flask
+   change making a hiring_manager land on `/my/jobs` needs PR #30's session-cookie forwarding + `get_cas_user()`
+   helper, so it lands as a small follow-up on `main` once **both PR #30 and FU-6 merge** (building it on
+   either branch alone duplicates the Flask plumbing). Suggested merge order: #30, then FU-6, then the switch.
+2. **Per-job configurable shortlist size (top P%, 1-100%)** — user-requested 2026-07-24. Today the shortlist
+   persists ALL ranked candidates up to `match_coarse_k=50` (top `match_evidence_k=15` get LLM evidence);
+   there is NO fixed cap. Decision: **per-job** `shortlist_top_percent` column (default 100% = today), set at
+   job creation + editable, capping the persisted shortlist to the top P% of the ranked pool. Its own branch,
+   after FU-6.
+3. **Assign-route session-role check** — when the assignment UI/proxy is added, `_require_real_assigner` must
+   also verify `user.role in {admin, recruiter}` (ADR-020 §8; latent-low today, no viewer proxy exists).
+
+**CAS is built + merged (FU-5) but NEITHER deployed NOR enabled.** The running containers were built
+2026-07-17 (pre-FU-5), and `cas_enabled` defaults False (no `CAS_*` env set) → dev-anonymous admin mode.
+To activate: rebuild off `main` (`docker compose build`), set `CAS_ENABLED=true` (+ `CAS_SERVER_URL`
+defaults to `https://cas.sfu.ca/cas`); first login by the §10a default-admin (`asalah`) lands as admin.
+
 ### FU-5 status — BUILT, gates green, ON A PR (read this before starting FU-6)
 
 > **Resume here.** FU-5 (CAS identity + attributable audit, ADR-019) is **code-complete and gate-green**

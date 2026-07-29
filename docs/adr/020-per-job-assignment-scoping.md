@@ -111,6 +111,59 @@ Auditors retain global, unscoped read access across all jobs in order to fulfill
 
 The default landing page for a `hiring_manager` is their assigned job set, not the global list. The API provides `GET /my/jobs` (routed through `require_role(hiring_manager, auditor)`), which internally calls `list_jobs(user_id=<resolved_user_id>)` and returns only that user's assigned jobs. The Flask viewer updates its job list view to hit this endpoint instead of `GET /jobs` for non-admin users, surfacing "your assigned requisitions" as the default experience.
 
+### 8. Build reconciliation and status (implemented 2026-07-24)
+
+FU-6 shipped in 10 TDD slices on `feat/fu6-job-assignment-scoping`, all gate-green
+(`./scripts/verify.sh all`): the `job_assignees` table (§1); `job_assignee_service`;
+the assign/unassign routes (§2); the `scoped_user_id_or_403` helper; row-scoping on
+the jobs, résumé (+reveal), and shortlist reads (§3/§5); auditor read-logging (§6);
+`GET /my/jobs` (§7); and `role` on `GET /auth/cas/user`. Merge-blocking gates:
+**reviewer APPROVE** (12 mutations caught across the scoping predicates, the helper,
+reveal ordering, `/my/jobs`, and auditor logging), **security PASS** (no
+critical/high; IDOR, fail-open, existence-oracle, and assignment-privilege surfaces
+all cleared). `ranking-evals` n/a — no scoring code touched.
+
+**Scoping keys off the CAS session role, not the API key (the crux reconciliation).**
+§3/§4 as written assumed the key carried identity — but that predates FU-5's CAS
+pivot. As built (`core/frontend/api_client.py`), the Flask viewer presents ONE shared
+`recruiter` key for every browser user, so the key-derived `Role` cannot identify a
+hiring_manager. Scoping therefore keys off `resolve_user().role` (the CAS session
+identity, cryptographically tied to a real login), via `scoped_user_id_or_403(user,
+key_role)` in `core/src/api/deps.py`: a real hiring_manager session scopes to
+`user.id` even under the shared recruiter key; a hiring_manager *key* with no/mismatched
+session **403s** (fail-closed, never served unscoped); admin/recruiter/auditor and the
+dev-anonymous sentinel are unscoped. `GET /my/jobs` is the exception — it scopes to the
+session `user.id` **directly** (not via the helper), so it always returns the caller's
+own assignments regardless of role.
+
+**Auditor read-logging scope (§6 as built).** Only the four deliberate single-subject /
+bulk reads are logged (`read_job` on `GET /jobs/{id}`, `read_resume` on `GET
+/resumes/{id}`, `read_shortlist_entry` on `GET /shortlist/{id}`, `read_shortlist_export`
+on the export), written **after** a successful read (a 404 logs nothing). The polled
+list-index routes (`GET /jobs`, `/jobs/{id}/resumes`, `/jobs/{id}/shortlist`) are NOT
+logged — the frontend polls them every 3s and they carry no specific subject.
+
+**Accepted residuals / deferred work:**
+- **Assign-route session-role check (security, latent LOW).** The assign/unassign routes
+  gate on the *key* role (`require_role(ADMIN, RECRUITER)`) plus a real-assigner check
+  (rejects `None`/the dev-anonymous sentinel), NOT the session role. Not reachable today
+  — the Flask viewer exposes no assign/unassign proxy, and a direct hiring_manager/auditor
+  caller presents their own key and is correctly 403'd. **When the assignment UI/proxy
+  (Consequences §1) is added, `_require_real_assigner` must ALSO verify
+  `user.role in {admin, recruiter}`** (the same session-role reasoning the read routes use).
+- **The Flask viewer default-view switch (§7 frontend half) is deferred.** Exposing `role`
+  on `/auth/cas/user` (the API enabler) shipped here; the Flask change that makes a
+  hiring_manager land on `/my/jobs` needs the session-cookie forwarding + `get_cas_user()`
+  helper that live on the separate branch `fix/upload-and-progress-ux` (PR #30). It lands
+  as a small follow-up on `main` once both that branch and this one merge — building it on
+  either branch alone would duplicate/conflict the Flask plumbing.
+- **`JobAssigneeCreate.note` is now capped** at 200 chars (was unbounded — reviewer +
+  security low finding, closed in-branch), since it rides into `audit_log.details`.
+- **No role-provisioning path** for `hiring_manager`/`auditor` (carried from FU-5 §10a):
+  a first CAS login lands as `recruiter`; testing/using scoped roles needs an admin to set
+  `users.role` via SQL until an admin endpoint exists. FU-6's integration fixtures seed
+  these roles directly.
+
 ## Consequences
 
 - **The shipped `hiring_manager` API key becomes useless until assignments exist.** On first deployment, any hiring_manager credential resolves to an empty job set (no assignments yet). An admin must run an assignment backfill (bulk INSERT into `job_assignees` from a CSV or JSON file naming which users own which jobs) or use the `POST /jobs/{job_id}/assignees` route to assign jobs one by one. The assignment workflow must be documented in the deployment guide so a deployer knows to backfill **before** distributing hiring_manager credentials to users.
