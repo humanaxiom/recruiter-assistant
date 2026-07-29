@@ -1,7 +1,10 @@
 # ADR-026: Résumé lifecycle — candidate withdrawal and stale-résumé tracking
 
-**Status:** Proposed (backlog scoping only — no code; ratify + assign an FU number before building)
-**Date:** 2026-07-28
+**Status:** Accepted as **FU-8** (2026-07-29) — building the **exclude-and-retain** slice (decisions 1–3, 5).
+The §4 **revoke-and-purge** (destructive consent-erasure) path remains **deferred** to a separate follow-up
+so the destructive operation is never the accidental default of a routine withdraw; decisions 1–3 ship the
+reversible `withdrawn_at` flag, un-project exclusion, reverse-match filter, audit, and per-job status breakdown.
+**Date:** 2026-07-28 (scoped) · 2026-07-29 (ratified as FU-8)
 
 ## Context
 
@@ -175,7 +178,8 @@ request's word "tractable."** Build it once, covering both axes.
 
 - This ADR is a scoping document filed from the backlog; it ships no code and no tests. When built, it
   follows the repo's mandatory TDD order (failing tests first) and all five merge-blocking gates, per
-  CLAUDE.md. Assign it an FU number (next free after FU-7) at ratification.
+  CLAUDE.md. **Ratified 2026-07-29 as FU-8** (next free after FU-7); the exclude-and-retain slice is being
+  built, the revoke-and-purge path stays deferred (see Status).
 - Cross-references: FU-7 / ADR-021 (the parse-failure half of "stale résumés"); ADR-019 (FU-5 `audit_log`,
   reused here); ADR-016 (audited-action UI pattern); ADR-010 (DELETE-first persist; concurrent-run
   residual); ADR-007 §6/§7 (at-rest cleartext PII posture the revoke-and-purge path would partially
