@@ -1,11 +1,11 @@
 # ADR-026: Résumé lifecycle — candidate withdrawal and stale-résumé tracking
 
-**Status:** Accepted as **FU-8** (2026-07-29) — the **exclude-and-retain** slice (decisions 1–3, 5) is
-**built, gate-green** on branch `feat/fu8-resume-withdrawal` (not yet merged/pushed — see "Built" below).
+**Status:** **MERGED** as **FU-8** — the **exclude-and-retain** slice (decisions 1–3, 5) is merged to
+`origin/main` via PR #37 (squash `0162302`, 2026-07-29), all five gates green + CI green in-cloud.
 The §4 **revoke-and-purge** (destructive consent-erasure) path remains **deferred** to a separate follow-up
-so the destructive operation is never the accidental default of a routine withdraw; decisions 1–3 ship the
+so the destructive operation is never the accidental default of a routine withdraw; decisions 1–3 shipped the
 reversible `withdrawn_at` flag, un-project exclusion, reverse-match filter, audit, and per-job status breakdown.
-**Date:** 2026-07-28 (scoped) · 2026-07-29 (ratified as FU-8) · 2026-07-29 (built, gate-green)
+**Date:** 2026-07-28 (scoped) · 2026-07-29 (ratified as FU-8) · 2026-07-29 (built + merged, PR #37)
 
 ## Built (FU-8, 2026-07-29)
 
