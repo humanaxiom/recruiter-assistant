@@ -104,6 +104,14 @@ def test_classify_does_not_false_match_inside_a_word() -> None:
     assert _classify("discover.pdf") == ("resume", "discover")
 
 
+def test_classify_leading_separator_with_no_name_is_not_a_cover() -> None:
+    # Pins the non-empty-base guard ``(?P<base>.*\S)``: a stem that is ONLY a
+    # separator + suffix ("_cover_letter", "-cover") has no candidate name to
+    # pair on, so it must stay a résumé, never a cover with an empty base.
+    assert _classify("_cover_letter.pdf") == ("resume", "cover letter")
+    assert _classify("-cover.pdf") == ("resume", "cover")
+
+
 # ── _classify: space/dash separators are equivalent to underscore (bug fix) ─
 
 

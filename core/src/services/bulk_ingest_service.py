@@ -36,20 +36,18 @@ from src.schemas.jobs import EmploymentType, Seniority
 # An uploaded file as this repo models it: ``(filename, content)``.
 UploadedFile = tuple[str, bytes]
 
-# Checked longest-first on the lowercased filename stem so ``_cover_letter``
-# wins over ``_cover``. The leading separator guards against a false hit inside
-# a word (``discover`` does not end with ``_cover``).
-_COVER_SUFFIXES: Final = ("_cover_letter", "_coverletter", "_cover_note", "_cover")
-_RESUME_SUFFIXES: Final = ("_resume", "_cv")
-
 # Space / dash / underscore are equivalent separators (bug fix:
 # fix/cover-letter-pairing-separators). ``[\s_-]*`` between "cover" and
 # "letter"/"note" lets a real-world name like "Jane Smith Cover Letter.pdf"
-# match; the mandatory ``[\s_-]+`` between the base and the suffix (anchored
-# at the end with ``$``) preserves the false-hit guard — "discover.pdf" has no
-# separator before "cover" so it never matches, and a bare "Cover.pdf" has no
-# non-empty base before a separator so it stays a résumé too. Alternatives are
-# ordered longest-first so "cover letter" wins over a bare "cover".
+# match. Two guards, both load-bearing:
+#   * the mandatory ``[\s_-]+`` between base and suffix means "discover.pdf"
+#     (no separator before "cover") never matches;
+#   * ``(?P<base>.*\S)`` requires a non-empty name before that separator, so a
+#     leading-separator stem with no name ("_cover_letter", "-cover") stays a
+#     résumé rather than pairing on an empty base.
+# The ``$`` anchor makes the alternation ORDER irrelevant (only the alternative
+# that consumes the exact tail can match at a given base/separator split), so
+# "cover letter" is recognized whether or not a bare "cover" precedes it.
 _COVER_SUFFIX_RE: Final = re.compile(
     r"^(?P<base>.*\S)[\s_-]+"
     r"(?:cover[\s_-]*letter|coverletter|cover[\s_-]*note|cover)$",
