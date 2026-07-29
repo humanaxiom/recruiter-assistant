@@ -12,11 +12,19 @@ skill chips and the evidence panel — plus the graceful ``evidence=None`` fallb
 ``display_label`` ("Candidate A"), never a real name; ``list_shortlist`` is
 called with NO ``reveal`` kwarg on the card-render path; and a planted fake
 name/email/phone is byte-absent from the rendered cards.
+
+**FU-8/ADR-026 — per-card withdraw control (added below).** Each candidate
+card mirrors the FU-1 reveal button pattern with a SECOND, independent
+audited action: a "Withdraw candidate" form posting to ``resume_withdraw``
+with ``context=shortlist``, carrying its OWN one-shot CSRF token
+(``action="withdraw"``, distinct from the same card's reveal token — see
+``test_frontend_csrf.py``'s "tokens scoped by (résumé id, action)" section).
 """
 
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -519,3 +527,103 @@ def test_shortlist_list_page_read_carries_no_reveal_kwarg(
     client.get(f"/jobs/{job_id}/shortlist")
     spy.assert_called_once()
     assert "reveal" not in spy.call_args.kwargs
+
+
+# ── FU-8/ADR-026 — per-card withdraw control ──────────────────────────────
+
+
+def test_shortlist_card_has_withdraw_control(monkeypatch: Any, client: Any) -> None:
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert f"/resumes/{resume_id}/withdraw" in body
+    assert "Withdraw candidate" in body
+
+
+def test_shortlist_card_withdraw_form_is_post_method(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    tag_re = re.compile(r'<form([^>]*action="[^"]*/withdraw[^"]*"[^>]*)>')
+    match = tag_re.search(body)
+    assert match is not None, "expected a withdraw <form> on the shortlist card"
+    assert "post" in match.group(1).lower()
+
+
+def test_shortlist_card_withdraw_form_carries_context_shortlist(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    form_re = re.compile(
+        r'<form[^>]*action="[^"]*/withdraw[^"]*"[^>]*>(.*?)</form>', re.DOTALL
+    )
+    match = form_re.search(body)
+    assert match is not None, "expected a withdraw <form> on the shortlist card"
+    assert 'value="shortlist"' in match.group(1)
+
+
+def test_shortlist_card_withdraw_token_is_independent_of_the_reveal_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Two audited actions on the same card must never share a CSRF slot:
+    the reveal form's token and the withdraw form's token, both rendered for
+    the SAME card's résumé id, must be different values."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+
+    reveal_form = re.search(
+        r'<form[^>]*action="[^"]*/reveal[^"]*"[^>]*>(.*?)</form>', body, re.DOTALL
+    )
+    withdraw_form = re.search(
+        r'<form[^>]*action="[^"]*/withdraw[^"]*"[^>]*>(.*?)</form>', body, re.DOTALL
+    )
+    assert reveal_form is not None, "expected a reveal <form> on the shortlist card"
+    assert withdraw_form is not None, "expected a withdraw <form> on the shortlist card"
+
+    token_re = re.compile(r'name="csrf_token"[^>]*value="([^"]+)"')
+    reveal_token = token_re.search(reveal_form.group(1))
+    withdraw_token = token_re.search(withdraw_form.group(1))
+    assert reveal_token is not None, "expected a csrf_token input in the reveal form"
+    assert (
+        withdraw_token is not None
+    ), "expected a csrf_token input in the withdraw form"
+    assert reveal_token.group(1) != withdraw_token.group(1)
+
+
+def test_shortlist_card_withdraw_control_uses_display_label_context_never_pii(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Blind invariant carried over: the withdraw control itself must not leak
+    identity even when a fake name/email/phone is planted on the entry."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    entry["candidate"] = {
+        "name": _REAL_NAME,
+        "email": _REAL_EMAIL,
+        "phone": _REAL_PHONE,
+    }
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    raw = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert f"/resumes/{resume_id}/withdraw" in raw
+    assert _REAL_NAME not in raw
+    assert _REAL_EMAIL not in raw
+    assert _REAL_PHONE not in raw

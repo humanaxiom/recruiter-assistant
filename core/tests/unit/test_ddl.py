@@ -14,6 +14,9 @@ The DDL is the schema contract for the whole port. These tests pin:
 * **blind review ON by default** (decision 4),
 * **attributable audit** — ``audit_log`` carries an actor-identity CHECK
   distinguishing a human actor from a service actor (ADR-019 §1.4/§6).
+* **résumé withdrawal lifecycle** (ADR-026 decision 1, FU-8) — a dedicated,
+  nullable ``withdrawn_at``/``withdrawal_reason`` pair on ``resumes``, NOT a
+  new terminal value on the ``resume_status`` enum.
 
 Contract with the implementation: ``init_schema`` awaits ``.execute(stmt)`` on
 the object it is handed (an asyncpg ``Connection`` or ``Pool``) once per
@@ -35,6 +38,12 @@ composite PK, the CASCADE on ``job_id``/``user_id``, or the RESTRICT on
 ``assigned_by`` at INSERT/DELETE time. That behavioural proof lives in
 ``tests/integration/test_job_assignees_pg.py`` against a live testcontainers
 Postgres.
+
+The résumé-withdrawal tests below (ADR-026, FU-8) are the same string-match
+kind again: they can prove the two ALTERs are *declared* nullable/no-default,
+but not that a real Postgres round-trips ``withdrawn_at IS NULL`` for every
+pre-existing row after the ALTER lands. That behavioural proof lives in
+``tests/integration/test_schema.py``.
 """
 
 from __future__ import annotations
@@ -547,6 +556,123 @@ def test_resumes_file_size_check() -> None:
         _table_sql("resumes"),
         re.IGNORECASE,
     )
+
+
+# ── resumes / withdrawal lifecycle (ADR-026 decision 1, FU-8) ──────────────
+#
+# ``withdrawn_at TIMESTAMPTZ`` (nullable) + ``withdrawal_reason TEXT``
+# (nullable) — a DEDICATED pair on the existing ``resumes`` table, NOT a new
+# terminal value on the ``resume_status`` enum (that stays exactly
+# ``('uploaded', 'parsing', 'parsed', 'failed')``, unchanged). Same
+# already-migrated-volume risk as every other ALTER in this module: a
+# separate idempotent ``ALTER TABLE resumes ADD COLUMN IF NOT EXISTS`` is
+# required so both columns land on an existing dev/CI volume too, not just a
+# fresh CREATE TABLE.
+
+
+def test_resumes_withdrawn_at_has_an_idempotent_alter() -> None:
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawn_at\s+TIMESTAMPTZ",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one idempotent ALTER for withdrawn_at"
+
+
+def test_resumes_withdrawn_at_alter_has_no_not_null_or_default() -> None:
+    """A withdrawn résumé is the exception, not the rule — the column must
+    stay nullable with no default so every pre-existing row still reads back
+    ``withdrawn_at IS NULL`` (not withdrawn) once the ALTER lands."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawn_at",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert alters, "no ALTER for withdrawn_at"
+    assert "NOT NULL" not in alters[0].upper()
+    assert "DEFAULT" not in alters[0].upper()
+
+
+def test_resumes_withdrawal_reason_has_an_idempotent_alter() -> None:
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawal_reason\s+TEXT",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert (
+        len(alters) == 1
+    ), "expected exactly one idempotent ALTER for withdrawal_reason"
+
+
+def test_resumes_withdrawal_reason_alter_has_no_not_null_or_default() -> None:
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawal_reason",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert alters, "no ALTER for withdrawal_reason"
+    assert "NOT NULL" not in alters[0].upper()
+    assert "DEFAULT" not in alters[0].upper()
+
+
+def test_resumes_withdrawal_alters_run_after_the_resumes_create_table() -> None:
+    resumes_idx = _statement_index("resumes")
+    withdrawn_at_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawn_at",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    withdrawal_reason_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"withdrawal_reason",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    assert resumes_idx < withdrawn_at_idx
+    assert resumes_idx < withdrawal_reason_idx
+
+
+def test_resume_status_enum_has_no_withdrawn_value() -> None:
+    """Decision 1 — withdrawal is a dedicated column pair, NOT a fifth
+    ``resume_status`` enum value. A ``'withdrawn'`` literal added to the enum
+    definition would conflate processing state with application state and
+    erase the parse outcome (ADR-026 §Decision 1)."""
+    enum_stmts = [
+        _squash(s)
+        for s in _STATEMENTS
+        if "resume_status" in _squash(s) and "ENUM" in _squash(s).upper()
+    ]
+    assert enum_stmts, "no resume_status CREATE TYPE statement found"
+    assert "'withdrawn'" not in enum_stmts[0]
 
 
 # ── ranking tables ─────────────────────────────────────────────────────────

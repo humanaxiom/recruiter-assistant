@@ -163,6 +163,12 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # router/gate as the listing above: an admin assigns a role, with a
         # role_changed audit row and a last-admin-lockout guard.
         "/users/{user_id}/role",
+        # FU-8 (ADR-026) — the résumé-withdrawal lifecycle routes on
+        # src.api.routes.resumes's existing router: withdraw/reinstate
+        # (admin+recruiter) and the per-job status breakdown (all roles).
+        "/resumes/{resume_id}/withdraw",
+        "/resumes/{resume_id}/reinstate",
+        "/jobs/{job_id}/resume-status",
     }
 )
 

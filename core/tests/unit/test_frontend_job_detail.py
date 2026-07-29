@@ -7,6 +7,25 @@ poll fragment (which drops its ``hx-trigger`` once parsing completes so polling
 stops), the legal-next-state status buttons (draft→open disabled until the LLM
 finishes parsing), and the blind-review toggle (which sends ONLY
 ``{"blind_review": <bool>}``).
+
+**FU-8/ADR-026 — per-job résumé status-breakdown widget (added below).**
+ADR-026 decision 5 asks for a per-job résumé-status breakdown
+(uploaded/parsing/parsed/failed/withdrawn) on the job-detail page, driven by
+``api_client.get_resume_status_breakdown(job_id)`` (``GET
+/jobs/{id}/resume-status`` on the backend). This is wired as an HTMX
+fragment — mirroring the EXISTING ``parse-status``/``resumes-table`` poll-
+fragment pattern in this same file/module — rather than baked into
+``_render_job_detail``'s synchronous path: the main ``GET /jobs/<id>`` page
+only renders a lazy-loading placeholder (``hx-get`` pointing at the new
+fragment route), so it never itself calls ``get_resume_status_breakdown``.
+This is deliberate: dozens of EXISTING tests across this file and others
+(``test_frontend_resume_upload.py``, ``test_frontend_shortlist.py``, etc.)
+already hit ``GET /jobs/<id>`` (or its error-path re-renders) without
+mocking a breakdown call, and baking the call into the synchronous render
+path would force every one of them to be touched just to keep working —
+which is out of scope for an additive slice and against this repo's
+"never modify existing tests to make an unrelated implementation pass" rule.
+The fragment route is exercised directly below.
 """
 
 from __future__ import annotations
@@ -52,6 +71,23 @@ def _job(
         "blind_review": True,
         "parsed_at": parsed_at,
         "description_parsed": description_parsed,
+    }
+
+
+def _breakdown(
+    *,
+    uploaded: int = 0,
+    parsing: int = 0,
+    parsed: int = 0,
+    failed: int = 0,
+    withdrawn: int = 0,
+) -> dict[str, int]:
+    return {
+        "uploaded": uploaded,
+        "parsing": parsing,
+        "parsed": parsed,
+        "failed": failed,
+        "withdrawn": withdrawn,
     }
 
 
@@ -309,5 +345,103 @@ def test_post_blind_review_backend_unavailable_not_500(
         MagicMock(side_effect=api_client.BackendUnavailable("down")),
     )
     resp = client.post(f"/jobs/{job_id}/blind-review", data={"blind_review": "true"})
+    assert resp.status_code in (502, 503)
+    assert resp.status_code != 500
+
+
+# ── FU-8/ADR-026 — per-job résumé status-breakdown widget ─────────────────
+
+
+def test_job_detail_page_includes_a_lazy_loading_status_breakdown_placeholder(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The main job-detail render must NOT itself call
+    ``get_resume_status_breakdown`` — it only renders a placeholder that
+    ``hx-get``s the fragment route below. Deliberately does NOT mock
+    ``get_resume_status_breakdown`` here, to prove the main render never
+    reaches it (see the module docstring for why)."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_job", MagicMock(return_value=_job(job_id, status="open"))
+    )
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "hx-get" in body
+    assert f"/jobs/{job_id}/resume-status" in body
+
+
+def test_resume_status_widget_route_shows_all_five_bucket_counts(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume_status_breakdown",
+        MagicMock(
+            return_value=_breakdown(
+                uploaded=2, parsing=1, parsed=5, failed=1, withdrawn=3
+            )
+        ),
+    )
+    resp = client.get(f"/jobs/{job_id}/resume-status")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True).lower()
+    for label in ("uploaded", "parsing", "parsed", "failed", "withdrawn"):
+        assert label in body
+    for count in ("2", "1", "5", "3"):
+        assert count in body
+
+
+def test_resume_status_widget_route_renders_all_zero_without_crashing(
+    monkeypatch: Any, client: Any
+) -> None:
+    """ADR-026 decision 5's explicit acceptance case: a job with no résumés
+    at all must render a clean all-zero breakdown, not crash or omit a
+    bucket."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_resume_status_breakdown", MagicMock(return_value=_breakdown())
+    )
+    resp = client.get(f"/jobs/{job_id}/resume-status")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True).lower()
+    assert "withdrawn" in body
+    assert "uploaded" in body
+
+
+def test_resume_status_widget_route_calls_get_resume_status_breakdown_with_job_id(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    spy = MagicMock(return_value=_breakdown())
+    monkeypatch.setattr(api_client, "get_resume_status_breakdown", spy)
+    client.get(f"/jobs/{job_id}/resume-status")
+    spy.assert_called_once()
+    assert spy.call_args.args[0] == job_id
+
+
+def test_resume_status_widget_route_404s_when_job_missing(
+    monkeypatch: Any, client: Any
+) -> None:
+    monkeypatch.setattr(
+        api_client,
+        "get_resume_status_breakdown",
+        MagicMock(side_effect=api_client.NotFound("no such job")),
+    )
+    resp = client.get(f"/jobs/{uuid4()}/resume-status")
+    assert resp.status_code == 404
+
+
+def test_resume_status_widget_route_backend_unavailable_not_500(
+    monkeypatch: Any, client: Any
+) -> None:
+    monkeypatch.setattr(
+        api_client,
+        "get_resume_status_breakdown",
+        MagicMock(side_effect=api_client.BackendUnavailable("down")),
+    )
+    resp = client.get(f"/jobs/{uuid4()}/resume-status")
     assert resp.status_code in (502, 503)
     assert resp.status_code != 500

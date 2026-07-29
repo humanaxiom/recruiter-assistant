@@ -91,7 +91,8 @@ _EMBED_BATCH_SIZE = 64
 
 _RESUME_META_SQL = (
     "SELECT blob_key, mime_type, status, job_id, "
-    "cover_letter_blob_key, cover_letter_text FROM resumes WHERE id = $1"
+    "cover_letter_blob_key, cover_letter_text, withdrawn_at FROM resumes "
+    "WHERE id = $1"
 )
 
 # A résumé is parseable only from these two states; anything else means another
@@ -762,6 +763,20 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 )
                 return "stale"
 
+            # ADR-026 (FU-8) — the withdrawn-during-parse race. A résumé
+            # withdrawn while still uploaded/parsing must NOT re-enter the
+            # ranking pool: the write-back still completes to status='parsed'
+            # (ADR-021 stays the single parse-state machine, and the withdrawal
+            # columns are untouched), but the projection-triggering
+            # `resume.parsed` enqueue is SKIPPED. A subsequent reinstate has no
+            # delivered payload to replay and re-enters via the normal path.
+            if meta.get("withdrawn_at") is not None:
+                log.info(
+                    "parse_resume.withdrawn_skip_projection resume_id=%s",
+                    resume_id_str,
+                )
+                return "parsed"
+
             await outbox_service.enqueue_outbox(
                 conn,
                 aggregate="resume",
@@ -1010,3 +1025,37 @@ async def _resume_projection_tx(
     # R8: no Company/Institution/experience/education writes from this
     # module — the matching pipeline that would consume them is out of scope
     # for Phase 4b.
+
+
+# ---------------- resume.withdrawn un-projection (ADR-026, FU-8) ----------------
+#
+# The withdrawal exclusion point. Detaching the Resume node (and its
+# ResumeChunks) from Neo4j removes it from the ``resume_summary_idx`` recall
+# set, so the ranking engine's stage-1 coarse recall simply cannot surface it
+# any more — no scoring-code change is needed. Skill nodes are SHARED across
+# every résumé that has ever claimed them, so they are NEVER touched:
+# un-projecting one candidate must not corrupt every other résumé's HAS_SKILL
+# edges pointing at the same vocabulary node. A pure Neo4j operation — no
+# Postgres round trip, no model call (mirrors ``project_resume``'s guarantees).
+
+
+async def unproject_resume(driver: AsyncDriver, *, resume_id: Any) -> None:
+    """Remove one résumé's Resume/ResumeChunk projection from Neo4j.
+
+    Idempotent — a résumé that was never projected (or already un-projected)
+    simply matches nothing. Skill nodes/edges are left untouched.
+    """
+    async with driver.session() as session:
+        await session.execute_write(_unproject_resume_tx, str(resume_id))
+
+
+async def _unproject_resume_tx(tx: Any, resume_id: str) -> None:
+    """Write-transaction callback for :func:`unproject_resume`."""
+    await tx.run(
+        """
+        MATCH (r:Resume {id: $rid})
+        OPTIONAL MATCH (r)-[:HAS_CHUNK]->(c:ResumeChunk)
+        DETACH DELETE c, r
+        """,
+        rid=resume_id,
+    )

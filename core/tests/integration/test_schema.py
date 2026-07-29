@@ -373,3 +373,100 @@ async def test_reverse_match_entry_round_trips_jsonb_payload(
     assert json.loads(row["score_breakdown"]) == {"must_have": 0.7}
     assert json.loads(row["evidence"]) == [{"req": "python", "quote": "5y python"}]
     assert json.loads(row["pipeline_meta"]) == {"stage": "reverse"}
+
+
+# ── résumé withdrawal lifecycle (ADR-026 decision 1, FU-8) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_at_column_is_a_nullable_timestamptz(
+    conn: asyncpg.Connection,
+) -> None:
+    row = await conn.fetchrow("""
+        SELECT data_type, is_nullable FROM information_schema.columns
+        WHERE table_name = 'resumes' AND column_name = 'withdrawn_at'
+        """)
+    assert row is not None, "resumes.withdrawn_at column does not exist"
+    assert row["data_type"] == "timestamp with time zone"
+    assert row["is_nullable"] == "YES"
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_reason_column_is_a_nullable_text(
+    conn: asyncpg.Connection,
+) -> None:
+    row = await conn.fetchrow("""
+        SELECT data_type, is_nullable FROM information_schema.columns
+        WHERE table_name = 'resumes' AND column_name = 'withdrawal_reason'
+        """)
+    assert row is not None, "resumes.withdrawal_reason column does not exist"
+    assert row["data_type"] == "text"
+    assert row["is_nullable"] == "YES"
+
+
+@pytest.mark.asyncio
+async def test_newly_inserted_resume_has_null_withdrawal_columns(
+    conn: asyncpg.Connection,
+) -> None:
+    """A fresh row must never be born withdrawn — proves no DEFAULT sneaked
+    onto either column."""
+    job_id = await _insert_job(conn)
+    resume_id = await _insert_resume(conn, job_id)
+    row = await conn.fetchrow(
+        "SELECT withdrawn_at, withdrawal_reason FROM resumes WHERE id = $1",
+        resume_id,
+    )
+    assert row is not None
+    assert row["withdrawn_at"] is None
+    assert row["withdrawal_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_at_and_reason_round_trip_through_an_update(
+    conn: asyncpg.Connection,
+) -> None:
+    job_id = await _insert_job(conn)
+    resume_id = await _insert_resume(conn, job_id)
+    await conn.execute(
+        "UPDATE resumes SET withdrawn_at = now(), withdrawal_reason = $2 "
+        "WHERE id = $1",
+        resume_id,
+        "candidate accepted another offer",
+    )
+    row = await conn.fetchrow(
+        "SELECT withdrawn_at, withdrawal_reason FROM resumes WHERE id = $1",
+        resume_id,
+    )
+    assert row is not None
+    assert row["withdrawn_at"] is not None
+    assert row["withdrawal_reason"] == "candidate accepted another offer"
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_columns_survive_init_schema_run_twice(pg_dsn: str) -> None:
+    """The idempotency proof this ADR's own column-addition convention
+    demands (mirrors ``test_init_schema_twice_in_a_row_succeeds``, but also
+    checks the specific columns this slice adds land — and stay landed —
+    across two boots against the SAME already-migrated volume)."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+
+        withdrawn_at_row = await connection.fetchrow("""
+            SELECT data_type, is_nullable FROM information_schema.columns
+            WHERE table_name = 'resumes' AND column_name = 'withdrawn_at'
+            """)
+        assert withdrawn_at_row is not None
+        assert withdrawn_at_row["data_type"] == "timestamp with time zone"
+        assert withdrawn_at_row["is_nullable"] == "YES"
+
+        reason_row = await connection.fetchrow("""
+            SELECT data_type, is_nullable FROM information_schema.columns
+            WHERE table_name = 'resumes' AND column_name = 'withdrawal_reason'
+            """)
+        assert reason_row is not None
+        assert reason_row["data_type"] == "text"
+        assert reason_row["is_nullable"] == "YES"
+    finally:
+        await connection.close()

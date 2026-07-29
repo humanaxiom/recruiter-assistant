@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 _JOB_META_SQL = (
     "SELECT description_parsed, shortlist_top_percent FROM jobs WHERE id = $1"
 )
-_RESUME_STATUS_SQL = "SELECT status FROM resumes WHERE id = $1"
+_RESUME_STATUS_SQL = "SELECT status, withdrawn_at FROM resumes WHERE id = $1"
 _PARSED_JOB_IDS_SQL = "SELECT id FROM jobs WHERE description_parsed IS NOT NULL"
 
 
@@ -122,6 +122,13 @@ async def reverse_match_job(ctx: dict[str, Any], resume_id_str: str) -> str:
             if row is None:
                 log.warning("reverse_match_job.missing resume_id=%s", resume_id_str)
                 return "missing"
+            # ADR-026 (FU-8): a withdrawn résumé is excluded from ranking — a
+            # DISTINCT status from "not_parsed" (checked FIRST so a withdrawn
+            # row that also happens to be unparsed is reported as withdrawn),
+            # the orchestrator is never called, and nothing is persisted.
+            if row["withdrawn_at"] is not None:
+                log.info("reverse_match_job.withdrawn resume_id=%s", resume_id_str)
+                return "withdrawn"
             if row["status"] != "parsed":
                 log.info("reverse_match_job.not_parsed resume_id=%s", resume_id_str)
                 return "not_parsed"

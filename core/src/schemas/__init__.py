@@ -68,7 +68,9 @@ from src.schemas.resumes import (
     ResumeSkillDetails,
     ResumeSkillNames,
     ResumeStatus,
+    ResumeStatusBreakdown,
     ResumeUploadResult,
+    WithdrawRequest,
 )
 
 __all__ = [
@@ -112,7 +114,9 @@ __all__ = [
     "ResumeSkillDetails",
     "ResumeSkillNames",
     "ResumeStatus",
+    "ResumeStatusBreakdown",
     "ResumeUploadResult",
+    "WithdrawRequest",
     # matching
     "CoverLetterEvidence",
     "CoverLetterTheme",

@@ -313,11 +313,17 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 | **CAS live integration** | `adb55fd`+`d54a6be` | [019](docs/adr/019-cas-identity-attributable-audit.md) | Turned the FU-5 CAS flow on against real SFU CAS via `compose.cas.yml`: split-origin (`:5000`/`:18000`) post-login redirect fix + a header auth widget (user · role · Logout/Login) |
 | **User admin — granular roles** | `45eba6d` (slices 1–8) | [025](docs/adr/025-user-admin-roles.md) | No-role-by-default first login (fail-closed, reverses ADR-019 §10a), the `require_role_assigned` gate, an admin-session-gated `GET /users` + `PATCH /users/{id}/role` (atomic `role_changed` audit, last-admin lockout), and a Flask `/admin/users` role-assignment page |
 
-**One further feature is planned and scoped (2026-07-20), not yet built:**
+**One further feature is built and gate-green on a branch, but not yet merged/pushed:**
+
+| Feature | branch / commits | ADR | What it added |
+|---|---|---|---|
+| **FU-8 — Résumé withdrawal + stale-résumé lifecycle** (2026-07-29) | `feat/fu8-resume-withdrawal` | [026](docs/adr/026-resume-withdrawal-lifecycle.md) | A candidate-withdrawal action (audited, `POST /resumes/{id}/withdraw` + `/reinstate`) that un-projects the résumé from Neo4j so it drops out of new shortlists/reverse-matches, distinct from a parse `failed`; reinstate replays the last parse rather than re-embedding; and a per-job résumé-status breakdown (`GET /jobs/{id}/resume-status`). All merge-blocking gates green (reviewer, security, ranking-evals) — awaiting push/PR. The §4 consent-revocation purge path stays deferred |
+
+**One further feature is planned and scoped, not yet built:**
 
 | Feature | ADR | What it will add |
 |---|---|---|
-| **FU-7 — LLM failover + fail-closed ranking** | [021](docs/adr/021-llm-failover-fail-closed-ranking.md) | An ordered provider chain with per-provider breakers; the pipeline refuses to publish a ranking containing a silently-zeroed component, and résumé parse status stops reporting failures as `uploaded` |
+| **FU-7 — LLM failover + fail-closed ranking** (2026-07-20) | [021](docs/adr/021-llm-failover-fail-closed-ranking.md) | An ordered provider chain with per-provider breakers; the pipeline refuses to publish a ranking containing a silently-zeroed component, and résumé parse status stops reporting failures as `uploaded` |
 
 A plain-language explainer of the scoring model, written for HR and compliance review — including the fifteen policy decisions currently encoded as configuration defaults — is at [docs/process/ranking-metrics-explainer.html](docs/process/ranking-metrics-explainer.html).
 

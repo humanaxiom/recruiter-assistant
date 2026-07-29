@@ -101,6 +101,19 @@
   </form>
   {% endif %}
 
+  <h3>Résumé status</h3>
+  {#
+    ADR-026 decision 5/FU-8: lazy-loaded so the main job-detail render never
+    itself calls `get_resume_status_breakdown` — only this fragment does,
+    once the browser fires the `load` trigger.
+  #}
+  <div id="resume-status-breakdown"
+       hx-get="{{ url_for('resume_status_widget', job_id=job.id) }}"
+       hx-trigger="load"
+       hx-swap="outerHTML">
+    <p class="muted">Loading résumé status…</p>
+  </div>
+
   <h3>Résumés</h3>
   {% include "resumes_table.html" %}
 </div>

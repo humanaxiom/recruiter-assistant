@@ -20,6 +20,11 @@ Pinned control flow:
   ``match_resume_to_jobs`` — reverse match must never silently rank a résumé
   against an unparsed JD (no ``required_skills``/``nice_to_have_skills`` to
   score against) or, worse, pass ``allowed_job_ids=None`` (no filter at all).
+* **ADR-026 (FU-8) — a withdrawn résumé returns the DISTINCT status
+  ``"withdrawn"``** (never ``"not_parsed"``, even though a withdrawn row
+  might also happen to be unparsed) and the orchestrator is NEVER called —
+  the same "row exists but is excluded" shape as ``"not_parsed"``, but
+  observably distinct so a caller/log can tell the two exclusions apart.
 
 ADR-010 §1 residual / concurrency dedup (this slice) — twin of the
 ``shortlist_job`` lock tests, using ``kind="reverse_match"`` (a distinct
@@ -37,6 +42,7 @@ advisory-lock namespace from ``"shortlist"`` — see
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -46,6 +52,8 @@ import pytest
 from src.pipeline.matching.orchestrator import JobMatchResult, JobMatchResultEntry
 from src.schemas.matching import ScoreBreakdown
 from src.settings import Settings
+
+_NOW = dt.datetime(2026, 7, 28, tzinfo=dt.UTC)
 
 
 class _Row(dict[str, Any]):
@@ -149,7 +157,7 @@ async def test_resume_not_parsed_returns_not_parsed_and_orchestrator_not_called(
 ) -> None:
     from src.worker.matching_tasks import reverse_match_job
 
-    conn = _make_conn(_Row({"status": status}))
+    conn = _make_conn(_Row({"status": status, "withdrawn_at": None}))
     ctx = _make_ctx(conn)
     lock_patch, release_patch = _lock_patches()
 
@@ -171,6 +179,110 @@ async def test_resume_not_parsed_returns_not_parsed_and_orchestrator_not_called(
     persist.assert_not_called()
 
 
+# ── ADR-026 (FU-8): a withdrawn résumé is excluded, distinctly ────────────
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_parsed_resume_returns_withdrawn_and_orchestrator_not_called() -> (  # noqa: E501
+    None
+):
+    """A withdrawn résumé that WAS successfully parsed (the common case —
+    withdrawal happens after the candidate is already in the pool) must
+    still be excluded: the orchestrator is never called and nothing is
+    persisted."""
+    from src.worker.matching_tasks import reverse_match_job
+
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": _NOW}))
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
+        ) as match_jobs,
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ) as persist,
+    ):
+        result = await reverse_match_job(ctx, str(uuid4()))
+
+    assert result == "withdrawn"
+    match_jobs.assert_not_called()
+    persist.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["uploaded", "parsing", "failed"])
+@pytest.mark.asyncio
+async def test_withdrawn_unparsed_resume_returns_withdrawn_not_not_parsed(
+    status: str,
+) -> None:
+    """The status string is DISTINCT from ``"not_parsed"`` even when the row
+    would ALSO have failed the parsed check — withdrawal is checked and
+    reported as its own exclusion reason, never conflated with 'never got
+    parsed'."""
+    from src.worker.matching_tasks import reverse_match_job
+
+    conn = _make_conn(_Row({"status": status, "withdrawn_at": _NOW}))
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
+        ) as match_jobs,
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ) as persist,
+    ):
+        result = await reverse_match_job(ctx, str(uuid4()))
+
+    assert result == "withdrawn"
+    assert result != "not_parsed"
+    match_jobs.assert_not_called()
+    persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_resume_lock_is_still_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.worker.matching_tasks import reverse_match_job
+
+    resume_id = uuid4()
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": _NOW}))
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
+        ) as match_jobs,
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ) as persist,
+    ):
+        result = await reverse_match_job(ctx, str(resume_id))
+
+    assert result == "withdrawn"
+    match_jobs.assert_not_called()
+    persist.assert_not_called()
+    release_lock.assert_awaited_once_with(conn, "reverse_match", resume_id)
+
+
 # ── happy path ───────────────────────────────────────────────────────────
 
 
@@ -179,7 +291,7 @@ async def test_happy_path_persists_the_orchestrator_result_exactly_once() -> Non
     from src.worker.matching_tasks import reverse_match_job
 
     resume_id = uuid4()
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
     lock_patch, release_patch = _lock_patches()
 
@@ -233,7 +345,7 @@ async def test_zero_candidate_result_still_calls_persist_and_returns_empty() -> 
     from src.worker.matching_tasks import reverse_match_job
 
     resume_id = uuid4()
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
     lock_patch, release_patch = _lock_patches()
     empty_result = JobMatchResult(resume_id=resume_id, entries=[])
@@ -272,7 +384,7 @@ async def test_allowed_job_ids_built_from_parsed_jobs_and_passed_as_explicit_set
     job_a: UUID = uuid4()
     job_b: UUID = uuid4()
     conn = _make_conn(
-        _Row({"status": "parsed"}),
+        _Row({"status": "parsed", "withdrawn_at": None}),
         fetch_result=[_Row({"id": job_a}), _Row({"id": job_b})],
     )
     ctx = _make_ctx(conn)
@@ -312,7 +424,7 @@ async def test_lock_already_held_returns_already_running_before_any_row_fetch() 
     ``reverse_match_job`` must short-circuit BEFORE fetching the résumé row."""
     from src.worker.matching_tasks import reverse_match_job
 
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
 
     with (
@@ -346,7 +458,7 @@ async def test_lock_is_acquired_with_reverse_match_kind_and_the_resume_id() -> N
     from src.worker.matching_tasks import reverse_match_job
 
     resume_id = uuid4()
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
 
     with (
@@ -376,7 +488,7 @@ async def test_normal_run_releases_the_lock_it_acquired() -> None:
     from src.worker.matching_tasks import reverse_match_job
 
     resume_id = uuid4()
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
 
     with (
@@ -409,7 +521,7 @@ async def test_lock_is_released_even_when_the_orchestrator_raises() -> None:
     from src.worker.matching_tasks import reverse_match_job
 
     resume_id = uuid4()
-    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    conn = _make_conn(_Row({"status": "parsed", "withdrawn_at": None}), fetch_result=[])
     ctx = _make_ctx(conn)
 
     with (

@@ -587,20 +587,27 @@ def blind_review(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
-def _mint_card_tokens(entries: list[dict[str, Any]] | None) -> dict[str, str]:
+def _mint_card_tokens(
+    entries: list[dict[str, Any]] | None, *, action: str = "reveal"
+) -> dict[str, str]:
     """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
 
     Returns a ``str(resume_id) -> token`` mapping the card template indexes by
     its own entry's résumé id, so every card on one render carries an
     independently valid, independently one-shot token. Entries without a usable
     ``resume_id`` are skipped rather than minting an unusable slot.
+
+    FU-8/ADR-026: ``action`` defaults to ``"reveal"`` (unchanged pre-existing
+    behaviour); each card's withdraw control mints a SEPARATE set of tokens by
+    calling this again with ``action="withdraw"``, so the two audited actions
+    on one card never share a slot.
     """
     tokens: dict[str, str] = {}
     for entry in entries or []:
         resume_id = entry.get("resume_id") if isinstance(entry, dict) else None
         if resume_id is None:
             continue
-        tokens[str(resume_id)] = csrf.issue_token(resume_id)
+        tokens[str(resume_id)] = csrf.issue_token(resume_id, action=action)
     return tokens
 
 
@@ -630,6 +637,10 @@ def job_shortlist(job_id: UUID) -> Any:
         # all posting to the SAME guarded route, so each card needs its OWN
         # token keyed by its own résumé id (FU-4/D4).
         csrf_tokens=_mint_card_tokens(entries),
+        # FU-8/ADR-026: each card's withdraw control needs its OWN token,
+        # independent of the reveal token above (same résumé id, different
+        # action).
+        withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
     )
 
 
@@ -681,6 +692,7 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         # for a résumé already present overwrites that résumé's slot in place,
         # so repeated polls cannot grow the mapping or evict unrelated tokens.
         csrf_tokens=_mint_card_tokens(entries),
+        withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
     )
 
 
@@ -719,6 +731,11 @@ def resume_detail(resume_id: UUID) -> Any:
         # back, bound to THIS résumé id, so a cross-site auto-submit cannot
         # manufacture an audit row.
         csrf_token=csrf.issue_token(resume_id),
+        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
+        # the withdraw/reinstate controls the template renders — same résumé
+        # id, distinct action, so minting it never disturbs the reveal token
+        # above.
+        withdraw_csrf_token=csrf.issue_token(resume_id, action="withdraw"),
     )
 
 
@@ -752,6 +769,69 @@ def resume_reveal(resume_id: UUID) -> Any:
         resume=resume,
         current_year=dt.date.today().year,
         revealed=True,
+    )
+
+
+@app.post("/resumes/<uuid:resume_id>/withdraw")
+def resume_withdraw(resume_id: UUID) -> Any:
+    """AUDITED. Mirrors ``resume_reveal``'s guard shape exactly (FU-8/ADR-026):
+    same-origin check first, then a one-shot CSRF token — this time scoped to
+    ``action="withdraw"``, independent of the SAME résumé's reveal token —
+    BOTH evaluated before any call reaches the backend, so a rejected forgery
+    attempt can never imply a withdrawal audit row. Redirects back to the
+    résumé-detail page (whichever context — résumé page or shortlist card —
+    the form was posted from)."""
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="withdraw"
+    ):
+        abort(403)
+    reason = (request.form.get("reason") or "").strip() or None
+    try:
+        api_client.withdraw_resume(resume_id, reason=reason)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/resumes/<uuid:resume_id>/reinstate")
+def resume_reinstate(resume_id: UUID) -> Any:
+    """AUDITED. Same guard shape as ``resume_withdraw`` (shares the
+    ``action="withdraw"`` CSRF slot — the résumé-detail page renders exactly
+    ONE of the withdraw/reinstate controls at a time, so they never contend
+    for the same slot in practice)."""
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="withdraw"
+    ):
+        abort(403)
+    try:
+        api_client.reinstate_resume(resume_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.get("/jobs/<uuid:job_id>/resume-status")
+def resume_status_widget(job_id: UUID) -> Any:
+    """HTMX fragment (ADR-026 decision 5) — the per-job résumé status
+    breakdown widget. Lazy-loaded: the main ``job_detail`` render never calls
+    ``get_resume_status_breakdown`` itself, only this dedicated fragment
+    route does."""
+    try:
+        breakdown = api_client.get_resume_status_breakdown(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "resume_status_breakdown.html", job_id=job_id, breakdown=breakdown
     )
 
 

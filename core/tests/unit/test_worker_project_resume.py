@@ -38,6 +38,14 @@ not against a mocked return value. Ported behaviourally from hris
   ``Skill`` nodes this module MERGEs on never get ``display_name``/
   ``embedding``/any cleartext written from this side either (ADR-008) — see
   the dedicated section near the bottom of this file.
+
+* **ADR-026 (FU-8) — ``unproject_resume``, the un-project exclusion point.**
+  On withdrawal, the résumé's ``Resume`` node (and its ``ResumeChunk``s) are
+  DETACH DELETEd from Neo4j so it simply is not in the
+  ``resume_summary_idx`` recall set any more (ADR-026 decision 3, option 1).
+  ``Skill`` nodes are NEVER touched — they are shared across every résumé
+  that has ever claimed them, so deleting one candidate's projection must
+  not erase a vocabulary node other résumés still reference.
 """
 
 from __future__ import annotations
@@ -51,7 +59,11 @@ from uuid import uuid4
 import pytest
 
 from src.pipeline import skills_graph
-from src.worker.resume_tasks import _resume_projection_tx, project_resume
+from src.worker.resume_tasks import (
+    _resume_projection_tx,
+    project_resume,
+    unproject_resume,
+)
 
 # ── fakes ─────────────────────────────────────────────────────────────────
 
@@ -183,6 +195,12 @@ async def _project(
     resume_id = uuid4()
     driver, tx, events = _fake_driver_and_tx()
     await project_resume(driver, resume_id=resume_id, payload=payload)
+    return tx, driver, events
+
+
+async def _unproject(resume_id: Any) -> tuple[_RecordingTx, MagicMock, list[str]]:
+    driver, tx, events = _fake_driver_and_tx()
+    await unproject_resume(driver, resume_id=resume_id)
     return tx, driver, events
 
 
@@ -544,3 +562,63 @@ async def test_resume_side_categories_write_is_still_vocab_scoped() -> None:
     categories_calls = [(c, p) for c, p in _all_run_calls(tx) if "categories" in c]
     assert categories_calls
     assert any(p.get("cats") for _c, p in categories_calls)
+
+
+# ── ADR-026 (FU-8): unproject_resume — the withdrawal un-project point ────
+
+
+@pytest.mark.asyncio
+async def test_unproject_resume_detach_deletes_the_resume_node() -> None:
+    resume_id = uuid4()
+    tx, _driver, _events = await _unproject(resume_id)
+    cypher = _all_cypher(tx)
+    assert re.search(
+        r"MATCH\s*\(\s*r\s*:\s*Resume\s*\{\s*id\s*:\s*\$\w+\s*\}\s*\)",
+        cypher,
+        re.IGNORECASE,
+    )
+    assert "DETACH DELETE" in cypher.upper()
+
+
+@pytest.mark.asyncio
+async def test_unproject_resume_removes_its_resume_chunks_too() -> None:
+    tx, _driver, _events = await _unproject(uuid4())
+    cypher = _all_cypher(tx)
+    assert "ResumeChunk" in cypher
+
+
+@pytest.mark.asyncio
+async def test_unproject_resume_never_touches_a_skill_node_or_edge() -> None:
+    """Skill nodes/edges are SHARED across every résumé that has ever
+    claimed them — un-projecting one candidate must never delete or even
+    reference a Skill, which would corrupt every OTHER résumé's HAS_SKILL
+    edges that still point at it."""
+    tx, _driver, _events = await _unproject(uuid4())
+    cypher = _all_cypher(tx)
+    assert ":Skill" not in cypher
+    assert "HAS_SKILL" not in cypher
+
+
+@pytest.mark.asyncio
+async def test_unproject_resume_binds_the_resume_id_as_a_parameter() -> None:
+    resume_id = uuid4()
+    tx, _driver, _events = await _unproject(resume_id)
+    all_values = [v for _cypher, params in _all_run_calls(tx) for v in params.values()]
+    assert str(resume_id) in all_values
+
+
+@pytest.mark.asyncio
+async def test_unproject_resume_issues_at_least_one_write() -> None:
+    tx, _driver, _events = await _unproject(uuid4())
+    assert tx.calls, "unproject_resume must issue at least one Cypher write"
+
+
+def test_unproject_resume_signature_has_no_postgres_llm_or_embedder_parameter() -> None:
+    """Mirrors ``project_resume``'s own architectural guarantees — un-project
+    is a pure Neo4j operation, no Postgres round trip, no model call."""
+    params = set(inspect.signature(unproject_resume).parameters)
+    assert not params & {"conn", "pool", "pg_pool", "llm", "embedder"}
+
+
+def test_unproject_resume_is_async() -> None:
+    assert inspect.iscoroutinefunction(unproject_resume)

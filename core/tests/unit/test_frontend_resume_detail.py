@@ -34,6 +34,19 @@ only the first reveal a recruiter clicked ever worked. The tests in the
 "one-shot, now scoped per résumé" section below pin the fixed contract:
 revealing résumé A must not disturb résumé B's token, and a token minted for
 résumé A must never validate a reveal of résumé B.
+
+**FU-8/ADR-026 — résumé withdrawal lifecycle (added below).** The résumé-
+detail page gains a SECOND audited action, mirroring the reveal button
+pattern: a "Withdraw candidate" button (posting to ``resume_withdraw``) when
+``resume.withdrawn_at`` is falsy, or a "Reinstate" button (posting to
+``resume_reinstate``) plus a withdrawn marker/badge when it is set. This is a
+DISTINCT audited action from reveal — it must carry its OWN one-shot CSRF
+token, independent of the reveal button's token on the same page (see
+``test_frontend_csrf.py``'s "tokens scoped by (résumé id, action)" section
+for the module-level regression this depends on). Blind posture is
+unchanged: the withdraw/reinstate control sits OUTSIDE the
+``{% if revealed %}...{% elif resume.blinded %}`` identity block, so it must
+never require (or imply) a reveal.
 """
 
 from __future__ import annotations
@@ -127,6 +140,8 @@ def _resume(
     blinded: bool = True,
     with_pii: bool = False,
     cover_letter: bool = True,
+    withdrawn_at: str | None = None,
+    withdrawal_reason: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": str(resume_id),
@@ -147,6 +162,10 @@ def _resume(
         "blinded": blinded,
         "cover_letter_text": None,
         "cover_letter_parsed": None,
+        # ADR-026/FU-8: the withdrawal lifecycle pair. Both None for a résumé
+        # that has never been withdrawn.
+        "withdrawn_at": withdrawn_at,
+        "withdrawal_reason": withdrawal_reason,
     }
     if cover_letter:
         payload["cover_letter_text"] = (
@@ -193,6 +212,47 @@ def _mint_csrf_token(monkeypatch: Any, client: Any, resume_id: Any) -> str:
     )
     body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
     return _extract_csrf_token(body)
+
+
+# ── FU-8/ADR-026 withdrawal-lifecycle helpers ───────────────────────────
+
+
+def _extract_form_token(html: str, action_fragment: str) -> str:
+    """Locate the ``<form>`` whose ``action`` attribute contains
+    ``action_fragment`` (e.g. ``"/withdraw"``) and pull ITS OWN hidden
+    ``csrf_token`` input value out of that form's body — used where a page
+    renders MULTIPLE forms (each with its own independent token) so a plain
+    "first csrf_token on the page" search would grab the wrong one."""
+    form_re = re.compile(
+        r'<form[^>]*action="[^"]*'
+        + re.escape(action_fragment)
+        + r'[^"]*"[^>]*>(.*?)</form>',
+        re.DOTALL,
+    )
+    match = form_re.search(html)
+    assert match is not None, f"expected a <form> posting to a {action_fragment} path"
+    return _extract_csrf_token(match.group(1))
+
+
+def _mint_withdraw_lifecycle_tokens(
+    monkeypatch: Any, client: Any, resume_id: Any, *, withdrawn: bool = False
+) -> str:
+    """GET the résumé-detail page and pull the withdraw-or-reinstate form's
+    OWN token (whichever is currently rendered, per ``withdrawn``)."""
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(
+            return_value=_resume(
+                resume_id,
+                blinded=True,
+                withdrawn_at="2026-07-20T00:00:00Z" if withdrawn else None,
+            )
+        ),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    fragment = "/reinstate" if withdrawn else "/withdraw"
+    return _extract_form_token(body, fragment)
 
 
 # ── section rendering ────────────────────────────────────────────────────
@@ -685,3 +745,305 @@ def test_two_resumes_on_one_shortlist_render_can_both_be_revealed_without_a_page
     assert reveal_spy.call_count == 2
     assert _REAL_NAME in resp_a.get_data(as_text=True)
     assert _REAL_NAME in resp_b.get_data(as_text=True)
+
+
+# ── FU-8/ADR-026 — résumé withdrawal lifecycle ───────────────────────────
+#
+# A "Withdraw candidate" control (when not withdrawn) or a "Reinstate"
+# control plus a withdrawn marker (when withdrawn), rendered on the résumé-
+# detail page. Mirrors the audited-reveal pattern (ADR-016): a POST-only
+# route, guarded by same-origin + a session-bound one-shot CSRF token that is
+# INDEPENDENT of the reveal button's token (FU-8/ADR-026 amends
+# ``frontend.csrf`` to key by (résumé id, action) — see
+# ``test_frontend_csrf.py``).
+
+
+def test_resume_detail_shows_withdraw_button_when_not_withdrawn(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "Withdraw candidate" in body
+    assert f"/resumes/{resume_id}/withdraw" in body
+    assert "Reinstate" not in body
+
+
+def test_resume_detail_shows_reinstate_button_and_badge_when_withdrawn(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(
+            return_value=_resume(
+                resume_id, blinded=True, withdrawn_at="2026-07-20T00:00:00Z"
+            )
+        ),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "Reinstate" in body
+    assert f"/resumes/{resume_id}/reinstate" in body
+    assert "Withdraw candidate" not in body
+    # a withdrawn marker/badge is visible somewhere on the page
+    assert "Withdrawn" in body
+
+
+def test_resume_detail_shows_withdrawal_reason_when_present(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(
+            return_value=_resume(
+                resume_id,
+                blinded=True,
+                withdrawn_at="2026-07-20T00:00:00Z",
+                withdrawal_reason="Accepted another offer",
+            )
+        ),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "Accepted another offer" in body
+
+
+def test_resume_detail_withdraw_and_reveal_tokens_on_the_same_page_are_independent(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The crux regression: two audited actions rendered on ONE page must
+    never share a CSRF slot."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    reveal_token = _extract_form_token(body, "/reveal")
+    withdraw_token = _extract_form_token(body, "/withdraw")
+    assert reveal_token != withdraw_token
+
+
+def test_resume_detail_withdraw_control_is_outside_the_reveal_identity_block() -> None:
+    """Structural guard: blind posture is UNCHANGED by this feature — the
+    withdraw/reinstate control must render regardless of reveal state, so it
+    must sit OUTSIDE the ``{% if revealed %}...{% elif resume.blinded %}
+    ...{% endif %}`` identity block (found via balanced if/elif/endif
+    matching, robust to the nested per-field ifs already inside that block)."""
+    template = (Path(app.root_path) / "templates" / "resume_detail.html").read_text(
+        encoding="utf-8"
+    )
+    control_re = re.compile(r"\{%-?\s*(if|elif|endif)\b[^%]*%\}")
+    gate = template.find("{% if revealed %}")
+    assert gate != -1, "expected an `{% if revealed %}` gate in resume_detail.html"
+
+    depth = 0
+    block_end = -1
+    for m in control_re.finditer(template, gate):
+        keyword = m.group(1)
+        if keyword == "if":
+            depth += 1
+        elif keyword == "endif":
+            depth -= 1
+            if depth == 0:
+                block_end = m.end()
+                break
+    assert block_end != -1, "could not find the matching endif for the reveal block"
+
+    withdraw_idx = template.find("Withdraw candidate")
+    assert withdraw_idx != -1, "expected a 'Withdraw candidate' control in the template"
+    assert not (gate < withdraw_idx < block_end), (
+        "the withdraw control must not be nested inside the reveal/blind "
+        "identity block — blind posture is unchanged by this feature"
+    )
+
+
+# ── FU-8/ADR-026 — POST /resumes/<id>/withdraw ───────────────────────────
+
+
+def test_resume_withdraw_route_is_post_only(client: Any) -> None:
+    resp = client.get(f"/resumes/{uuid4()}/withdraw")
+    assert resp.status_code == 405
+
+
+def test_resume_withdraw_route_posts_and_redirects(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    spy = MagicMock(return_value=_resume(resume_id, blinded=True))
+    monkeypatch.setattr(api_client, "withdraw_resume", spy)
+    resp = client.post(f"/resumes/{resume_id}/withdraw", data={"csrf_token": token})
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")
+    spy.assert_called_once()
+    assert spy.call_args.args[0] == resume_id
+
+
+def test_resume_withdraw_route_forwards_the_reason_field(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    spy = MagicMock(return_value=_resume(resume_id, blinded=True))
+    monkeypatch.setattr(api_client, "withdraw_resume", spy)
+    client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token, "reason": "Accepted another offer"},
+    )
+    spy.assert_called_once()
+    assert spy.call_args.kwargs.get("reason") == "Accepted another offer"
+
+
+def test_resume_withdraw_route_rejects_missing_csrf_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id))
+    monkeypatch.setattr(api_client, "withdraw_resume", spy)
+    resp = client.post(f"/resumes/{resume_id}/withdraw")
+    assert resp.status_code == 403
+    spy.assert_not_called()
+
+
+def test_resume_withdraw_route_rejects_a_garbage_csrf_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    spy = MagicMock(return_value=_resume(resume_id))
+    monkeypatch.setattr(api_client, "withdraw_resume", spy)
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw", data={"csrf_token": "not-the-real-token"}
+    )
+    assert resp.status_code == 403
+    spy.assert_not_called()
+
+
+def test_resume_withdraw_route_rejects_cross_origin_even_with_a_valid_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    spy = MagicMock(return_value=_resume(resume_id))
+    monkeypatch.setattr(api_client, "withdraw_resume", spy)
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    spy.assert_not_called()
+
+
+# ── FU-8/ADR-026 — POST /resumes/<id>/reinstate ──────────────────────────
+
+
+def test_resume_reinstate_route_is_post_only(client: Any) -> None:
+    resp = client.get(f"/resumes/{uuid4()}/reinstate")
+    assert resp.status_code == 405
+
+
+def test_resume_reinstate_route_posts_and_redirects(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(
+        monkeypatch, client, resume_id, withdrawn=True
+    )
+    spy = MagicMock(return_value=_resume(resume_id, blinded=True))
+    monkeypatch.setattr(api_client, "reinstate_resume", spy)
+    resp = client.post(f"/resumes/{resume_id}/reinstate", data={"csrf_token": token})
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")
+    spy.assert_called_once()
+    assert spy.call_args.args[0] == resume_id
+
+
+def test_resume_reinstate_route_rejects_missing_csrf_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    spy = MagicMock(return_value=_resume(resume_id))
+    monkeypatch.setattr(api_client, "reinstate_resume", spy)
+    resp = client.post(f"/resumes/{resume_id}/reinstate")
+    assert resp.status_code == 403
+    spy.assert_not_called()
+
+
+def test_resume_reinstate_route_rejects_cross_origin_even_with_a_valid_token(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(
+        monkeypatch, client, resume_id, withdrawn=True
+    )
+    spy = MagicMock(return_value=_resume(resume_id))
+    monkeypatch.setattr(api_client, "reinstate_resume", spy)
+    resp = client.post(
+        f"/resumes/{resume_id}/reinstate",
+        data={"csrf_token": token},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    spy.assert_not_called()
+
+
+# ── FU-8/ADR-026 — cross-action token confusion (route level) ───────────
+#
+# Route-level mirror of the module-level regression tests in
+# test_frontend_csrf.py: the withdraw button's token must not be usable to
+# trigger a reveal, and vice versa, even though both live in the SAME
+# session for the SAME résumé at once.
+
+
+def test_withdraw_token_does_not_validate_the_reveal_route_and_vice_versa(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    reveal_token = _extract_form_token(body, "/reveal")
+    withdraw_token = _extract_form_token(body, "/withdraw")
+    assert reveal_token != withdraw_token
+
+    reveal_spy = MagicMock(return_value=_resume(resume_id, with_pii=True))
+    monkeypatch.setattr(api_client, "reveal_resume", reveal_spy)
+    withdraw_spy = MagicMock(return_value=_resume(resume_id, blinded=True))
+    monkeypatch.setattr(api_client, "withdraw_resume", withdraw_spy)
+
+    # withdraw's token posted at the reveal route → rejected, no reveal call.
+    resp1 = client.post(
+        f"/resumes/{resume_id}/reveal", data={"csrf_token": withdraw_token}
+    )
+    assert resp1.status_code == 403
+    reveal_spy.assert_not_called()
+
+    # reveal's token posted at the withdraw route → rejected, no withdraw call.
+    resp2 = client.post(
+        f"/resumes/{resume_id}/withdraw", data={"csrf_token": reveal_token}
+    )
+    assert resp2.status_code == 403
+    withdraw_spy.assert_not_called()
+
+    # each token still works on ITS OWN route afterward — neither was leaked
+    # or burned by the misdirected cross-action attempt above.
+    resp3 = client.post(
+        f"/resumes/{resume_id}/reveal", data={"csrf_token": reveal_token}
+    )
+    assert resp3.status_code == 200
+    resp4 = client.post(
+        f"/resumes/{resume_id}/withdraw", data={"csrf_token": withdraw_token}
+    )
+    assert resp4.status_code == 302
