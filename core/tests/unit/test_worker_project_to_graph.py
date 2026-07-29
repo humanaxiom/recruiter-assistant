@@ -29,6 +29,11 @@ human-locked deviations pinned:
 * Batch limit and the dead-letter cap are both read from
   ``settings.outbox_drain_batch_size`` / ``settings.outbox_max_delivery_attempts``
   — never hard-coded (see ``test_settings.py``).
+* **ADR-026 (FU-8) — a THIRD dispatch branch, ``resume.withdrawn``.** The
+  résumé-withdrawal un-project exclusion point: on this event the drainer
+  calls ``src.worker.resume_tasks.unproject_resume`` (imported into this
+  module the same way ``project_resume``/``_project_job`` already are), not
+  either of the parse-projection functions.
 
 ``src.worker.graph_tasks.project_to_graph`` does not exist yet — this whole
 file fails at collection (``ImportError``). RED half of the TDD cycle.
@@ -161,6 +166,81 @@ async def test_dispatches_resume_parsed_to_project_resume() -> None:
     project_job.assert_not_awaited()
     kwargs = project_resume.await_args.kwargs
     assert kwargs.get("resume_id") == row["aggregate_id"]
+
+
+# ── ADR-026 (FU-8): resume.withdrawn -> unproject_resume ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatches_resume_withdrawn_to_unproject_resume() -> None:
+    row = _row(
+        aggregate="resume",
+        event_type="resume.withdrawn",
+        payload={},
+    )
+    conn = _make_conn([row])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch(
+            "src.worker.graph_tasks._project_job", new_callable=AsyncMock
+        ) as project_job,
+        patch(
+            "src.worker.graph_tasks.project_resume", new_callable=AsyncMock
+        ) as project_resume,
+        patch(
+            "src.worker.graph_tasks.unproject_resume", new_callable=AsyncMock
+        ) as unproject_resume,
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 1
+    unproject_resume.assert_awaited_once()
+    project_job.assert_not_awaited()
+    project_resume.assert_not_awaited()
+    flat = list(unproject_resume.await_args.args) + list(
+        unproject_resume.await_args.kwargs.values()
+    )
+    assert ctx["neo4j"] in flat
+    assert row["aggregate_id"] in flat
+
+
+@pytest.mark.asyncio
+async def test_resume_withdrawn_row_marked_delivered_on_success() -> None:
+    row = _row(aggregate="resume", event_type="resume.withdrawn", payload={})
+    conn = _make_conn([row])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.graph_tasks.unproject_resume", new_callable=AsyncMock),
+        patch("src.worker.graph_tasks.project_resume", new_callable=AsyncMock),
+        patch("src.worker.graph_tasks._project_job", new_callable=AsyncMock),
+    ):
+        await project_to_graph(ctx)
+
+    calls = _execute_calls(conn)
+    assert any("delivered_at" in c[0] and row["id"] in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_resume_withdrawn_failure_increments_delivery_attempts_not_delivered() -> (
+    None
+):
+    row = _row(aggregate="resume", event_type="resume.withdrawn", payload={})
+    conn = _make_conn([row])
+    ctx = _make_ctx(conn)
+
+    with patch(
+        "src.worker.graph_tasks.unproject_resume",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("neo4j delete failed"),
+    ):
+        delivered = await project_to_graph(ctx)
+
+    assert delivered == 0
+    calls = _execute_calls(conn)
+    assert any("delivery_attempts" in c[0] and row["id"] in c for c in calls)
+    assert not any("delivered_at" in c[0] and row["id"] in c for c in calls)
 
 
 @pytest.mark.asyncio

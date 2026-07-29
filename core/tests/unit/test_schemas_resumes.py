@@ -11,6 +11,10 @@ Phase 2 ports hris ``packages/schemas/src/schemas/resumes.py`` (import fixed to
 * ``ResumeOut`` is the PII redaction boundary — it exposes ``candidate`` but
   never the ``candidate_email`` / ``blob_key`` ciphertext,
 * ``extra="forbid"``/``"ignore"`` behave per model.
+* ADR-026 (FU-8) résumé-withdrawal lifecycle contracts: ``ResumeOut`` /
+  ``ResumeListItem`` gain ``withdrawn_at``/``withdrawal_reason``;
+  ``WithdrawRequest`` caps ``reason`` at 500 chars; ``ResumeStatusBreakdown``
+  is a closed, five-bucket, non-negative-int shape.
 
 These modules do not exist yet — this is the RED half of the TDD cycle.
 """
@@ -40,7 +44,9 @@ from src.schemas.resumes import (
     ResumeSkillDetail,
     ResumeSkillDetails,
     ResumeSkillNames,
+    ResumeStatusBreakdown,
     ResumeUploadResult,
+    WithdrawRequest,
     _coerce_year,
 )
 
@@ -49,6 +55,8 @@ _TS = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
 # The public surface the module and package must expose. ``Skill`` is re-used
 # from jobs and re-exported by resumes; ``ResumeCore`` / ``ResumeSkill*`` are
 # defined in the module even though hris omits them from ``__all__``.
+# ADR-026 (FU-8): ``WithdrawRequest``/``ResumeStatusBreakdown`` are NEW —
+# résumé-withdrawal lifecycle request/response shapes.
 RESUMES_PUBLIC: tuple[str, ...] = (
     "ResumeStatus",
     "ResumeChunk",
@@ -68,6 +76,8 @@ RESUMES_PUBLIC: tuple[str, ...] = (
     "ResumeListItem",
     "ResumeOut",
     "ResumeDeleteOut",
+    "WithdrawRequest",
+    "ResumeStatusBreakdown",
     "Skill",
 )
 
@@ -101,6 +111,16 @@ YEARS_CASES: tuple[tuple[object, int | None], ...] = (
     (-1, None),  # under 0
 )
 
+# The five mutually-exclusive résumé-lifecycle buckets ADR-026 decision 5
+# promises on the job status-breakdown surface.
+STATUS_BREAKDOWN_FIELDS: tuple[str, ...] = (
+    "uploaded",
+    "parsing",
+    "parsed",
+    "failed",
+    "withdrawn",
+)
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -123,6 +143,18 @@ def _resume_out_kwargs(**over: object) -> dict[str, object]:
         "parsed_at": None,
         "failure_reason": None,
         "consent_acknowledged": True,
+    }
+    base.update(over)
+    return base
+
+
+def _breakdown_kwargs(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "uploaded": 0,
+        "parsing": 0,
+        "parsed": 0,
+        "failed": 0,
+        "withdrawn": 0,
     }
     base.update(over)
     return base
@@ -347,3 +379,141 @@ def test_resume_parsed_ignores_unknown_key() -> None:
 def test_resume_chunk_ignores_unknown_key() -> None:
     chunk = ResumeChunk.model_validate({"id": "c_1", "text": "hi", "bogus": 1})
     assert "bogus" not in chunk.model_dump()
+
+
+# ── ADR-026 (FU-8): résumé withdrawal lifecycle — ResumeOut/ResumeListItem ──
+
+
+def test_resume_out_has_withdrawn_at_and_withdrawal_reason_fields() -> None:
+    assert "withdrawn_at" in ResumeOut.model_fields
+    assert "withdrawal_reason" in ResumeOut.model_fields
+
+
+def test_resume_out_withdrawal_fields_default_to_none() -> None:
+    """A résumé that has never been withdrawn must not require the caller to
+    supply these fields — they default to ``None``."""
+    out = ResumeOut(**_resume_out_kwargs())
+    assert out.withdrawn_at is None
+    assert out.withdrawal_reason is None
+
+
+def test_resume_out_carries_a_real_withdrawn_at_and_reason() -> None:
+    out = ResumeOut(
+        **_resume_out_kwargs(withdrawn_at=_TS, withdrawal_reason="took another offer")
+    )
+    assert out.withdrawn_at == _TS
+    assert out.withdrawal_reason == "took another offer"
+
+
+def test_resume_list_item_has_withdrawn_at_and_withdrawal_reason_fields() -> None:
+    assert "withdrawn_at" in ResumeListItem.model_fields
+    assert "withdrawal_reason" in ResumeListItem.model_fields
+
+
+def test_resume_list_item_withdrawal_fields_default_to_none() -> None:
+    item = ResumeListItem(
+        id=uuid4(),
+        original_filename="jane.pdf",
+        status="parsed",
+        uploaded_at=_TS,
+        parsed_at=None,
+    )
+    assert item.withdrawn_at is None
+    assert item.withdrawal_reason is None
+
+
+def test_resume_list_item_carries_a_real_withdrawn_at() -> None:
+    item = ResumeListItem(
+        id=uuid4(),
+        original_filename="jane.pdf",
+        status="parsed",
+        uploaded_at=_TS,
+        parsed_at=None,
+        withdrawn_at=_TS,
+        withdrawal_reason="no longer interested",
+    )
+    assert item.withdrawn_at == _TS
+    assert item.withdrawal_reason == "no longer interested"
+
+
+# ── ADR-026 (FU-8): WithdrawRequest ─────────────────────────────────────────
+
+
+def test_withdraw_request_reason_defaults_to_none() -> None:
+    req = WithdrawRequest()
+    assert req.reason is None
+
+
+def test_withdraw_request_accepts_a_reason_up_to_500_chars() -> None:
+    req = WithdrawRequest(reason="x" * 500)
+    assert req.reason is not None
+    assert len(req.reason) == 500
+
+
+def test_withdraw_request_rejects_a_reason_over_500_chars() -> None:
+    with pytest.raises(ValidationError):
+        WithdrawRequest(reason="x" * 501)
+
+
+def test_withdraw_request_forbids_unknown_key() -> None:
+    with pytest.raises(ValidationError):
+        WithdrawRequest(bogus=1)
+
+
+def test_withdraw_request_accepts_none_reason_explicitly() -> None:
+    req = WithdrawRequest(reason=None)
+    assert req.reason is None
+
+
+# ── ADR-026 (FU-8) decision 5: ResumeStatusBreakdown ────────────────────────
+
+
+def test_resume_status_breakdown_accepts_all_five_buckets() -> None:
+    b = ResumeStatusBreakdown(
+        **_breakdown_kwargs(uploaded=1, parsing=2, parsed=3, failed=4, withdrawn=5)
+    )
+    assert b.uploaded == 1
+    assert b.parsing == 2
+    assert b.parsed == 3
+    assert b.failed == 4
+    assert b.withdrawn == 5
+
+
+def test_resume_status_breakdown_zero_job_shape_is_all_zeros() -> None:
+    """A job with no résumés at all must still yield the five-bucket shape,
+    every count zero — never an omitted field."""
+    b = ResumeStatusBreakdown(**_breakdown_kwargs())
+    for field in STATUS_BREAKDOWN_FIELDS:
+        assert getattr(b, field) == 0
+
+
+def test_resume_status_breakdown_forbids_unknown_key() -> None:
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**_breakdown_kwargs(bogus=1))
+
+
+@pytest.mark.parametrize("field", STATUS_BREAKDOWN_FIELDS)
+def test_resume_status_breakdown_requires_every_bucket(field: str) -> None:
+    """No default on any individual bucket — a caller must supply all five,
+    so a service-layer bug that forgets one bucket 500s loudly at
+    construction rather than silently reporting zero."""
+    kwargs = _breakdown_kwargs()
+    del kwargs[field]
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**kwargs)
+
+
+@pytest.mark.parametrize("field", STATUS_BREAKDOWN_FIELDS)
+def test_resume_status_breakdown_rejects_a_negative_count(field: str) -> None:
+    kwargs = _breakdown_kwargs(**{field: -1})
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**kwargs)
+
+
+@pytest.mark.parametrize("field", STATUS_BREAKDOWN_FIELDS)
+def test_resume_status_breakdown_rejects_a_non_numeric_string_count(
+    field: str,
+) -> None:
+    kwargs = _breakdown_kwargs(**{field: "not-a-number"})
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**kwargs)
