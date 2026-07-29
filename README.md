@@ -313,11 +313,12 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 | **CAS live integration** | `adb55fd`+`d54a6be` | [019](docs/adr/019-cas-identity-attributable-audit.md) | Turned the FU-5 CAS flow on against real SFU CAS via `compose.cas.yml`: split-origin (`:5000`/`:18000`) post-login redirect fix + a header auth widget (user · role · Logout/Login) |
 | **User admin — granular roles** | `45eba6d` (slices 1–8) | [025](docs/adr/025-user-admin-roles.md) | No-role-by-default first login (fail-closed, reverses ADR-019 §10a), the `require_role_assigned` gate, an admin-session-gated `GET /users` + `PATCH /users/{id}/role` (atomic `role_changed` audit, last-admin lockout), and a Flask `/admin/users` role-assignment page |
 
-**One further feature is planned and scoped (2026-07-20), not yet built:**
+**Two further features are planned and scoped, not yet built:**
 
 | Feature | ADR | What it will add |
 |---|---|---|
-| **FU-7 — LLM failover + fail-closed ranking** | [021](docs/adr/021-llm-failover-fail-closed-ranking.md) | An ordered provider chain with per-provider breakers; the pipeline refuses to publish a ranking containing a silently-zeroed component, and résumé parse status stops reporting failures as `uploaded` |
+| **FU-7 — LLM failover + fail-closed ranking** (2026-07-20) | [021](docs/adr/021-llm-failover-fail-closed-ranking.md) | An ordered provider chain with per-provider breakers; the pipeline refuses to publish a ranking containing a silently-zeroed component, and résumé parse status stops reporting failures as `uploaded` |
+| **Résumé withdrawal + stale-résumé lifecycle** (2026-07-28) | [026](docs/adr/026-resume-withdrawal-lifecycle.md) | A candidate-withdrawal action (audited) that excludes a résumé from new shortlists/reverse-matches, distinct from a parse `failed`; an optional consent-revocation purge; and a per-job résumé-status breakdown. The parse-failure half of "stale résumés" is FU-7 above — this covers the withdrawal half |
 
 A plain-language explainer of the scoring model, written for HR and compliance review — including the fifteen policy decisions currently encoded as configuration defaults — is at [docs/process/ranking-metrics-explainer.html](docs/process/ranking-metrics-explainer.html).
 

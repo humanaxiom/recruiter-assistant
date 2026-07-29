@@ -1438,6 +1438,34 @@ from **inside the worker container**, then compare `max_tokens / tok_s` against 
 
 The remaining backlog below is still **options, not a queued to-do list**:
 
+- **Résumé lifecycle — candidate withdrawal + stale-résumé tracking (user request 2026-07-28, scoped in
+  [ADR-026](docs/adr/026-resume-withdrawal-lifecycle.md)).** Two
+  related staleness problems make an uploaded résumé's fate untraceable: **(a) parse-failure staleness** —
+  a résumé stranded at `uploaded` when its parse times out (or the worker never runs), indistinguishable
+  from one that was never enqueued; **(b) candidate withdrawal** — no way to mark a candidate as withdrawn,
+  so a withdrawn résumé keeps appearing in newly-generated shortlists with no signal. Both leave "stale"
+  rows the recruiter can't reason about.
+  - **Part (a) is ALREADY SCOPED as FU-7 / ADR-021 decision 3** ("honest résumé parse status": claim
+    `uploaded`→`parsing` on task start, transition `parsing`→`failed` when arq exhausts `max_tries`). The
+    2026-07-19/20 incident (16 résumés stuck at `uploaded` for ~18h — see the incident note above) is
+    exactly this defect. **Build it in FU-7, not as a second state machine** — don't duplicate. The
+    `'parsing'`/`'failed'` enum values already exist in `core/src/models/ddl.py:57`; `'parsing'` is
+    currently unreachable and `record_parse_failure` is never called on a timeout (ADR-021 §2/§3).
+  - **Part (b) is NEW — nothing in the repo handles withdrawal.** `resume_status`
+    (`core/src/models/ddl.py:57`) is `('uploaded','parsing','parsed','failed')` — no `withdrawn`. Scope to
+    decide: a new terminal **`withdrawn`** status vs. a separate `withdrawn_at`/`withdrawal_reason` column
+    kept distinct from a parse `failed` (a withdrawal is a lifecycle event, not a processing error, and
+    conflating them loses that). Then: an API action + a Workflow-UI control to withdraw a candidate;
+    **exclusion of withdrawn résumés from `shortlist_job`/`reverse_match_job`** (they filter on parse
+    status/`description_parsed`, not lifecycle, so a withdrawn candidate would otherwise still rank); and an
+    audit row (reuse FU-5's `audit_log`, ADR-019). **PIPEDA/FIPPA angle to settle in the ADR:** a
+    withdrawal may be an explicit consent revocation, which is stronger than mere shortlist exclusion —
+    decide whether withdrawn PII is purged or retained (the repo already tracks `consent_acknowledged`; this
+    is its symmetric un-consent).
+  - **Cross-cut for both halves:** surface a per-job résumé-status breakdown in the UI (ADR-021 decision 3
+    already promises "candidate counts by status") so a recruiter sees stuck/failed/withdrawn résumés
+    instead of a silently-shrinking pool. This is the "tractable" the request is really asking for.
+
 - **Wire the reverse-match UI** — ✅ **CLOSED (FU-3 slice 5, PR #21, merge `e033d31`).** Shipped as the
   POST-only trigger + bounded poll + rows linking to the job. Listed here as an option long after it was
   delivered; retained per the repo's record-closure-forward convention rather than deleted.
