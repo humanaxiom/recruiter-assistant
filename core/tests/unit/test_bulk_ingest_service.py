@@ -112,6 +112,15 @@ def test_classify_leading_separator_with_no_name_is_not_a_cover() -> None:
     assert _classify("-cover.pdf") == ("resume", "cover")
 
 
+def test_classify_pathological_length_short_circuits_without_backtracking() -> None:
+    # ReDoS guard (security finding): an over-length all-separator stem must
+    # skip the backtracking-prone suffix regexes and return fast. If the guard
+    # regressed, this pathological input backtracks O(n²) and the test hangs
+    # (the suite's per-test timeout would then fail it) instead of asserting.
+    role, _ = _classify("-" * 5000 + "cover.pdf")
+    assert role == "resume"
+
+
 # ── _classify: space/dash separators are equivalent to underscore (bug fix) ─
 
 

@@ -64,6 +64,16 @@ def _norm_base(s: str) -> str:
     return re.sub(r"[\s_-]+", " ", s).strip()
 
 
+# The suffix regexes have two adjacent ambiguous quantifiers (``.*\S`` then
+# ``[\s_-]+`` over overlapping classes), so a pathological all-separator stem
+# backtracks O(n²). Filenames run on UNTRUSTED input (zip entry names can be
+# tens of KB) and pairing runs synchronously inside the async upload route, so
+# an uncapped name could block the event loop. Real résumé/cover names are far
+# under this cap; an over-length stem skips suffix detection entirely (treated
+# as a plain résumé) — ``_norm_base``'s single quantifier stays linear.
+_MAX_STEM_LEN: Final = 256
+
+
 # STATIC English pairing notes — never interpolate a filename (blind invariant).
 _DEMOTED_COVER_NOTE: Final = (
     "looked like a cover letter but had no matching résumé; ingested as a résumé"
@@ -170,6 +180,10 @@ def _classify(filename: str) -> tuple[str, str]:
     with no known suffix is a résumé whose base is the whole (normalized)
     stem."""
     stem = Path(basename_lower(filename)).stem
+    if len(stem) > _MAX_STEM_LEN:
+        # Pathological/attacker-crafted length — skip the backtracking-prone
+        # suffix regexes (see _MAX_STEM_LEN). No real name reaches here.
+        return "resume", _norm_base(stem)
     cover_match = _COVER_SUFFIX_RE.match(stem)
     if cover_match:
         return "cover", _norm_base(cover_match.group("base"))
