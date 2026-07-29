@@ -304,20 +304,15 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 | **Live-app bug fixes** | #30 `22db93f` | — | zip-upload empty-file 422, résumé-upload 404, slow-job progress honesty, duplicate-run dedupe |
 | **FU-6 — Per-job assignment + row-level scoping** | #31 `c2f6a57` | [020](docs/adr/020-per-job-assignment-scoping.md) | A `job_assignees` table so hiring managers see only their assigned jobs; scoping enforced off the CAS **session** role in SQL, unassigned reads 404 not 403; auditor read-logging |
 
-**Four further features are merged to LOCAL `main` and running, but NOT yet pushed to `origin`.** The org's GitHub-Actions billing block that used to gate CI is **CLEARED (2026-07-28)** — FU-5, the live-app bug fixes, and FU-6 (rows above) are all pushed and CI-green. These four remaining features are still local-only because none of them ever had its own PR, and local `main` has since diverged from `origin/main`'s squash SHAs for #30/#31 (same content, different commit hashes), so a plain `git push` is rejected. They need rebasing onto `origin/main` (or one fresh PR each) and then a push — see `HANDOFF.md`'s current-state banner for the exact reconciliation path. Ordered oldest-first:
+**Five further features landed on `origin/main` on 2026-07-29** (the four below were previously local-only and reached `origin` via the reconciliation push `c2f6a57 → 5cab283`; FU-8 was then built and merged on top). `origin/main` == `sfu-aria/main` == `6903691`, both repos public, CI green in-cloud. Ordered oldest-first:
 
-| Feature | local commit | ADR | What it added |
+| Feature | commit / PR | ADR | What it added |
 |---|---|---|---|
 | **Configurable shortlist size** | `2e2da05` | [024](docs/adr/024-configurable-shortlist-size.md) | Per-job `shortlist_top_percent` (1–100%, default 100 = keep-all) caps the persisted forward shortlist to the top P% of the ranked pool |
 | **`/my/jobs` hiring-manager viewer default** | `f3b2998` | [020](docs/adr/020-per-job-assignment-scoping.md) | ADR-020 §7 "viewer half" — a hiring_manager lands on the assignment-scoped `/my/jobs` view by default; landed after the local FU-6 merge, so it was not part of PR #31 |
 | **CAS live integration** | `adb55fd`+`d54a6be` | [019](docs/adr/019-cas-identity-attributable-audit.md) | Turned the FU-5 CAS flow on against real SFU CAS via `compose.cas.yml`: split-origin (`:5000`/`:18000`) post-login redirect fix + a header auth widget (user · role · Logout/Login) |
 | **User admin — granular roles** | `45eba6d` (slices 1–8) | [025](docs/adr/025-user-admin-roles.md) | No-role-by-default first login (fail-closed, reverses ADR-019 §10a), the `require_role_assigned` gate, an admin-session-gated `GET /users` + `PATCH /users/{id}/role` (atomic `role_changed` audit, last-admin lockout), and a Flask `/admin/users` role-assignment page |
-
-**One further feature is built and gate-green on a branch, but not yet merged/pushed:**
-
-| Feature | branch / commits | ADR | What it added |
-|---|---|---|---|
-| **FU-8 — Résumé withdrawal + stale-résumé lifecycle** (2026-07-29) | `feat/fu8-resume-withdrawal` | [026](docs/adr/026-resume-withdrawal-lifecycle.md) | A candidate-withdrawal action (audited, `POST /resumes/{id}/withdraw` + `/reinstate`) that un-projects the résumé from Neo4j so it drops out of new shortlists/reverse-matches, distinct from a parse `failed`; reinstate replays the last parse rather than re-embedding; and a per-job résumé-status breakdown (`GET /jobs/{id}/resume-status`). All merge-blocking gates green (reviewer, security, ranking-evals) — awaiting push/PR. The §4 consent-revocation purge path stays deferred |
+| **FU-8 — Résumé withdrawal** | PR #37, squash `0162302` | [026](docs/adr/026-resume-withdrawal-lifecycle.md) | A candidate-withdrawal action (audited, `POST /resumes/{id}/withdraw` + `/reinstate`) that un-projects the résumé from Neo4j so it drops out of new shortlists/reverse-matches, distinct from a parse `failed`; reinstate replays the last parse rather than re-embedding; and a per-job résumé-status breakdown (`GET /jobs/{id}/resume-status`). All five gates green + CI green in-cloud on merge. The §4 consent-revocation purge path stays deferred |
 
 **One further feature is planned and scoped, not yet built:**
 

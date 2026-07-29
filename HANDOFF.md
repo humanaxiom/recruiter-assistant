@@ -2,45 +2,46 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — ORG MOVE + VISIBILITY + CI RECONCILE (2026-07-29) — supersedes the "billing CLEARED" banner below
+### ⚠️⚠️ READ FIRST — SESSION COMPLETE 2026-07-29: FU-8 shipped, org/CI reconciled, everything merged
 
-> **The 2026-07-28 "billing CLEARED" claim (in the `⚠️ LOCAL-INTEGRATION STATE` banner further down) is WRONG.**
-> GitHub Actions is **still billing-blocked on `humanaxiom`** — confirmed this session by the run annotation:
-> *"The job was not started because recent account payments have failed or your spending limit needs to be
-> increased."* Every run, including on `main`, fails at *Set-up-job* with zero steps executed. It is NOT a
-> branch-name-gate failure (the regex accepts all the branch names; `main` is exempted and still fails).
+> **Current tip: `humanaxiom/main` == `sfu-aria/main` == `6903691`. Both repos are PUBLIC. Zero open PRs.
+> Working tree clean.** This banner supersedes BOTH the earlier 2026-07-29 "awaiting push" banner (which was
+> written before the mid-session directive change that allowed the agent to push/merge) AND the stale
+> 2026-07-28 "billing CLEARED" banner further down.
 >
-> **What this session did:**
-> 1. **Rebased local `main`** onto `origin/main` (dropped the two redundant #30/#31 local commits — content
->    already on origin as `22db93f`/`c2f6a57`; replayed the 23 real commits). Result: local `main` = **`5cab283`**,
->    **0 behind / 23 ahead** of `humanaxiom/main` (`c2f6a57`), a clean fast-forward. **Tree is byte-identical to
->    the pre-rebase tip** (verified `git diff` empty). **SHAs of the four local-only features CHANGED** — old
->    `2b2f291`/`eb5533f` tips are gone; backups at `backup/main-pre-reconcile` and `backup/chore-pre-reconcile`.
-> 2. **Forked to `sfu-aria/recruiter-assistant`** and pushed reconciled `main` there (`5cab283`, tree-identical).
->    Making it private later **detached it** from the parent (`fork: false, parent: null`) — it is now a
->    standalone repo, NOT a fork. Syncing back to `humanaxiom` is still a plain `git push origin main`
->    fast-forward (shared history), just not a fork-PR.
-> 3. **Visibility, final state: BOTH repos are PUBLIC** (`humanaxiom` + `sfu-aria`), by explicit user decision,
->    **temporary until finance sorts the org billing.** Rationale: **public repos get free unlimited Actions;
->    private repos draw on paid/quota minutes** — so public is the only way to run CI for free while
->    `humanaxiom`'s payment is failed. **PII exposure is live while public** (`recruiter@sfu.ca` in
->    `test_schemas_{jobs,resumes}.py`; owner email in git history) — re-privatize or scrub before this settles.
-> 4. **Added `workflow_dispatch`** to `.github/workflows/ci.yml` (branch **`chore/ci-workflow-dispatch`**, commit
->    `fdaac68`, not yet pushed) so CI is triggerable on demand — the workflow previously had no manual trigger,
->    and a fresh fork suppresses its first push run.
+> **The CI billing story, resolved.** GitHub Actions on `humanaxiom` was blocked because the **`team`-plan
+> payment failed** (run annotation: *"recent account payments have failed or your spending limit needs to be
+> increased"*; every run, incl. on `main`, died at *Set-up-job*). **The unblock was making the repos PUBLIC —
+> public-repo Actions run free regardless of the payment failure.** CI now runs green in the cloud
+> (integration job ~5 min). **No org billing change was needed to unblock CI; billing only needs funding if
+> you want the repos PRIVATE again** (private repos draw on paid/quota minutes).
 >
-> **Exact next steps — all are `git push` / `gh` commands the AGENT CANNOT run (classifier-blocked); a human runs them:**
-> - `git push origin main` — brings **`humanaxiom` up to date** (`c2f6a57..5cab283`, clean ff). Now that it's
->   public, this also triggers **free** CI on the canonical repo — likely the simplest full fix.
-> - `git push sfu-aria chore/ci-workflow-dispatch` — triggers the first free CI run on `sfu-aria` and lands the
->   dispatch trigger (if you keep the `sfu-aria` track).
-> - `git push sfu-aria main` was already done this session; `sfu-aria/main` = `5cab283`.
-> - **Do NOT re-merge #29/#30/#31** — already on `origin`. Backups let you `git reset --hard backup/main-pre-reconcile`.
+> **What landed on `origin/main` this session (all CI-verified green in the cloud, then merged):**
+> - **Reconciliation:** local `main` was rebased onto `origin/main` (dropped the redundant #30/#31 duplicates,
+>   replayed the 23 real commits, byte-identical tree), then `git push origin main` fast-forwarded
+>   `c2f6a57 → 5cab283`. This landed the four previously-local-only features — **configurable shortlist size
+>   (ADR-024), `/my/jobs` HM view, CAS live-integration, user-admin roles (ADR-025)** — on `origin`.
+> - **FU-8 résumé withdrawal (ADR-026 exclude-and-retain)** — PR **#37**, squash `0162302`. Full TDD, all five
+>   gates green (reviewer APPROVE 8/8 mutations, security PASS, ranking-evals PASS, `verify.sh all` 3958 unit
+>   @ 92.63% + 422 integration). See "FU-8 status" below.
+> - **`workflow_dispatch` CI trigger** — PR **#38**, squash `fc1b52d`.
+> - **This session's reconcile docs** — PR **#40**, squash `6903691`.
+> - **Closed as redundant: PRs #32–#35** (the stacked per-feature PRs) — their content had already landed via
+>   the reconciliation push; branches left intact for inspection. **Do NOT re-open/re-merge them** (double-merge).
 >
-> **Still local-only, rebased onto the new `main` this session (unchanged in intent):** `chore/resume-withdrawal-lifecycle-adr`
-> (ADR-026, backlog scoping — needs the human §4 consent-vs-purge decision before build) and `chore/ci-workflow-dispatch`
-> (the CI fix above). The four feature branches (#32–#35) still have OPEN PRs on `humanaxiom` whose CI is red
-> **only** because of the billing block, not a gate failure.
+> **`sfu-aria/recruiter-assistant`** is a **detached standalone PUBLIC mirror** (was forked from `humanaxiom`,
+> then detached when briefly made private), synced to `6903691`. It is no longer needed now that `humanaxiom`
+> CI works, but is kept in sync. Local safety backups `backup/main-pre-reconcile` + `backup/chore-pre-reconcile`
+> still exist.
+>
+> **Live exposure while public (accepted, temporary):** `recruiter@sfu.ca` in `test_schemas_{jobs,resumes}.py`
+> and the owner email in git history are publicly visible. When finance funds the `humanaxiom` billing,
+> re-privatize with `gh repo edit <repo> --visibility private --accept-visibility-change-consequences` (CI then
+> needs that org's Actions quota funded), and/or run the long-flagged `recruiter@sfu.ca → @example.test` scrub.
+>
+> **Next session: nothing is mid-flight.** See "## Next session" below for the option list (ADR-026 §4
+> revoke-and-purge is the natural follow-on; `jd.education.fields`, FU-7 parse-failure staleness, and the
+> connectors feature remain open). None is auto-start — a human picks.
 
 ## What we're doing
 
@@ -802,6 +803,31 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
+> **STATE AS OF 2026-07-29 (session complete — read the top READ-FIRST banner first).** `origin/main` ==
+> `sfu-aria/main` == **`6903691`**, both repos PUBLIC, **zero open PRs**, working tree clean. Everything below
+> in this section is the older historical log; the current shipped set is: all of v1 (phases 0–7), the
+> Workflow UI, FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`,
+> CAS live-integration, and **FU-8 résumé withdrawal (ADR-026 exclude-and-retain, PR #37)** — all on `main`,
+> CI green. **Nothing is mid-flight.**
+>
+> **Plan — options for the next session (a human picks; none auto-starts):**
+> 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
+>    path (hard-delete blob + null pgcrypto columns + `resumes.parsed`, keep a non-PII tombstone), clearly
+>    separated from the routine reversible withdraw. Would be the repo's FIRST destructive PII op — needs its
+>    own security review. Decide the consent-revocation semantics first.
+> 2. **FU-7 — parse-failure staleness / honest parse status** (ADR-021 decision 3): `uploaded→parsing` on task
+>    start, `parsing→failed` when arq exhausts `max_tries`. The 2026-07-19/20 "16 résumés stuck at uploaded"
+>    incident is exactly this. Shares the per-job status-breakdown UI that FU-8 already shipped.
+> 3. **`jd.education.fields`** (ADR-009 §7, open since 4c): `score_education` ignores JD field-relevance —
+>    either extend the scorer or drop `fields` from the JD contract. Still decorative.
+> 4. **Re-privatize + PII hygiene** once finance funds `humanaxiom` billing: flip both repos back to private
+>    (CI then needs the org's Actions quota funded) and run the `recruiter@sfu.ca → @example.test` test-data
+>    scrub. Tracked in the top banner.
+> 5. **Connectors feature** (Taleo/CSV-manifest ingest) — explicitly cut in Phase 6 (ADR-012 §2), deferred by
+>    the user ("Taleo was a shortcut … more connectors in the future").
+> 6. **Retire the `sfu-aria` mirror** if `humanaxiom` is the settled home — it was the billing workaround and
+>    is now redundant (detached standalone public copy at `6903691`).
+
 **The v1 extraction plan is fully delivered, and FIVE post-v1 features have shipped on top of it: the
 Workflow UI, then FU-1/FU-2/FU-3.** All seven plan phases (0–7) are merged to `main`, CI green: Phase 0
 (PR #1, `8b2b47c`), Phase 1 (PR #2, `f7e7cbe`), Phase 2 (PR #3, `cefd545`), Phase 3 (PR #6, `49196d7`),
@@ -1239,17 +1265,14 @@ split.
 
 </details>
 
-### FU-8 status — DONE, gate-green on branch (awaiting push/PR)
+### FU-8 status — MERGED to `main` via PR #37 (squash `0162302`), CI green
 
-FU-8 (résumé withdrawal + stale-résumé lifecycle, ADR-026 exclude-and-retain slice) is **code-complete and
-gate-green** on branch `feat/fu8-resume-withdrawal`. FU-8 sits atop the local/origin reconciliation
-recorded in the "⚠️ LOCAL-INTEGRATION STATE (2026-07-28)" banner above — it was branched after that
-reconciliation state was recorded, so it carries the same four-features-local-only backdrop as context,
-not as part of its own diff.
-
-**The branch is NOT yet pushed.** As with every prior feature in this repo, pushing/opening the PR is
-classifier-blocked for the agent — a human runs `git push` (and opens the PR) next. Verify against origin
-first: `git fetch && gh pr list`.
+FU-8 (résumé withdrawal, ADR-026 exclude-and-retain slice) is **MERGED to `origin/main`** — PR #37, squash
+`0162302`, 2026-07-29. All five gates green (reviewer APPROVE with 8/8 load-bearing mutations killed,
+security PASS, ranking-evals PASS, coordinator-independent `./scripts/verify.sh all` = 3958 unit @ 92.63% +
+422 integration), and **CI re-ran the full suite green in the cloud** on the now-public repo before merge.
+Branch `feat/fu8-resume-withdrawal` was deleted on merge (local pruned too). The §4 revoke-and-purge
+(destructive consent-erasure) path is **still DEFERRED, not built** — the natural next follow-on.
 
 **What shipped (ADR-026 decisions 1–3, 5 — decision 4's revoke-and-purge path is still DEFERRED, not
 built):**
