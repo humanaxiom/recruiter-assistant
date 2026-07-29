@@ -183,7 +183,7 @@ async def test_resume_not_parsed_returns_not_parsed_and_orchestrator_not_called(
 
 
 @pytest.mark.asyncio
-async def test_withdrawn_parsed_resume_returns_withdrawn_and_orchestrator_not_called() -> (
+async def test_withdrawn_parsed_resume_returns_withdrawn_and_orchestrator_not_called() -> (  # noqa: E501
     None
 ):
     """A withdrawn résumé that WAS successfully parsed (the common case —

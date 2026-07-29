@@ -155,6 +155,25 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS resumes_has_cover_idx ON resumes (job_id)
         WHERE cover_letter_blob_key IS NOT NULL OR cover_letter_text IS NOT NULL
     """,
+    # ── resumes / withdrawal lifecycle (ADR-026 decision 1, FU-8) ────────────
+    # A DEDICATED, nullable ``withdrawn_at``/``withdrawal_reason`` pair — NOT a
+    # fifth ``resume_status`` enum value (that stays ('uploaded','parsing',
+    # 'parsed','failed')): conflating application state with the parse-outcome
+    # state machine (ADR-021) would erase the parse result. Same already-
+    # migrated-volume risk as ``description_sha256``/``shortlist_top_percent``
+    # above — ``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing dev/CI
+    # volume — so both columns land via a separate idempotent ALTER. Both stay
+    # nullable with NO default so every pre-existing row reads back
+    # ``withdrawn_at IS NULL`` (not withdrawn) the instant the ALTER lands.
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawn_at TIMESTAMPTZ",
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawal_reason TEXT",
+    # Powers the per-job status breakdown's ``withdrawn`` bucket and any
+    # "excluded résumés" listing — partial so it only indexes the rare
+    # withdrawn rows.
+    """
+    CREATE INDEX IF NOT EXISTS resumes_withdrawn_idx ON resumes (job_id)
+        WHERE withdrawn_at IS NOT NULL
+    """,
     # ── shortlist_entries ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS shortlist_entries (

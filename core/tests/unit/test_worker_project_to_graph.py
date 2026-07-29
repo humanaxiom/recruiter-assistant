@@ -223,7 +223,7 @@ async def test_resume_withdrawn_row_marked_delivered_on_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_withdrawn_failure_increments_delivery_attempts_not_delivered() -> (
+async def test_resume_withdrawn_failure_increments_delivery_attempts_not_delivered() -> (  # noqa: E501
     None
 ):
     row = _row(aggregate="resume", event_type="resume.withdrawn", payload={})

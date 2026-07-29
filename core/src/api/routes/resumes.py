@@ -31,6 +31,7 @@ from fastapi import (
 from src.api.deps import (
     _DEV_ADMIN_SENTINEL_ID,
     Role,
+    actor_fields_from_user,
     get_arq,
     log_auditor_read,
     require_role,
@@ -41,7 +42,13 @@ from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
 from src.schemas.auth import User
 from src.schemas.matching import JobMatchResultOut
-from src.schemas.resumes import ResumeListItem, ResumeOut, ResumeUploadResult
+from src.schemas.resumes import (
+    ResumeListItem,
+    ResumeOut,
+    ResumeStatusBreakdown,
+    ResumeUploadResult,
+    WithdrawRequest,
+)
 from src.services import (
     audit_service,
     bulk_ingest_service,
@@ -379,6 +386,73 @@ async def reveal_resume(
         )
 
     return await resume_service.get_one(db, resume_id, reveal=True, user_id=user_id)
+
+
+# ── withdrawal lifecycle (ADR-026, FU-8) ─────────────────────────────────────
+
+
+@router.post(
+    "/resumes/{resume_id}/withdraw",
+    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+)
+async def withdraw_resume(
+    resume_id: UUID,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+    body: WithdrawRequest,
+) -> ResumeOut:
+    """Exclude a résumé from ranking without deleting it. Idempotent (the
+    service guards on ``withdrawn_at``); a nonexistent id 404s via the
+    service's ``NotFoundError``. The response goes back through
+    ``resume_service.get_one`` — the same redaction boundary every other read
+    uses (ADR-006 §4) — never a raw re-query."""
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    await resume_service.withdraw_resume(
+        db,
+        resume_id,
+        reason=body.reason,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
+    return await resume_service.get_one(db, resume_id)
+
+
+@router.post(
+    "/resumes/{resume_id}/reinstate",
+    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+)
+async def reinstate_resume(
+    resume_id: UUID,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> ResumeOut:
+    """Re-enter a withdrawn résumé into the ranking pool (REPLAYS its stored
+    embeddings — never re-embeds; ADR-026 decision 1). Symmetric with
+    ``withdraw``: idempotent, admin/recruiter only, response via
+    ``resume_service.get_one``'s redaction boundary."""
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    await resume_service.reinstate_resume(
+        db,
+        resume_id,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
+    return await resume_service.get_one(db, resume_id)
+
+
+@router.get(
+    "/jobs/{job_id}/resume-status",
+    dependencies=[Depends(require_role(*_RESUME_READERS))],
+)
+async def resume_status(job_id: UUID, db: Db) -> ResumeStatusBreakdown:
+    """Per-job résumé status breakdown (ADR-026 decision 5) — readable by every
+    role via the key alone. It is a job-level aggregate count (not per-résumé
+    data), so unlike the list/get reads it is NOT row-scoped to a
+    hiring_manager's assigned jobs — a hiring_manager key with no CAS session
+    still gets the breakdown, never a 403."""
+    return await resume_service.status_breakdown(db, job_id)
 
 
 # ── reverse-match subresource ────────────────────────────────────────────────

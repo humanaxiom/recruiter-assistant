@@ -50,6 +50,13 @@ from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
 _DIM = get_settings().llm_embedding_dim
 
+# A real ``users`` row backing the ``actor_kind='user'`` audit rows the
+# withdraw/reinstate calls below write. ``audit_log.actor_user_id`` carries a
+# FK to ``users`` (FU-5, ADR-019 §6); in production the route always supplies a
+# real CAS-session ``user.id``. At the service layer these tests must seed the
+# referenced row for the FK to hold — a precondition only, no assertion change.
+_ACTOR_ID = uuid.UUID("a11ce000-0000-4000-8000-000000000002")
+
 
 def _vec(seed: int) -> list[float]:
     """Deterministic near-orthogonal 768-d vector — same technique as
@@ -80,6 +87,12 @@ async def pg_pool(pg_dsn: str) -> AsyncIterator[asyncpg.Pool]:
     await init_schema(pool)
     async with pool.acquire() as conn:
         await conn.execute("TRUNCATE jobs, resumes, outbox, audit_log CASCADE")
+        await conn.execute(
+            "INSERT INTO users (id, cas_username, role) "
+            "VALUES ($1, 'withdrawal-projection-test-actor', 'recruiter') "
+            "ON CONFLICT (id) DO NOTHING",
+            _ACTOR_ID,
+        )
     try:
         yield pool
     finally:
@@ -283,7 +296,7 @@ async def test_withdraw_then_drain_excludes_the_resume_from_stage1_coarse(
             resume_id,
             reason="withdrew before shortlist",
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -291,9 +304,9 @@ async def test_withdraw_then_drain_excludes_the_resume_from_stage1_coarse(
     assert delivered == 1, "the resume.withdrawn outbox row must be drained"
 
     after = await stage1_coarse(neo4j_driver, job_id, k=10)
-    assert resume_id not in {c.resume_id for c in after}, (
-        "a withdrawn+drained résumé must no longer appear in stage1_coarse"
-    )
+    assert resume_id not in {
+        c.resume_id for c in after
+    }, "a withdrawn+drained résumé must no longer appear in stage1_coarse"
 
 
 @pytest.mark.asyncio
@@ -327,7 +340,7 @@ async def test_withdraw_then_drain_removes_the_node_from_the_real_vector_index(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     await project_to_graph(ctx, batch=10)
@@ -369,7 +382,7 @@ async def test_unproject_never_deletes_the_shared_skill_node(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     await project_to_graph(ctx, batch=10)
@@ -413,7 +426,7 @@ async def test_reinstate_then_drain_restores_recall_with_the_same_embedding(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     await project_to_graph(ctx, batch=10)
@@ -426,22 +439,21 @@ async def test_reinstate_then_drain_restores_recall_with_the_same_embedding(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     delivered = await project_to_graph(ctx, batch=10)
     assert delivered == 1, "the replayed resume.parsed row must be drained"
 
     included_again = await stage1_coarse(neo4j_driver, job_id, k=10)
-    assert resume_id in {c.resume_id for c in included_again}, (
-        "the résumé must be back in the recall set after reinstate + drain"
-    )
+    assert resume_id in {
+        c.resume_id for c in included_again
+    }, "the résumé must be back in the recall set after reinstate + drain"
 
     restored_embedding = await _resume_summary_embedding(neo4j_driver, resume_id)
     assert restored_embedding is not None
     assert restored_embedding == pytest.approx(original_embedding), (
-        "reinstate must REPLAY the stored embedding byte-for-byte, never "
-        "re-embed"
+        "reinstate must REPLAY the stored embedding byte-for-byte, never " "re-embed"
     )
 
 
@@ -478,7 +490,7 @@ async def test_reinstate_never_calls_the_embedder(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     await project_to_graph(ctx, batch=10)
@@ -488,11 +500,11 @@ async def test_reinstate_never_calls_the_embedder(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     await project_to_graph(ctx, batch=10)
 
-    assert embedder.embed.await_count == calls_before_reinstate, (
-        "reinstate + drain must not invoke the embedder at all"
-    )
+    assert (
+        embedder.embed.await_count == calls_before_reinstate
+    ), "reinstate + drain must not invoke the embedder at all"

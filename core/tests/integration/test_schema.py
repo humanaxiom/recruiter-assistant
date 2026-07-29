@@ -382,12 +382,10 @@ async def test_reverse_match_entry_round_trips_jsonb_payload(
 async def test_withdrawn_at_column_is_a_nullable_timestamptz(
     conn: asyncpg.Connection,
 ) -> None:
-    row = await conn.fetchrow(
-        """
+    row = await conn.fetchrow("""
         SELECT data_type, is_nullable FROM information_schema.columns
         WHERE table_name = 'resumes' AND column_name = 'withdrawn_at'
-        """
-    )
+        """)
     assert row is not None, "resumes.withdrawn_at column does not exist"
     assert row["data_type"] == "timestamp with time zone"
     assert row["is_nullable"] == "YES"
@@ -397,12 +395,10 @@ async def test_withdrawn_at_column_is_a_nullable_timestamptz(
 async def test_withdrawal_reason_column_is_a_nullable_text(
     conn: asyncpg.Connection,
 ) -> None:
-    row = await conn.fetchrow(
-        """
+    row = await conn.fetchrow("""
         SELECT data_type, is_nullable FROM information_schema.columns
         WHERE table_name = 'resumes' AND column_name = 'withdrawal_reason'
-        """
-    )
+        """)
     assert row is not None, "resumes.withdrawal_reason column does not exist"
     assert row["data_type"] == "text"
     assert row["is_nullable"] == "YES"
@@ -457,22 +453,18 @@ async def test_withdrawal_columns_survive_init_schema_run_twice(pg_dsn: str) -> 
         await init_schema(connection)
         await init_schema(connection)
 
-        withdrawn_at_row = await connection.fetchrow(
-            """
+        withdrawn_at_row = await connection.fetchrow("""
             SELECT data_type, is_nullable FROM information_schema.columns
             WHERE table_name = 'resumes' AND column_name = 'withdrawn_at'
-            """
-        )
+            """)
         assert withdrawn_at_row is not None
         assert withdrawn_at_row["data_type"] == "timestamp with time zone"
         assert withdrawn_at_row["is_nullable"] == "YES"
 
-        reason_row = await connection.fetchrow(
-            """
+        reason_row = await connection.fetchrow("""
             SELECT data_type, is_nullable FROM information_schema.columns
             WHERE table_name = 'resumes' AND column_name = 'withdrawal_reason'
-            """
-        )
+            """)
         assert reason_row is not None
         assert reason_row["data_type"] == "text"
         assert reason_row["is_nullable"] == "YES"

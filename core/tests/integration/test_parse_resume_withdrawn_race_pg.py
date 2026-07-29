@@ -78,9 +78,7 @@ CORE_RESULT = ResumeCore(
     total_years_experience=6,
 )
 
-SKILLS_RESULT = ResumeSkillDetails(
-    skills=[ResumeSkillDetail(name="Python", years=6)]
-)
+SKILLS_RESULT = ResumeSkillDetails(skills=[ResumeSkillDetail(name="Python", years=6)])
 
 
 def _make_llm() -> MagicMock:
@@ -244,8 +242,7 @@ async def test_withdrawn_mid_parse_enqueues_no_resume_parsed_outbox_row(
             outcome["resume_id"],
         )
     assert rows == [], (
-        "a withdrawn-mid-parse résumé must not enqueue a resume.parsed "
-        "outbox row"
+        "a withdrawn-mid-parse résumé must not enqueue a resume.parsed " "outbox row"
     )
 
 

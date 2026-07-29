@@ -214,9 +214,9 @@ async def test_withdraw_twice_is_idempotent_both_200(pg_pool: asyncpg.Pool) -> N
     assert first.status_code == 200
     assert second.status_code == 200
     assert first.json()["withdrawn_at"] == second.json()["withdrawn_at"]
-    assert second.json()["withdrawal_reason"] == "first", (
-        "the second call must not overwrite the original reason"
-    )
+    assert (
+        second.json()["withdrawal_reason"] == "first"
+    ), "the second call must not overwrite the original reason"
 
     async with pg_pool.acquire() as conn:
         audit_count = await conn.fetchval(

@@ -614,9 +614,9 @@ def test_resumes_withdrawal_reason_has_an_idempotent_alter() -> None:
             re.IGNORECASE,
         )
     ]
-    assert len(alters) == 1, (
-        "expected exactly one idempotent ALTER for withdrawal_reason"
-    )
+    assert (
+        len(alters) == 1
+    ), "expected exactly one idempotent ALTER for withdrawal_reason"
 
 
 def test_resumes_withdrawal_reason_alter_has_no_not_null_or_default() -> None:

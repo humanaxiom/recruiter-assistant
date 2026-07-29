@@ -37,7 +37,7 @@ import time
 from typing import Any
 
 from src.settings import get_settings
-from src.worker.resume_tasks import project_resume
+from src.worker.resume_tasks import project_resume, unproject_resume
 from src.worker.tasks import _project_job
 
 log = logging.getLogger(__name__)
@@ -153,6 +153,13 @@ async def project_to_graph(ctx: dict[str, Any], batch: int | None = None) -> int
                             resume_id=row["aggregate_id"],
                             payload=payload,
                         )
+                    elif row["event_type"] == "resume.withdrawn":
+                        # ADR-026 (FU-8): the withdrawal un-project exclusion
+                        # point — detach the Resume node from Neo4j so it drops
+                        # out of the coarse-recall set. Reinstate needs NO new
+                        # branch: it replays a `resume.parsed` event, handled
+                        # by the branch above.
+                        await unproject_resume(neo4j, resume_id=row["aggregate_id"])
                     else:
                         log.warning(
                             "outbox.unknown_event_type event_type=%s outbox_id=%s",

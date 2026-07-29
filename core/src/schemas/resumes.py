@@ -424,6 +424,10 @@ class ResumeListItem(BaseModel):
     # Whether a cover letter is attached (Feature 2) — drives a list badge so a
     # recruiter can see at a glance which résumés carry one.
     has_cover_letter: bool = False
+    # ADR-026 (FU-8): the résumé-withdrawal lifecycle pair. Both None for a
+    # résumé that has never been withdrawn. NOT PII — no redaction applies.
+    withdrawn_at: dt.datetime | None = None
+    withdrawal_reason: str | None = None
 
 
 class ResumeOut(BaseModel):
@@ -459,6 +463,40 @@ class ResumeOut(BaseModel):
     # LLM extraction. Both None when the résumé has no cover letter.
     cover_letter_text: str | None = None
     cover_letter_parsed: CoverLetterParsed | None = None
+    # ADR-026 (FU-8): the résumé-withdrawal lifecycle pair. Both None for a
+    # résumé that has never been withdrawn. NOT PII — no redaction applies.
+    withdrawn_at: dt.datetime | None = None
+    withdrawal_reason: str | None = None
+
+
+class WithdrawRequest(BaseModel):
+    """POST /resumes/{id}/withdraw body (ADR-026 decision 2, FU-8).
+
+    ``reason`` is an OPTIONAL free-text note (capped at 500 chars) recorded on
+    the résumé + the audit row. Absent/``None`` is a legitimate withdrawal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class ResumeStatusBreakdown(BaseModel):
+    """GET /jobs/{id}/resume-status response (ADR-026 decision 5, FU-8).
+
+    A closed, five-bucket, non-negative-int shape — every bucket is required
+    (no per-field default) so a service-layer bug that forgets one 500s loudly
+    at construction rather than silently reporting zero. ``withdrawn`` is a
+    peer bucket, counted from ``withdrawn_at IS NOT NULL`` rather than the
+    ``resume_status`` enum (which has no ``withdrawn`` value)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    uploaded: int = Field(ge=0)
+    parsing: int = Field(ge=0)
+    parsed: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    withdrawn: int = Field(ge=0)
 
 
 class ResumeDeleteOut(BaseModel):
@@ -487,6 +525,8 @@ __all__ = [
     "ResumeParsed",
     "ResumeSkill",
     "ResumeStatus",
+    "ResumeStatusBreakdown",
     "ResumeUploadResult",
     "Skill",
+    "WithdrawRequest",
 ]

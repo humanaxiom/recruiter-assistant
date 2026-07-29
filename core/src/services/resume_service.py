@@ -38,9 +38,10 @@ from src.schemas.resumes import (
     ResumeListItem,
     ResumeOut,
     ResumeParsed,
+    ResumeStatusBreakdown,
     ResumeUploadResult,
 )
-from src.services import DbConn
+from src.services import DbConn, audit_service, outbox_service
 from src.services import pii as pii_service
 from src.services.bulk_ingest_service import basename_lower
 from src.services.pii import set_pii_key
@@ -414,7 +415,9 @@ _LIST_SQL_BASE = (
     # Feature 2: surface whether a cover letter is attached (blob or pasted
     # text) so the list can badge it. Cheap boolean, no PII.
     "(cover_letter_blob_key IS NOT NULL OR cover_letter_text IS NOT NULL) "
-    "AS has_cover_letter "
+    "AS has_cover_letter, "
+    # ADR-026 (FU-8): the withdrawal lifecycle pair — NOT PII, no redaction.
+    "withdrawn_at, withdrawal_reason "
     "FROM resumes WHERE job_id = $1"
 )
 
@@ -435,7 +438,8 @@ SELECT id, job_id, original_filename, mime_type, file_size_bytes, sha256,
     pgp_sym_decrypt(cover_letter_text, current_setting('app.pii_key')) AS cl_text,
     cover_letter_parsed,
     candidate_email_hash, parsed, status, uploaded_by, uploaded_at,
-    parsed_at, failure_reason, consent_acknowledged
+    parsed_at, failure_reason, consent_acknowledged,
+    withdrawn_at, withdrawal_reason
 FROM resumes WHERE id = $1
 """
 
@@ -494,6 +498,8 @@ async def list_for_job(
             parsed_at=r["parsed_at"],
             candidate_name=None if blind else r["candidate_name"],
             has_cover_letter=r["has_cover_letter"],
+            withdrawn_at=r["withdrawn_at"],
+            withdrawal_reason=r["withdrawal_reason"],
         )
         for r in rows
     ]
@@ -568,6 +574,9 @@ async def get_one(
             # blind review (an audited reveal surfaces it, like the name).
             cover_letter_text=None,
             cover_letter_parsed=None,
+            # ADR-026 (FU-8): withdrawal state is not PII — surfaced under blind.
+            withdrawn_at=row["withdrawn_at"],
+            withdrawal_reason=row["withdrawal_reason"],
         )
 
     return ResumeOut(
@@ -593,6 +602,8 @@ async def get_one(
         consent_acknowledged=row["consent_acknowledged"],
         cover_letter_text=row["cl_text"],
         cover_letter_parsed=cover_parsed,
+        withdrawn_at=row["withdrawn_at"],
+        withdrawal_reason=row["withdrawal_reason"],
     )
 
 
@@ -676,3 +687,160 @@ def _blind_parsed(
             ],
         }
     )
+
+
+# ── withdrawal lifecycle (ADR-026, FU-8) ─────────────────────────────────────
+
+_RESUME_EXISTS_SQL = "SELECT id FROM resumes WHERE id = $1"
+
+# Guarded UPDATEs: the ``withdrawn_at`` predicate makes both operations
+# idempotent — a second withdraw (or reinstate) matches zero rows, so no audit
+# or outbox row is written.
+_WITHDRAW_SQL = (
+    "UPDATE resumes SET withdrawn_at = now(), withdrawal_reason = $2 "
+    "WHERE id = $1 AND withdrawn_at IS NULL"
+)
+_REINSTATE_SQL = (
+    "UPDATE resumes SET withdrawn_at = NULL, withdrawal_reason = NULL "
+    "WHERE id = $1 AND withdrawn_at IS NOT NULL"
+)
+
+# The last DELIVERED ``resume.parsed`` payload for this résumé — the exact
+# bytes reinstate REPLAYS (never re-embeds; ADR-026 decision 1).
+_LAST_PARSED_PAYLOAD_SQL = (
+    "SELECT payload FROM outbox "
+    "WHERE aggregate_id = $1 AND event_type = 'resume.parsed' "
+    "AND delivered_at IS NOT NULL "
+    "ORDER BY delivered_at DESC, id DESC LIMIT 1"
+)
+
+_STATUS_BREAKDOWN_SQL = (
+    "SELECT CASE WHEN withdrawn_at IS NOT NULL THEN 'withdrawn' "
+    "ELSE status::text END AS bucket, count(*) AS n "
+    "FROM resumes WHERE job_id = $1 GROUP BY 1"
+)
+
+
+async def withdraw_resume(
+    conn: DbConn,
+    resume_id: UUID,
+    *,
+    reason: str | None,
+    actor_kind: str,
+    actor_user_id: UUID | None,
+    actor_service: str | None,
+) -> bool:
+    """Exclude a résumé from ranking without deleting it (ADR-026 decision 2).
+
+    Idempotent: the guarded UPDATE (``WHERE withdrawn_at IS NULL``) applies to
+    at most one row. When it applies, an ``audit_log`` row and a
+    ``resume.withdrawn`` outbox event (the un-project signal) are written in
+    the SAME transaction (atomic). An already-withdrawn résumé matches zero
+    rows and is a quiet no-op success — no new audit/outbox row, no error.
+
+    Raises ``NotFoundError`` for a résumé id that does not exist at all.
+    Returns whether the withdrawal actually applied.
+    """
+    exists = await conn.fetchval(_RESUME_EXISTS_SQL, resume_id)
+    if exists is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+
+    async with conn.transaction():
+        result = await conn.execute(_WITHDRAW_SQL, resume_id, reason)
+        if not result.endswith(" 1"):
+            return False
+        await audit_service.record_audit(
+            conn,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="withdraw_resume",
+            subject_type="resume",
+            subject_id=resume_id,
+            details={"reason": reason} if reason else None,
+        )
+        await outbox_service.enqueue_outbox(
+            conn,
+            aggregate="resume",
+            aggregate_id=resume_id,
+            event_type="resume.withdrawn",
+            payload={},
+        )
+    return True
+
+
+async def reinstate_resume(
+    conn: DbConn,
+    resume_id: UUID,
+    *,
+    actor_kind: str,
+    actor_user_id: UUID | None,
+    actor_service: str | None,
+) -> bool:
+    """Re-enter a withdrawn résumé into the ranking pool (ADR-026 decision 1).
+
+    REPLAYS the last delivered ``resume.parsed`` payload — it never re-embeds
+    (no ``llm``/``embedder`` parameter, mirroring ``project_resume``'s ADR-008
+    guarantee). The existing drainer branch re-projects that byte-identical
+    payload, restoring identical recall. Idempotent via the guarded UPDATE
+    (``WHERE withdrawn_at IS NOT NULL``): a non-withdrawn résumé is a quiet
+    no-op. A résumé withdrawn before it was ever parsed has no payload to
+    replay, so the columns are cleared and the reinstatement is audited, but
+    no ``resume.parsed`` event is enqueued.
+
+    Raises ``NotFoundError`` for a résumé id that does not exist at all.
+    Returns whether the reinstatement actually applied.
+    """
+    exists = await conn.fetchval(_RESUME_EXISTS_SQL, resume_id)
+    if exists is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+
+    async with conn.transaction():
+        result = await conn.execute(_REINSTATE_SQL, resume_id)
+        if not result.endswith(" 1"):
+            return False
+        await audit_service.record_audit(
+            conn,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="reinstate_resume",
+            subject_type="resume",
+            subject_id=resume_id,
+        )
+        raw_payload = await conn.fetchval(_LAST_PARSED_PAYLOAD_SQL, resume_id)
+        if raw_payload is not None:
+            payload = (
+                json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+            )
+            await outbox_service.enqueue_outbox(
+                conn,
+                aggregate="resume",
+                aggregate_id=resume_id,
+                event_type="resume.parsed",
+                payload=payload,
+            )
+    return True
+
+
+async def status_breakdown(conn: DbConn, job_id: UUID) -> ResumeStatusBreakdown:
+    """Per-job résumé status counts (ADR-026 decision 5).
+
+    Five mutually-exclusive buckets: a withdrawn résumé counts as ``withdrawn``
+    regardless of its parse ``status`` (the CASE puts it in that bucket), so
+    the five counts partition the job's résumés. Absent buckets zero-fill, so
+    a job with no résumés still yields the full five-bucket shape.
+    """
+    rows = await conn.fetch(_STATUS_BREAKDOWN_SQL, job_id)
+    counts: dict[str, int] = {
+        "uploaded": 0,
+        "parsing": 0,
+        "parsed": 0,
+        "failed": 0,
+        "withdrawn": 0,
+    }
+    for row in rows:
+        bucket = row["bucket"]
+        if bucket in counts:
+            counts[bucket] = row["n"]
+    return ResumeStatusBreakdown(**counts)

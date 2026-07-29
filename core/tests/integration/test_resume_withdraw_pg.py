@@ -46,6 +46,16 @@ from src.errors import NotFoundError
 from src.models.ddl import init_schema
 from src.services import outbox_service
 
+# A real ``users`` row backing the ``actor_kind='user'`` audit rows these
+# service tests write. ``audit_log.actor_user_id`` carries a FK to ``users``
+# (FU-5, ADR-019 §6) — in production the withdraw/reinstate route always
+# supplies a real CAS-session ``user.id`` (or a service actor with
+# ``actor_user_id=None``), so a fabricated id never reaches the audit sink. At
+# the service layer these tests must seed the referenced row for the FK to
+# hold; the assertions (``actor_kind``/``actor_user_id``/row counts) are
+# unchanged — only this precondition is supplied.
+_ACTOR_ID = uuid.UUID("a11ce000-0000-4000-8000-000000000001")
+
 
 @pytest.fixture(scope="session")
 def pg_dsn() -> Iterator[str]:
@@ -58,8 +68,12 @@ async def pg_pool(pg_dsn: str) -> AsyncIterator[asyncpg.Pool]:
     pool = await asyncpg.create_pool(dsn=pg_dsn, min_size=2, max_size=8)
     await init_schema(pool)
     async with pool.acquire() as conn:
+        await conn.execute("TRUNCATE jobs, resumes, outbox, audit_log CASCADE")
         await conn.execute(
-            "TRUNCATE jobs, resumes, outbox, audit_log CASCADE"
+            "INSERT INTO users (id, cas_username, role) "
+            "VALUES ($1, 'withdraw-test-actor', 'recruiter') "
+            "ON CONFLICT (id) DO NOTHING",
+            _ACTOR_ID,
         )
     try:
         yield pool
@@ -184,7 +198,7 @@ async def test_withdraw_resume_sets_withdrawn_at_and_reason(
             resume_id,
             reason="accepted another offer",
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -201,7 +215,7 @@ async def test_withdraw_resume_writes_exactly_one_audit_log_row(
 
     job_id = await _insert_job(pg_pool)
     resume_id = await _insert_resume(pg_pool, job_id)
-    actor_id = uuid.uuid4()
+    actor_id = _ACTOR_ID
 
     async with pg_pool.acquire() as conn:
         await withdraw_resume(
@@ -236,7 +250,7 @@ async def test_withdraw_resume_enqueues_exactly_one_resume_withdrawn_outbox_row(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -258,7 +272,7 @@ async def test_withdraw_resume_nonexistent_resume_raises_not_found(
                 uuid.uuid4(),
                 reason=None,
                 actor_kind="user",
-                actor_user_id=uuid.uuid4(),
+                actor_user_id=_ACTOR_ID,
                 actor_service=None,
             )
 
@@ -286,7 +300,7 @@ async def test_withdraw_resume_twice_is_idempotent_zero_new_rows_unchanged_times
             resume_id,
             reason="first",
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
     first_row = await _resume_row(pg_pool, resume_id)
@@ -299,7 +313,7 @@ async def test_withdraw_resume_twice_is_idempotent_zero_new_rows_unchanged_times
             resume_id,
             reason="second attempt, different reason text",
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -350,7 +364,7 @@ async def test_audit_write_failure_rolls_back_the_withdraw_flip_too(
                 resume_id,
                 reason="should not stick",
                 actor_kind="user",
-                actor_user_id=uuid.uuid4(),
+                actor_user_id=_ACTOR_ID,
                 actor_service=None,
             )
 
@@ -377,7 +391,7 @@ async def test_reinstate_resume_clears_withdrawn_columns(pg_pool: asyncpg.Pool) 
             resume_id,
             reason="mistaken click",
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -386,7 +400,7 @@ async def test_reinstate_resume_clears_withdrawn_columns(pg_pool: asyncpg.Pool) 
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -409,11 +423,11 @@ async def test_reinstate_resume_writes_exactly_one_audit_log_row(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
-    actor_id = uuid.uuid4()
+    actor_id = _ACTOR_ID
     async with pg_pool.acquire() as conn:
         await reinstate_resume(
             conn,
@@ -440,7 +454,7 @@ async def test_reinstate_resume_nonexistent_resume_raises_not_found(
                 conn,
                 uuid.uuid4(),
                 actor_kind="user",
-                actor_user_id=uuid.uuid4(),
+                actor_user_id=_ACTOR_ID,
                 actor_service=None,
             )
 
@@ -472,14 +486,14 @@ async def test_reinstate_resume_replays_the_last_delivered_resume_parsed_payload
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
         await reinstate_resume(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -511,14 +525,14 @@ async def test_reinstate_resume_with_no_prior_parse_enqueues_no_resume_parsed_ro
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
         await reinstate_resume(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -548,14 +562,14 @@ async def test_reinstate_resume_twice_is_idempotent_zero_new_rows(
             resume_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
         await reinstate_resume(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
         # Second reinstate on an already-active (never-withdrawn) résumé.
@@ -563,7 +577,7 @@ async def test_reinstate_resume_twice_is_idempotent_zero_new_rows(
             conn,
             resume_id,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
@@ -602,7 +616,7 @@ async def test_status_breakdown_buckets_are_mutually_exclusive(
             withdrawn_parsed_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
         await withdraw_resume(
@@ -610,7 +624,7 @@ async def test_status_breakdown_buckets_are_mutually_exclusive(
             withdrawn_uploaded_id,
             reason=None,
             actor_kind="user",
-            actor_user_id=uuid.uuid4(),
+            actor_user_id=_ACTOR_ID,
             actor_service=None,
         )
 
