@@ -769,7 +769,7 @@ def test_resume_detail_shows_withdraw_button_when_not_withdrawn(
     )
     body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
     assert "Withdraw candidate" in body
-    assert f'/resumes/{resume_id}/withdraw' in body
+    assert f"/resumes/{resume_id}/withdraw" in body
     assert "Reinstate" not in body
 
 
@@ -788,7 +788,7 @@ def test_resume_detail_shows_reinstate_button_and_badge_when_withdrawn(
     )
     body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
     assert "Reinstate" in body
-    assert f'/resumes/{resume_id}/reinstate' in body
+    assert f"/resumes/{resume_id}/reinstate" in body
     assert "Withdraw candidate" not in body
     # a withdrawn marker/badge is visible somewhere on the page
     assert "Withdrawn" in body

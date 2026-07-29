@@ -601,7 +601,9 @@ def test_shortlist_card_withdraw_token_is_independent_of_the_reveal_token(
     reveal_token = token_re.search(reveal_form.group(1))
     withdraw_token = token_re.search(withdraw_form.group(1))
     assert reveal_token is not None, "expected a csrf_token input in the reveal form"
-    assert withdraw_token is not None, "expected a csrf_token input in the withdraw form"
+    assert (
+        withdraw_token is not None
+    ), "expected a csrf_token input in the withdraw form"
     assert reveal_token.group(1) != withdraw_token.group(1)
 
 
@@ -614,7 +616,11 @@ def test_shortlist_card_withdraw_control_uses_display_label_context_never_pii(
     resume_id = uuid4()
     entry = _full_entry(uuid4())
     entry["resume_id"] = str(resume_id)
-    entry["candidate"] = {"name": _REAL_NAME, "email": _REAL_EMAIL, "phone": _REAL_PHONE}
+    entry["candidate"] = {
+        "name": _REAL_NAME,
+        "email": _REAL_EMAIL,
+        "phone": _REAL_PHONE,
+    }
     monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
     raw = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
     assert f"/resumes/{resume_id}/withdraw" in raw

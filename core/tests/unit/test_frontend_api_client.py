@@ -596,7 +596,9 @@ def test_get_resume_status_breakdown_hits_the_resume_status_route() -> None:
             },
         )
 
-    result = api_client.get_resume_status_breakdown(job_id, client=_client_with(handler))
+    result = api_client.get_resume_status_breakdown(
+        job_id, client=_client_with(handler)
+    )
     assert captured["method"] == "GET"
     assert captured["url"].path == f"/jobs/{job_id}/resume-status"
     assert result == {

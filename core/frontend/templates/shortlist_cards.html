@@ -62,6 +62,18 @@
         <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
           (audited)</button>
       </form>
+      {# FU-8/ADR-026: a SECOND audited action on this same card — its own
+         one-shot token, independent of the reveal form's token above (same
+         résumé id, distinct action). `context=shortlist` mirrors the reveal
+         form's own context field. #}
+      <form method="post"
+            action="{{ url_for('resume_withdraw', resume_id=entry.resume_id) }}"
+            style="display:inline">
+        <input type="hidden" name="context" value="shortlist">
+        <input type="hidden" name="csrf_token"
+               value="{{ (withdraw_csrf_tokens or {}).get(entry.resume_id|string, '') }}">
+        <button type="submit" class="btn btn-danger btn-sm">Withdraw candidate</button>
+      </form>
       <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
     </div>
 

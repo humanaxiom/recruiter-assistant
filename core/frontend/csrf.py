@@ -62,15 +62,25 @@ _TOKEN_BYTES = 16
 _KEY_HEX_CHARS = 12
 
 
-def _session_key_for(resume_id: Any) -> str:
-    """Derive the mapping key for ``resume_id``.
+def _session_key_for(resume_id: Any, action: str = "reveal") -> str:
+    """Derive the mapping key for ``(resume_id, action)``.
 
     Hashing keeps each entry ~12 bytes instead of a raw ~36-char UUID string:
     the signed session cookie must stay inside the ~4093-byte ceiling browsers
     silently enforce, and an oversized cookie is DROPPED rather than rejected —
     which would empty the session and 403 every reveal.
+
+    FU-8/ADR-026: for the default ``action="reveal"`` the hashed input is
+    UNCHANGED — plain ``str(resume_id)``, byte-for-byte identical to the
+    pre-amendment key derivation — so every pre-existing caller (which never
+    passes ``action``) derives the EXACT SAME key as before this amendment
+    (existing sessions/tests keep working unmodified). A non-default action
+    (e.g. "withdraw") folds the action into the hashed input instead, which
+    mints into an INDEPENDENT slot for the SAME résumé id — minting one
+    action's token never invalidates the other's.
     """
-    return hashlib.sha256(str(resume_id).encode("utf-8")).hexdigest()[:_KEY_HEX_CHARS]
+    seed = str(resume_id) if action == "reveal" else f"{action}:{resume_id}"
+    return hashlib.sha256(seed.encode()).hexdigest()[:_KEY_HEX_CHARS]
 
 
 def _mapping() -> dict[str, str]:
@@ -88,19 +98,21 @@ def _mapping() -> dict[str, str]:
     }
 
 
-def issue_token(resume_id: Any) -> str:
-    """Mint a fresh token for ``resume_id``, store it and return it.
+def issue_token(resume_id: Any, *, action: str = "reveal") -> str:
+    """Mint a fresh token for ``(resume_id, action)``, store it and return it.
 
-    Overwrites any previously-issued, unconsumed token for the SAME résumé,
-    but leaves every other résumé's token untouched — the shortlist renders
-    one reveal form per card, all posting to the same route, so each card needs
-    its own independently-valid token. When adding a NEW résumé would push the
-    mapping past :data:`MAX_TOKENS_PER_SESSION`, the oldest entry is evicted
-    first (strict FIFO by issue order; re-issuing for an existing résumé keeps
-    that résumé's original position rather than promoting it). Must be called
-    inside an active Flask request context.
+    Overwrites any previously-issued, unconsumed token for the SAME résumé AND
+    action, but leaves every other résumé/action slot untouched — the
+    shortlist renders one reveal form per card, all posting to the same route,
+    so each card needs its own independently-valid token; similarly, FU-8's
+    withdraw button shares a résumé id with the reveal button but must mint
+    into its OWN slot (``action="withdraw"``). When adding a NEW slot would
+    push the mapping past :data:`MAX_TOKENS_PER_SESSION`, the oldest entry is
+    evicted first (strict FIFO by issue order; re-issuing for an existing
+    résumé/action keeps that slot's original position rather than promoting
+    it). Must be called inside an active Flask request context.
     """
-    key = _session_key_for(resume_id)
+    key = _session_key_for(resume_id, action)
     mapping = _mapping()
     if key not in mapping:
         while len(mapping) >= MAX_TOKENS_PER_SESSION:
@@ -113,26 +125,50 @@ def issue_token(resume_id: Any) -> str:
     return token
 
 
-def verify_and_consume(resume_id: Any, submitted: str | None) -> bool:
-    """Return ``True`` iff ``submitted`` matches ``resume_id``'s stored token.
+def verify_and_consume(
+    resume_id: Any, submitted: str | None, *, action: str = "reveal"
+) -> bool:
+    """Return ``True`` iff ``submitted`` matches ``(resume_id, action)``'s
+    stored token.
 
-    ``resume_id``'s entry is popped UNCONDITIONALLY — a wrong-token attempt
-    burns that résumé's slot just as a correct one does, so the token is a
-    strict one-shot per résumé and an attacker cannot probe it by replaying
-    guesses against a live slot. Other résumés' entries are left intact, so a
-    misdirected attempt (résumé A's token posted at résumé B) fails without
-    burning A's rightful slot. Never raises: a missing, empty or non-ASCII
-    submission is simply ``False``.
+    On a MATCH, ``(resume_id, action)``'s entry is popped (strict one-shot).
+
+    On a MISMATCH, the target slot is popped UNCONDITIONALLY *unless*
+    ``submitted`` is itself a still-live token currently stored under some
+    OTHER ``(resume_id, action)`` slot in this SAME session (e.g. the FU-8
+    withdraw button's token mistakenly posted to the reveal route, or vice
+    versa — both rendered on the SAME résumé-detail page). A blind guess
+    burns the slot regardless of match — this is the anti-probing guarantee
+    (an attacker cannot replay guesses against a live slot) — but a genuine,
+    currently-valid credential the caller already holds for a DIFFERENT
+    action gains an attacker nothing by being rejected non-destructively, so
+    it leaves every slot (including the misdirected target) untouched:
+    résumé A's token posted at résumé B's route, or one action's token
+    posted at a different action's route on the SAME résumé, both fail
+    without burning the rightful slot. Never raises: a missing, empty or
+    non-ASCII submission is simply ``False``.
     """
-    key = _session_key_for(resume_id)
+    key = _session_key_for(resume_id, action)
     mapping = _mapping()
-    stored = mapping.pop(key, None)
-    flask.session[SESSION_KEY] = mapping
-    if not stored or not submitted:
+    stored = mapping.get(key)
+    if stored and submitted:
+        # Compare UTF-8 bytes: `compare_digest` raises on non-ASCII `str`
+        # inputs, and `submitted` is attacker-controlled form data.
+        if secrets.compare_digest(stored.encode("utf-8"), submitted.encode("utf-8")):
+            del mapping[key]
+            flask.session[SESSION_KEY] = mapping
+            return True
+    if submitted and any(
+        other_key != key and other_value == submitted
+        for other_key, other_value in mapping.items()
+    ):
+        # `submitted` is a genuine, still-live token for a DIFFERENT slot —
+        # a misdirected-but-honest submission, not a blind guess. Leave
+        # every slot untouched.
         return False
-    # Compare UTF-8 bytes: `compare_digest` raises on non-ASCII `str` inputs,
-    # and `submitted` is attacker-controlled form data.
-    return secrets.compare_digest(stored.encode("utf-8"), submitted.encode("utf-8"))
+    mapping.pop(key, None)
+    flask.session[SESSION_KEY] = mapping
+    return False
 
 
 def _origin_of(url: str) -> str:

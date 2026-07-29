@@ -672,7 +672,7 @@ def test_reveal_and_withdraw_tokens_for_the_same_resume_are_independent_values()
     assert reveal_token != withdraw_token
 
 
-def test_minting_a_withdraw_token_does_not_invalidate_an_already_minted_reveal_token() -> (
+def test_minting_a_withdraw_token_does_not_invalidate_an_already_minted_reveal_token() -> (  # noqa: E501
     None
 ):
     """THE load-bearing regression test: minting the SECOND audited action's
@@ -686,7 +686,7 @@ def test_minting_a_withdraw_token_does_not_invalidate_an_already_minted_reveal_t
         assert csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
 
 
-def test_minting_a_reveal_token_does_not_invalidate_an_already_minted_withdraw_token() -> (
+def test_minting_a_reveal_token_does_not_invalidate_an_already_minted_withdraw_token() -> (  # noqa: E501
     None
 ):
     resume_id = uuid4()
@@ -706,8 +706,7 @@ def test_a_token_minted_for_reveal_fails_verification_for_withdraw_same_resume()
     with app.test_request_context():
         reveal_token = csrf.issue_token(resume_id, action="reveal")
         assert (
-            csrf.verify_and_consume(resume_id, reveal_token, action="withdraw")
-            is False
+            csrf.verify_and_consume(resume_id, reveal_token, action="withdraw") is False
         )
 
 
@@ -718,12 +717,11 @@ def test_a_token_minted_for_withdraw_fails_verification_for_reveal_same_resume()
     with app.test_request_context():
         withdraw_token = csrf.issue_token(resume_id, action="withdraw")
         assert (
-            csrf.verify_and_consume(resume_id, withdraw_token, action="reveal")
-            is False
+            csrf.verify_and_consume(resume_id, withdraw_token, action="reveal") is False
         )
 
 
-def test_a_misdirected_cross_action_verify_does_not_burn_the_rightful_actions_slot() -> (
+def test_a_misdirected_cross_action_verify_does_not_burn_the_rightful_actions_slot() -> (  # noqa: E501
     None
 ):
     """A wrong-action attempt (right résumé, right token, wrong action) must
@@ -737,9 +735,7 @@ def test_a_misdirected_cross_action_verify_does_not_burn_the_rightful_actions_sl
         )
         assert misdirected is False
         # The reveal token is still valid afterwards, for its OWN action.
-        assert (
-            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
-        )
+        assert csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
 
 
 def test_consuming_the_withdraw_token_does_not_consume_the_reveal_slot() -> None:
@@ -752,9 +748,7 @@ def test_consuming_the_withdraw_token_does_not_consume_the_reveal_slot() -> None
             is True
         )
         # Reveal's slot for the SAME résumé is untouched by consuming withdraw's.
-        assert (
-            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
-        )
+        assert csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
 
 
 def test_both_actions_on_one_resume_can_be_used_back_to_back_with_no_reissue() -> None:
@@ -792,6 +786,4 @@ def test_reissuing_the_withdraw_token_overwrites_only_its_own_action_slot() -> N
         csrf.issue_token(resume_id, action="withdraw")
         mapping = flask.session[csrf.SESSION_KEY]
         assert len(mapping) == 2  # one reveal slot + one withdraw slot, no more
-        assert (
-            csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True
-        )
+        assert csrf.verify_and_consume(resume_id, reveal_token, action="reveal") is True

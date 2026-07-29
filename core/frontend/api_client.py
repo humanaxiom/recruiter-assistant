@@ -430,6 +430,44 @@ def get_cas_user(*, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def withdraw_resume(
+    resume_id: UUID,
+    *,
+    reason: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """AUDITED. ``POST /resumes/{id}/withdraw`` (ADR-026/FU-8) — marks the
+    résumé withdrawn (excluded from shortlisting, retained for audit — the
+    "exclude-and-retain" decision) and returns the updated ``ResumeOut``.
+    Mirrors :func:`reveal_resume`'s shape: a dedicated per-résumé POST route,
+    the same typed error mapping."""
+    response = _request(
+        "POST",
+        f"/resumes/{resume_id}/withdraw",
+        json={"reason": reason},
+        client=client,
+    )
+    return response.json()
+
+
+def reinstate_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """AUDITED. ``POST /resumes/{id}/reinstate`` (ADR-026/FU-8) — clears the
+    withdrawal, returning the résumé to shortlist eligibility, and returns the
+    updated ``ResumeOut``. No body required."""
+    response = _request("POST", f"/resumes/{resume_id}/reinstate", client=client)
+    return response.json()
+
+
+def get_resume_status_breakdown(
+    job_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """``GET /jobs/{id}/resume-status`` (ADR-026 decision 5/FU-8) — the
+    per-job résumé status-breakdown widget's data source: a 5-bucket count
+    dict (``uploaded``/``parsing``/``parsed``/``failed``/``withdrawn``)."""
+    response = _request("GET", f"/jobs/{job_id}/resume-status", client=client)
+    return response.json()
+
+
 def export_shortlist(
     job_id: UUID,
     *,
@@ -472,6 +510,9 @@ __all__ = [
     "get_shortlist_entry",
     "get_resume",
     "reveal_resume",
+    "withdraw_resume",
+    "reinstate_resume",
+    "get_resume_status_breakdown",
     "trigger_reverse_match",
     "get_match_results",
     "export_shortlist",
