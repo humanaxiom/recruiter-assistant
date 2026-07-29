@@ -1116,7 +1116,57 @@ haystack made a chunk fail to match *itself* at 0.838). Severity fell monotonica
 2 major → 5 medium/low → self-caught — which is why it was allowed to run five rounds rather than being
 split.
 
-### ⚠️ LOCAL-INTEGRATION STATE (2026-07-25) — local `main` is AHEAD of origin; GitHub CI is billing-blocked
+### ⚠️ LOCAL-INTEGRATION STATE (2026-07-28) — billing CLEARED, origin caught up to FU-6, four features remain local-only
+
+> **Read this FIRST — supersedes the 2026-07-25 version of this banner below (kept as history, not
+> deleted).** The org's GitHub-Actions **billing block is now CLEARED** (2026-07-28) — CI runs again.
+> `origin/main` has advanced to **`c2f6a57`**, which now contains, via merged GitHub PRs: **FU-5** (#29,
+> `ae18687`), the **live-app UX bug fixes** (#30, origin squash `22db93f`), and **FU-6 core** (#31, origin
+> squash `c2f6a57`). CI on all three is green.
+>
+> **Local `main` is at `2b2f291`, 24 commits AHEAD of `origin/main` and 2 BEHIND it.** This is a SHA-only
+> divergence, not a content divergence: origin's #30/#31 landed as squash commits with different SHAs than
+> local's own merge commits for the same content (`git diff origin/main main` on the FU-6 files is EMPTY).
+> **Consequence: local `main` cannot fast-forward push** — a plain `git push` will be rejected.
+>
+> **Four finished, fully-gated features are STILL local-only** — none of them ever had their own PR, so
+> they did not ride in with #29/#30/#31:
+> 1. **Configurable shortlist size** — ADR-024, commit `2e2da05` (per-job `shortlist_top_percent`, 1–100%,
+>    default 100).
+> 2. **`/my/jobs` hiring-manager viewer default** — commit `f3b2998` (ADR-020 §7 "viewer half"; it landed
+>    after the local FU-6 merge, so PR #31 does not contain it).
+> 3. **CAS live integration** — commits `adb55fd` (split-origin post-login redirect fix, `:5000`/`:18000`)
+>    + `d54a6be` (header auth widget: user · role · Logout/Login) + the untracked operational
+>    `compose.cas.yml` override that enables real SFU CAS.
+> 4. **User-admin roles** — ADR-025, slices 1–8 up to `45eba6d` (no-role-by-default first login, reversing
+>    ADR-019 §10a; the fail-closed `require_role_assigned` gate; admin-session-gated `GET /users` +
+>    `PATCH /users/{id}/role` with atomic `role_changed` audit + last-admin lockout; the Flask
+>    `/admin/users` page). Confirmed absent from `origin/main`: `docs/adr/025-*.md`,
+>    `core/frontend/templates/pending_access.html`, `core/src/api/routes/users.py`.
+>
+> **Verification:** `./scripts/verify.sh all` re-run GREEN on the local tip — **3815 unit tests @ 92.6%
+> coverage, 375 integration tests**. All four features are applied to the running stack (the `users.role`
+> DDL reversal is live in the running Postgres; `asalah` is the sole active admin).
+>
+> **Reconciliation path (exact next step — human/next session runs it; the push/PR-merge itself is
+> classifier-blocked for the agent, same as every prior PR in this repo):**
+> - **Preferred:** rebase just the four local-only commits onto `origin/main` — `git rebase --onto
+>   origin/main <local-FU-6-tip> main` (drops local's now-redundant #30/#31 merge commits, since that
+>   content is already on origin under different SHAs) — then `git push origin main`.
+> - **Alternative:** open one fresh PR per remaining feature (shortlist-config, my-jobs, CAS-integration,
+>   user-admin) off `origin/main` and let CI gate each individually — cleaner for review, more branches.
+> - Either way: do **not** double-merge — #29/#30/#31 are already on origin, do not re-open or re-merge
+>   them.
+>
+> **CAS status, precisely:** the FU-5 CAS *backend* (identity, session store, ticket dance) is merged to
+> `origin/main` (#29); the CAS *live-integration polish* — the split-origin redirect fix and the header auth
+> widget (item 3 above) — is still local-only. Both are applied to the running stack (`compose.cas.yml` is
+> live), and `asalah` is the §10a default-admin turned sole active admin under the ADR-025 role reversal.
+>
+> **No open follow-ups from this session remain** beyond the reconciliation path above.
+
+<details>
+<summary>Superseded 2026-07-25 version of this banner (billing-blocked state) — kept for history</summary>
 
 > **Read this FIRST.** GitHub Actions is **billing-blocked** for the `humanaxiom` org (jobs fail at "Set up
 > job" with `BlobNotFound`; the failure annotation reads "recent account payments have failed or your
@@ -1147,9 +1197,16 @@ split.
 >
 > **No open follow-ups from this session remain** — the two ADR-020/shortlist follow-ups were both built.
 
+</details>
+
 ### FU-6 status — BUILT, gates green, ON A PR (read this before starting FU-7)
 
-> **Resume here.** FU-6 (per-job assignment + row-level scoping, ADR-020) is **code-complete and
+> **SUPERSEDED 2026-07-28 — FU-6 merged.** PR #31 merged to `origin/main` (squash `c2f6a57`), CI green.
+> This section's "Resume here" pointer and PR-open framing are historical; see the "⚠️ LOCAL-INTEGRATION
+> STATE (2026-07-28)" banner near the top of this file for the current state and next step. Body kept below
+> for the FU-6 architecture/decision record.
+
+> **Resume here** *(historical — see supersession note above)*. FU-6 (per-job assignment + row-level scoping, ADR-020) is **code-complete and
 > gate-green** on branch `feat/fu6-job-assignment-scoping` (10 TDD slices + a note-cap hardening, each a
 > `red:`→`green:` pair, off `main` @ `ae18687`). Both merge-blocking gates passed: **reviewer APPROVE**
 > (12 mutations caught across the scoping predicates / helper / reveal ordering / `/my/jobs` / auditor
@@ -1193,7 +1250,12 @@ defaults to `https://cas.sfu.ca/cas`); first login by the §10a default-admin (`
 
 ### FU-5 status — BUILT, gates green, ON A PR (read this before starting FU-6)
 
-> **Resume here.** FU-5 (CAS identity + attributable audit, ADR-019) is **code-complete and gate-green**
+> **SUPERSEDED 2026-07-28 — FU-5 merged.** PR #29 merged to `origin/main` (`ae18687`), CI green. This
+> section's "Resume here" pointer and PR-open framing are historical; see the "⚠️ LOCAL-INTEGRATION STATE
+> (2026-07-28)" banner near the top of this file for the current state and next step. Body kept below for
+> the FU-5 architecture/decision record.
+
+> **Resume here** *(historical — see supersession note above)*. FU-5 (CAS identity + attributable audit, ADR-019) is **code-complete and gate-green**
 > on branch `feat/fu5-cas-identity` (13 TDD slices, each a `red:`→`green:` pair, off `main` @ `1f526f6`).
 > Both merge-blocking gates passed: **reviewer APPROVE** (8 security-critical guards mutation-verified),
 > **security PASS** (no critical/high). `./scripts/verify.sh all` green — 3358 unit @ ~91.9%, 202
@@ -1751,17 +1813,27 @@ See the "Phase 3 starting map (verified)" subsection above (historical) and
 docs/adr/007 for how the ingest/parse layer Phase 4 builds on was ported.
 ```
 
-### user-admin-roles status — built, gates green, not yet on main
+### user-admin-roles status — built + integrated to local main, not yet pushed to origin
 
-Built on branch `feat/user-admin-roles` (HEAD `63ae662`), off `feat/fu5-cas-identity`'s completed FU-5
-work, across eight TDD slices (DDL nullable-role reversal → provisioning default reversal →
-`require_role_assigned` fail-closed gate → the Flask `pending_access.html` gate → `GET /users` →
-`PATCH /users/{id}/role` (+ `Role` enum move to `schemas.auth` + last-admin lockout) → the Flask admin
-UI → a security-hardening fix round). **All offline gates green** and **both merge-blocking reviews
-recorded APPROVE** (a first-round APPROVE followed by a second confirming APPROVE after the security
-round's fixes were folded in); **security PASS**. Full decision record: [ADR-025](docs/adr/025-user-admin-roles.md);
-the superseded ADR-019 §10a default (`role='recruiter'` on first login) is annotated in place, not
-rewritten — see ADR-019's inline supersession note and its §10c residuals list.
+**2026-07-28 update.** `feat/user-admin-roles` is integrated to local `main` (fast-forward, at `45eba6d`,
+full `red:`→`green:`→`docs:` history preserved). `./scripts/verify.sh all` was **re-verified GREEN on the
+local tip**: **3815 unit tests @ 92.6% coverage, 375 integration tests** against real Postgres/Neo4j.
+**Reviewer APPROVE ×2** (backend slices 5+6 and the frontend slice 7 each reviewed separately) + **security
+PASS** — the accepted concurrent-double-demote residual described below is recorded in ADR-025. Applied to
+the running stack: the nullable-role DDL is live in Postgres and `asalah` is the sole active admin. It is
+**not yet on `origin/main`** — see the "⚠️ LOCAL-INTEGRATION STATE (2026-07-28)" banner near the top of
+this file for the four local-only features (this is one of them) and the reconciliation path.
+
+Built on branch `feat/user-admin-roles` (HEAD `63ae662`, integrated to local `main` at `45eba6d`), off
+`feat/fu5-cas-identity`'s completed FU-5 work, across eight TDD slices (DDL nullable-role reversal →
+provisioning default reversal → `require_role_assigned` fail-closed gate → the Flask `pending_access.html`
+gate → `GET /users` → `PATCH /users/{id}/role` (+ `Role` enum move to `schemas.auth` + last-admin lockout)
+→ the Flask admin UI → a security-hardening fix round). **All offline gates green** and **both
+merge-blocking reviews recorded APPROVE** (a first-round APPROVE followed by a second confirming APPROVE
+after the security round's fixes were folded in); **security PASS**. Full decision record:
+[ADR-025](docs/adr/025-user-admin-roles.md); the superseded ADR-019 §10a default (`role='recruiter'` on
+first login) is annotated in place, not rewritten — see ADR-019's inline supersession note and its §10c
+residuals list.
 
 **The headline change: no-role-by-default first login.** ADR-019 §10a's "every non-default-admin CAS
 login lands as `recruiter`" is reversed — `users.role` is now nullable with no DB default
@@ -1797,11 +1869,12 @@ and both commit, leaving 0 admins. Deliberately deferred (an offline, effectivel
 today); ADR-025's Accepted residuals section has the exact remediation (`SELECT ... FOR UPDATE` or
 SERIALIZABLE) for when multi-admin becomes real.
 
-**Exact next step:** integrate `feat/user-admin-roles` to local `main` (merge or rebase-and-fast-forward;
-`gh pr merge` remains classifier-blocked per the standing note above, so this is a human-driven command,
-not something to attempt unattended) and apply the schema/behaviour change to the running stack via the
-existing CAS compose overrides (`docker compose ... up -d` after a pull — the nullable-role ALTERs and the
-new routes come up idempotently on API boot, no separate migration step). **The GitHub-Actions billing
-block noted elsewhere in this file means CI cannot run for this branch right now — integration is
-local-only**: verify with `./scripts/verify.sh all` against the merged tree before treating this as done,
-do not rely on a CI badge that cannot execute.
+**Exact next step (updated 2026-07-28 — integration to local `main` is DONE, this is what's left):**
+this feature is already integrated to local `main` and applied to the running stack (see the 2026-07-28
+update above); what remains is getting it onto `origin/main`. The billing block that used to gate CI is
+CLEARED, but local `main` has diverged from `origin/main` on SHAs (not content — see the current-state
+banner), so a plain `git push` is rejected. Follow the reconciliation path in the "⚠️ LOCAL-INTEGRATION
+STATE (2026-07-28)" banner near the top of this file: either rebase the four local-only commits (this one
+included) onto `origin/main` and push, or open a fresh PR for this feature off `origin/main` and let CI
+gate it. Either way the push/PR-merge is a human-driven command (`gh pr merge` remains classifier-blocked
+for the agent) — do not attempt it unattended.
