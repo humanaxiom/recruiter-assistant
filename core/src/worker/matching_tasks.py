@@ -26,6 +26,10 @@ Status strings:
 * ``"empty"``       — zero candidates ranked; STILL persisted (DELETE-first
   clears any stale prior run), but a distinct status so "ranked, zero results"
   is told apart from "ranked, wrote N rows".
+* ``"already_running"`` — a concurrent duplicate run for the same entity
+  already holds the Postgres advisory lock (``src.worker.job_lock``,
+  ADR-010 §1 residual); the row is never even fetched and the orchestrator is
+  never called.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from src.pipeline.matching.orchestrator import (
 )
 from src.services.shortlist_service import persist_reverse_match, persist_shortlist
 from src.settings import get_settings, weights_from_settings
+from src.worker.job_lock import release_job_lock, try_job_lock
 
 log = logging.getLogger(__name__)
 
@@ -56,31 +61,38 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
     settings = get_settings()
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(_JOB_META_SQL, job_id)
-        if row is None:
-            log.warning("shortlist_job.missing job_id=%s", job_id_str)
-            return "missing"
-        if row["description_parsed"] is None:
-            log.info("shortlist_job.not_parsed job_id=%s", job_id_str)
-            return "not_parsed"
+        if not await try_job_lock(conn, "shortlist", job_id):
+            log.info("shortlist_job.already_running job_id=%s", job_id_str)
+            return "already_running"
 
-        mc = matching_context_from_settings(
-            settings,
-            db=conn,
-            neo4j=ctx["neo4j"],
-            llm=ctx["llm"],
-            embedder=ctx["embedder"],
-        )
-        result = await generate_shortlist(
-            job_id,
-            ctx=mc,
-            weights=weights_from_settings(settings),
-            coarse_k=settings.match_coarse_k,
-            evidence_k=settings.match_evidence_k,
-        )
+        try:
+            row = await conn.fetchrow(_JOB_META_SQL, job_id)
+            if row is None:
+                log.warning("shortlist_job.missing job_id=%s", job_id_str)
+                return "missing"
+            if row["description_parsed"] is None:
+                log.info("shortlist_job.not_parsed job_id=%s", job_id_str)
+                return "not_parsed"
 
-        async with conn.transaction():
-            await persist_shortlist(conn, result)
+            mc = matching_context_from_settings(
+                settings,
+                db=conn,
+                neo4j=ctx["neo4j"],
+                llm=ctx["llm"],
+                embedder=ctx["embedder"],
+            )
+            result = await generate_shortlist(
+                job_id,
+                ctx=mc,
+                weights=weights_from_settings(settings),
+                coarse_k=settings.match_coarse_k,
+                evidence_k=settings.match_evidence_k,
+            )
+
+            async with conn.transaction():
+                await persist_shortlist(conn, result)
+        finally:
+            await release_job_lock(conn, "shortlist", job_id)
 
     persisted = bool(result.entries)
     log.info(
@@ -98,39 +110,46 @@ async def reverse_match_job(ctx: dict[str, Any], resume_id_str: str) -> str:
     settings = get_settings()
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(_RESUME_STATUS_SQL, resume_id)
-        if row is None:
-            log.warning("reverse_match_job.missing resume_id=%s", resume_id_str)
-            return "missing"
-        if row["status"] != "parsed":
-            log.info("reverse_match_job.not_parsed resume_id=%s", resume_id_str)
-            return "not_parsed"
+        if not await try_job_lock(conn, "reverse_match", resume_id):
+            log.info("reverse_match_job.already_running resume_id=%s", resume_id_str)
+            return "already_running"
 
-        # Reverse match must never rank a résumé against an UNPARSED JD (no
-        # required/nice-to-have skills to score against). Scope to parsed jobs
-        # and pass an explicit set — never None (which means "no filter" to
-        # match_resume_to_jobs).
-        job_rows = await conn.fetch(_PARSED_JOB_IDS_SQL)
-        allowed_job_ids: set[UUID] = {r["id"] for r in job_rows}
+        try:
+            row = await conn.fetchrow(_RESUME_STATUS_SQL, resume_id)
+            if row is None:
+                log.warning("reverse_match_job.missing resume_id=%s", resume_id_str)
+                return "missing"
+            if row["status"] != "parsed":
+                log.info("reverse_match_job.not_parsed resume_id=%s", resume_id_str)
+                return "not_parsed"
 
-        mc = matching_context_from_settings(
-            settings,
-            db=conn,
-            neo4j=ctx["neo4j"],
-            llm=ctx["llm"],
-            embedder=ctx["embedder"],
-        )
-        result = await match_resume_to_jobs(
-            resume_id,
-            ctx=mc,
-            allowed_job_ids=allowed_job_ids,
-            weights=weights_from_settings(settings),
-            coarse_k=settings.match_coarse_k,
-            evidence_k=settings.match_reverse_evidence_k,
-        )
+            # Reverse match must never rank a résumé against an UNPARSED JD (no
+            # required/nice-to-have skills to score against). Scope to parsed
+            # jobs and pass an explicit set — never None (which means "no
+            # filter" to match_resume_to_jobs).
+            job_rows = await conn.fetch(_PARSED_JOB_IDS_SQL)
+            allowed_job_ids: set[UUID] = {r["id"] for r in job_rows}
 
-        async with conn.transaction():
-            await persist_reverse_match(conn, result)
+            mc = matching_context_from_settings(
+                settings,
+                db=conn,
+                neo4j=ctx["neo4j"],
+                llm=ctx["llm"],
+                embedder=ctx["embedder"],
+            )
+            result = await match_resume_to_jobs(
+                resume_id,
+                ctx=mc,
+                allowed_job_ids=allowed_job_ids,
+                weights=weights_from_settings(settings),
+                coarse_k=settings.match_coarse_k,
+                evidence_k=settings.match_reverse_evidence_k,
+            )
+
+            async with conn.transaction():
+                await persist_reverse_match(conn, result)
+        finally:
+            await release_job_lock(conn, "reverse_match", resume_id)
 
     persisted = bool(result.entries)
     log.info(

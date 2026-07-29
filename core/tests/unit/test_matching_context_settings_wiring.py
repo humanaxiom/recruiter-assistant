@@ -173,6 +173,13 @@ async def test_shortlist_job_passes_weights_from_settings_not_default_weights() 
     conn.fetchrow = AsyncMock(
         return_value=_Row({"description_parsed": {"required_skills": []}})
     )
+    # ADR-010 §1 residual: shortlist_job now acquires/releases a Postgres
+    # advisory lock on this same conn before/after its existing work (see
+    # src/worker/job_lock.py). This test is about settings wiring, not
+    # locking, so make the lock a no-op pass-through: fetchval (try_job_lock)
+    # truthy, execute (release_job_lock) a plain AsyncMock.
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
     ctx = _make_worker_ctx(conn)
 
     fake_result = MagicMock(name="ShortlistResult", entries=[])
@@ -205,6 +212,11 @@ async def test_reverse_match_job_uses_match_reverse_evidence_k_from_settings() -
     conn = MagicMock(name="conn")
     conn.fetchrow = AsyncMock(return_value=_Row({"status": "parsed"}))
     conn.fetch = AsyncMock(return_value=[])
+    # ADR-010 §1 residual: reverse_match_job now acquires/releases a Postgres
+    # advisory lock on this same conn (see src/worker/job_lock.py). Not the
+    # concern of this test — make the lock a no-op pass-through.
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
     ctx = _make_worker_ctx(conn)
 
     fake_result = MagicMock(name="JobMatchResult", entries=[])

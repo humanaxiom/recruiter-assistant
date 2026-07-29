@@ -20,6 +20,19 @@ Pinned control flow:
   ``match_resume_to_jobs`` — reverse match must never silently rank a résumé
   against an unparsed JD (no ``required_skills``/``nice_to_have_skills`` to
   score against) or, worse, pass ``allowed_job_ids=None`` (no filter at all).
+
+ADR-010 §1 residual / concurrency dedup (this slice) — twin of the
+``shortlist_job`` lock tests, using ``kind="reverse_match"`` (a distinct
+advisory-lock namespace from ``"shortlist"`` — see
+``src.worker.job_lock._CLASS_ID``):
+
+* the lock is acquired FIRST, right after ``pool.acquire()`` — BEFORE the
+  résumé row is even fetched. Already-held -> ``"already_running"``, nothing
+  else touched, and no attempt to release a lock never held.
+* released in a ``finally`` on both the success path and when the
+  orchestrator raises. Real session-lock semantics against a real Postgres
+  live in ``tests/integration/test_job_lock_pg.py`` — mandatory for this
+  change, not optional.
 """
 
 from __future__ import annotations
@@ -85,6 +98,21 @@ def _breakdown() -> ScoreBreakdown:
     )
 
 
+def _lock_patches(*, held: bool = True) -> tuple[Any, Any]:
+    """Patch ``try_job_lock``/``release_job_lock`` as imported into
+    ``matching_tasks`` — the lock is acquired by default (``held=True``) so
+    existing control-flow tests written before this slice keep passing
+    unchanged."""
+    return (
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=held,
+        ),
+        patch("src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock),
+    )
+
+
 # ── missing / not-parsed ─────────────────────────────────────────────────
 
 
@@ -94,9 +122,12 @@ async def test_missing_resume_row_returns_missing_and_orchestrator_not_called() 
 
     conn = _make_conn(None)
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
         ) as match_jobs,
@@ -120,9 +151,12 @@ async def test_resume_not_parsed_returns_not_parsed_and_orchestrator_not_called(
 
     conn = _make_conn(_Row({"status": status}))
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
         ) as match_jobs,
@@ -147,6 +181,7 @@ async def test_happy_path_persists_the_orchestrator_result_exactly_once() -> Non
     resume_id = uuid4()
     conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     fake_result = JobMatchResult(
         resume_id=resume_id,
@@ -168,6 +203,8 @@ async def test_happy_path_persists_the_orchestrator_result_exactly_once() -> Non
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.match_resume_to_jobs",
             new_callable=AsyncMock,
@@ -198,10 +235,13 @@ async def test_zero_candidate_result_still_calls_persist_and_returns_empty() -> 
     resume_id = uuid4()
     conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
     empty_result = JobMatchResult(resume_id=resume_id, entries=[])
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.match_resume_to_jobs",
             new_callable=AsyncMock,
@@ -236,10 +276,13 @@ async def test_allowed_job_ids_built_from_parsed_jobs_and_passed_as_explicit_set
         fetch_result=[_Row({"id": job_a}), _Row({"id": job_b})],
     )
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
     fake_result = JobMatchResult(resume_id=resume_id, entries=[])
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.match_resume_to_jobs",
             new_callable=AsyncMock,
@@ -258,3 +301,158 @@ async def test_allowed_job_ids_built_from_parsed_jobs_and_passed_as_explicit_set
         "None (None means 'no filter at all' to match_resume_to_jobs)"
     )
     assert allowed == {job_a, job_b}
+
+
+# ── advisory-lock dedup (ADR-010 §1 residual) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_already_held_returns_already_running_before_any_row_fetch() -> None:
+    """When the advisory lock is already held by a concurrent duplicate run,
+    ``reverse_match_job`` must short-circuit BEFORE fetching the résumé row."""
+    from src.worker.matching_tasks import reverse_match_job
+
+    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs", new_callable=AsyncMock
+        ) as match_jobs,
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ) as persist,
+    ):
+        result = await reverse_match_job(ctx, str(uuid4()))
+
+    assert result == "already_running"
+    conn.fetchrow.assert_not_called()
+    match_jobs.assert_not_called()
+    persist.assert_not_called()
+    release_lock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lock_is_acquired_with_reverse_match_kind_and_the_resume_id() -> None:
+    from src.worker.matching_tasks import reverse_match_job
+
+    resume_id = uuid4()
+    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as try_lock,
+        patch("src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock),
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs",
+            new_callable=AsyncMock,
+            return_value=JobMatchResult(resume_id=resume_id, entries=[]),
+        ),
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ),
+    ):
+        await reverse_match_job(ctx, str(resume_id))
+
+    try_lock.assert_awaited_once_with(conn, "reverse_match", resume_id)
+
+
+@pytest.mark.asyncio
+async def test_normal_run_releases_the_lock_it_acquired() -> None:
+    from src.worker.matching_tasks import reverse_match_job
+
+    resume_id = uuid4()
+    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs",
+            new_callable=AsyncMock,
+            return_value=JobMatchResult(resume_id=resume_id, entries=[]),
+        ),
+        patch(
+            "src.worker.matching_tasks.persist_reverse_match", new_callable=AsyncMock
+        ),
+    ):
+        result = await reverse_match_job(ctx, str(resume_id))
+
+    assert result == "empty"
+    release_lock.assert_awaited_once_with(conn, "reverse_match", resume_id)
+
+
+@pytest.mark.asyncio
+async def test_lock_is_released_even_when_the_orchestrator_raises() -> None:
+    from src.worker.matching_tasks import reverse_match_job
+
+    resume_id = uuid4()
+    conn = _make_conn(_Row({"status": "parsed"}), fetch_result=[])
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.match_resume_to_jobs",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await reverse_match_job(ctx, str(resume_id))
+
+    release_lock.assert_awaited_once_with(conn, "reverse_match", resume_id)
+
+
+@pytest.mark.asyncio
+async def test_missing_resume_row_still_releases_the_lock() -> None:
+    from src.worker.matching_tasks import reverse_match_job
+
+    conn = _make_conn(None)
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+    ):
+        result = await reverse_match_job(ctx, str(uuid4()))
+
+    assert result == "missing"
+    release_lock.assert_awaited_once()

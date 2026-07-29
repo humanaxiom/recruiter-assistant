@@ -15,6 +15,14 @@ What a REAL Postgres + REAL BlobStore prove that the mocked route tests
   SERVER-GENERATED key (never the zip entry's own name), and the DDL's
   ``UNIQUE (job_id, sha256)`` constraint is what a real duplicate-file zip
   entry collides against.
+* a résumé uploaded against a ``job_id`` with no matching ``jobs`` row is
+  rejected with a clean 404, not left to surface the real
+  ``asyncpg.exceptions.ForeignKeyViolationError`` the ``resumes_job_id_fkey``
+  constraint raises on the INSERT — diagnosed live, see
+  ``test_upload_to_nonexistent_job_returns_404_not_500`` below. A mocked
+  connection (``test_route_resumes.py``) cannot reproduce the FK violation
+  itself, only whatever pre-check a fix chooses to add; only a real Postgres
+  proves the crash this test pins is actually gone.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import asyncpg
 import pytest
@@ -193,3 +202,94 @@ async def test_real_zip_upload_writes_n_blobs_with_server_generated_keys(
             )
         }
     assert db_blob_keys == set(keys)
+
+
+# ── backend-robustness fix: upload against a nonexistent job ────────────
+#
+# Diagnosed live: POST /jobs/{job_id}/resumes with a valid file + consent but
+# a job_id that does not exist currently crashes on the résumé INSERT with
+# asyncpg.exceptions.ForeignKeyViolationError ("resumes_job_id_fkey"),
+# surfacing as an unhandled 500. It must be a clean 404 instead, consistent
+# with every other job-scoped route (e.g. GET /jobs/{job_id}).
+
+
+@pytest.mark.asyncio
+async def test_upload_to_nonexistent_job_returns_404_not_500(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    """The load-bearing test for this fix: only a REAL Postgres can raise the
+    real FK violation this guards against — a mocked connection cannot
+    reproduce it, only whatever pre-check a fix chooses to add."""
+    missing_job_id = str(uuid4())
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{missing_job_id}/resumes",
+            files=[("files", ("resume.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "resource.not_found"
+    arq.enqueue_job.assert_not_awaited()
+
+    async with pg_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT count(*) FROM resumes WHERE job_id = $1", missing_job_id
+        )
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_upload_to_nonexistent_job_writes_no_blob(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    """No orphaned blob file either — the whole request is rejected before
+    any I/O against the blob store, not merely before the DB commit."""
+    missing_job_id = str(uuid4())
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+
+    async with await _client(app) as client:
+        await client.post(
+            f"/jobs/{missing_job_id}/resumes",
+            files=[("files", ("resume.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+
+    keys = await store.list_keys()
+    assert keys == []
+
+
+@pytest.mark.asyncio
+async def test_upload_to_a_real_job_is_unaffected_by_the_existence_check(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    """Regression guard alongside the fix: a real job's upload must still
+    succeed exactly as before (guards against the existence check being
+    implemented backwards, e.g. always rejecting or querying the wrong id)."""
+    job_id = await _insert_job(pg_pool)
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{job_id}/resumes",
+            files=[("files", ("resume.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+
+    assert resp.status_code == 202
+    assert resp.json()[0]["outcome"] == "accepted"
+    arq.enqueue_job.assert_awaited_once()
+
+    async with pg_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT count(*) FROM resumes WHERE job_id = $1", job_id
+        )
+    assert count == 1

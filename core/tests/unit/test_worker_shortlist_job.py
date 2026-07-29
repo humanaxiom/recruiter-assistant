@@ -19,6 +19,23 @@ Pinned control flow, mirroring the precedent in ``test_worker_parse_job.py``
   ``test_services_shortlist_persist.py``) and returns the DISTINCT status
   ``"empty"`` (not ``"persisted"``) so a caller/log line can tell "ranked, zero
   results" apart from "ranked, wrote N rows".
+
+ADR-010 §1 residual / concurrency dedup (this slice):
+
+* the advisory lock (``src.worker.job_lock.try_job_lock`` /
+  ``release_job_lock``, imported into this module) is acquired FIRST, right
+  after ``pool.acquire()`` — BEFORE the job row is even fetched. When it is
+  already held (by a concurrent duplicate run on another connection),
+  ``shortlist_job`` returns the new status ``"already_running"`` and touches
+  NOTHING else: no row fetch, no orchestrator call, no persist, and it must
+  NOT attempt to release a lock it never held.
+* on every path that DID acquire the lock, it is released in a ``finally`` —
+  proven both on the ordinary success path and when the orchestrator raises,
+  so a later legitimate re-run is never left blocked by a crashed prior run.
+  The real, only-provable-against-a-real-Postgres session-lock semantics
+  (does a second connection actually get blocked; does release actually free
+  it) live in ``tests/integration/test_job_lock_pg.py`` — mandatory, not
+  optional, for this change.
 """
 
 from __future__ import annotations
@@ -82,6 +99,21 @@ def _breakdown() -> ScoreBreakdown:
     )
 
 
+def _lock_patches(*, held: bool = True) -> tuple[Any, Any]:
+    """Patch ``try_job_lock``/``release_job_lock`` as imported into
+    ``matching_tasks`` — the lock is acquired by default (``held=True``) so
+    existing control-flow tests written before this slice keep passing
+    unchanged."""
+    return (
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=held,
+        ),
+        patch("src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock),
+    )
+
+
 # ── missing / not-parsed ─────────────────────────────────────────────────
 
 
@@ -91,9 +123,12 @@ async def test_missing_job_row_returns_missing_and_orchestrator_not_called() -> 
 
     conn = _make_conn(None)
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.generate_shortlist", new_callable=AsyncMock
         ) as generate,
@@ -116,9 +151,12 @@ async def test_job_not_yet_parsed_returns_not_parsed_and_orchestrator_not_called
 
     conn = _make_conn(_Row({"description_parsed": None}))
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.generate_shortlist", new_callable=AsyncMock
         ) as generate,
@@ -145,6 +183,7 @@ async def test_happy_path_persists_the_orchestrator_result_exactly_once() -> Non
         _Row({"description_parsed": {"required_skills": [{"name": "Python"}]}})
     )
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     fake_result = ShortlistResult(
         job_id=job_id,
@@ -163,6 +202,8 @@ async def test_happy_path_persists_the_orchestrator_result_exactly_once() -> Non
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.generate_shortlist",
             new_callable=AsyncMock,
@@ -193,9 +234,12 @@ async def test_happy_path_passes_default_weights_when_settings_are_default() -> 
     conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
     ctx = _make_ctx(conn)
     fake_result = ShortlistResult(job_id=job_id, entries=[])
+    lock_patch, release_patch = _lock_patches()
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.generate_shortlist",
             new_callable=AsyncMock,
@@ -219,11 +263,14 @@ async def test_zero_candidate_result_still_calls_persist_and_returns_empty() -> 
     job_id = uuid4()
     conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
     ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
 
     empty_result = ShortlistResult(job_id=job_id, entries=[])
 
     with (
         patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
         patch(
             "src.worker.matching_tasks.generate_shortlist",
             new_callable=AsyncMock,
@@ -241,3 +288,161 @@ async def test_zero_candidate_result_still_calls_persist_and_returns_empty() -> 
     assert any(
         arg is empty_result for arg in _flat_call_args(persist.await_args)
     ), "a zero-candidate rerun must still persist (clearing any stale prior shortlist)"
+
+
+# ── advisory-lock dedup (ADR-010 §1 residual) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lock_already_held_returns_already_running_before_any_row_fetch() -> None:
+    """When the advisory lock is already held by a concurrent duplicate run,
+    ``shortlist_job`` must short-circuit BEFORE fetching the job row —
+    proving the lock check runs first, not merely "somewhere before persist"."""
+    from src.worker.matching_tasks import shortlist_job
+
+    conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist", new_callable=AsyncMock
+        ) as generate,
+        patch(
+            "src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock
+        ) as persist,
+    ):
+        result = await shortlist_job(ctx, str(uuid4()))
+
+    assert result == "already_running"
+    conn.fetchrow.assert_not_called()
+    generate.assert_not_called()
+    persist.assert_not_called()
+    release_lock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lock_is_acquired_with_shortlist_kind_and_the_job_id() -> None:
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as try_lock,
+        patch("src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock),
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=ShortlistResult(job_id=job_id, entries=[]),
+        ),
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+    ):
+        await shortlist_job(ctx, str(job_id))
+
+    try_lock.assert_awaited_once_with(conn, "shortlist", job_id)
+
+
+@pytest.mark.asyncio
+async def test_normal_run_releases_the_lock_it_acquired() -> None:
+    """A successful run must release the lock in a ``finally`` so a later
+    legitimate re-run is not left blocked."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=ShortlistResult(job_id=job_id, entries=[]),
+        ),
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+    ):
+        result = await shortlist_job(ctx, str(job_id))
+
+    assert result == "empty"
+    release_lock.assert_awaited_once_with(conn, "shortlist", job_id)
+
+
+@pytest.mark.asyncio
+async def test_lock_is_released_even_when_the_orchestrator_raises() -> None:
+    """The release must be in a ``finally`` — an exception mid-run must not
+    leave the lock held forever."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_Row({"description_parsed": {"required_skills": []}}))
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await shortlist_job(ctx, str(job_id))
+
+    release_lock.assert_awaited_once_with(conn, "shortlist", job_id)
+
+
+@pytest.mark.asyncio
+async def test_missing_job_row_still_releases_the_lock() -> None:
+    """The "missing" early-return happens AFTER the lock is acquired (the
+    row fetch is inside the locked section), so it must still release."""
+    from src.worker.matching_tasks import shortlist_job
+
+    conn = _make_conn(None)
+    ctx = _make_ctx(conn)
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+    ):
+        result = await shortlist_job(ctx, str(uuid4()))
+
+    assert result == "missing"
+    release_lock.assert_awaited_once()

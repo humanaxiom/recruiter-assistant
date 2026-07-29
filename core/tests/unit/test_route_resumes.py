@@ -168,11 +168,29 @@ def _mock_conn(
     fetchrow: _Row | None = None,
     fetch: list[_Row] | None = None,
     fetchval: Any = None,
+    job_exists: bool = True,
 ) -> MagicMock:
+    """``fetchval`` answers the job-existence pre-check
+    (``resume_service._JOB_EXISTS_SQL``, ``"SELECT id FROM jobs WHERE id =
+    $1"`` EXACTLY) by ``job_exists`` — a truthy id by default, so every
+    pre-existing caller of this fixture (all written before that check
+    existed) is unaffected — while every OTHER ``fetchval`` query (the
+    sha-dedup pre-check, the blind-review flag lookup, …) keeps answering
+    the plain ``fetchval`` param unchanged. Matching on the FULL exact query
+    string (not a ``"jobs" in query`` substring test) is deliberate: the
+    blind-review lookups (``...FROM jobs j JOIN resumes r...``) also contain
+    the substring ``"jobs"`` and must keep going through ``fetchval``, not
+    this branch."""
     conn = MagicMock(name="conn")
     conn.fetchrow = AsyncMock(return_value=fetchrow)
     conn.fetch = AsyncMock(return_value=fetch or [])
-    conn.fetchval = AsyncMock(return_value=fetchval)
+
+    async def _fetchval(query: str, *args: Any) -> Any:
+        if query.strip() == "SELECT id FROM jobs WHERE id = $1":
+            return uuid4() if job_exists else None
+        return fetchval
+
+    conn.fetchval = AsyncMock(side_effect=_fetchval)
     conn.execute = AsyncMock(return_value="INSERT 0 1")
     conn.transaction = MagicMock(return_value=_acm())
     return conn
@@ -640,6 +658,70 @@ async def test_upload_resumes_crafted_filename_blob_key_server_generated() -> No
     assert "jane" not in key.lower()
     assert "doe" not in key.lower()
     assert "confidential" not in key.lower()
+
+
+# ── upload: nonexistent job (backend-robustness fix) ────────────────────
+#
+# ``POST /jobs/{job_id}/resumes`` against a job_id with no matching ``jobs``
+# row must return a clean 404, never let a raw
+# ``asyncpg.exceptions.ForeignKeyViolationError`` from the résumé INSERT
+# escape as an unhandled 500 (diagnosed live against a real Postgres). This
+# mocked-conn test proves the ROUTE-level plumbing maps "job missing" -> 404
+# and performs no blob/DB write; because everything here is mocked, it can
+# only exercise a PRE-INSERT existence check (the recommended fix) — the
+# FK-violation-vs-clean-404 distinction itself can only be proven against a
+# REAL Postgres, which is why
+# ``test_api_resumes_pg.py::test_upload_to_nonexistent_job_returns_404_not_500``
+# is the load-bearing test for this fix, not this file.
+
+
+def _mock_conn_missing_job() -> MagicMock:
+    """``fetchval`` answers ``None`` to EVERY query — including whatever
+    job-existence pre-check the fix adds — while every other mocked method
+    stays identical to a fresh ``_mock_conn()``."""
+    conn = MagicMock(name="conn")
+    conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock(return_value="INSERT 0 1")
+    conn.transaction = MagicMock(return_value=_acm())
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_job_not_found_returns_404_and_writes_nothing() -> None:
+    conn = _mock_conn_missing_job()
+    store = _mock_blob_store()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("resume.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 404
+    store.put.assert_not_called()
+    conn.execute.assert_not_called()
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_job_not_found_body_is_the_apperror_envelope() -> None:
+    """The 404 goes through the SAME ``AppError`` -> JSON envelope every other
+    not-found route uses (``{"detail": ..., "code": "resource.not_found"}``),
+    not a bare FastAPI/Starlette default error page."""
+    conn = _mock_conn_missing_job()
+    store = _mock_blob_store()
+    app = _build_app(conn, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[("files", ("resume.pdf", _PDF_MAGIC, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "resource.not_found"
 
 
 # ── FU-4 (RBAC): POST /jobs/{id}/resumes is admin/recruiter ONLY ────────

@@ -54,6 +54,17 @@ def _client_with(
     return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
 
 
+def _norm(text: str) -> str:
+    """Collapse all whitespace and lowercase before a substring check.
+
+    A template line-wrap can split a phrase across a rendered newline (e.g.
+    "...a minute\n    or two..."), which would let an absence assertion pass
+    merely because the phrase happens to wrap, not because it's actually
+    gone. Normalizing whitespace first closes that gap.
+    """
+    return " ".join(text.split()).lower()
+
+
 def _entry(
     job_id: Any,
     *,
@@ -318,6 +329,121 @@ def test_match_cards_read_carries_no_reveal_kwarg(
     client.get(f"/resumes/{resume_id}/match-results-cards")
     spy.assert_called_once()
     assert "reveal" not in spy.call_args.kwargs
+
+
+# ── honest progress copy + elapsed indicator (fix/upload-and-progress-ux) ──
+#
+# Diagnosed live: the reverse-match job runs the evidence model on EVERY
+# candidate the run considers (per-candidate evidence calls on a local model,
+# ~1-2 min PER candidate), so a full run realistically takes several minutes,
+# scaling with the number of jobs/candidates involved — not "a minute or two"
+# as the old copy claimed. That undersell reads as "not doing much" / broken.
+# This fix is copy + a live elapsed-time signal only (no backend/server-state
+# change in this slice — a fully server-durable timestamp, so the indicator
+# survives a hard reload, stays out of scope). Pure Flask/Jinja rendering over
+# a mocked api_client — offline suffices, no integration test needed.
+
+
+def test_match_cards_still_finding_shows_honest_multi_minute_copy(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The old copy ('the local model can take a minute or two') badly
+    undersells a job that runs the model on every candidate; several minutes
+    is the honest floor."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
+    )
+    body = client.get(f"/resumes/{resume_id}/match-results-cards").get_data(
+        as_text=True
+    )
+    assert "several minutes" in _norm(body)
+    assert "every candidate" in _norm(body)
+
+
+def test_match_cards_still_finding_drops_the_old_minute_or_two_phrasing(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
+    )
+    body = client.get(f"/resumes/{resume_id}/match-results-cards").get_data(
+        as_text=True
+    )
+    assert "minute or two" not in _norm(body)
+
+
+def test_match_cards_elapsed_indicator_at_attempt_zero_shows_a_sane_start(
+    monkeypatch: Any, client: Any
+) -> None:
+    """At ``attempt=0`` (~0s since the poll started) the indicator must not
+    lie about elapsed time — it shows a near-zero/just-started reading."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
+    )
+    body = client.get(f"/resumes/{resume_id}/match-results-cards").get_data(
+        as_text=True
+    )
+    assert "elapsed" in _norm(body)
+    assert "0s" in _norm(body) or "just started" in _norm(body)
+
+
+def test_match_cards_elapsed_indicator_scales_with_attempt(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The poll re-fires every 3s, so at attempt=40 roughly 120s (~2 min) have
+    passed — the fragment must reflect that moving figure, not a static hint."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
+    )
+    body = client.get(f"/resumes/{resume_id}/match-results-cards?attempt=40").get_data(
+        as_text=True
+    )
+    assert "elapsed" in _norm(body)
+    assert "120s" in _norm(body) or "2 min" in _norm(body) or "2:00" in _norm(body)
+
+
+def test_match_cards_empty_done_has_no_elapsed_or_still_working_line(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A completed-but-empty result is terminal — it must not carry the
+    still-working elapsed indicator."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_match_results",
+        MagicMock(
+            return_value=_results(resume_id, generated_at="2026-07-18T00:00:00Z")
+        ),
+    )
+    body = client.get(f"/resumes/{resume_id}/match-results-cards").get_data(
+        as_text=True
+    )
+    assert "elapsed" not in _norm(body)
+    assert "still working" not in _norm(body)
+    assert "No matching" in body
+
+
+def test_match_cards_gave_up_has_no_elapsed_or_still_working_line(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The give-up state (attempt at the cap) is terminal too — no elapsed
+    line, no poll trigger."""
+    from frontend.app import _MAX_MATCH_POLL_ATTEMPTS
+
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_match_results", MagicMock(return_value=_results(resume_id))
+    )
+    body = client.get(
+        f"/resumes/{resume_id}/match-results-cards?attempt={_MAX_MATCH_POLL_ATTEMPTS}"
+    ).get_data(as_text=True)
+    assert "hx-trigger" not in body
+    assert "elapsed" not in _norm(body)
+    assert "still working" not in _norm(body)
 
 
 # ── match_results.html — candidate→job navigation ─────────────────────────

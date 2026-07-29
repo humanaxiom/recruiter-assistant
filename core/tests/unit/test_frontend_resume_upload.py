@@ -9,10 +9,23 @@ error) and the HTMX ``resumes-table`` poll fragment (keeps its ``hx-trigger``
 while any résumé row is still ``uploaded``/``parsing`` and DROPS it once every
 row is terminal ``parsed``/``failed``). Includes a blind-boundary byte-scan:
 a planted fake name/email/phone must be absent from the rendered table.
+
+Also covers the upload-UX fix: an empty/misdirected file selection (nothing
+attached to the ``files`` input, or a part with an empty filename) must be
+caught by the ROUTE itself — before ``api_client.upload_resumes`` is ever
+called — with a friendly re-render, never a raw pydantic 422 list forwarded
+to and echoed by the page; and ``_format_error`` must turn a raw pydantic
+error-list ``detail`` into readable text in general (not just for this one
+route). All of this is pure Flask/route/formatting logic over a MOCKED
+``api_client`` — no real backend or database involved — so the offline unit
+suite is the correct (and sufficient) place for it; no integration test is
+needed for this diff.
 """
 
 from __future__ import annotations
 
+import html
+import zipfile
 from collections.abc import Callable
 from io import BytesIO
 from typing import Any
@@ -23,7 +36,7 @@ import httpx
 import pytest
 
 from frontend import api_client
-from frontend.app import app
+from frontend.app import _format_error, app
 
 _REAL_NAME = "Zzyzxqrst Wibblesworth"
 _REAL_EMAIL = "zzyzxqrst.wibblesworth@example.test"
@@ -82,6 +95,14 @@ def _resume(
     }
     row.update(extra)
     return row
+
+
+def _fake_resume_zip() -> bytes:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr(zipfile.ZipInfo(filename="a.pdf"), b"%PDF-1.4 fake pdf bytes")
+        zf.writestr(zipfile.ZipInfo(filename="b.pdf"), b"%PDF-1.4 fake pdf bytes 2")
+    return buf.getvalue()
 
 
 # ── api_client.upload_resumes — multipart shape ──────────────────────────
@@ -549,6 +570,222 @@ def test_upload_route_backend_unavailable_is_not_a_500(
     )
     assert resp.status_code in (502, 503)
     assert resp.status_code != 500
+
+
+# ── POST /jobs/<id>/resumes — empty/misdirected file-selection guard ────
+#
+# Diagnosed against the live app: submitting the form with consent ticked but
+# nothing (or an empty part) attached to the ``files`` input forwards an
+# EMPTY list to ``api_client.upload_resumes``. The backend then 422s with a
+# raw pydantic error body, which — pre-fix — the frontend renders VERBATIM.
+# The fix is a route-level guard, mirroring the existing consent guard: if
+# ``files`` ends up empty, never call the backend at all.
+
+
+def test_upload_route_with_no_files_part_never_calls_backend_and_shows_friendly_error(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Consent is ticked but the ``files`` input has nothing attached at all
+    (no ``files`` part in the multipart body whatsoever) — e.g. the recruiter
+    forgot to select a résumé, or attached it under one of the form's OTHER
+    file inputs (cover letter / pairing manifest) by mistake."""
+    job_id = uuid4()
+    spy = MagicMock()
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={"consent_acknowledged": "true"},
+        content_type="multipart/form-data",
+    )
+    spy.assert_not_called()
+    assert resp.status_code == 400
+    body = resp.get_data(as_text=True).lower()
+    assert "select at least one" in body
+    assert "résumé" in body or "resume" in body
+    # And, critically, no raw pydantic error leaks through:
+    assert "{'type'" not in body
+    assert "'loc'" not in body
+
+
+def test_upload_route_with_empty_filename_file_never_calls_backend(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A ``files`` part IS present but carries an empty filename (the
+    existing ``if upload.filename`` filter in the route drops it, yielding
+    the same empty list as the no-part case above) — the guard must fire
+    here too."""
+    job_id = uuid4()
+    spy = MagicMock()
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b""), ""),
+        },
+        content_type="multipart/form-data",
+    )
+    spy.assert_not_called()
+    assert resp.status_code == 400
+    assert "select at least one" in resp.get_data(as_text=True).lower()
+
+
+def test_upload_route_with_a_real_file_still_calls_backend(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The new guard must NOT false-trip on a normal, well-formed upload —
+    a single real résumé file must still reach ``api_client.upload_resumes``
+    exactly as before."""
+    job_id = uuid4()
+    spy = MagicMock(
+        return_value=[{"original_filename": "a.pdf", "outcome": "accepted"}]
+    )
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"%PDF-1.4 fake pdf bytes"), "a.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    spy.assert_called_once()
+
+
+def test_upload_route_with_a_zip_file_still_calls_backend(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Nor may the guard break the documented ``.zip`` batch-upload path —
+    the backend expands a ``.zip`` server-side; the route only ever forwards
+    the raw bytes as a single ``files=`` part, and the guard's emptiness
+    check must not mistake a non-empty zip part for an empty selection."""
+    job_id = uuid4()
+    spy = MagicMock(
+        return_value=[
+            {"original_filename": "a.pdf", "outcome": "accepted"},
+            {"original_filename": "b.pdf", "outcome": "accepted"},
+        ]
+    )
+    monkeypatch.setattr(api_client, "upload_resumes", spy)
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(_fake_resume_zip()), "batch.zip"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    spy.assert_called_once()
+    forwarded_files = spy.call_args.args[1]
+    assert forwarded_files[0][0] == "batch.zip"
+
+
+def test_upload_route_translates_raw_pydantic_422_detail_to_friendly_text(
+    monkeypatch: Any, client: Any
+) -> None:
+    """End-to-end through the route: if the backend still returns a 422 with
+    a raw pydantic-style error-list ``detail`` (e.g. some validation path the
+    empty-files guard above does not cover), the recruiter must see readable
+    text — never the raw ``[{'type': ...}]`` repr, whether checked as literal
+    text or (since Jinja autoescapes single quotes to ``&#39;``) after
+    HTML-unescaping the rendered body."""
+    job_id = uuid4()
+    pydantic_detail = [
+        {
+            "type": "missing",
+            "loc": ["body", "files"],
+            "msg": "Field required",
+            "input": None,
+        }
+    ]
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            side_effect=api_client.BadRequest(
+                "backend 422", status_code=422, detail=pydantic_detail
+            )
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"%PDF-1.4 fake pdf bytes"), "a.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = resp.get_data(as_text=True)
+    unescaped = html.unescape(body)
+    assert "Field required" in unescaped
+    assert "{'type'" not in unescaped
+    assert "'loc'" not in unescaped
+    assert "'input'" not in unescaped
+
+
+# ── _format_error — friendly rendering of backend error details ─────────
+
+
+def test_format_error_renders_pydantic_style_list_detail_as_readable_text() -> None:
+    """A raw FastAPI/pydantic 422 body — ``[{'type': 'missing', 'loc': [...],
+    'msg': 'Field required', 'input': None}]`` — must never be shown
+    verbatim; it must be translated into readable text (e.g. joining the
+    ``msg`` fields)."""
+    detail = [
+        {
+            "type": "missing",
+            "loc": ["body", "files"],
+            "msg": "Field required",
+            "input": None,
+        }
+    ]
+    result = _format_error(detail)
+    assert "Field required" in result
+    assert "{'type'" not in result
+    assert "'loc'" not in result
+    assert "'input'" not in result
+
+
+def test_format_error_joins_multiple_pydantic_errors() -> None:
+    detail = [
+        {"type": "missing", "loc": ["body", "files"], "msg": "Field required"},
+        {
+            "type": "value_error",
+            "loc": ["body", "consent_acknowledged"],
+            "msg": "must be true",
+        },
+    ]
+    result = _format_error(detail)
+    assert "Field required" in result
+    assert "must be true" in result
+    assert "{'type'" not in result
+
+
+def test_format_error_plain_string_detail_is_unchanged() -> None:
+    assert _format_error("unsupported file type") == "unsupported file type"
+
+
+def test_format_error_none_detail_has_a_sensible_fallback() -> None:
+    result = _format_error(None)
+    assert result
+    assert isinstance(result, str)
+    assert "{" not in result
+
+
+def test_format_error_empty_list_detail_has_a_sensible_fallback() -> None:
+    result = _format_error([])
+    assert result
+    assert isinstance(result, str)
+    assert result != "[]"
 
 
 # ── GET /jobs/<id>/resumes-table — poll fragment ─────────────────────────

@@ -190,6 +190,8 @@ def _sniff_mime(data: bytes) -> str:
     return MIME_TXT
 
 
+_JOB_EXISTS_SQL = "SELECT id FROM jobs WHERE id = $1"
+
 _DEDUP_SQL = "SELECT id FROM resumes WHERE job_id = $1 AND sha256 = $2"
 
 _INSERT_UPLOADED_SQL = """
@@ -266,6 +268,20 @@ async def upload_resumes(
         raise ValueError(
             "consent_acknowledged must be true before any résumé upload I/O"
         )
+
+    # Backend-robustness fix (diagnosed live): a job_id with no matching
+    # `jobs` row must be rejected here, BEFORE any blob write or résumé
+    # INSERT is attempted — otherwise the INSERT's `resumes_job_id_fkey`
+    # trips a raw `asyncpg.exceptions.ForeignKeyViolationError` that
+    # surfaces as an unhandled 500 at the route layer. This mirrors the
+    # existence-check convention already used elsewhere (job_service.get_job,
+    # resumes.py's own `_EXISTS_SQL`) rather than catching the FK violation
+    # itself, so the contract has no dependency on the driver's exception
+    # type or message text.
+    job_exists = await conn.fetchval(_JOB_EXISTS_SQL, job_id)
+    if job_exists is None:
+        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+
     cover_map = cover_letter_map or {}
     warn_map = warnings_map or {}
 
