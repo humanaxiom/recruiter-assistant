@@ -63,10 +63,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import arq
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from src.pipeline.llm import LLMOutputInvalidError
+from src.pipeline.llm import LLMOutputInvalidError, LLMUnavailableError
 from src.pipeline.parsing import MIME_DOCX, EncryptedPdfError, UnsupportedMimeError
 from src.schemas import (
     CandidateInfo,
@@ -79,6 +80,7 @@ from src.schemas import (
     ResumeSkillDetail,
     ResumeSkillDetails,
 )
+from src.settings import Settings
 from src.storage.blob_store import BlobNotFound
 from src.worker.resume_tasks import (
     _drop_smeared_years,
@@ -2306,3 +2308,367 @@ async def test_non_empty_candidate_block_uncommon_two_word_skill_kept() -> None:
     )
     stored_names = [s.name for s in stored_parsed.skills]
     assert "postgres db" in stored_names
+
+
+# ── FU-7 (ADR-021 §3) — honest résumé parse status ──────────────────────────
+#
+# Two transitions `parse_resume` must make honest:
+#
+# 1. Claim `uploaded -> parsing` at task start (`resume_service.claim_parsing`),
+#    BEFORE any blob I/O — so a worker crash mid-parse leaves the row
+#    observably 'parsing', never silently stuck at 'uploaded' forever.
+# 2. On a TRANSIENT `LLMUnavailableError` (Ollama down / circuit breaker
+#    open), let arq retry via `raise arq.Retry(...) from exc` on every
+#    NON-final try, and only give up (`record_parse_failure` -> "failed") on
+#    the LAST configured try (`ctx["job_try"] >= settings.resume_parse_max_tries`).
+#
+# CRITICAL arq fact (verified against the INSTALLED arq==0.28.0, not ADR-021
+# §3's wording, which is wrong): `ctx` carries `job_try` (1-based) but NO
+# `max_tries` key of its own, and a plain uncaught exception does NOT trigger
+# an arq retry — only raising `arq.Retry` does.
+
+
+# ── Decision 1: uploaded -> parsing claim ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_claim_parsing_called_before_blob_fetch() -> None:
+    """`resume_service.claim_parsing(conn, resume_id)` must run BEFORE any
+    blob I/O — the whole point of the claim is that a crash mid-parse leaves
+    the row observably 'parsing', not silently stuck 'uploaded'."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    ctx = _make_ctx(conn, blob_store=blob_store)
+
+    manager = MagicMock()
+    claim_parsing = AsyncMock(return_value=True)
+    manager.attach_mock(claim_parsing, "claim_parsing")
+    manager.attach_mock(blob_store.get, "blob_get")
+
+    with (
+        patch("src.worker.resume_tasks.resume_service.claim_parsing", claim_parsing),
+        patch(
+            "src.worker.resume_tasks.extract_text",
+            MagicMock(side_effect=UnsupportedMimeError("stop after blob fetch")),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    claim_parsing.assert_awaited_once()
+    flat = _flat_call_args(claim_parsing.await_args)
+    assert conn in flat
+    assert resume_id in flat
+    blob_store.get.assert_awaited_once()
+    call_names = [c[0] for c in manager.mock_calls]
+    assert call_names.index("claim_parsing") < call_names.index("blob_get"), (
+        "claim_parsing must run BEFORE the blob fetch, not after -- a crash "
+        "between the claim and the blob fetch must still leave the row "
+        "'parsing', not 'uploaded'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_parsing_false_on_retry_still_proceeds_to_parse() -> None:
+    """A retry where the row is already 'parsing' (`claim_parsing` returns
+    False -- the guarded UPDATE matched 0 rows) must NOT be treated as stale
+    or an error: the parse proceeds exactly like a fresh claim. The returned
+    bool is for logging only, never a control-flow branch."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="parsing", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as claim_parsing,
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(None, None, None, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    claim_parsing.assert_awaited_once()
+    assert result == "parsed", (
+        "claim_parsing returning False (already 'parsing') must not be "
+        "mistaken for a stale row or a failure"
+    )
+    record_parsed.assert_awaited_once()
+    enqueue.assert_awaited_once()
+
+
+# ── Decision 2: transient-LLM retry/fail boundary ───────────────────────────
+#
+# Every test below needs control flow to actually reach the LLM/embed calls,
+# so `claim_parsing` is mocked True throughout -- its own behaviour is
+# Decision 1's concern, covered above.
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_on_non_last_try_raises_arq_retry() -> None:
+    """`ctx["job_try"]=1` against `resume_parse_max_tries=5` is NOT the last
+    try -- `parse_resume` must let arq retry (`raise arq.Retry(...) from exc`),
+    and must NEVER call `record_parse_failure` or write a 'failed' status for
+    a transient outage arq is about to retry anyway."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    llm_exc = LLMUnavailableError("ollama down")
+    llm = MagicMock(chat_json=AsyncMock(side_effect=llm_exc))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store)
+    ctx["job_try"] = 1
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks.get_settings",
+            return_value=Settings(resume_parse_max_tries=5),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+    ):
+        with pytest.raises(arq.Retry) as exc_info:
+            await parse_resume(ctx, str(resume_id))
+
+    assert exc_info.value.__cause__ is llm_exc, (
+        "arq.Retry must chain the original LLMUnavailableError ('raise ... "
+        "from exc'), not swallow or replace it"
+    )
+    record_failure.assert_not_awaited()
+    record_parsed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_on_last_try_records_failure_and_returns_failed() -> None:
+    """`ctx["job_try"]=5` against `resume_parse_max_tries=5` IS the last try
+    -- `parse_resume` must give up: call `record_parse_failure` with a reason
+    mentioning the retry count, return "failed" (NOT raise arq.Retry), and
+    never call `record_parsed` / enqueue an outbox row."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    llm = MagicMock(chat_json=AsyncMock(side_effect=LLMUnavailableError("ollama down")))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store)
+    ctx["job_try"] = 5
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks.get_settings",
+            return_value=Settings(resume_parse_max_tries=5),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    flat = _flat_call_args(record_failure.await_args)
+    reason = next((a for a in flat if isinstance(a, str) and "retr" in a.lower()), None)
+    assert (
+        reason is not None
+    ), f"record_parse_failure's reason should mention the retry count: {flat!r}"
+    assert "5" in reason, f"reason should mention the configured try count: {reason!r}"
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_from_skills_extraction_on_last_try_records_failure() -> (
+    None
+):
+    """SINGLE boundary proof, not a per-call-site patch: the core LLM call
+    succeeds, but the LLM call INSIDE `_extract_skills_merged`
+    (`resume_skills_v2`) raises `LLMUnavailableError` on the last try. Must
+    be caught by the SAME boundary as the core call -- `_extract_skills_merged`
+    itself only ever catches `LLMOutputInvalidError`, never
+    `LLMUnavailableError` (see its existing non-fatal-failure test above), so
+    this exception is UNCAUGHT until it reaches `parse_resume`."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(summary="Backend engineer.")
+
+    async def _chat_json_dispatch(messages: Any, schema: Any, **kwargs: Any) -> Any:
+        if schema is ResumeCore:
+            return core
+        raise LLMUnavailableError("ollama down mid-skills-call")
+
+    llm = MagicMock(chat_json=AsyncMock(side_effect=_chat_json_dispatch))
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="Python, SQL")]
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store)
+    ctx["job_try"] = 5
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.get_settings",
+            return_value=Settings(resume_parse_max_tries=5),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_from_embedder_on_last_try_records_failure() -> None:
+    """SINGLE boundary proof, not a per-call-site patch: the core LLM call
+    and skills extraction succeed, but `embedder.embed` (the summary embed
+    call) raises `LLMUnavailableError` on the last try. Must be caught by the
+    SAME boundary as the core/skills LLM calls, exactly like the last-try
+    core-call case above."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(
+        embed=AsyncMock(side_effect=LLMUnavailableError("ollama down mid-embed"))
+    )
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    ctx["job_try"] = 5
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "src.worker.resume_tasks.get_settings",
+            return_value=Settings(resume_parse_max_tries=5),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    record_parsed.assert_not_awaited()
+    enqueue.assert_not_awaited()
