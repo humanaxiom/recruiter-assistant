@@ -244,11 +244,26 @@ _ENTRY_COLS = (
     "id, job_id, resume_id, rank, score_final, "
     "score_breakdown, evidence, generated_at"
 )
+# FU-9 (withdrawn-résumé lifecycle) — a withdrawn candidate's persisted
+# shortlist_entries row survives the withdrawal untouched (write path is
+# unchanged); only the READ must hide it. Neither query below joins resumes,
+# so the guard is a correlated NOT EXISTS keyed on the entry's own
+# resume_id. Appended AFTER the "WHERE job_id = $1" / "WHERE id = $1" anchor
+# so list_for_job's FU-6 `.replace("WHERE job_id = $1", ...)` still finds
+# that exact substring verbatim and inserts its scoping predicate before
+# this clause.
+_NOT_WITHDRAWN_SQL = (
+    "NOT EXISTS (SELECT 1 FROM resumes r WHERE r.id = shortlist_entries.resume_id "
+    "AND r.withdrawn_at IS NOT NULL)"
+)
 _LIST_QUERY = (
     f"SELECT {_ENTRY_COLS} FROM shortlist_entries "
-    "WHERE job_id = $1 ORDER BY rank ASC"
+    f"WHERE job_id = $1 AND {_NOT_WITHDRAWN_SQL} ORDER BY rank ASC"
 )
-_GET_QUERY = f"SELECT {_ENTRY_COLS} FROM shortlist_entries WHERE id = $1"
+_GET_QUERY = (
+    f"SELECT {_ENTRY_COLS} FROM shortlist_entries "
+    f"WHERE id = $1 AND {_NOT_WITHDRAWN_SQL}"
+)
 
 # Blind-review queries: same columns (aliased `se`, since the JOIN to resumes
 # makes a bare `id` ambiguous) plus the candidate's decrypted name/contact and
@@ -267,14 +282,20 @@ _BLIND_COLS = (
     "AS _c_phone, "
     "r.parsed AS _c_parsed"
 )
+# FU-9 (withdrawn-résumé lifecycle) — these already JOIN resumes, so a plain
+# `r.withdrawn_at IS NULL` predicate suffices. Appended AFTER the
+# "WHERE se.job_id = $1" / "WHERE se.id = $1" anchor so the FU-6
+# `.replace("WHERE se.job_id = $1", ...)` scoping in list_for_job still finds
+# that exact substring verbatim.
 _BLIND_LIST_QUERY = (
     f"SELECT {_BLIND_COLS} FROM shortlist_entries se "
     "JOIN resumes r ON r.id = se.resume_id "
-    "WHERE se.job_id = $1 ORDER BY se.rank ASC"
+    "WHERE se.job_id = $1 AND r.withdrawn_at IS NULL ORDER BY se.rank ASC"
 )
 _BLIND_GET_QUERY = (
     f"SELECT {_BLIND_COLS} FROM shortlist_entries se "
-    "JOIN resumes r ON r.id = se.resume_id WHERE se.id = $1"
+    "JOIN resumes r ON r.id = se.resume_id "
+    "WHERE se.id = $1 AND r.withdrawn_at IS NULL"
 )
 _BLIND_CHECK_QUERY = (
     "SELECT j.blind_review FROM jobs j "
