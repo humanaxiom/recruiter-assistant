@@ -243,3 +243,24 @@ request's word "tractable."** Build it once, covering both axes.
   reused here); ADR-016 (audited-action UI pattern); ADR-010 (DELETE-first persist; concurrent-run
   residual); ADR-007 §6/§7 (at-rest cleartext PII posture the revoke-and-purge path would partially
   reverse).
+
+## Amendment 2026-07-29 — shortlist read hides withdrawn candidates (closes the "rely on regenerate" residual)
+
+The "Accepted residuals" note above said a `shortlist_entries` row persisted *before* a withdrawal keeps
+the candidate until the next regenerate, and we'd "rely on regenerate." Live testing showed this is a bug
+from the recruiter's view: a withdrawn candidate kept appearing in the shortlist (with an active "Withdraw"
+button and no withdrawn marker), even though FU-8's Neo4j un-projection had correctly removed them from the
+forward recall set (verified: the `resume.withdrawn` outbox event was delivered and the node deleted).
+
+Fixed at the **read layer**: `shortlist_service`'s four read queries (`_LIST_QUERY`, `_GET_QUERY`,
+`_BLIND_LIST_QUERY`, `_BLIND_GET_QUERY`) now filter `withdrawn_at IS NULL` (blind queries via the existing
+`resumes` join; non-blind via a correlated `NOT EXISTS`). A withdrawn candidate drops out of the shortlist
+view **immediately, without a regenerate**; because the persisted row is left untouched, a **reinstate**
+(which clears `withdrawn_at`) brings them straight back from that same row — symmetric, no regenerate either
+way. The write path (`persist_shortlist`, DELETE-first) and all scoring code are unchanged; the FU-6
+row-scoping predicate still composes (the filter is appended after the scoping `.replace` anchor). Gates
+green: reviewer, security, `./scripts/verify.sh all` (3977 unit @ 92.64% + integration incl. new
+`test_shortlist_read_excludes_withdrawn_pg.py`).
+
+Remaining (unchanged): reverse-match already excludes withdrawn at *generation*; its persisted read is not
+scrubbed here (out of scope — the reported issue was the forward shortlist).
