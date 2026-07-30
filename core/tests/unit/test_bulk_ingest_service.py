@@ -19,6 +19,12 @@ fails at collection.
   letter to its résumé by the filename convention, PRESERVES résumé input order,
   and DEMOTES a cover-named file with no matching résumé to a standalone résumé
   carrying a STATIC-English ``note`` (never dropped, never filename-derived).
+* Bug fix (fix/cover-letter-pairing-separators): the filename convention MUST
+  treat space, dash, and underscore as EQUIVALENT separators (case-insensitive)
+  when matching a suffix and building the shared pairing base — real-world zip
+  filenames like ``Jane Smith Cover Letter.pdf`` are common and were previously
+  only recognized as résumés (silently losing the cover-letter pairing), NOT
+  dropped outright, which made the bug hard to notice.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import pytest
 
 from src.errors import AppError
 from src.services.bulk_ingest_service import (
+    _DEMOTED_COVER_NOTE,
     ApplicantFiles,
     JobManifestRow,
     ManifestError,
@@ -95,6 +102,87 @@ def test_classify_is_case_insensitive() -> None:
 def test_classify_does_not_false_match_inside_a_word() -> None:
     # ``discover`` ends with ``cover`` but not ``_cover`` — it is a résumé.
     assert _classify("discover.pdf") == ("resume", "discover")
+
+
+def test_classify_leading_separator_with_no_name_is_not_a_cover() -> None:
+    # Pins the non-empty-base guard ``(?P<base>.*\S)``: a stem that is ONLY a
+    # separator + suffix ("_cover_letter", "-cover") has no candidate name to
+    # pair on, so it must stay a résumé, never a cover with an empty base.
+    assert _classify("_cover_letter.pdf") == ("resume", "cover letter")
+    assert _classify("-cover.pdf") == ("resume", "cover")
+
+
+def test_classify_pathological_length_short_circuits_without_backtracking() -> None:
+    # ReDoS guard (security finding): an over-length all-separator stem must
+    # skip the backtracking-prone suffix regexes and return fast. If the guard
+    # regressed, this pathological input backtracks O(n²) and the test hangs
+    # (the suite's per-test timeout would then fail it) instead of asserting.
+    role, _ = _classify("-" * 5000 + "cover.pdf")
+    assert role == "resume"
+
+
+# ── _classify: space/dash separators are equivalent to underscore (bug fix) ─
+
+
+def test_classify_cover_with_space_separator() -> None:
+    role, base = _classify("Jane Smith Cover Letter.pdf")
+    assert role == "cover"
+    assert base == "jane smith"
+
+
+def test_classify_resume_with_space_separator_shares_base_with_its_cover() -> None:
+    cover_role, cover_base = _classify("Jane Smith Cover Letter.pdf")
+    resume_role, resume_base = _classify("Jane Smith Resume.pdf")
+    assert cover_role == "cover"
+    assert resume_role == "resume"
+    assert resume_base == cover_base
+
+
+def test_classify_cover_with_dash_separator() -> None:
+    assert _classify("jane-cover-letter.pdf") == ("cover", "jane")
+
+
+def test_classify_resume_with_dash_separator() -> None:
+    assert _classify("jane-resume.pdf") == ("resume", "jane")
+
+
+def test_classify_cv_with_dash_separator() -> None:
+    assert _classify("alex-cv.pdf") == ("resume", "alex")
+
+
+def test_classify_bare_cover_with_dash_separator() -> None:
+    assert _classify("alex-cover.pdf") == ("cover", "alex")
+
+
+@pytest.mark.parametrize(
+    "resume_name, cover_name",
+    [
+        ("Jane_Smith Resume.pdf", "jane-smith-cover-letter.pdf"),
+        ("Jane Smith Resume.pdf", "Jane_Smith_Cover_Letter.pdf"),
+    ],
+)
+def test_classify_mixed_separators_normalize_to_the_same_base(
+    resume_name: str, cover_name: str
+) -> None:
+    resume_role, resume_base = _classify(resume_name)
+    cover_role, cover_base = _classify(cover_name)
+    assert resume_role == "resume"
+    assert cover_role == "cover"
+    assert resume_base == cover_base
+
+
+def test_classify_bare_cover_word_with_no_name_before_it_stays_a_resume() -> None:
+    # "Cover.pdf" is just the bare word — no applicant name precedes it, so
+    # there is no shared pairing base to build. It must stay a résumé, not be
+    # misclassified as a cover letter.
+    assert _classify("Cover.pdf") == ("resume", "cover")
+
+
+def test_classify_rediscover_analytics_resume_is_not_a_false_cover_hit() -> None:
+    assert _classify("Rediscover Analytics Resume.pdf") == (
+        "resume",
+        "rediscover analytics",
+    )
 
 
 # ── pair_applicants ──────────────────────────────────────────────────────
@@ -195,6 +283,92 @@ def test_applicant_files_is_frozen() -> None:
     pair = ApplicantFiles(resume=_f("a.pdf"))
     with pytest.raises(dataclasses.FrozenInstanceError):
         pair.note = "mutated"  # type: ignore[misc]
+
+
+# ── pair_applicants: space/dash separators are equivalent (bug fix) ──────
+
+
+def test_pair_applicants_pairs_space_separated_resume_and_cover() -> None:
+    result = pair_applicants(
+        [_f("Jane Smith Resume.pdf"), _f("Jane Smith Cover Letter.pdf")]
+    )
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "Jane Smith Resume.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "Jane Smith Cover Letter.pdf"
+    assert pair.note is None
+
+
+def test_pair_applicants_pairs_dash_separated_resume_and_cover() -> None:
+    result = pair_applicants([_f("jane-resume.pdf"), _f("jane-cover-letter.pdf")])
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "jane-resume.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "jane-cover-letter.pdf"
+    assert pair.note is None
+
+
+def test_pair_applicants_pairs_mixed_underscore_and_dash_separators() -> None:
+    # Base normalization collapses runs of space/underscore/dash
+    # (case-insensitively) so a résumé named with underscore+space still
+    # pairs with a cover letter named entirely with dashes.
+    result = pair_applicants(
+        [_f("Jane_Smith Resume.pdf"), _f("jane-smith-cover-letter.pdf")]
+    )
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "Jane_Smith Resume.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "jane-smith-cover-letter.pdf"
+    assert pair.note is None
+
+
+def test_pair_applicants_no_suffix_resume_still_pairs_with_spaced_cover() -> None:
+    # A résumé with NO suffix at all (its base is the whole normalized stem)
+    # still finds its spaced-cover-letter sibling.
+    result = pair_applicants([_f("Jane Smith.pdf"), _f("Jane Smith Cover Letter.pdf")])
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "Jane Smith.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "Jane Smith Cover Letter.pdf"
+    assert pair.note is None
+
+
+def test_pair_applicants_standalone_spaced_cover_is_demoted_with_note() -> None:
+    # A cover-named file with no matching résumé is DEMOTED to a standalone
+    # résumé carrying the static note — it must NOT be silently classified
+    # as a plain résumé with no note (that was the bug: the old underscore-
+    # only ``_classify`` never even recognized this as a cover letter).
+    result = pair_applicants([_f("John Cover Letter.pdf")])
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "John Cover Letter.pdf"
+    assert pair.cover_letter is None
+    assert pair.note == _DEMOTED_COVER_NOTE
+
+
+def test_pair_applicants_dash_cv_and_dash_cover_pair() -> None:
+    result = pair_applicants([_f("alex-cv.pdf"), _f("alex-cover.pdf")])
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "alex-cv.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "alex-cover.pdf"
+
+
+def test_pair_applicants_original_underscore_convention_still_works() -> None:
+    """Regression guard: the space/dash fix must not break the original
+    underscore convention this module shipped with."""
+    result = pair_applicants([_f("jane_resume.pdf"), _f("jane_cover_letter.pdf")])
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "jane_resume.pdf"
+    assert pair.cover_letter is not None
+    assert pair.cover_letter[0] == "jane_cover_letter.pdf"
+    assert pair.note is None
 
 
 # ── manifest (Slice-3 plumbing; the pure helper is still covered here) ────

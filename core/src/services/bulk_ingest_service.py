@@ -36,11 +36,43 @@ from src.schemas.jobs import EmploymentType, Seniority
 # An uploaded file as this repo models it: ``(filename, content)``.
 UploadedFile = tuple[str, bytes]
 
-# Checked longest-first on the lowercased filename stem so ``_cover_letter``
-# wins over ``_cover``. The leading separator guards against a false hit inside
-# a word (``discover`` does not end with ``_cover``).
-_COVER_SUFFIXES: Final = ("_cover_letter", "_coverletter", "_cover_note", "_cover")
-_RESUME_SUFFIXES: Final = ("_resume", "_cv")
+# Space / dash / underscore are equivalent separators (bug fix:
+# fix/cover-letter-pairing-separators). ``[\s_-]*`` between "cover" and
+# "letter"/"note" lets a real-world name like "Jane Smith Cover Letter.pdf"
+# match. Two guards, both load-bearing:
+#   * the mandatory ``[\s_-]+`` between base and suffix means "discover.pdf"
+#     (no separator before "cover") never matches;
+#   * ``(?P<base>.*\S)`` requires a non-empty name before that separator, so a
+#     leading-separator stem with no name ("_cover_letter", "-cover") stays a
+#     résumé rather than pairing on an empty base.
+# The ``$`` anchor makes the alternation ORDER irrelevant (only the alternative
+# that consumes the exact tail can match at a given base/separator split), so
+# "cover letter" is recognized whether or not a bare "cover" precedes it.
+_COVER_SUFFIX_RE: Final = re.compile(
+    r"^(?P<base>.*\S)[\s_-]+"
+    r"(?:cover[\s_-]*letter|coverletter|cover[\s_-]*note|cover)$",
+    re.IGNORECASE,
+)
+_RESUME_SUFFIX_RE: Final = re.compile(
+    r"^(?P<base>.*\S)[\s_-]+(?:resume|cv)$", re.IGNORECASE
+)
+
+
+def _norm_base(s: str) -> str:
+    """Collapse runs of space/underscore/dash into a single space so a base
+    built from any separator convention normalizes to the same pairing key."""
+    return re.sub(r"[\s_-]+", " ", s).strip()
+
+
+# The suffix regexes have two adjacent ambiguous quantifiers (``.*\S`` then
+# ``[\s_-]+`` over overlapping classes), so a pathological all-separator stem
+# backtracks O(n²). Filenames run on UNTRUSTED input (zip entry names can be
+# tens of KB) and pairing runs synchronously inside the async upload route, so
+# an uncapped name could block the event loop. Real résumé/cover names are far
+# under this cap; an over-length stem skips suffix detection entirely (treated
+# as a plain résumé) — ``_norm_base``'s single quantifier stays linear.
+_MAX_STEM_LEN: Final = 256
+
 
 # STATIC English pairing notes — never interpolate a filename (blind invariant).
 _DEMOTED_COVER_NOTE: Final = (
@@ -141,16 +173,24 @@ def basename_lower(filename: str) -> str:
 def _classify(filename: str) -> tuple[str, str]:
     """Classify a filename by its stem suffix. Returns ``(role, base)`` where
     ``role`` is ``"cover"`` or ``"resume"`` and ``base`` is the shared key two
-    paired files have in common (the stem minus the role suffix). A stem with
-    no known suffix is a résumé whose base is the whole stem."""
+    paired files have in common (the stem minus the role suffix). Space, dash,
+    and underscore are equivalent separators (case-insensitive) both in
+    matching the suffix and in the returned ``base``, so filenames using
+    different separator conventions still share the same pairing key. A stem
+    with no known suffix is a résumé whose base is the whole (normalized)
+    stem."""
     stem = Path(basename_lower(filename)).stem
-    for suf in _COVER_SUFFIXES:
-        if stem.endswith(suf):
-            return "cover", stem[: -len(suf)].rstrip("_- ")
-    for suf in _RESUME_SUFFIXES:
-        if stem.endswith(suf):
-            return "resume", stem[: -len(suf)].rstrip("_- ")
-    return "resume", stem
+    if len(stem) > _MAX_STEM_LEN:
+        # Pathological/attacker-crafted length — skip the backtracking-prone
+        # suffix regexes (see _MAX_STEM_LEN). No real name reaches here.
+        return "resume", _norm_base(stem)
+    cover_match = _COVER_SUFFIX_RE.match(stem)
+    if cover_match:
+        return "cover", _norm_base(cover_match.group("base"))
+    resume_match = _RESUME_SUFFIX_RE.match(stem)
+    if resume_match:
+        return "resume", _norm_base(resume_match.group("base"))
+    return "resume", _norm_base(stem)
 
 
 @dataclass(frozen=True)
