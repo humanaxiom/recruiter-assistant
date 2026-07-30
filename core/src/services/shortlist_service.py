@@ -244,7 +244,7 @@ _ENTRY_COLS = (
     "id, job_id, resume_id, rank, score_final, "
     "score_breakdown, evidence, generated_at"
 )
-# FU-9 (withdrawn-résumé lifecycle) — a withdrawn candidate's persisted
+# ADR-026 residual fix (FU-8 withdrawal) — a withdrawn candidate's persisted
 # shortlist_entries row survives the withdrawal untouched (write path is
 # unchanged); only the READ must hide it. Neither query below joins resumes,
 # so the guard is a correlated NOT EXISTS keyed on the entry's own
@@ -282,7 +282,7 @@ _BLIND_COLS = (
     "AS _c_phone, "
     "r.parsed AS _c_parsed"
 )
-# FU-9 (withdrawn-résumé lifecycle) — these already JOIN resumes, so a plain
+# ADR-026 residual fix (FU-8 withdrawal) — these already JOIN resumes, so a plain
 # `r.withdrawn_at IS NULL` predicate suffices. Appended AFTER the
 # "WHERE se.job_id = $1" / "WHERE se.id = $1" anchor so the FU-6
 # `.replace("WHERE se.job_id = $1", ...)` scoping in list_for_job still finds
