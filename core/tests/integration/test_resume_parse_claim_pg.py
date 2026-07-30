@@ -41,6 +41,28 @@ PII_KEY = "b3VyLTMyLWJ5dGUtcGlpLWtleS1mb3ItdGVzdHM="
 
 RESUME_TEXT = "Summary\nExperienced backend engineer.\n"
 
+# A résumé body that actually produces chunks — REQUIRED for any test that must
+# reach the LLM/embed boundary (the short RESUME_TEXT above yields 0 chunks, so
+# parse_resume returns "failed" at the `if not chunks:` guard BEFORE the LLM is
+# ever called; a test using it cannot prove the retries-exhausted transition).
+# Mirrors test_parse_resume_e2e.py's chunk-producing body.
+_CHUNKING_RESUME_TEXT = """Summary
+Experienced backend engineer with a distributed systems background, six
+years building services that stay up at 3am so nobody has to page anyone.
+
+Experience
+Senior Software Engineer at Acme Corp
+2019 - Present
+Built distributed systems in Python and Kubernetes, ran the on-call
+rotation, and mentored two junior engineers onto the platform team.
+
+Education
+BSc Computer Science, Example University, 2015
+
+Skills
+Python, Kubernetes, PostgreSQL, Redis
+"""
+
 
 async def _insert_job(pool: asyncpg.Pool) -> uuid.UUID:
     async with pool.acquire() as conn:
@@ -187,7 +209,10 @@ async def test_llm_unavailable_exhausted_retries_ends_failed_with_reason(
     ``failure_reason`` — not stranded 'parsing'/'uploaded' forever, and not
     an uncaught exception that crashes the worker process."""
     job_id = await _insert_job(pg_pool)
-    data = RESUME_TEXT.encode("utf-8")
+    # Chunk-producing body so parse_resume REACHES the LLM boundary (the short
+    # RESUME_TEXT would return "failed" at the no-chunks guard first, never
+    # exercising the retries-exhausted transition this test exists to prove).
+    data = _CHUNKING_RESUME_TEXT.encode("utf-8")
     blob_key = f"resumes/{uuid.uuid4().hex}.txt"
     await blob_store.put(blob_key, data)
     resume_id = await _insert_resume(
@@ -219,6 +244,13 @@ async def test_llm_unavailable_exhausted_retries_ends_failed_with_reason(
         result = await parse_resume(ctx, str(resume_id))
 
     assert result == "failed"
+    # The LLM boundary was actually REACHED (guards against the vacuous
+    # no-chunks path that would return "failed" before any LLM call).
+    assert llm.chat_json.await_count > 0, (
+        "the test must exercise the LLMUnavailableError boundary — if the LLM "
+        "was never called, parse_resume failed for some OTHER reason and this "
+        "test proves nothing about the retries-exhausted transition"
+    )
     async with pg_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT status, failure_reason FROM resumes WHERE id = $1", resume_id
@@ -229,4 +261,10 @@ async def test_llm_unavailable_exhausted_retries_ends_failed_with_reason(
         "a real row left status='failed' after exhausted retries must carry "
         "a non-empty failure_reason — a NULL reason here is the exact "
         "'stranded row, no diagnostic' regression this feature fixes"
+    )
+    # ...and the reason must be the RETRIES-EXHAUSTED one, not some other
+    # failure — pins that we came through the LLMUnavailableError last-try path.
+    assert "retr" in row["failure_reason"].lower(), (
+        f"failure_reason should name the exhausted-retries cause, got: "
+        f"{row['failure_reason']!r}"
     )
