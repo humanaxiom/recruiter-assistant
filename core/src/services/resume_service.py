@@ -93,6 +93,15 @@ UPDATE resumes SET
 WHERE id = $1 AND status IN ('uploaded', 'parsing')
 """
 
+# FU-7 (ADR-021 §3): the guarded WHERE clause is `status = 'uploaded'` ONLY —
+# never `('uploaded', 'parsing')` — a row already 'parsing' (a retry) matches
+# zero rows and is a normal, non-error outcome (see `claim_parsing`'s
+# docstring); a TERMINAL row ('parsed'/'failed') must never be silently
+# reopened by a stray/duplicate enqueue.
+_CLAIM_PARSING_SQL = (
+    "UPDATE resumes SET status = 'parsing' WHERE id = $1 AND status = 'uploaded'"
+)
+
 
 async def encrypt_pii_via_session(
     conn: DbConn, candidate: CandidateInfo
@@ -149,6 +158,22 @@ async def record_parsed(
     if not applied:
         logger.info("resume.record_parsed.stale resume_id=%s", resume_id)
     return applied
+
+
+async def claim_parsing(conn: DbConn, resume_id: UUID) -> bool:
+    """Flip the résumé row ``uploaded`` -> ``parsing`` at task start (FU-7,
+    ADR-021 §3) — BEFORE any blob I/O, so a worker crash mid-parse leaves the
+    row observably ``'parsing'``, never silently stuck at ``'uploaded'``
+    forever.
+
+    Returns ``True`` iff THIS call flipped the row (a first entry). Returns
+    ``False`` on a RETRY (the row is already ``'parsing'`` — 0 rows matched)
+    or on a row already in a terminal state (``'parsed'``/``'failed'``); the
+    caller must NOT branch on the result — it is for logging only, never
+    control flow (a retry proceeds exactly like a fresh claim).
+    """
+    result = await conn.execute(_CLAIM_PARSING_SQL, resume_id)
+    return result.endswith(" 1")
 
 
 async def record_parse_failure(conn: DbConn, resume_id: UUID, reason: str) -> None:

@@ -40,6 +40,7 @@ from collections import Counter
 from typing import Any
 from uuid import UUID
 
+from arq import Retry
 from asyncpg import Record
 from neo4j import AsyncDriver
 from pydantic import ValidationError
@@ -49,6 +50,7 @@ from src.pipeline.llm import (
     CachedEmbedder,
     LLMClient,
     LLMOutputInvalidError,
+    LLMUnavailableError,
     validation_error_digest,
 )
 from src.pipeline.parsing import (
@@ -76,9 +78,17 @@ from src.schemas import (
     ResumeSkillDetails,
 )
 from src.services import DbConn, outbox_service, pii, resume_service
+from src.settings import get_settings
 from src.storage.blob_store import BlobNotFound, BlobStore, InvalidBlobKey
 
 log = logging.getLogger(__name__)
+
+# FU-7 (ADR-021 §3), Decision 2: how long arq waits before re-running a job
+# retried off a transient LLMUnavailableError. A named module constant (not a
+# bare literal at the raise site) so the value has one home; not a settings
+# field — this is an internal backoff tuning knob, not a deploy-facing
+# tunable like resume_parse_max_tries.
+_RETRY_DEFER_SECONDS = 15.0
 
 # ResumeParsed.skills is capped at 80; cap the merge at the same number so the
 # model_validate below never has to silently truncate.
@@ -572,6 +582,14 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
             )
             return "stale"
 
+        # FU-7 (ADR-021 §3), Decision 1: claim uploaded -> parsing BEFORE any
+        # blob I/O, so a worker crash mid-parse leaves the row observably
+        # 'parsing', never silently stuck at 'uploaded' forever. `claimed` is
+        # for LOGGING ONLY — a retry (row already 'parsing', 0 rows matched)
+        # is a normal outcome, never a control-flow branch or a "stale" verdict.
+        claimed = await resume_service.claim_parsing(conn, resume_id)
+        log.info("parse_resume.claim resume_id=%s claimed=%s", resume_id_str, claimed)
+
         try:
             blob = await blob_store.get(meta["blob_key"])
         except (BlobNotFound, InvalidBlobKey) as exc:
@@ -600,211 +618,251 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
             )
             return "failed"
 
-        # LLM extraction is SPLIT (hris ADR 0011) and must stay split:
-        #   1. a bounded "core" call for the narrative (candidate, summary,
-        #      experience, education) — small local models produce this
-        #      reliably;
-        #   2. skills come from a deterministic vocabulary scan (always) MERGED
-        #      with a best-effort skills-only call.
-        # A single combined call made small models loop/over-generate on the
-        # open-ended skills list and truncate the whole résumé into invalid JSON.
-        core_prompt = load_prompt("resume_core_v1", chunks=chunks)
+        # FU-7 (ADR-021 §3), Decision 2: a SINGLE boundary around the whole
+        # LLM/embed/persist section catches a TRANSIENT `LLMUnavailableError`
+        # (Ollama down / circuit breaker open) from ANY call site inside it
+        # (the core call, `_extract_skills_merged`'s internal call, or
+        # `embedder.embed`) — not a per-call-site patch. On every NON-final
+        # try, let arq retry (`raise Retry(...) from exc`); only give up
+        # (`record_parse_failure` -> "failed") on the LAST configured try.
+        # Every existing `except LLMOutputInvalidError` / `except
+        # ValidationError` block below is UNCHANGED and still converts to
+        # "failed" in-body — this is a separate, additive clause; ordering
+        # is such that neither shadows the other (`LLMUnavailableError` is
+        # not a subclass either catches).
         try:
-            core = await llm.chat_json(
-                core_prompt.messages, ResumeCore, max_tokens=3072, max_retries=1
+            # LLM extraction is SPLIT (hris ADR 0011) and must stay split:
+            #   1. a bounded "core" call for the narrative (candidate, summary,
+            #      experience, education) — small local models produce this
+            #      reliably;
+            #   2. skills come from a deterministic vocabulary scan (always)
+            #      MERGED with a best-effort skills-only call.
+            # A single combined call made small models loop/over-generate on
+            # the open-ended skills list and truncate the whole résumé into
+            # invalid JSON.
+            core_prompt = load_prompt("resume_core_v1", chunks=chunks)
+            try:
+                core = await llm.chat_json(
+                    core_prompt.messages, ResumeCore, max_tokens=3072, max_retries=1
+                )
+            except LLMOutputInvalidError as exc:
+                await resume_service.record_parse_failure(
+                    conn, resume_id=resume_id, reason=f"llm output invalid: {exc}"
+                )
+                return "failed"
+
+            merged = await _extract_skills_merged(llm, chunks, resume_id_str)
+            # F3 (security re-audit), layer 2: scrub the candidate's own
+            # identity out of any skill NAME the LLM emitted, before it enters
+            # `resumes.parsed`/the outbox. Must run before `cleaned_parsed` is
+            # built below — layer 1 (skills_graph, Phase 4b projection) cannot
+            # catch this, it has no candidate context.
+            merged = _redact_skill_names_pii(merged, core.candidate, resume_id_str)
+
+            # Non-fatal. Its chunks ride in the parsed jsonb (cl_NNN id
+            # space); the LLM extraction goes to the cover_letter_parsed
+            # column.
+            cl_chunks, cl_parsed = await _parse_cover_letter(
+                conn, llm, blob_store, meta, resume_id
             )
-        except LLMOutputInvalidError as exc:
-            await resume_service.record_parse_failure(
-                conn, resume_id=resume_id, reason=f"llm output invalid: {exc}"
+            # Hand-assembled: a résumé parse spans 2-3 load_prompt calls, so
+            # there is no single RenderedPrompt.version to reach for.
+            prompt_version = "resume_core_v1+resume_skills_v2" + (
+                "+cover_letter_v1" if cl_chunks else ""
             )
-            return "failed"
 
-        merged = await _extract_skills_merged(llm, chunks, resume_id_str)
-        # F3 (security re-audit), layer 2: scrub the candidate's own identity
-        # out of any skill NAME the LLM emitted, before it enters
-        # `resumes.parsed`/the outbox. Must run before `cleaned_parsed` is
-        # built below — layer 1 (skills_graph, Phase 4b projection) cannot
-        # catch this, it has no candidate context.
-        merged = _redact_skill_names_pii(merged, core.candidate, resume_id_str)
+            # L1 (security re-audit round 2): the LLM sometimes hallucinates a
+            # chunk id (``evidence_chunk_ids``) that was never in this
+            # résumé's actual chunk set — scrub those refs BEFORE persistence,
+            # at the citation boundary, exactly like ``ResumeChunk``'s own
+            # docstring already promises ("citations that don't exist in the
+            # chunk set are scrubbed before persistence"). Mutates a plain
+            # dict list, not the ``ResumeSkill`` models directly —
+            # ``scrub_invalid_chunk_refs``'s contract (``chunk.py``) is
+            # dict-shaped, matching ``ResumeParsed.model_validate``'s own
+            # dict-first input below.
+            skill_dicts = [s.model_dump() for s in merged]
+            scrub_invalid_chunk_refs(skill_dicts, {c.id for c in chunks})
 
-        # Non-fatal. Its chunks ride in the parsed jsonb (cl_NNN id space); the
-        # LLM extraction goes to the cover_letter_parsed column.
-        cl_chunks, cl_parsed = await _parse_cover_letter(
-            conn, llm, blob_store, meta, resume_id
-        )
-        # Hand-assembled: a résumé parse spans 2-3 load_prompt calls, so there
-        # is no single RenderedPrompt.version to reach for.
-        prompt_version = "resume_core_v1+resume_skills_v2" + (
-            "+cover_letter_v1" if cl_chunks else ""
-        )
+            # Build from dicts so ResumeParsed's lossy row-dropping validator
+            # runs. The lossy validator only drops bad LIST ROWS — a violated
+            # LIST CAP (e.g. >200 chunks) or a bad scalar still raises.
+            # Uncaught, that ValidationError escapes the task entirely:
+            # record_parse_failure never runs, the row is stranded
+            # uploaded/parsing with a NULL failure_reason, and arq re-runs
+            # this whole expensive LLM pipeline on every retry.
+            try:
+                cleaned_parsed = ResumeParsed.model_validate(
+                    {
+                        "candidate": core.candidate.model_dump(),
+                        "summary": core.summary,
+                        "total_years_experience": core.total_years_experience,
+                        "skills": skill_dicts,
+                        "experience": [e.model_dump() for e in core.experience],
+                        "education": [e.model_dump() for e in core.education],
+                        "chunks": [c.model_dump() for c in chunks],
+                        "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
+                    }
+                )
+            except ValidationError as exc:
+                # PII-FREE digest only: str(ValidationError) embeds
+                # input_value — here that is the candidate's own name/phone/
+                # email, and failure_reason is a CLEARTEXT column.
+                await resume_service.record_parse_failure(
+                    conn,
+                    resume_id=resume_id,
+                    reason=f"parsed schema invalid: {validation_error_digest(exc)}",
+                )
+                return "failed"
 
-        # L1 (security re-audit round 2): the LLM sometimes hallucinates a
-        # chunk id (``evidence_chunk_ids``) that was never in this résumé's
-        # actual chunk set — scrub those refs BEFORE persistence, at the
-        # citation boundary, exactly like ``ResumeChunk``'s own docstring
-        # already promises ("citations that don't exist in the chunk set are
-        # scrubbed before persistence"). Mutates a plain dict list, not the
-        # ``ResumeSkill`` models directly — ``scrub_invalid_chunk_refs``'s
-        # contract (``chunk.py``) is dict-shaped, matching
-        # ``ResumeParsed.model_validate``'s own dict-first input below.
-        skill_dicts = [s.model_dump() for s in merged]
-        scrub_invalid_chunk_refs(skill_dicts, {c.id for c in chunks})
+            # The embedding text NEVER carries name/email/phone/location —
+            # embeddings are PII-equivalent under PIPEDA/FIPPA. See
+            # _build_summary_text.
+            #
+            # LLMClient.embed raises LLMOutputInvalidError on a count
+            # mismatch AND on the 768-d expected_dim check — a PERMANENT
+            # per-document error (the model is mis-pointed or misbehaving;
+            # re-running the same bytes won't fix it), exactly like a core
+            # chat_json failure. Funnel it through record_parse_failure ->
+            # "failed" so it doesn't escape parse_resume uncaught (stranded
+            # row + arq retry storm). A TRANSIENT LLMUnavailableError (Ollama
+            # down) is deliberately NOT caught here: it propagates up to the
+            # outer boundary above, exactly like the core/skills calls.
+            try:
+                # Scrub the candidate's structured identifiers out of every
+                # string handed to the embedder — the STORED chunk text /
+                # summary stay full (see _redact_candidate_pii /
+                # _build_summary_text docstrings).
+                candidate = cleaned_parsed.candidate
+                summary_text = _redact_candidate_pii(
+                    _build_summary_text(cleaned_parsed), candidate
+                )
+                [summary_emb] = await embedder.embed([summary_text])
 
-        # Build from dicts so ResumeParsed's lossy row-dropping validator runs.
-        # The lossy validator only drops bad LIST ROWS — a violated LIST CAP
-        # (e.g. >200 chunks) or a bad scalar still raises. Uncaught, that
-        # ValidationError escapes the task entirely: record_parse_failure never
-        # runs, the row is stranded uploaded/parsing with a NULL failure_reason,
-        # and arq re-runs this whole expensive LLM pipeline on every retry.
-        try:
-            cleaned_parsed = ResumeParsed.model_validate(
-                {
-                    "candidate": core.candidate.model_dump(),
-                    "summary": core.summary,
-                    "total_years_experience": core.total_years_experience,
-                    "skills": skill_dicts,
-                    "experience": [e.model_dump() for e in core.experience],
-                    "education": [e.model_dump() for e in core.education],
-                    "chunks": [c.model_dump() for c in chunks],
-                    "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
-                }
-            )
-        except ValidationError as exc:
-            # PII-FREE digest only: str(ValidationError) embeds input_value —
-            # here that is the candidate's own name/phone/email, and
-            # failure_reason is a CLEARTEXT column.
-            await resume_service.record_parse_failure(
-                conn,
-                resume_id=resume_id,
-                reason=f"parsed schema invalid: {validation_error_digest(exc)}",
-            )
-            return "failed"
+                # S7 (security re-audit round 3): when there is NO structured
+                # candidate identifier to redact against,
+                # `_redact_candidate_pii` can only fall back to its generic
+                # (email/phone-shaped) scrub — it has no way to strip an
+                # arbitrary bare NAME. Refuse to embed the header-like
+                # chunk(s) entirely in that case, rather than silently
+                # handing the embedder raw contact-block text. Redaction IS
+                # available (the normal case), every chunk embeds as before.
+                if _redaction_available(candidate):
+                    chunks_for_embedding = chunks
+                else:
+                    chunks_for_embedding = [
+                        c
+                        for i, c in enumerate(chunks)
+                        if not _is_header_like_chunk(i, c)
+                    ]
+                    skipped = len(chunks) - len(chunks_for_embedding)
+                    if skipped:
+                        log.warning(
+                            "parse_resume.header_chunk_embedding_skipped_"
+                            "redaction_unavailable resume_id=%s count=%d",
+                            resume_id_str,
+                            skipped,
+                        )
+                chunk_embs_list = await _embed_batched(
+                    embedder,
+                    [
+                        _redact_candidate_pii(c.text, candidate)
+                        for c in chunks_for_embedding
+                    ],
+                )
+            except LLMOutputInvalidError as exc:
+                await resume_service.record_parse_failure(
+                    conn, resume_id=resume_id, reason=f"embedding failed: {exc}"
+                )
+                return "failed"
+            chunk_embs = {
+                chunks_for_embedding[i].id: chunk_embs_list[i]
+                for i in range(len(chunks_for_embedding))
+            }
 
-        # The embedding text NEVER carries name/email/phone/location — embeddings
-        # are PII-equivalent under PIPEDA/FIPPA. See _build_summary_text.
-        #
-        # LLMClient.embed raises LLMOutputInvalidError on a count mismatch AND on
-        # the 768-d expected_dim check — a PERMANENT per-document error (the model
-        # is mis-pointed or misbehaving; re-running the same bytes won't fix it),
-        # exactly like a core chat_json failure. Funnel it through
-        # record_parse_failure -> "failed" so it doesn't escape parse_resume
-        # uncaught (stranded row + arq retry storm). A TRANSIENT
-        # LLMUnavailableError (Ollama down) is deliberately NOT caught here: it
-        # propagates so arq retries the genuine outage.
-        try:
-            # Scrub the candidate's structured identifiers out of every string
-            # handed to the embedder — the STORED chunk text / summary stay full
-            # (see _redact_candidate_pii / _build_summary_text docstrings).
-            candidate = cleaned_parsed.candidate
-            summary_text = _redact_candidate_pii(
-                _build_summary_text(cleaned_parsed), candidate
-            )
-            [summary_emb] = await embedder.embed([summary_text])
-
-            # S7 (security re-audit round 3): when there is NO structured
-            # candidate identifier to redact against, `_redact_candidate_pii`
-            # can only fall back to its generic (email/phone-shaped) scrub —
-            # it has no way to strip an arbitrary bare NAME. Refuse to embed
-            # the header-like chunk(s) entirely in that case, rather than
-            # silently handing the embedder raw contact-block text. Redaction
-            # IS available (the normal case), every chunk embeds as before.
-            if _redaction_available(candidate):
-                chunks_for_embedding = chunks
-            else:
-                chunks_for_embedding = [
-                    c for i, c in enumerate(chunks) if not _is_header_like_chunk(i, c)
-                ]
-                skipped = len(chunks) - len(chunks_for_embedding)
-                if skipped:
-                    log.warning(
-                        "parse_resume.header_chunk_embedding_skipped_"
-                        "redaction_unavailable resume_id=%s count=%d",
+            # Encrypt PII + write back + enqueue the outbox row, all atomic.
+            async with conn.transaction():
+                encrypted_pii = await resume_service.encrypt_pii_via_session(
+                    conn, cleaned_parsed.candidate
+                )
+                applied = await resume_service.record_parsed(
+                    conn,
+                    resume_id=resume_id,
+                    parsed=cleaned_parsed,
+                    pii=encrypted_pii,
+                    cover_letter_parsed=cl_parsed,
+                    parsed_at=dt.datetime.now(dt.UTC),
+                )
+                if not applied:
+                    # The row moved out of uploaded/parsing under us. Drop
+                    # the result on the floor: an outbox event for a write
+                    # that never landed would project stale state into the
+                    # graph in Phase 4.
+                    log.info(
+                        "parse_resume.race resume_id=%s note=%s",
                         resume_id_str,
-                        skipped,
+                        "row left uploaded/parsing mid-parse; dropping result",
                     )
-            chunk_embs_list = await _embed_batched(
-                embedder,
-                [
-                    _redact_candidate_pii(c.text, candidate)
-                    for c in chunks_for_embedding
-                ],
-            )
-        except LLMOutputInvalidError as exc:
-            await resume_service.record_parse_failure(
-                conn, resume_id=resume_id, reason=f"embedding failed: {exc}"
-            )
-            return "failed"
-        chunk_embs = {
-            chunks_for_embedding[i].id: chunk_embs_list[i]
-            for i in range(len(chunks_for_embedding))
-        }
+                    return "stale"
 
-        # Encrypt PII + write back + enqueue the outbox row, all atomic.
-        async with conn.transaction():
-            encrypted_pii = await resume_service.encrypt_pii_via_session(
-                conn, cleaned_parsed.candidate
-            )
-            applied = await resume_service.record_parsed(
-                conn,
-                resume_id=resume_id,
-                parsed=cleaned_parsed,
-                pii=encrypted_pii,
-                cover_letter_parsed=cl_parsed,
-                parsed_at=dt.datetime.now(dt.UTC),
-            )
-            if not applied:
-                # The row moved out of uploaded/parsing under us. Drop the
-                # result on the floor: an outbox event for a write that never
-                # landed would project stale state into the graph in Phase 4.
-                log.info(
-                    "parse_resume.race resume_id=%s note=%s",
-                    resume_id_str,
-                    "row left uploaded/parsing mid-parse; dropping result",
+                # ADR-026 (FU-8) — the withdrawn-during-parse race. A résumé
+                # withdrawn while still uploaded/parsing must NOT re-enter
+                # the ranking pool: the write-back still completes to
+                # status='parsed' (ADR-021 stays the single parse-state
+                # machine, and the withdrawal columns are untouched), but the
+                # projection-triggering `resume.parsed` enqueue is SKIPPED. A
+                # subsequent reinstate has no delivered payload to replay and
+                # re-enters via the normal path.
+                if meta.get("withdrawn_at") is not None:
+                    log.info(
+                        "parse_resume.withdrawn_skip_projection resume_id=%s",
+                        resume_id_str,
+                    )
+                    return "parsed"
+
+                await outbox_service.enqueue_outbox(
+                    conn,
+                    aggregate="resume",
+                    aggregate_id=resume_id,
+                    event_type="resume.parsed",
+                    payload={
+                        # NO `candidate` block AND no raw chunk TEXT. Phase 4
+                        # projects this payload into Neo4j and needs skills/
+                        # experience/embeddings, NOT identity — `resumes`
+                        # (pgcrypto-encrypted) is the system of record for
+                        # PII, and the outbox is an unencrypted jsonb table.
+                        # Beyond the structured `candidate` block, header
+                        # chunks carry the candidate's name/email/phone
+                        # VERBATIM in `chunks[].text` /
+                        # `cover_letter_chunks[].text`, so those are dropped
+                        # too (ids/section/page stay — Phase 4 keys
+                        # embeddings by chunk id and reads any chunk-text
+                        # preview from `resumes.parsed`, the system of
+                        # record, which KEEPS the full text).
+                        "parsed": cleaned_parsed.model_dump(
+                            exclude=_OUTBOX_PARSED_EXCLUDE
+                        ),
+                        "summary_emb": summary_emb,
+                        "chunk_embs": chunk_embs,
+                        "prompt_version": prompt_version,
+                        # job_id rides along so Phase 4's stage-1 vector
+                        # search can scope candidates to "resumes uploaded
+                        # against THIS job" rather than every résumé in the
+                        # system — without it a recruiter sees other jobs'
+                        # candidates in their shortlist.
+                        "job_id": str(meta["job_id"]),
+                    },
                 )
-                return "stale"
-
-            # ADR-026 (FU-8) — the withdrawn-during-parse race. A résumé
-            # withdrawn while still uploaded/parsing must NOT re-enter the
-            # ranking pool: the write-back still completes to status='parsed'
-            # (ADR-021 stays the single parse-state machine, and the withdrawal
-            # columns are untouched), but the projection-triggering
-            # `resume.parsed` enqueue is SKIPPED. A subsequent reinstate has no
-            # delivered payload to replay and re-enters via the normal path.
-            if meta.get("withdrawn_at") is not None:
-                log.info(
-                    "parse_resume.withdrawn_skip_projection resume_id=%s",
-                    resume_id_str,
+        except LLMUnavailableError as exc:
+            job_try = ctx.get("job_try", 1)
+            if job_try >= get_settings().resume_parse_max_tries:
+                await resume_service.record_parse_failure(
+                    conn,
+                    resume_id=resume_id,
+                    reason=f"timeout after {job_try} retries: {exc}",
                 )
-                return "parsed"
-
-            await outbox_service.enqueue_outbox(
-                conn,
-                aggregate="resume",
-                aggregate_id=resume_id,
-                event_type="resume.parsed",
-                payload={
-                    # NO `candidate` block AND no raw chunk TEXT. Phase 4 projects
-                    # this payload into Neo4j and needs skills/experience/
-                    # embeddings, NOT identity — `resumes` (pgcrypto-encrypted) is
-                    # the system of record for PII, and the outbox is an
-                    # unencrypted jsonb table. Beyond the structured `candidate`
-                    # block, header chunks carry the candidate's name/email/phone
-                    # VERBATIM in `chunks[].text` / `cover_letter_chunks[].text`,
-                    # so those are dropped too (ids/section/page stay — Phase 4
-                    # keys embeddings by chunk id and reads any chunk-text preview
-                    # from `resumes.parsed`, the system of record, which KEEPS the
-                    # full text).
-                    "parsed": cleaned_parsed.model_dump(exclude=_OUTBOX_PARSED_EXCLUDE),
-                    "summary_emb": summary_emb,
-                    "chunk_embs": chunk_embs,
-                    "prompt_version": prompt_version,
-                    # job_id rides along so Phase 4's stage-1 vector search can
-                    # scope candidates to "resumes uploaded against THIS job"
-                    # rather than every résumé in the system — without it a
-                    # recruiter sees other jobs' candidates in their shortlist.
-                    "job_id": str(meta["job_id"]),
-                },
-            )
+                return "failed"
+            raise Retry(defer=_RETRY_DEFER_SECONDS) from exc
 
     log.info(
         "parse_resume.ok resume_id=%s chunks=%d skills=%d",

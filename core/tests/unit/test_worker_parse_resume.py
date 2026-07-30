@@ -109,6 +109,19 @@ def _make_conn(fetchrow_result: Any) -> MagicMock:
     conn = MagicMock(name="conn")
     conn.fetchrow = AsyncMock(return_value=fetchrow_result)
     conn.transaction = MagicMock(return_value=_acm())
+    # FU-7 (ADR-021 §3): `parse_resume` now calls the REAL
+    # `resume_service.claim_parsing(conn, resume_id)` unconditionally right
+    # after the status check, on every test that doesn't patch it away (only
+    # the two claim_parsing-focused tests below do). That function awaits
+    # `conn.execute(...)` — an attribute this fixture never configured before
+    # FU-7, so it auto-created as a plain (non-async) `MagicMock`, and
+    # awaiting it raised `TypeError: object MagicMock can't be used in
+    # 'await' expression` in every OTHER test exercising `parse_resume`'s
+    # later failure/success paths, none of which care about the claim
+    # outcome (that is exercised by the dedicated claim_parsing tests). A
+    # benign default closes that fixture gap without touching any
+    # assertion.
+    conn.execute = AsyncMock(return_value="UPDATE 1")
     return conn
 
 

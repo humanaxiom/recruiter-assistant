@@ -152,5 +152,11 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    # FU-7 (ADR-021 §3): the arq JOB-layer retry ceiling, sourced from the
+    # SAME settings value `parse_resume`'s `LLMUnavailableError` boundary
+    # reads via `ctx["job_try"]` — see `src/settings.py::resume_parse_max_tries`.
+    # Must stay a plain class attribute (arq's `get_kwargs` reads it directly
+    # off `WorkerSettings`), never `arq.func(...)`.
+    max_tries = get_settings().resume_parse_max_tries
     max_jobs = 4
     job_timeout = 3600  # local inference is slow; ranking a batch takes a while
