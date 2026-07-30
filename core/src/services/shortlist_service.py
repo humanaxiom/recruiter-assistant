@@ -645,9 +645,13 @@ SELECT
 FROM shortlist_entries s
 JOIN jobs j ON j.id = s.job_id
 JOIN resumes r ON r.id = s.resume_id
-WHERE s.job_id = $1
+WHERE s.job_id = $1 AND r.withdrawn_at IS NULL
 ORDER BY s.rank ASC
 """
+# ADR-026 residual fix (FU-8 withdrawal) — the export is a shortlist view too,
+# so it must hide withdrawn candidates like list_for_job/get_one. The clause is
+# appended AFTER the "WHERE s.job_id = $1" anchor so export_rows' FU-6
+# `.replace("WHERE s.job_id = $1", ...)` row-scoping still finds it verbatim.
 
 
 def _as_obj(v: object) -> dict[str, Any]:

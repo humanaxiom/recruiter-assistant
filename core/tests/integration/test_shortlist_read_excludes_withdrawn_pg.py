@@ -396,3 +396,37 @@ async def test_list_for_job_scoped_by_unassigned_user_stays_empty_regardless(
         )
 
     assert scoped_entries == []
+
+
+# -- 6. export (CSV/JSON) also excludes withdrawn (reviewer follow-up) --------
+
+
+@pytest.mark.asyncio
+async def test_export_rows_excludes_withdrawn_candidate(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The export is a shortlist view too (GET /jobs/{id}/shortlist/export), so
+    a withdrawn candidate must not appear in the exported rows either."""
+    from src.services.pii import set_pii_key
+    from src.services.shortlist_service import export_rows
+
+    job_id = await _insert_job(pg_pool, blind_review=True)
+    withdrawn_resume = await _insert_resume(pg_pool, job_id)
+    active_resume = await _insert_resume(pg_pool, job_id)
+    await _seed_shortlist_entries(
+        pg_pool, job_id=job_id, resume_ids_ranked=[withdrawn_resume, active_resume]
+    )
+
+    await _withdraw(pg_pool, withdrawn_resume)
+
+    async with pg_pool.acquire() as conn:
+        async with conn.transaction():
+            await set_pii_key(conn)
+            rows = await export_rows(conn, job_id=job_id, reveal=False)
+
+    resume_ids = {r["resume_id"] for r in rows}
+    assert (
+        withdrawn_resume not in resume_ids
+    ), "a withdrawn candidate must not appear in the shortlist export"
+    assert active_resume in resume_ids
+    assert len(rows) == 1
