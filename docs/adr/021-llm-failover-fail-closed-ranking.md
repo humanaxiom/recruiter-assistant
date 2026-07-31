@@ -74,6 +74,11 @@ Implement the following state machine:
 
 A row that timeouts now moves to `failed` instead of staying `uploaded`, making it observable and excluding it from future shortlist attempts.
 
+> **2026-07-30 note:** Implemented — see [ADR-027](027-honest-resume-parse-status-fu7.md). Also corrects
+> this section's premise about arq: `ctx` has no `max_tries` key, and a plain uncaught exception does
+> **not** trigger an arq retry (only `arq.Retry` does) — so the pre-existing assumption that arq was
+> retrying the timeout automatically was wrong. See ADR-027's "Notes / corrections" section.
+
 ### 4. Degraded-parse visibility
 
 When a résumé's skills extraction fails (catches `LLMOutputInvalidError`, line 154 in `resume_tasks.py`), add a `degraded` boolean and a `degradation_reason` to the `ResumeParsed` schema. Persist both to the `resumes.parsed` jsonb.

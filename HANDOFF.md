@@ -815,9 +815,11 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 >    path (hard-delete blob + null pgcrypto columns + `resumes.parsed`, keep a non-PII tombstone), clearly
 >    separated from the routine reversible withdraw. Would be the repo's FIRST destructive PII op — needs its
 >    own security review. Decide the consent-revocation semantics first.
-> 2. **FU-7 — parse-failure staleness / honest parse status** (ADR-021 decision 3): `uploaded→parsing` on task
->    start, `parsing→failed` when arq exhausts `max_tries`. The 2026-07-19/20 "16 résumés stuck at uploaded"
->    incident is exactly this. Shares the per-job status-breakdown UI that FU-8 already shipped.
+> 2. **FU-7 — parse-failure staleness / honest parse status** (ADR-021 decision 3): **BUILT + gate-green on
+>    branch `feat/fu7-honest-parse-status` (tip `bf1da36`), pending merge** — `uploaded→parsing` claim on
+>    task start, `parsing→failed` when arq exhausts `resume_parse_max_tries`, PII-free `failure_reason`. See
+>    [ADR-027](docs/adr/027-honest-resume-parse-status-fu7.md). The remaining FU-7 scope — ADR-021 decisions
+>    1 (provider failover), 2 (fail-closed ranking), and 4 (degraded-parse visibility) — stays deferred.
 > 3. **`jd.education.fields`** (ADR-009 §7, open since 4c): `score_education` ignores JD field-relevance —
 >    either extend the scorer or drop `fields` from the JD contract. Still decorative.
 > 4. **Re-privatize + PII hygiene** once finance funds `humanaxiom` billing: flip both repos back to private
