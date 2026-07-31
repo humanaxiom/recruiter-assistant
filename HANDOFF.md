@@ -2,11 +2,29 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-07-30/31: FU-7 + two live-bug fixes shipped; everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-07-31: reverse-match read consistency shipped (PR #46); everything merged
 
-> **Current tip: `humanaxiom/main` == `sfu-aria/main` == `69e6ac0`. Both repos are PUBLIC. Zero open PRs.
-> Working tree clean. Nothing is mid-flight.** This banner supersedes the 2026-07-29 "FU-8 shipped" banner
-> (kept below as history) and the older stale banners.
+> **Current tip: `humanaxiom/main` == `6d8d33f`. Both repos are PUBLIC. Zero open PRs. Working tree clean
+> (one untracked stray `compose.cas.yml` — operational scratch, not part of any branch; leave it). Nothing
+> is mid-flight.** This banner supersedes the 2026-07-30/31 "FU-7 + two live-bug fixes" banner below (kept
+> as history) and all older stale banners.
+>
+> **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **Reverse-match read hides withdrawn** — PR **#46**, squash `6d8d33f`. The mirror of PR #43, one read
+>   path over: the reverse-match (candidate → jobs) persisted read `get_reverse_match_result` /
+>   `_REVERSE_MATCH_QUERY` in `shortlist_service.py` still returned a withdrawn candidate's rows written
+>   *before* withdrawal (the write path `reverse_match_job` was already withdrawal-aware). Added a correlated
+>   `NOT EXISTS (… r.id = rm.resume_id AND r.withdrawn_at IS NOT NULL)` guard (`_REVERSE_NOT_WITHDRAWN_SQL`,
+>   mirroring the non-blind-shortlist `_NOT_WITHDRAWN_SQL`): a withdrawn candidate's whole reverse-match read
+>   collapses to the empty shape, reinstate restores it from the same rows, correlation on `rm.resume_id`
+>   means A's withdrawal never empties B's read. Scoring byte-unchanged. **With this, all five persisted read
+>   paths (four shortlist + reverse-match) + export hide withdrawn consistently** — the ADR-026 read-side
+>   residual is fully closed. TDD (3 integration tests vs real Postgres, RED → GREEN); all three
+>   merge-blocking gates green (reviewer APPROVE w/ mutation evidence, security PASS, ranking-evals PASS);
+>   `./scripts/verify.sh all` + CI green. ADR-026 amendment 2026-07-31.
+>
+> **`sfu-aria` mirror note:** NOT re-synced to `6d8d33f` this session (last synced at `69e6ac0`). It's the
+> redundant billing workaround (option 7 below); sync or retire it only if you still want it live.
 >
 > **What landed on `origin/main` this session (all CI-verified green, then squash-merged):**
 > - **Cover-letter zip pairing fix** — PR **#42**, squash `1b7c40d`. `bulk_ingest_service._classify` only
@@ -805,13 +823,14 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-07-31 (read the top READ-FIRST banner first).** `origin/main` == `sfu-aria/main` ==
-> **`69e6ac0`**, both repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
+> **STATE AS OF 2026-07-31 (read the top READ-FIRST banner first).** `origin/main` == **`6d8d33f`**, both
+> repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
 > live-integration, **FU-8 résumé withdrawal (ADR-026, PR #37)**, the **cover-letter zip pairing fix (PR
-> #42)**, the **shortlist-hides-withdrawn read fix (PR #43)**, and **FU-7 §3 honest parse status (ADR-027, PR
-> #44)** — all on `main`, CI green. **Nothing is mid-flight.**
+> #42)**, the **shortlist-hides-withdrawn read fix (PR #43)**, **FU-7 §3 honest parse status (ADR-027, PR
+> #44)**, and the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)** — all on
+> `main`, CI green. **Nothing is mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
@@ -822,9 +841,10 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 >    via PR #44 / [ADR-027](docs/adr/027-honest-resume-parse-status-fu7.md). Left: 1 (LLM provider failover
 >    chain), 2 (fail-closed ranking + "waiting for AI…" UI status), 4 (empty-content / degraded-parse
 >    visibility). Also a minor FU-7 residual: `resume_parse_max_tries` has no upper sanity cap.
-> 3. **Reverse-match read consistency (small).** PR #43 hid withdrawn candidates from the *shortlist* reads;
->    the reverse-match persisted read (`_REVERSE_MATCH_COLS` list in `shortlist_service.py`) was left out of
->    scope. Extend the same `withdrawn_at IS NULL` filter there. Quick win.
+> 3. ~~**Reverse-match read consistency (small).**~~ ✅ **DONE — PR #46 (`6d8d33f`), 2026-07-31.** The
+>    reverse-match persisted read (`_REVERSE_MATCH_QUERY` in `shortlist_service.py`) now carries the
+>    correlated `_REVERSE_NOT_WITHDRAWN_SQL` guard, mirroring PR #43's shortlist filter. All five persisted
+>    read paths + export now hide withdrawn consistently (ADR-026 amendment 2026-07-31).
 > 4. **`jd.education.fields`** (ADR-009 §7, open since 4c): `score_education` ignores JD field-relevance —
 >    either extend the scorer or drop `fields` from the JD contract. Touches scoring → ranking-evals applies.
 > 5. **Re-privatize + PII hygiene** once finance funds `humanaxiom` billing: flip both repos back to private
