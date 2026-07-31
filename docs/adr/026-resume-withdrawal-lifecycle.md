@@ -263,4 +263,28 @@ green: reviewer, security, `./scripts/verify.sh all` (3977 unit @ 92.64% + integ
 `test_shortlist_read_excludes_withdrawn_pg.py`).
 
 Remaining (unchanged): reverse-match already excludes withdrawn at *generation*; its persisted read is not
-scrubbed here (out of scope — the reported issue was the forward shortlist).
+scrubbed here (out of scope — the reported issue was the forward shortlist). **Closed by the amendment below.**
+
+## Amendment 2026-07-31 — reverse-match read hides withdrawn candidates (closes the 2026-07-29 residual)
+
+The amendment above left the mirror gap on the *reverse-match* (candidate → jobs) read: `reverse_match_job`
+already skips a withdrawn résumé at generation and persists nothing, but rows written *before* a withdrawal
+survived and `get_reverse_match_result` returned them unfiltered — the same "rely on regenerate" bug the
+shortlist read had, one read path over.
+
+Fixed at the **read layer**, symmetric with the shortlist fix: `shortlist_service`'s reverse-match read
+query (`_REVERSE_MATCH_QUERY`) now carries a correlated `NOT EXISTS (SELECT 1 FROM resumes r WHERE
+r.id = rm.resume_id AND r.withdrawn_at IS NOT NULL)` guard (constant `_REVERSE_NOT_WITHDRAWN_SQL`, the
+non-blind-shortlist `_NOT_WITHDRAWN_SQL` pattern). This read is keyed on a single `resume_id` and JOINs
+`jobs` (not `resumes`), so a withdrawn candidate's **whole** reverse-match result collapses to
+`get_reverse_match_result`'s existing empty shape (`entries=[]`, `pipeline_meta=None`, `generated_at=None`)
+— the candidate's match history is no longer readable **immediately, without a regenerate**; a **reinstate**
+restores it from the same persisted rows. The correlation on `rm.resume_id` (not a blanket predicate) means
+withdrawing candidate A never empties candidate B's read. Write path (`persist_reverse_match`, DELETE-first)
+and all scoring code are byte-unchanged.
+
+Gates green: reviewer APPROVE (mutation-verified the guard is load-bearing and the correlation is pinned),
+security PASS (static parameterized predicate, fail-safe, a consent-correctness improvement), ranking-evals
+PASS (scoring byte-unchanged), and `./scripts/verify.sh all` (offline + 438 integration incl. new
+`test_reverse_match_read_excludes_withdrawn_pg.py`). With this, **all five persisted read paths** (four
+shortlist + reverse-match) plus the export hide withdrawn candidates consistently.
