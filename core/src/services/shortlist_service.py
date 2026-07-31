@@ -167,9 +167,25 @@ _REVERSE_MATCH_COLS = (
     "rm.score_structured, rm.score_evidence, rm.score_breakdown, rm.evidence, "
     "rm.requirement_count, rm.must_have_count, rm.pipeline_meta, rm.generated_at"
 )
+# ADR-026 residual fix (FU-8 withdrawal), mirror of PR #43's shortlist read
+# filter for the reverse-match (candidate -> jobs) read. The write path
+# (``reverse_match_job``) already skips a withdrawn résumé and persists
+# nothing, but rows written BEFORE withdrawal survive untouched — only the READ
+# must hide them. This read is keyed on a SINGLE ``resume_id`` and JOINs
+# ``jobs`` (not ``resumes``), so — like ``_NOT_WITHDRAWN_SQL`` for the non-blind
+# shortlist read — the guard is a correlated NOT EXISTS on the entry's own
+# ``rm.resume_id``: a withdrawn candidate's whole reverse-match result collapses
+# to the empty shape (``get_reverse_match_result``'s "never matched" contract),
+# and reinstatement restores the same persisted rows.
+_REVERSE_NOT_WITHDRAWN_SQL = (
+    "NOT EXISTS (SELECT 1 FROM resumes r WHERE r.id = rm.resume_id "
+    "AND r.withdrawn_at IS NOT NULL)"
+)
 _REVERSE_MATCH_QUERY = (
     f"SELECT {_REVERSE_MATCH_COLS} FROM reverse_match_entries rm "
-    "JOIN jobs j ON j.id = rm.job_id WHERE rm.resume_id = $1 ORDER BY rm.rank ASC"
+    "JOIN jobs j ON j.id = rm.job_id "
+    f"WHERE rm.resume_id = $1 AND {_REVERSE_NOT_WITHDRAWN_SQL} "
+    "ORDER BY rm.rank ASC"
 )
 
 
