@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.settings import Settings
+from src.settings import Settings, get_settings
 from src.storage.blob_store import BlobStore
 from src.worker.main import WorkerSettings, startup
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
@@ -255,3 +255,29 @@ async def test_startup_does_not_raise_when_skill_hash_salt_is_configured(
         await startup(ctx)  # must not raise
 
     assert "pg_pool" in ctx
+
+
+# ── FU-7 (ADR-021 §3) — honest résumé parse status: arq retry ceiling ──────
+#
+# `parse_resume`'s single `LLMUnavailableError` boundary reads
+# `settings.resume_parse_max_tries` (via `ctx["job_try"]`, arq's 1-based
+# per-job attempt counter) to decide "let arq retry" vs "give up". arq
+# itself only actually RETRIES a job up to `WorkerSettings.max_tries` (a
+# class attribute on the arq `Worker`, not sourced from `ctx` at all) --
+# so that class attribute must be wired from the SAME settings value, not a
+# bare literal duplicated here, or the two ceilings can silently drift
+# apart (e.g. arq stops retrying at try 3 while the boundary is still
+# waiting for try 5, permanently stranding the row 'parsing').
+
+
+def test_worker_settings_max_tries_matches_resume_parse_max_tries_setting() -> None:
+    assert WorkerSettings.max_tries == get_settings().resume_parse_max_tries
+
+
+def test_worker_settings_max_tries_is_a_plain_int() -> None:
+    """Pinned as a concrete int (e.g. 5), not e.g. a bool (a `bool` is an
+    `int` subclass in Python and would sail past a bare `isinstance(...,
+    int)` check while being nonsensical here) or a settings object itself."""
+    assert isinstance(WorkerSettings.max_tries, int)
+    assert not isinstance(WorkerSettings.max_tries, bool)
+    assert WorkerSettings.max_tries == 5

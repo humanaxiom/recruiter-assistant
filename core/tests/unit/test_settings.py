@@ -291,3 +291,28 @@ def test_env_override_skill_auto_merge_threshold(monkeypatch: MonkeyPatch) -> No
 def test_env_override_skill_tiebreaker_threshold(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("SKILL_TIEBREAKER_THRESHOLD", "0.80")
     assert Settings().skill_tiebreaker_threshold == pytest.approx(0.80)
+
+
+# ── FU-7 (ADR-021 §3) — honest résumé parse status ──────────────────────────
+#
+# ``resume_parse_max_tries`` is the retry ceiling `parse_resume`'s single
+# `LLMUnavailableError` boundary reads via `ctx["job_try"]` (arq's per-job,
+# 1-based attempt counter -- arq's `ctx` carries NO `max_tries` key of its
+# own) to decide "let arq retry" vs "give up, record_parse_failure". The SAME
+# number must also back `WorkerSettings.max_tries` in `src/worker/main.py` --
+# see `test_worker_wiring.py` -- so arq's own retry ceiling and this
+# boundary's give-up threshold can never silently drift apart.
+
+
+def test_resume_parse_max_tries_default() -> None:
+    assert Settings().resume_parse_max_tries == 5
+
+
+def test_resume_parse_max_tries_is_a_positive_int() -> None:
+    assert isinstance(Settings().resume_parse_max_tries, int)
+    assert Settings().resume_parse_max_tries > 0
+
+
+def test_env_override_resume_parse_max_tries(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("RESUME_PARSE_MAX_TRIES", "3")
+    assert Settings().resume_parse_max_tries == 3

@@ -415,9 +415,12 @@ class LLMClient:
                 self._log_attempt(
                     path, prompt_hash, attempt, start, status=response.status_code
                 )
-                raise LLMUnavailableError(
-                    f"{response.status_code} {response.text[:200]}"
-                )
+                # Do NOT embed ``response.text`` — an upstream 4xx body can
+                # reflect the request (résumé/prompt text, candidate PII), and
+                # this message flows into the cleartext, blind-review-exposed
+                # ``resumes.failure_reason`` column. Status code alone is the
+                # PII-free diagnostic; full body detail stays in ``_log_attempt``.
+                raise LLMUnavailableError(f"HTTP {response.status_code}")
 
             payload: dict[str, Any] = response.json()
             self._on_success()

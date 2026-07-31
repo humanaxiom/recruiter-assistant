@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     llm_model_embedding: str = "nomic-embed-text"
     llm_embedding_dim: int = 768  # CONTRACT: == Neo4j `vector.dimensions`
     llm_timeout_s: float = 120.0
+    # LLMClient's own HTTP-layer retry budget (httpx-level, inside ONE arq job
+    # try) — do not confuse with `resume_parse_max_tries` below, which is the
+    # arq JOB-layer retry ceiling (a whole job re-enqueue, across possibly
+    # many `LLMClient` calls each with their own `llm_max_retries` budget).
     llm_max_retries: int = 2
     llm_breaker_threshold: int = 10  # consecutive failures before the breaker opens
     llm_breaker_cooldown_s: float = 30.0
@@ -205,6 +209,17 @@ class Settings(BaseSettings):
     match_reverse_evidence_k: int = 10
     match_llm_concurrency: int = 4
     match_evidence_max_tokens: int = 2048
+
+    # ── FU-7 (ADR-021 §3): honest résumé parse status ─────────────────────────
+    # The arq JOB-layer retry ceiling `parse_resume`'s `LLMUnavailableError`
+    # boundary reads (via `ctx["job_try"]`, arq's 1-based per-job attempt
+    # counter) to decide "let arq retry" vs "give up, record_parse_failure".
+    # NOT `llm_max_retries` above, which is the LLMClient HTTP-layer retry
+    # budget inside a single call. The SAME value also backs
+    # `WorkerSettings.max_tries` in `src/worker/main.py`, so arq's own retry
+    # ceiling and this boundary's give-up threshold can never silently drift
+    # apart.
+    resume_parse_max_tries: int = 5
 
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"

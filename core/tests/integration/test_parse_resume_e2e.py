@@ -404,3 +404,72 @@ async def test_outbox_payload_carries_the_resume_parse_fields(
     assert "chunk_embs" in payload
     assert "prompt_version" in payload
     assert str(payload.get("job_id")) == str(parsed["job_id"])
+
+
+# ── FU-7 (ADR-021 §3) — the uploaded->parsing claim's effect is otherwise ──
+# invisible ───────────────────────────────────────────────────────────────
+#
+# 'parsed'/'failed' are both reachable whether or not parse_resume ever
+# claims the row -- a mutant that deletes the claim step still passes every
+# OTHER assertion in this file. This test is the one that actually proves
+# the claim ran: the mocked LLM reads the row's LIVE status back from
+# Postgres, from a FRESH connection, from INSIDE the parse, on its first
+# call, before returning anything.
+
+
+@pytest.mark.asyncio
+async def test_row_is_already_parsing_when_the_core_llm_call_fires(
+    pg_pool: asyncpg.Pool, blob_store: BlobStore
+) -> None:
+    job_id = await _insert_job(pg_pool)
+    data = RESUME_TEXT.encode("utf-8")
+    blob_key = f"resumes/{uuid.uuid4().hex}.txt"
+    await blob_store.put(blob_key, data)
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        blob_key=blob_key,
+        mime_type=MIME_TXT,
+        file_size_bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+
+    observed_status: dict[str, Any] = {"value": "not-observed"}
+
+    async def _chat_json(messages: Any, schema: Any, **kwargs: Any) -> Any:
+        if schema is ResumeCore:
+            # In-flight: read the row's LIVE status from a FRESH connection,
+            # from inside the parse, before returning the canned core.
+            async with pg_pool.acquire() as conn:
+                observed_status["value"] = await conn.fetchval(
+                    "SELECT status FROM resumes WHERE id = $1", resume_id
+                )
+            return CORE_RESULT
+        if schema is ResumeSkillDetails:
+            return SKILLS_RESULT
+        if schema is CoverLetterParsed:
+            return CoverLetterParsed()
+        raise AssertionError(f"unexpected schema in in-flight test: {schema!r}")
+
+    llm = MagicMock(chat_json=AsyncMock(side_effect=_chat_json))
+    embedder = _make_embedder()
+    ctx: dict[str, Any] = {
+        "pg_pool": pg_pool,
+        "llm": llm,
+        "embedder": embedder,
+        "blob_store": blob_store,
+    }
+
+    with patch(
+        "src.services.pii.get_settings",
+        return_value=SimpleNamespace(pii_key=PII_KEY),
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    assert observed_status["value"] == "parsing", (
+        "resumes.status was NOT 'parsing' by the time the core LLM call "
+        "fired -- the uploaded->parsing claim did not run (or ran too late "
+        "-- after the blob fetch/LLM call instead of before it), observed "
+        f"status: {observed_status['value']!r}"
+    )
