@@ -2563,6 +2563,57 @@ async def test_llm_unavailable_on_last_try_records_failure_and_returns_failed() 
 
 
 @pytest.mark.asyncio
+async def test_last_try_failure_reason_never_embeds_the_exception_text() -> None:
+    """PRIVACY INVARIANT (security): ``failure_reason`` is a cleartext column
+    surfaced by ``get_one`` even under blind review, so the retries-exhausted
+    reason must be PII-free BY CONSTRUCTION — it must NOT interpolate
+    ``str(exc)``, which can carry an upstream 4xx body that reflects résumé /
+    candidate PII. A mutant that reintroduces ``: {exc}`` fails this test."""
+    resume_id = uuid4()
+    conn = _make_conn(_meta_row(job_id=uuid4(), status="uploaded"))
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    pii_marker = "HTTP 400 candidate Jane Doe jane.doe@example.com 555-0199"
+    llm = MagicMock(chat_json=AsyncMock(side_effect=LLMUnavailableError(pii_marker)))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store)
+    ctx["job_try"] = 5
+
+    with (
+        patch(
+            "src.worker.resume_tasks.resume_service.claim_parsing",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks.get_settings",
+            return_value=Settings(resume_parse_max_tries=5),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parse_failure",
+            new_callable=AsyncMock,
+        ) as record_failure,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "failed"
+    record_failure.assert_awaited_once()
+    flat = _flat_call_args(record_failure.await_args)
+    reasons = [a for a in flat if isinstance(a, str)]
+    for r in reasons:
+        for leaked in ("Jane", "Doe", "jane.doe@example.com", "555-0199"):
+            assert leaked not in r, (
+                f"failure_reason leaked exception PII {leaked!r}: {r!r} — the "
+                "reason must be PII-free by construction, not interpolate str(exc)"
+            )
+
+
+@pytest.mark.asyncio
 async def test_llm_unavailable_from_skills_extraction_on_last_try_records_failure() -> (
     None
 ):

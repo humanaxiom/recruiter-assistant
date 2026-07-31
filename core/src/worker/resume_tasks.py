@@ -856,10 +856,22 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
         except LLMUnavailableError as exc:
             job_try = ctx.get("job_try", 1)
             if job_try >= get_settings().resume_parse_max_tries:
+                # ``failure_reason`` is a CLEARTEXT column surfaced by
+                # ``get_one`` even under blind review — keep it PII-free BY
+                # CONSTRUCTION (do NOT interpolate ``str(exc)``, which can carry
+                # upstream detail), the same merge-blocking privacy invariant the
+                # sibling ``ValidationError`` path enforces via
+                # ``validation_error_digest``. Full exc goes to the worker log.
+                log.warning(
+                    "parse_resume.retries_exhausted resume_id=%s job_try=%s exc=%s",
+                    resume_id_str,
+                    job_try,
+                    exc,
+                )
                 await resume_service.record_parse_failure(
                     conn,
                     resume_id=resume_id,
-                    reason=f"timeout after {job_try} retries: {exc}",
+                    reason=f"llm unavailable after {job_try} retries",
                 )
                 return "failed"
             raise Retry(defer=_RETRY_DEFER_SECONDS) from exc
