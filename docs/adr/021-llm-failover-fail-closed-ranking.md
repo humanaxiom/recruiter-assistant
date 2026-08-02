@@ -95,6 +95,15 @@ In the UI and ranking pipeline:
 
 This closes the gap where 10 résumés silently had no skills but were marked "parsed".
 
+> **2026-08-02 note:** Implemented — see [ADR-030](030-fu7-degraded-parse-visibility.md). The flag/reason
+> ride the existing `resumes.parsed` jsonb verbatim (no DDL change), exactly as scoped here. The exclusion
+> mechanism is a skip of the `resume.parsed` outbox enqueue (no Neo4j projection → no stage-1 recall hit),
+> mirroring the ADR-026 withdrawn-during-parse skip rather than any new scoring code — consistent with the
+> ADR-029 fail-closed stance this section's own rationale anticipates. Visibility surfaces: `ResumeListItem`,
+> a `ResumeStatusBreakdown.degraded` sub-count of `parsed` (not a disjoint peer bucket), `get_one` under
+> blind+reveal, and UI badges on the résumé detail/list/status-breakdown views. Re-parse is via re-upload
+> today; a dedicated `POST /resumes/{id}/reparse` route is a documented follow-up, not built in this slice.
+
 ### 5. Timeout sizing as a documented function of hardware
 
 `LLM_TIMEOUT_S` must be set as: **`max_tokens / measured_tok_per_s` + headroom**

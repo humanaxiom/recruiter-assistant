@@ -164,8 +164,12 @@ flowchart TB
     subgraph RANKF["during ranking (ADR-029)"]
         RS["fail closed: shortlist WITHHELD<br/>jobs.shortlist_state = awaiting_llm<br/>UI: 'Waiting for AI to rank…'<br/>arq retry ≤ shortlist_max_tries"]
     end
+    subgraph DEGF["skills extraction only (ADR-030)"]
+        DG["degraded=true, PII-free reason persisted<br/>badged in UI + status breakdown<br/>no graph projection -> excluded from ranking"]
+    end
     RETRY -->|parse path| PARSEF
     RETRY -->|rank path| RANKF
+    B -->|"resume_skills_v2 call only<br/>(keyword-scan floor still lands)"| DEGF
 
     classDef bad fill:#DC2626,stroke:#991B1B,color:#fff;
     classDef ok fill:#16A34A,stroke:#166534,color:#fff;
@@ -180,6 +184,11 @@ flowchart TB
   that depends on the LLM (evidence + motivation). The whole shortlist is withheld and retried instead.
 - **Honest parse status (ADR-027):** a résumé whose parse times out moves to `failed`, not a silent
   `uploaded`, so it can't vanish from a shortlist unnoticed.
+- **Degraded-parse visibility (ADR-030):** when skills extraction (Mode B) falls back to a deterministic
+  keyword scan, the résumé is marked `degraded` (persisted on the existing `resumes.parsed` jsonb, no DDL),
+  badged in the list/detail UI and the per-job status breakdown, and — same fail-closed reasoning as
+  ADR-029 — excluded from ranking (its `resume.parsed` graph-projection event is never enqueued) until it is
+  re-parsed.
 
 ---
 
@@ -240,5 +249,6 @@ flowchart LR
 | Embedding / PII boundary | ADR-007 |
 | Evidence anti-fabrication | ADR-022 · ADR-023 |
 | Fail-closed ranking · honest parse status | ADR-029 · ADR-027 |
+| Degraded-parse visibility | ADR-030 |
 | Education field relevance | ADR-028 |
 | HR-facing metrics + ratification register | `docs/process/ranking-metrics-explainer.html` |
