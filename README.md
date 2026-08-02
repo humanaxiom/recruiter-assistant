@@ -166,7 +166,7 @@ The DTOs are aligned to the Phase 0 DDL at three points, and the redaction bound
 Four stages, implemented in `core/src/pipeline/matching/{stages,orchestrator}.py` (Phase 4c):
 
 1. **Coarse recall** — Neo4j `resume_summary_idx` vector query, scoped to the job, 3× oversample → k = 50.
-2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty (keyed off the candidate's actual ontology match, not a raw zero score — see [ADR-009](docs/adr/009-matching-engine-port.md)).
+2. **Structured score** — `0.40·skill + 0.25·exp + 0.10·edu + 0.15·seniority + 0.10·vector` over the skill graph, with ontology partial-credit, years/recency weighting, and a must-have-miss penalty (keyed off the candidate's actual ontology match, not a raw zero score — see [ADR-009](docs/adr/009-matching-engine-port.md)). Education (`edu`) compares degree **level** against `jd.education.min_level`; when the JD also lists `education.fields`, a candidate who meets the level bar but whose qualifying degree is in a non-allowed field is capped at `education_partial` (0.5) rather than full credit, via a fuzzy field-name match (`rapidfuzz.fuzz.token_set_ratio ≥ education_field_fuzz`, default 0.85) — see [ADR-028](docs/adr/028-education-field-relevance.md), resolving ADR-009 §7.
 3. **Evidence** — LLM per-requirement evidence, then anti-fabrication verify: every quote fuzzy-matched (`rapidfuzz.fuzz.partial_ratio` ≥ 0.85) against its cited résumé chunk, or blanked.
 4. **Combine + rank** — `0.6·structured + 0.3·evidence_completeness + 0.1·motivation` → ranked entries. Reverse-match (résumé → jobs) reuses stages 2–4 against an inverted stage-1 query.
 

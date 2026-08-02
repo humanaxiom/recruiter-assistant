@@ -134,22 +134,28 @@ under `src/` via `ast` (not text grep, so it doesn't false-positive on the docst
 reads `os.environ`/`os.getenv`, in any import shape (`import os`, `import os as _os`,
 `from os import environ`, `from os import getenv`).
 
-### 7. OPEN DECISION FOR A HUMAN — NOT resolved here
+### 7. `jd.education.fields` — RESOLVED (2026-08-01): extended, see ADR-028
 
 **`score_education` ignores `jd.education.fields` entirely** — it compares only the candidate's best
 degree **level** against `jd.education.min_level`; the JD's `education.fields` list (e.g.
 `["Computer Science", "Software Engineering", "Data Engineering"]`) is read nowhere in the scorer.
-Field-relevance is decorative in the shipped contract today. Flagged since Phase 4a (round 5) and
-**still open** — this port does not resolve it, because extending the scorer is new behaviour, not a
-port, and needs its own tests/ADR. Two options for a human to pick between:
+Field-relevance is decorative in the shipped contract today. Flagged since Phase 4a (round 5) and left
+open at port time — this port did not resolve it, because extending the scorer is new behaviour, not a
+port, and needed its own tests/ADR. Two options were on the table for a human to pick between:
 
 1. **Extend `score_education`** to read `fields` (e.g. a non-allowed field earns only
    `education_partial` even at a sufficient level).
 2. **Drop `fields`** from the JD contract as unused.
 
-The corpus's r14/r11 education ordering pair is deliberately built to survive either resolution (both
-twins' fields are JD-allowed, so the pair turns on level alone) — this is not blocking, but it should
-not be read as tacit acceptance of option 2.
+The corpus's r14/r11 education ordering pair was deliberately built to survive either resolution (both
+twins' fields are JD-allowed, so the pair turns on level alone) — this was not blocking, but was not to
+be read as tacit acceptance of option 2.
+
+**Decision (2026-08-01): option 1, extend.** `score_education` now reads `jd.education.fields`: a
+candidate who meets the level bar but whose qualifying degree is in a non-allowed field is capped at
+`education_partial` instead of `1.0`, via a fuzzy field-name match (`rapidfuzz.fuzz.token_set_ratio`,
+new `MatchWeights.education_field_fuzz` knob). Full algorithm, the unknown-field-penalizes decision and
+its counter-risk, and the corpus impact: [ADR-028](028-education-field-relevance.md).
 
 ## Accepted Residuals
 
@@ -185,7 +191,7 @@ flowchart TB
     subgraph S2["Stage 2 — structured score (per candidate)"]
         SK["skill (0.40)<br/>REQUIRES-only Cypher, reqSkill.canonical_key<br/>missing_must keys off row.ontology_weight==0"]
         EXP["experience (0.25)<br/>years vs jd_min_years, overqual curve"]
-        EDU["education (0.10)<br/>degree LEVEL only -- fields ignored (OPEN DECISION)"]
+        EDU["education (0.10)<br/>degree LEVEL + jd.education.fields relevance (ADR-028)"]
         SEN["seniority (0.15)<br/>cosine(jd.title, most-recent role title)"]
         VEC["vector (0.10)<br/>normalised stage-1 score"]
     end
