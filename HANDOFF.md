@@ -2,14 +2,30 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed + §4 degraded-parse shipped; everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed + §4 degraded-parse + dev-boot fix; everything merged
 
-> **Current tip: `humanaxiom/main` == `3df47de`. Both repos are PUBLIC. Zero open PRs. Working tree clean
-> (one untracked stray `compose.cas.yml` — operational scratch, not part of any branch; leave it). Nothing
-> is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner below
-> (kept as history) and all older stale banners.
+> **Current tip: `humanaxiom/main` == `f7dadc5`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
+> Nothing is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner
+> below (kept as history) and all older stale banners.
+>
+> **⚠️ `compose.cas.yml` IS NOW TRACKED (PR #58) — the old "untracked stray, leave it" guidance is DEAD.**
+> It is the real CAS override (port-parameterized `${API_PORT}`/`${FRONTEND_PORT}`). **CAS (SFU login + RBAC
+> + user management) is ON BY DEFAULT** in `scripts/quickstart.ps1`; a *plain* `docker compose up` (no
+> override) runs `cas_enabled=False` = dev-anonymous-admin (no login screen) — that is a BOOT MODE, not a
+> missing feature. **Standing orders (do not violate):** (1) publish UNIQUE host ports (29xxx block in
+> `.env.example`; `docker-compose.yml` reads `${X_PORT:-<stock>}`) — never stock 5432/6379/7474/7687/8000/5000,
+> which collide with other apps on this machine; (2) never ship tooling/config that silently drops a feature
+> (e.g. CAS) without asking.
 >
 > **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **Dev-boot fix — unique host ports + CAS on by default (PR #58, `f7dadc5`).** A stock `docker compose up`
+>   hit `Bind for 0.0.0.0:8000 failed` (held by `bccb-api-1`) and, separately, booted CAS-off so RBAC/
+>   user-management *looked* gone. Fix: `docker-compose.yml` host ports parameterized `${X_PORT:-<stock>}`
+>   (only host side; in-network DSNs unchanged); `.env.example` ships a unique 29xxx block; `compose.cas.yml`
+>   TRACKED + CAS URLs port-parameterized; `scripts/quickstart.ps1` writes the ports to `.env`, PORT-PREFLIGHTS
+>   with a clear "port N held by <container>" message, and applies CAS by default (`-NoCas` to skip). Verified
+>   live: stack up on 29xxx, frontend `:29500` 302→CAS login, API `:29800` `/auth/cas/login` → `cas.sfu.ca`.
+>   No feature code changed. Ports (unique): API 29800, frontend 29500, pg 29432, redis 29379, neo4j 29474/29687.
 > - **FU-7 §4 degraded-parse visibility (ADR-030)** — PR **#55**, squash `3df47de`. Closes the 2026-07-19
 >   silent-partial-parse gap: when résumé SKILLS extraction hits `LLMOutputInvalidError`,
 >   `_extract_skills_merged` falls back to the deterministic keyword scan; the parse is now flagged
@@ -880,7 +896,7 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`3df47de`**, both
+> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`f7dadc5`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
@@ -889,9 +905,10 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 > #44)**, the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)**,
 > **education field-of-study relevance (ADR-028, PR #49, `9229d61`)**, the **explainer follow-up (PR #51,
 > `107e6bb`)**, **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029, PR #52, `79d69ac`)**, the
-> **AI-usage one-pager (PR #54)**, the **Windows quickstart `scripts/quickstart.ps1` (PR #56)**, and
-> **FU-7 §4 degraded-parse visibility (ADR-030, PR #55, `3df47de`)** — all on `main`, CI green. **Nothing is
-> mid-flight.**
+> **AI-usage one-pager (PR #54)**, the **Windows quickstart `scripts/quickstart.ps1` (PR #56)**,
+> **FU-7 §4 degraded-parse visibility (ADR-030, PR #55, `3df47de`)**, and the **dev-boot fix — unique host
+> ports + CAS-on-by-default + tracked `compose.cas.yml` (PR #58, `f7dadc5`)** — all on `main`, CI green.
+> **Nothing is mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
