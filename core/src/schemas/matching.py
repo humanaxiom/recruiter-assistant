@@ -530,6 +530,31 @@ class JobMatchResultOut(BaseModel):
     generated_at: dt.datetime | None = None
 
 
+class ShortlistStateOut(BaseModel):
+    """FU-7 §2 (ADR-021 §2 / ADR-029) — the fail-closed ranking state read
+    off ``jobs`` by ``shortlist_service.get_shortlist_state``. Present only
+    when a shortlist run failed closed and is awaiting a healthy LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: str
+    reason: str | None
+    at: dt.datetime
+
+
+class ShortlistStatusResponse(BaseModel):
+    """Response for GET /jobs/{id}/shortlist/status. ``state`` is ``None``
+    (with ``reason``/``at`` also ``None``) when the job carries no
+    fail-closed ``awaiting_llm`` state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUID
+    state: str | None = None
+    reason: str | None = None
+    at: dt.datetime | None = None
+
+
 __all__ = [
     "CoverLetterEvidence",
     "CoverLetterEvidenceIngest",
@@ -552,6 +577,8 @@ __all__ = [
     "SCRUBBED_CONFIDENCE_CAP",
     "ScoreBreakdown",
     "ShortlistEntry",
+    "ShortlistStateOut",
+    "ShortlistStatusResponse",
     "SkillCategory",
     "SkillContribution",
 ]

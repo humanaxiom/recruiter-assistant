@@ -53,6 +53,7 @@ from src.schemas.matching import (
     PipelineMeta,
     ScoreBreakdown,
     ShortlistEntry,
+    ShortlistStateOut,
 )
 from src.schemas.resumes import ResumeParsed
 from src.services import DbConn
@@ -154,6 +155,91 @@ async def persist_reverse_match(conn: DbConn, result: JobMatchResult) -> int:
             meta_json,
         )
     return len(result.entries)
+
+
+# ── fail-closed shortlist state (FU-7 §2, ADR-021 §2 / ADR-029) ─────────────
+#
+# A shortlist run that fails closed (a Mode A/B LLM failure during ranking —
+# ``RankingUnavailableError``) records a visible ``awaiting_llm`` state on the
+# job's dedicated nullable columns instead of persisting a silently-degraded
+# shortlist. The worker sets it before an arq retry and clears it on the next
+# successful run; the status route surfaces it so the UI can distinguish
+# "awaiting AI" from "still generating".
+
+_SET_SHORTLIST_STATE_SQL = (
+    "UPDATE jobs SET shortlist_state = 'awaiting_llm', "
+    "shortlist_state_reason = $2, shortlist_state_at = now() WHERE id = $1"
+)
+_CLEAR_SHORTLIST_STATE_SQL = (
+    "UPDATE jobs SET shortlist_state = NULL, shortlist_state_reason = NULL, "
+    "shortlist_state_at = NULL WHERE id = $1"
+)
+_GET_SHORTLIST_STATE_SQL = (
+    "SELECT shortlist_state, shortlist_state_reason, shortlist_state_at "
+    "FROM jobs WHERE id = $1"
+)
+# FU-6/ADR-020 §3 single-entity row-scoping predicate, mirroring
+# ``job_service._JOB_ASSIGNEE_EXISTS_SQL`` VERBATIM — keyed on ``jobs.id`` (the
+# read below is on the ``jobs`` table itself). This is deliberately NOT the
+# sibling ``_SHORTLIST_ASSIGNEE_EXISTS_SQL`` above, which is keyed on
+# ``{table}.job_id`` for reads OFF the shortlist tables (``jobs`` has no
+# ``job_id`` column). A local constant keeps this off a cross-service import.
+_JOBS_ASSIGNEE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM job_assignees "
+    "WHERE job_assignees.job_id = jobs.id "
+    "AND job_assignees.user_id = $2)"
+)
+
+
+async def set_shortlist_awaiting_llm(
+    conn: DbConn, job_id: UUID, *, reason: str
+) -> None:
+    """Record the fail-closed ``awaiting_llm`` state (with its reason + a
+    ``now()`` timestamp) on ``job_id``. Clearing/overwriting is idempotent —
+    a later run either clears it or re-sets it."""
+    await conn.execute(_SET_SHORTLIST_STATE_SQL, job_id, reason)
+
+
+async def clear_shortlist_state(conn: DbConn, job_id: UUID) -> None:
+    """Null out every ``shortlist_state*`` column for ``job_id``. A no-op on a
+    job that carries no state (the columns are already NULL) — never raises."""
+    await conn.execute(_CLEAR_SHORTLIST_STATE_SQL, job_id)
+
+
+async def get_shortlist_state(
+    conn: DbConn, job_id: UUID, *, user_id: UUID | None = None
+) -> ShortlistStateOut | None:
+    """Read the fail-closed ranking state for ``job_id``.
+
+    Raises ``NotFoundError`` when the job does not resolve (mirroring every
+    other single-entity read here — ``get_one`` / ``job_service.get_job``);
+    returns ``None`` only when the job resolves but carries no ``awaiting_llm``
+    state.
+
+    FU-6/ADR-020 §3/§5 (IDOR fix) — ``user_id`` row-scopes the read to a
+    hiring_manager SESSION's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``, keyed on ``jobs.id`` exactly like
+    ``job_service.get_job``. A job that exists but is NOT assigned to
+    ``user_id`` is filtered out at the SQL layer (0 rows) and surfaces as
+    ``NotFoundError`` — observationally IDENTICAL to a genuinely nonexistent
+    job id, so a scoped reader gains no 404-vs-200 existence oracle and cannot
+    read another job's ranking state. ``None`` (the default, for
+    admin/recruiter/auditor) leaves the query byte-identical to the unscoped
+    read — no predicate, no extra bind arg."""
+    if user_id is None:
+        row = await conn.fetchrow(_GET_SHORTLIST_STATE_SQL, job_id)
+    else:
+        query = f"{_GET_SHORTLIST_STATE_SQL} AND {_JOBS_ASSIGNEE_EXISTS_SQL}"
+        row = await conn.fetchrow(query, job_id, user_id)
+    if row is None:
+        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+    if row["shortlist_state"] is None:
+        return None
+    return ShortlistStateOut(
+        state=row["shortlist_state"],
+        reason=row["shortlist_state_reason"],
+        at=row["shortlist_state_at"],
+    )
 
 
 # ── reverse-match read (Phase 6) ────────────────────────────────────────────

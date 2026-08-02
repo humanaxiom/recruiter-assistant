@@ -19,6 +19,16 @@ audited action: a "Withdraw candidate" form posting to ``resume_withdraw``
 with ``context=shortlist``, carrying its OWN one-shot CSRF token
 (``action="withdraw"``, distinct from the same card's reveal token — see
 ``test_frontend_csrf.py``'s "tokens scoped by (résumé id, action)" section).
+
+**FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed ``awaiting_llm`` state (added
+below).** ``api_client.get_shortlist_status`` does not exist yet — every new
+test that overrides it via ``monkeypatch.setattr`` (default ``raising=True``)
+fails at that call with ``AttributeError`` until it's added. The autouse
+``_default_shortlist_status`` fixture below stubs a harmless "no state" shape
+with ``raising=False`` so every EXISTING test in this file (written before the
+``awaiting_llm`` state existed) keeps passing once ``shortlist_cards`` starts
+consulting the status endpoint unconditionally — a job with no fail-closed
+state at all is overwhelmingly the common case this whole file exercises.
 """
 
 from __future__ import annotations
@@ -40,11 +50,46 @@ _REAL_NAME = "Zzyzxqrst Wibblesworth"
 _REAL_EMAIL = "zzyzxqrst.wibblesworth@example.test"
 _REAL_PHONE = "604-555-0192"
 
+# The two tests below exercise the REAL api_client.get_shortlist_status
+# passthrough (their own httpx.MockTransport handler) -- the autouse
+# _default_shortlist_status fixture below must not monkeypatch it out from
+# under them.
+_REAL_SHORTLIST_STATUS_TESTS = frozenset(
+    {
+        "test_get_shortlist_status_gets_the_status_path",
+        "test_get_shortlist_status_maps_5xx_to_backend_unavailable",
+    }
+)
+
 
 @pytest.fixture
 def client() -> Any:
     app.config.update(TESTING=True)
     return app.test_client()
+
+
+@pytest.fixture(autouse=True)
+def _default_shortlist_status(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default stub for the new FU-7 status endpoint — see module docstring.
+    ``raising=False`` because ``api_client.get_shortlist_status`` does not
+    exist yet on the real module; once it does, this simply overrides it with
+    a benign default that every pre-existing test in this file can rely on.
+
+    The two tests in ``_REAL_SHORTLIST_STATUS_TESTS`` exercise the REAL
+    ``api_client.get_shortlist_status`` passthrough against their own
+    ``httpx.MockTransport`` -- this fixture must NOT shadow it for them, or
+    their handler never runs (the monkeypatched stub answers first).
+    """
+    if request.node.name in _REAL_SHORTLIST_STATUS_TESTS:
+        return
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        lambda *_a, **_k: {"job_id": None, "state": None, "reason": None, "at": None},
+        raising=False,
+    )
 
 
 def _client_with(
@@ -627,3 +672,142 @@ def test_shortlist_card_withdraw_control_uses_display_label_context_never_pii(
     assert _REAL_NAME not in raw
     assert _REAL_EMAIL not in raw
     assert _REAL_PHONE not in raw
+
+
+# ── FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed "awaiting_llm" state ──────
+#
+# ``api_client.get_shortlist_status`` (new passthrough) and the
+# ``shortlist_cards.html`` awaiting_llm branch don't exist yet. Every
+# ``monkeypatch.setattr(api_client, "get_shortlist_status", ...)`` call below
+# uses the DEFAULT ``raising=True`` (unlike the autouse fixture above), so it
+# fails with ``AttributeError`` until the attribute is added — that failure
+# IS the RED signal for these tests specifically.
+
+
+def test_get_shortlist_status_gets_the_status_path() -> None:
+    job_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        return httpx.Response(
+            200,
+            json={"job_id": str(job_id), "state": None, "reason": None, "at": None},
+        )
+
+    result = api_client.get_shortlist_status(job_id, client=_client_with(handler))
+    assert captured["method"] == "GET"
+    assert captured["url"].path == f"/jobs/{job_id}/shortlist/status"
+    assert result["state"] is None
+
+
+def test_get_shortlist_status_maps_5xx_to_backend_unavailable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "boom"})
+
+    with pytest.raises(api_client.BackendUnavailable):
+        api_client.get_shortlist_status(uuid4(), client=_client_with(handler))
+
+
+def test_shortlist_cards_calls_get_shortlist_status(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    spy = MagicMock(
+        return_value={"job_id": str(job_id), "state": None, "reason": None, "at": None}
+    )
+    monkeypatch.setattr(api_client, "get_shortlist_status", spy)
+    client.get(f"/jobs/{job_id}/shortlist-cards")
+    spy.assert_called_once()
+
+
+def test_shortlist_cards_shows_awaiting_llm_message_and_keeps_polling(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": "awaiting_llm",
+                "reason": "llm output invalid: empty response",
+                "at": "2026-08-01T00:00:00+00:00",
+            }
+        ),
+    )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Waiting for AI to rank candidates" in body
+    assert "hx-trigger" in body  # still polling — a retry is queued server-side
+
+
+def test_shortlist_cards_no_awaiting_message_when_state_is_null(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": None,
+                "reason": None,
+                "at": None,
+            }
+        ),
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "Waiting for AI to rank candidates" not in body
+    assert "hx-trigger" in body  # ordinary "still generating" path, unchanged
+
+
+def test_shortlist_cards_entries_present_ignores_awaiting_llm_state(
+    monkeypatch: Any, client: Any
+) -> None:
+    """If entries exist, render cards (unchanged) — even if the status
+    endpoint still reports a (now-stale) awaiting_llm state from before the
+    successful retry landed."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": "awaiting_llm",
+                "reason": "boom",
+                "at": "2026-08-01T00:00:00+00:00",
+            }
+        ),
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "Candidate A" in body
+    assert "Waiting for AI to rank candidates" not in body
+    assert "hx-trigger" not in body
+
+
+def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(side_effect=api_client.NotFound("no job")),
+    )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    assert resp.status_code == 404

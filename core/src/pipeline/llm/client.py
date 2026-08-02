@@ -64,6 +64,21 @@ class LLMOutputInvalidError(RuntimeError):
     """Model produced non-JSON or schema-invalid JSON after the retry budget."""
 
 
+def _empty_content_message(reasoning_present: bool) -> str:
+    """PII-free diagnostic for an empty/whitespace-only chat completion.
+
+    An empty ``content`` is the classic "reasoning model burned its whole
+    ``max_tokens`` budget on a discarded reasoning/thinking trace" failure
+    (ADR-021 §6). ``reasoning_present`` distinguishes that cause (a
+    reasoning/thinking field WAS present alongside the empty content) from
+    some other reason the model returned nothing.
+    """
+    return (
+        "response content was empty (possibly reasoning model exhausted "
+        f"token budget); reasoning_present={reasoning_present}"
+    )
+
+
 def validation_error_digest(exc: ValidationError) -> str:
     """A PII-FREE one-line digest of a pydantic ``ValidationError``.
 
@@ -205,14 +220,17 @@ class LLMClient:
             "stream": False,
         }
         if json_mode:
-            # OpenAI JSON mode + disable "thinking". On reasoning models
-            # (glm-4.7, gpt-oss, deepseek-r1) the reasoning trace counts
-            # against max_tokens; on a large prompt it fills the budget so
-            # generation stops before any JSON is emitted and `content`
-            # comes back empty. We never use the reasoning text. NOTE:
-            # Ollama's OpenAI-compat layer honours `think` only
-            # intermittently — for a reliable thinking-off path on Ollama,
-            # set llm_ollama_native=True (see _chat_native).
+            # OpenAI JSON mode + a best-effort `think:false`. On reasoning
+            # models (glm-4.7, gpt-oss, deepseek-r1) the reasoning trace
+            # counts against max_tokens; on a large prompt it fills the budget
+            # so generation stops before any JSON is emitted and `content`
+            # comes back empty (raised as LLMOutputInvalidError below). We
+            # never use the reasoning text. NOTE (ADR-021 §6): neither this
+            # OpenAI-compat path NOR the native /api/chat path (_chat_native)
+            # reliably suppresses reasoning for gpt-oss:20b — `think:false` is
+            # only intermittently honoured on both, so switching to
+            # llm_ollama_native is NOT a guaranteed escape hatch from
+            # reasoning-token exhaustion, only a different roll of the dice.
             body["response_format"] = {"type": "json_object"}
             body["think"] = False
         payload = await self._post_json("/chat/completions", body)
@@ -223,6 +241,13 @@ class LLMClient:
         content = message.get("content")
         if not isinstance(content, str):
             raise LLMOutputInvalidError("response choice had no string content")
+        if not content.strip():
+            reasoning_present = bool(
+                message.get("reasoning") or choices[0].get("reasoning")
+            )
+            msg = _empty_content_message(reasoning_present)
+            log.warning("llm.empty_content %s", msg)
+            raise LLMOutputInvalidError(msg)
         return content
 
     async def _chat_native(
@@ -232,11 +257,12 @@ class LLMClient:
         max_tokens: int,
         json_mode: bool,
     ) -> str:
-        """Ollama's native /api/chat. Unlike the OpenAI-compat endpoint it
-        honours ``think: false`` reliably, which is what keeps reasoning
-        models from burning the whole token budget on a discarded trace.
-        Content may still arrive fenced (```json …```); ``_extract_json``
-        downstream strips that."""
+        """Ollama's native /api/chat. It ALSO passes ``think: false``, but
+        per ADR-021 §6 neither this path nor the OpenAI-compat one reliably
+        suppresses reasoning for gpt-oss:20b — an empty ``content`` (the
+        reasoning trace ate the whole token budget) can still come back and is
+        raised as LLMOutputInvalidError below. Content may also arrive fenced
+        (```json …```); ``_extract_json`` downstream strips that."""
         body: dict[str, Any] = {
             "model": self._gen,
             "messages": list(messages),
@@ -252,6 +278,11 @@ class LLMClient:
         content = (payload.get("message") or {}).get("content")
         if not isinstance(content, str):
             raise LLMOutputInvalidError("native chat response had no string content")
+        if not content.strip():
+            reasoning_present = bool(payload.get("thinking"))
+            msg = _empty_content_message(reasoning_present)
+            log.warning("llm.empty_content %s", msg)
+            raise LLMOutputInvalidError(msg)
         return content
 
     async def chat_json(

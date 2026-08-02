@@ -138,6 +138,10 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         "/resumes/{resume_id}/match-results",
         "/jobs/{job_id}/shortlist",
         "/jobs/{job_id}/shortlist/export",
+        # FU-7 §2 (ADR-021 §2 / ADR-029) — GET .../shortlist/status, the
+        # fail-closed awaiting_llm state read, same router/RBAC as the rest
+        # of the shortlist routes.
+        "/jobs/{job_id}/shortlist/status",
         "/shortlist/{entry_id}",
         # FU-5 slice 6 (ADR-019 §10) — src.api.routes.auth, mounted with
         # prefix="/auth" per test_route_auth.py's locked contract.

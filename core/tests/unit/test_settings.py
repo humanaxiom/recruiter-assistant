@@ -32,6 +32,7 @@ override, matching the existing style for every other setting in this file.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from src.settings import Settings, get_settings
@@ -316,3 +317,72 @@ def test_resume_parse_max_tries_is_a_positive_int() -> None:
 def test_env_override_resume_parse_max_tries(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("RESUME_PARSE_MAX_TRIES", "3")
     assert Settings().resume_parse_max_tries == 3
+
+
+# ── FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed shortlist ranking ──────────
+#
+# ``shortlist_max_tries`` is the arq JOB-layer retry ceiling
+# ``shortlist_job``'s ``RankingUnavailableError`` boundary reads (via
+# ``ctx.get("job_try", 1)``) to decide "let arq retry" vs "give up, leave
+# jobs.shortlist_state='awaiting_llm' visible". Unlike
+# ``resume_parse_max_tries`` above (no upper bound), this one gets an UPPER
+# sanity cap (the FU-7 residual named in the spec) via
+# ``Field(default=20, ge=1, le=1000)`` — a misconfigured/huge value must fail
+# loud at startup, not silently retry a shortlist run forever.
+# ``shortlist_retry_defer_s`` is the arq defer between retries.
+
+
+def test_shortlist_max_tries_default() -> None:
+    assert Settings().shortlist_max_tries == 20
+
+
+def test_shortlist_max_tries_is_a_positive_int() -> None:
+    assert isinstance(Settings().shortlist_max_tries, int)
+    assert Settings().shortlist_max_tries > 0
+
+
+def test_env_override_shortlist_max_tries(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTLIST_MAX_TRIES", "7")
+    assert Settings().shortlist_max_tries == 7
+
+
+def test_shortlist_max_tries_rejects_zero(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTLIST_MAX_TRIES", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_shortlist_max_tries_rejects_negative(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTLIST_MAX_TRIES", "-1")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_shortlist_max_tries_rejects_a_value_above_the_upper_sanity_cap(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The FU-7 residual: give this retry ceiling an UPPER bound, unlike
+    ``resume_parse_max_tries`` which has none — ``Field(..., le=1000)``."""
+    monkeypatch.setenv("SHORTLIST_MAX_TRIES", "1001")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_shortlist_max_tries_accepts_the_upper_sanity_cap_boundary(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHORTLIST_MAX_TRIES", "1000")
+    assert Settings().shortlist_max_tries == 1000
+
+
+def test_shortlist_retry_defer_s_default() -> None:
+    assert Settings().shortlist_retry_defer_s == pytest.approx(45.0)
+
+
+def test_shortlist_retry_defer_s_is_positive() -> None:
+    assert Settings().shortlist_retry_defer_s > 0
+
+
+def test_env_override_shortlist_retry_defer_s(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTLIST_RETRY_DEFER_S", "12.5")
+    assert Settings().shortlist_retry_defer_s == pytest.approx(12.5)

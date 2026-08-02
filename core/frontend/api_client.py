@@ -350,6 +350,15 @@ def get_shortlist_entry(entry_id: UUID, *, client: httpx.Client | None = None) -
     return response.json()
 
 
+def get_shortlist_status(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /jobs/{id}/shortlist/status (FU-7 §2) — the fail-closed ranking
+    state ``{job_id, state, reason, at}``. ``state`` is ``"awaiting_llm"`` when
+    a run failed closed and a retry is queued, else ``None``. A backend 404
+    (missing job) surfaces as ``NotFound``; a 5xx as ``BackendUnavailable``."""
+    response = _request("GET", f"/jobs/{job_id}/shortlist/status", client=client)
+    return response.json()
+
+
 def get_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     """GET /resumes/{id} — unconditionally blind.
 
@@ -508,6 +517,7 @@ __all__ = [
     "generate_shortlist",
     "list_shortlist",
     "get_shortlist_entry",
+    "get_shortlist_status",
     "get_resume",
     "reveal_resume",
     "withdraw_resume",

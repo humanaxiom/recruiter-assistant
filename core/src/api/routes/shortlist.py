@@ -25,7 +25,7 @@ from src.api.deps import (
 )
 from src.models.pool import Db
 from src.schemas.auth import User
-from src.schemas.matching import ShortlistEntry
+from src.schemas.matching import ShortlistEntry, ShortlistStatusResponse
 from src.services import shortlist_service
 from src.services.pii import set_pii_key
 
@@ -137,6 +137,36 @@ async def list_shortlist(
     genuinely nonexistent ``job_id``."""
     user_id = await scoped_user_id_or_403(user, role)
     return await shortlist_service.list_for_job(db, job_id=job_id, user_id=user_id)
+
+
+@router.get("/jobs/{job_id}/shortlist/status")
+async def shortlist_status(
+    job_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_SHORTLIST_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> ShortlistStatusResponse:
+    """FU-7 §2 (ADR-021 §2 / ADR-029) — the fail-closed ranking state the
+    frontend poll consults to tell "awaiting AI" apart from "still generating".
+
+    FU-6 slice 7 (ADR-020 §3/§5) — row-scoped exactly like ``list_shortlist``:
+    the resolved ``user_id`` is forwarded into ``get_shortlist_state``. For a
+    hiring_manager SESSION (not the key role — see ``scoped_user_id_or_403``)
+    the read is scoped to their assigned jobs; a job they are not assigned to,
+    and a genuinely nonexistent job, BOTH surface as 404 (never 403), so the
+    404-vs-200 split cannot be used as a job-existence oracle and one manager
+    cannot read another job's ranking state. admin/recruiter/auditor read
+    unscoped (``user_id=None``). A hiring_manager KEY with no verifiable
+    session 403s before the service is ever reached (``scoped_user_id_or_403``).
+    An existing, assigned job with no ``awaiting_llm`` state returns
+    ``state=null``."""
+    user_id = await scoped_user_id_or_403(user, role)
+    state = await shortlist_service.get_shortlist_state(db, job_id, user_id=user_id)
+    if state is None:
+        return ShortlistStatusResponse(job_id=job_id)
+    return ShortlistStatusResponse(
+        job_id=job_id, state=state.state, reason=state.reason, at=state.at
+    )
 
 
 @router.get("/shortlist/{entry_id}")

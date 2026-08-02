@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from src.schemas.matching import MatchWeights
@@ -221,6 +222,18 @@ class Settings(BaseSettings):
     # ceiling and this boundary's give-up threshold can never silently drift
     # apart.
     resume_parse_max_tries: int = 5
+
+    # ── FU-7 §2 (ADR-021 §2 / ADR-029): fail-closed shortlist ranking ─────────
+    # The arq JOB-layer retry ceiling ``shortlist_job``'s
+    # ``RankingUnavailableError`` boundary reads (via ``ctx.get("job_try", 1)``)
+    # to decide "let arq retry" vs "give up, leave jobs.shortlist_state=
+    # 'awaiting_llm' visible". Unlike ``resume_parse_max_tries`` above (no upper
+    # bound), this one gets an UPPER sanity cap (the FU-7 residual) so a
+    # misconfigured/huge value fails loud at startup rather than silently
+    # retrying a shortlist run forever.
+    shortlist_max_tries: int = Field(default=20, ge=1, le=1000)
+    # The arq defer (seconds) between fail-closed shortlist retries.
+    shortlist_retry_defer_s: float = 45.0
 
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"

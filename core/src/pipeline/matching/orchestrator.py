@@ -41,7 +41,12 @@ from uuid import UUID
 import asyncpg
 from neo4j import AsyncDriver
 
-from src.pipeline.llm import CachedEmbedder, LLMClient, LLMOutputInvalidError
+from src.pipeline.llm import (
+    CachedEmbedder,
+    LLMClient,
+    LLMOutputInvalidError,
+    LLMUnavailableError,
+)
 from src.pipeline.matching.stages import (
     _CombineInput,
     _evidence_completeness,
@@ -67,6 +72,12 @@ from src.schemas.matching import (
 from src.settings import Settings, non_matchable_families_from_settings
 
 log = logging.getLogger(__name__)
+
+
+class RankingUnavailableError(RuntimeError):
+    """Stage-3 evidence could not complete because the LLM failed (Mode A
+    availability or Mode B invalid output). The shortlist must fail closed:
+    do NOT persist silently-degraded rows. ADR-021 §2 / ADR-029."""
 
 
 # ---------------- typed I/O ----------------
@@ -538,12 +549,16 @@ async def _stage3_per_candidate(
             max_retries=1,
         )
     except LLMOutputInvalidError as exc:
+        # FU-7 §2 (ADR-021 §2 / ADR-029): fail closed. Keep the log line, but
+        # re-raise instead of silently zeroing this candidate's evidence — a
+        # Mode B invalid output withholds the whole shortlist rather than
+        # persisting a degraded one.
         log.warning(
             "stage3.llm_invalid resume_id=%s error=%s",
             str(candidate.resume_id),
             str(exc),
         )
-        return None
+        raise
 
     chunks_by_id = {c["id"]: c["text"] for c in chunks if c.get("id")}
     if has_cover:
@@ -579,6 +594,12 @@ async def stage3_evidence(
                     parsed_by_id[candidate.resume_id],
                     weights=weights,
                 )
+            except (LLMOutputInvalidError, LLMUnavailableError):
+                # FU-7 §2 (ADR-021 §2 / ADR-029): a Mode A/B LLM failure fails
+                # CLOSED — re-raise so ONE such failure withholds the whole
+                # shortlist (asyncio.gather propagates it and cancels the
+                # siblings). ADR-021 §2 explicitly rejects partial shortlists.
+                raise
             except Exception:  # noqa: BLE001 — one candidate must not sink all
                 log.exception("stage3.failed resume_id=%s", str(candidate.resume_id))
                 results[candidate.resume_id] = None
@@ -633,20 +654,34 @@ async def generate_shortlist(
             pipeline_meta=_shortlist_meta(ctx, weights, started, timings),
         )
 
-    # Stage 2 — per-candidate (sequential; each does its own DB calls)
+    # Stage 2 — per-candidate (sequential; each does its own DB calls).
+    # FU-7 §2 (ADR-021 §2 / ADR-029): the seniority-cosine ``ctx.embedder.embed``
+    # call can raise ``LLMUnavailableError`` (an embedder outage), so the loop is
+    # wrapped to fail CLOSED — any Mode A/B failure becomes a single typed
+    # ``RankingUnavailableError`` that ``shortlist_job`` catches (a bare
+    # ``LLMUnavailableError`` escaping here would NOT trigger an arq retry —
+    # ADR-027). Stage 1 is a Neo4j vector query (no LLM) and is not wrapped.
     t = dt.datetime.now(dt.UTC)
     vec_normalised = normalise_vector_scores([c.vec_score for c in candidates_s1])
     candidates_s2: list[Stage2Candidate] = []
-    for c, vn in zip(candidates_s1, vec_normalised, strict=True):
-        s2 = await _stage2_per_candidate(ctx, job, c, vn, weights)
-        candidates_s2.append(s2)
+    try:
+        for c, vn in zip(candidates_s1, vec_normalised, strict=True):
+            s2 = await _stage2_per_candidate(ctx, job, c, vn, weights)
+            candidates_s2.append(s2)
+    except (LLMOutputInvalidError, LLMUnavailableError) as exc:
+        raise RankingUnavailableError(str(exc)) from exc
     candidates_s2.sort(key=lambda c: c.structured, reverse=True)
     timings["stage2_ms"] = _ms_since(t)
 
-    # Stage 3 — top-K evidence
+    # Stage 3 — top-K evidence. Fails CLOSED for the same reason (see above):
+    # a Mode A/B LLM failure re-raised out of ``stage3_evidence`` becomes a
+    # ``RankingUnavailableError`` rather than a silently-degraded shortlist.
     t = dt.datetime.now(dt.UTC)
     top_k = candidates_s2[:evidence_k]
-    evidence_by_id = await stage3_evidence(ctx, job, top_k, weights=weights)
+    try:
+        evidence_by_id = await stage3_evidence(ctx, job, top_k, weights=weights)
+    except (LLMOutputInvalidError, LLMUnavailableError) as exc:
+        raise RankingUnavailableError(str(exc)) from exc
     timings["stage3_ms"] = _ms_since(t)
 
     # Stage 4 — combine + rank

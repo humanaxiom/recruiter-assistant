@@ -12,6 +12,12 @@
 {% set a = attempt|default(0) %}
 {% set m = max_attempts|default(400) %}
 {% set polling = (not entries) and (a < m) %}
+{# FU-7 §2 (ADR-021 §2 / ADR-029): the fail-closed ranking state. When ranking
+   failed closed a retry is queued server-side, so we keep polling but show a
+   DISTINCT "waiting for AI" message. Defaults to "no state" for callers that
+   don't pass it (e.g. the shortlist list page). #}
+{% set _status = shortlist_status|default(none) %}
+{% set awaiting_llm = _status is not none and _status.get('state') == 'awaiting_llm' %}
 <div id="shortlist-cards"
   {%- if polling %}
      hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
@@ -19,6 +25,15 @@
      hx-swap="outerHTML"
   {%- endif %}>
   {% if entries %}{# fall through to the cards below #}
+  {% elif polling and awaiting_llm %}
+  <p class="muted">
+    <span class="htmx-indicator spinner">polling…</span>
+    Waiting for AI to rank candidates… the ranking model was briefly
+    unavailable, so this run is queued to retry automatically. It will pick up
+    again on its own — no action needed.
+    <br>
+    <span class="elapsed">~{{ a * 3 }}s elapsed</span>
+  </p>
   {% elif polling %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>

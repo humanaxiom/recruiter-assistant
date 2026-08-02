@@ -709,9 +709,9 @@ sequenceDiagram
     </tr>
     <tr>
       <td class="num">11</td>
-      <td>If the language model returns malformed output for a candidate, they silently score 0 on 40% of the composite.</td>
-      <td>A technical failure becomes a ranking penalty, with only a log line behind it. Indistinguishable from a genuinely weak candidate. Note this is specifically <em>unreadable model output</em> — an outright outage fails the whole run loudly instead, which is the safer of the two behaviours.</td>
-      <td><span class="chip gap">Gap</span></td>
+      <td>If the language model fails during ranking — either it times out/errors, or it returns malformed or empty output — the shortlist is withheld rather than shown with a silently-zeroed candidate. The job displays "Waiting for AI to rank candidates…" and retries automatically, up to a configurable ceiling, before it stops and stays visibly in that state for a human to notice.</td>
+      <td>Closes the former gap (ADR-029): a technical failure can no longer look identical to a genuinely weak candidate. What is left to own is the policy: how many times to retry and how long to wait between attempts before giving up and asking a human to re-run it.</td>
+      <td><span class="chip ratify">Ratify</span></td>
     </tr>
     <tr>
       <td class="num">12</td>
@@ -751,7 +751,7 @@ sequenceDiagram
 
 <h2>Suggested next steps</h2>
 <ol>
-  <li><strong>Assign an owner to each of the fifteen register items.</strong> The ten marked "Ratify" need a documented yes or a changed number; all of them are configurable without code changes.</li>
+  <li><strong>Assign an owner to each of the fifteen register items.</strong> The eleven marked "Ratify" need a documented yes or a changed number; all of them are configurable without code changes.</li>
   <li><strong>Treat items 13 and 14 as blocking</strong> if these scores will inform real hiring decisions — unattributable reveals and unaudited un-blinding are the two that would be hardest to defend if challenged.</li>
   <li><strong>Decide whether items 7 and 8 survive legal review</strong> before first production use. Over-qualification dampening and skill-recency banding are the two most likely to produce adverse impact.</li>
 </ol>

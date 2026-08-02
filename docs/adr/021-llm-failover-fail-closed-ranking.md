@@ -66,6 +66,12 @@ When an LLM call produces invalid output (Mode B: `LLMOutputInvalidError`) durin
 
 This replaces the prior behaviour of catching `LLMOutputInvalidError` and silently returning `None`, which resulted in a broken-down candidate staying in the shortlist with degraded scores.
 
+> **2026-08-02 note:** Implemented — see [ADR-029](029-fail-closed-ranking-fu7.md). Scope was widened by a
+> human decision beyond this section's literal text: ADR-029 fails closed on **both** Mode B
+> (`LLMOutputInvalidError`, as scoped here) **and** Mode A (`LLMUnavailableError` — timeout/connection/5xx/429),
+> not Mode B alone. The `awaiting_llm` job state is a dedicated nullable column trio on `jobs`
+> (`shortlist_state`/`_reason`/`_at`), not a new `job_status` enum value — see ADR-029 for why.
+
 ### 3. Honest résumé parse status
 
 Implement the following state machine:
@@ -127,6 +133,12 @@ Additionally, handle the **empty `content` string** case explicitly in `_chat_op
 - Check if `content` is a string but empty after strip
 - Log a diagnostic warning that includes whether a `reasoning` field was present (to distinguish token-exhaustion on reasoning from other causes)
 - Raise `LLMOutputInvalidError` with a message like "response content was empty (possibly reasoning model exhausted token budget)" before JSON parsing
+
+> **2026-08-02 note:** Implemented — see [ADR-029](029-fail-closed-ranking-fu7.md). Both `_chat_openai` and
+> `_chat_native` now raise `LLMOutputInvalidError` on empty-after-strip `content`, via a shared
+> `_empty_content_message(reasoning_present: bool)` helper reporting whether a `reasoning`/`thinking` field
+> was present. The inert `think:false`/"reliable thinking-off path" comment this section describes was also
+> corrected in the same branch to state plainly that neither path suppresses reasoning for `gpt-oss:20b`.
 
 ---
 

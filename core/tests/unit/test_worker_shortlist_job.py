@@ -36,6 +36,23 @@ ADR-010 §1 residual / concurrency dedup (this slice):
   (does a second connection actually get blocked; does release actually free
   it) live in ``tests/integration/test_job_lock_pg.py`` — mandatory, not
   optional, for this change.
+
+── FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed ranking retry control flow ──
+
+``generate_shortlist`` raising the new ``RankingUnavailableError`` (Mode A/B
+LLM failure during ranking) must NOT be treated like any other exception:
+``shortlist_job`` must catch it specifically, record the ``awaiting_llm``
+state (``src.services.shortlist_service.set_shortlist_awaiting_llm`` — does
+not exist yet, imported into ``matching_tasks``), and either ``raise
+arq.Retry(...)`` (below ``settings.shortlist_max_tries``) or give up and
+return ``"awaiting_llm"`` (at/above the ceiling) — mirroring
+``resume_tasks.py``'s ADR-027 ``ctx["job_try"]`` pattern. A SUCCESSFUL run
+must clear any prior ``awaiting_llm`` state
+(``src.services.shortlist_service.clear_shortlist_state`` — also new).
+These are unit-level control-flow pins with everything mocked; the real
+Postgres round trip (columns actually persisted/cleared, ``arq.Retry``
+actually raised) is ``tests/integration/test_shortlist_fail_closed_pg.py`` —
+mandatory, not optional, for this change.
 """
 
 from __future__ import annotations
@@ -45,6 +62,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from arq import Retry
 
 from src.pipeline.matching.orchestrator import ShortlistResult, ShortlistResultEntry
 from src.schemas.matching import DEFAULT_WEIGHTS, ScoreBreakdown
@@ -74,6 +92,7 @@ def _acm(return_value: Any = None) -> MagicMock:
 def _make_conn(fetchrow_result: Any) -> MagicMock:
     conn = MagicMock(name="conn")
     conn.fetchrow = AsyncMock(return_value=fetchrow_result)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
     return conn
 
 
@@ -568,3 +587,234 @@ async def test_shortlist_job_forwards_the_default_top_percent_of_100() -> None:
         await shortlist_job(ctx, str(job_id))
 
     assert generate.await_args.kwargs.get("top_percent") == 100
+
+
+# ── FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed retry control flow ─────────
+#
+# ``src.pipeline.matching.orchestrator.RankingUnavailableError`` and
+# ``src.services.shortlist_service.set_shortlist_awaiting_llm`` /
+# ``clear_shortlist_state`` do not exist yet — every test below fails, either
+# at the local import (``ImportError``) or at the ``patch(...)`` call
+# (``AttributeError`` — the target attribute is not on the module).
+
+
+def _job_row(top_percent: int = 100) -> _Row:
+    return _Row(
+        {
+            "description_parsed": {"required_skills": [{"name": "Python"}]},
+            "shortlist_top_percent": top_percent,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_ranking_unavailable_error_sets_awaiting_llm_and_raises_retry_below_max() -> (  # noqa: E501
+    None
+):
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_job_row())
+    ctx = _make_ctx(conn)
+    ctx["job_try"] = 1
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch(
+            "src.worker.matching_tasks.get_settings",
+            return_value=Settings(shortlist_max_tries=20),
+        ),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            side_effect=RankingUnavailableError("llm output invalid: empty response"),
+        ),
+        patch(
+            "src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock
+        ) as persist,
+        patch(
+            "src.worker.matching_tasks.set_shortlist_awaiting_llm",
+            new_callable=AsyncMock,
+        ) as set_awaiting,
+        patch(
+            "src.worker.matching_tasks.clear_shortlist_state", new_callable=AsyncMock
+        ) as clear_state,
+    ):
+        with pytest.raises(Retry) as exc_info:
+            await shortlist_job(ctx, str(job_id))
+
+    assert isinstance(exc_info.value.__cause__, RankingUnavailableError), (
+        "arq.Retry must chain the original RankingUnavailableError "
+        "('raise ... from exc'), not swallow or replace it"
+    )
+    set_awaiting.assert_awaited_once()
+    assert job_id in _flat_call_args(set_awaiting.await_args)
+    persist.assert_not_awaited()
+    clear_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ranking_unavailable_error_at_max_tries_returns_awaiting_llm_no_retry() -> (  # noqa: E501
+    None
+):
+    """At/above the configured ceiling, ``shortlist_job`` must give up: return
+    the new status string ``"awaiting_llm"`` (NOT raise ``arq.Retry``), while
+    still leaving the ``awaiting_llm`` state set (visible; the user can
+    re-Generate)."""
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_job_row())
+    ctx = _make_ctx(conn)
+    ctx["job_try"] = 1
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch(
+            "src.worker.matching_tasks.get_settings",
+            return_value=Settings(shortlist_max_tries=1),
+        ),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            side_effect=RankingUnavailableError("llm unavailable"),
+        ),
+        patch(
+            "src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock
+        ) as persist,
+        patch(
+            "src.worker.matching_tasks.set_shortlist_awaiting_llm",
+            new_callable=AsyncMock,
+        ) as set_awaiting,
+    ):
+        result = await shortlist_job(ctx, str(job_id))
+
+    assert result == "awaiting_llm"
+    set_awaiting.assert_awaited_once()
+    persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ranking_unavailable_error_releases_the_lock() -> None:
+    """Same ADR-010 §1 guarantee as every other exception path: the advisory
+    lock must be released even when the run fails closed."""
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_job_row())
+    ctx = _make_ctx(conn)
+    ctx["job_try"] = 1
+
+    with (
+        patch(
+            "src.worker.matching_tasks.get_settings",
+            return_value=Settings(shortlist_max_tries=20),
+        ),
+        patch(
+            "src.worker.matching_tasks.try_job_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.matching_tasks.release_job_lock", new_callable=AsyncMock
+        ) as release_lock,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            side_effect=RankingUnavailableError("boom"),
+        ),
+        patch(
+            "src.worker.matching_tasks.set_shortlist_awaiting_llm",
+            new_callable=AsyncMock,
+        ),
+    ):
+        with pytest.raises(Retry):
+            await shortlist_job(ctx, str(job_id))
+
+    release_lock.assert_awaited_once_with(conn, "shortlist", job_id)
+
+
+@pytest.mark.asyncio
+async def test_successful_run_clears_any_prior_awaiting_llm_state() -> None:
+    """A successful run (whether or not a prior run left ``awaiting_llm``
+    set) must clear the state — the DDL default is nullable/no-default, so
+    clearing an already-clear state is a no-op, not an error."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_job_row())
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    fake_result = ShortlistResult(
+        job_id=job_id,
+        entries=[
+            ShortlistResultEntry(
+                resume_id=uuid4(),
+                rank=1,
+                score_final=0.9,
+                score_structured=0.8,
+                score_evidence=0.7,
+                breakdown=_breakdown(),
+                evidence=None,
+            )
+        ],
+    )
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            return_value=fake_result,
+        ),
+        patch("src.worker.matching_tasks.persist_shortlist", new_callable=AsyncMock),
+        patch(
+            "src.worker.matching_tasks.clear_shortlist_state", new_callable=AsyncMock
+        ) as clear_state,
+    ):
+        result = await shortlist_job(ctx, str(job_id))
+
+    assert result == "persisted"
+    clear_state.assert_awaited_once()
+    assert job_id in _flat_call_args(clear_state.await_args)
+
+
+@pytest.mark.asyncio
+async def test_a_generic_exception_from_the_orchestrator_is_not_treated_as_ranking_unavailable() -> (  # noqa: E501
+    None
+):
+    """A plain, unrelated exception (not ``RankingUnavailableError``) must
+    NOT be caught by the new fail-closed branch — it should propagate exactly
+    as it did before this slice (already pinned by
+    ``test_lock_is_released_even_when_the_orchestrator_raises`` above); this
+    is an explicit regression guard that the new ``except`` clause is typed
+    narrowly."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = uuid4()
+    conn = _make_conn(_job_row())
+    ctx = _make_ctx(conn)
+    lock_patch, release_patch = _lock_patches()
+
+    with (
+        patch("src.worker.matching_tasks.get_settings", return_value=Settings()),
+        lock_patch,
+        release_patch,
+        patch(
+            "src.worker.matching_tasks.generate_shortlist",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("totally unrelated"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="totally unrelated"):
+            await shortlist_job(ctx, str(job_id))
