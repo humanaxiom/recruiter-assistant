@@ -2,14 +2,30 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed ranking shipped (PR #52); everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed + §4 degraded-parse shipped; everything merged
 
-> **Current tip: `humanaxiom/main` == `79d69ac`. Both repos are PUBLIC. Zero open PRs. Working tree clean
+> **Current tip: `humanaxiom/main` == `3df47de`. Both repos are PUBLIC. Zero open PRs. Working tree clean
 > (one untracked stray `compose.cas.yml` — operational scratch, not part of any branch; leave it). Nothing
 > is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner below
 > (kept as history) and all older stale banners.
 >
 > **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **FU-7 §4 degraded-parse visibility (ADR-030)** — PR **#55**, squash `3df47de`. Closes the 2026-07-19
+>   silent-partial-parse gap: when résumé SKILLS extraction hits `LLMOutputInvalidError`,
+>   `_extract_skills_merged` falls back to the deterministic keyword scan; the parse is now flagged
+>   `ResumeParsed.degraded`/`degradation_reason` (PII-free literal; persisted in the `resumes.parsed` jsonb —
+>   NO DDL), and **excluded from ranking by SKIPPING the `resume.parsed` Neo4j projection enqueue** (mirrors
+>   the ADR-026 withdrawn-during-parse skip → no node → absent from stage-1 recall), until a successful
+>   re-parse. Made VISIBLE where it was blind: `ResumeListItem.degraded`, a `degraded` sub-count on
+>   `ResumeStatusBreakdown` (⊆ `parsed`), `get_one` under blind+reveal (non-PII), UI badges on the résumé
+>   detail/list/status-breakdown. Scoring math + outbox payload BYTE-UNCHANGED. **Residual:** no in-place
+>   re-parse route (re-parse via re-upload today; dedicated `POST /resumes/{id}/reparse` deferred, ADR-030).
+>   Degraded covers skills extraction only. TDD (red→green→test→docs); reviewer APPROVE (exclusion
+>   mutation-proven), security PASS, ranking-evals PASS, `./scripts/verify.sh all` + CI green.
+> - **AI-usage one-pager** — PR **#54**, squash `30c1c7f`. `docs/ai-usage-overview.md`: every LLM/embedding
+>   call site, the 4-stage AI-vs-deterministic split, resilience, and the privacy boundaries, with 5 mermaid
+>   diagrams. **Windows quickstart** — PR **#56**, squash `d336cd8`: `scripts/quickstart.ps1` boots the whole
+>   stack (generates `PII_KEY`/`SKILL_HASH_SALT`, checks Ollama, `docker compose up -d`, waits for health).
 > - **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029)** — PR **#52**, squash `79d69ac`. Closes the
 >   silent zero-score penalty (ADR-009 residual / explainer register item 11): when the LLM fails during
 >   ranking — **BOTH** Mode A (`LLMUnavailableError`, timeout/conn/5xx/429) **and** Mode B
@@ -864,7 +880,7 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`79d69ac`**, both
+> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`3df47de`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
@@ -872,21 +888,21 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 > #42)**, the **shortlist-hides-withdrawn read fix (PR #43)**, **FU-7 §3 honest parse status (ADR-027, PR
 > #44)**, the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)**,
 > **education field-of-study relevance (ADR-028, PR #49, `9229d61`)**, the **explainer follow-up (PR #51,
-> `107e6bb`)**, and **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029, PR #52, `79d69ac`)** — all on
-> `main`, CI green. **Nothing is mid-flight.**
+> `107e6bb`)**, **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029, PR #52, `79d69ac`)**, the
+> **AI-usage one-pager (PR #54)**, the **Windows quickstart `scripts/quickstart.ps1` (PR #56)**, and
+> **FU-7 §4 degraded-parse visibility (ADR-030, PR #55, `3df47de`)** — all on `main`, CI green. **Nothing is
+> mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
 >    path (hard-delete blob + null pgcrypto columns + `resumes.parsed`, keep a non-PII tombstone), clearly
 >    separated from the routine reversible withdraw. The repo's FIRST destructive PII op — needs a human
 >    decision on consent-revocation semantics + its own security review before any code.
-> 2. **Remaining FU-7 (ADR-021 decisions 1 & 4)** — decision 3 (honest parse status) shipped via PR #44 /
->    [ADR-027](docs/adr/027-honest-resume-parse-status-fu7.md); **decision 2 (fail-closed ranking + "waiting
->    for AI…" UI) AND §6 (empty-content detection) shipped via PR #52 /
->    [ADR-029](docs/adr/029-fail-closed-ranking-fu7.md) this session.** Left: **1** (LLM provider failover
->    chain — most infra-heavy; offline-only local Ollama peers) and **4** (degraded-parse visibility:
->    `degraded`/`degradation_reason` on `ResumeParsed`, a "skills unavailable (AI extraction failed)"
->    indicator, exclude degraded résumés from ranking). Two small FU-7 residuals: `resume_parse_max_tries`
+> 2. **Remaining FU-7 (ADR-021 decision 1 only)** — decision 3 (honest parse status, ADR-027, PR #44),
+>    **decision 2 (fail-closed ranking) + §6 (empty-content), ADR-029, PR #52**, and **decision 4
+>    (degraded-parse visibility), ADR-030, PR #55** are all shipped. Left: **1** (LLM provider failover
+>    chain — most infra-heavy; offline-only local Ollama peers, so limited payoff until there's a second
+>    endpoint to fail over to). Two small FU-7 residuals: `resume_parse_max_tries`
 >    has no upper sanity cap (`shortlist_max_tries` got one — mirror it), and fail-closed is NOT extended to
 >    reverse-match (ADR-029 residual; mirror the withdrawn-read split #43→#46).
 > 3. ~~**Reverse-match read consistency (small).**~~ ✅ **DONE — PR #46 (`6d8d33f`), 2026-07-31.** The
