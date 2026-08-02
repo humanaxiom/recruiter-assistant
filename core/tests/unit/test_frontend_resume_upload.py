@@ -832,6 +832,44 @@ def test_resumes_table_stops_polling_once_every_row_is_terminal(
     assert "hx-trigger" not in body  # polling stopped
 
 
+def test_resumes_table_shows_degraded_badge_when_row_is_degraded(
+    monkeypatch: Any, client: Any
+) -> None:
+    """FU-7 §4 / ADR-030: the résumé list must flag a degraded row (skills
+    extraction fell back to the keyword scan) -- the incident this slice
+    fixes was invisible precisely because the list looked complete."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_resumes",
+        MagicMock(
+            return_value=[
+                _resume(status="parsed", degraded=True),
+                _resume(status="parsed", degraded=False),
+            ]
+        ),
+    )
+    resp = client.get(f"/jobs/{job_id}/resumes-table")
+    body = resp.get_data(as_text=True).lower()
+    assert resp.status_code == 200
+    assert "degraded" in body
+
+
+def test_resumes_table_omits_degraded_badge_for_a_clean_parse(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_resumes",
+        MagicMock(return_value=[_resume(status="parsed", degraded=False)]),
+    )
+    resp = client.get(f"/jobs/{job_id}/resumes-table")
+    body = resp.get_data(as_text=True).lower()
+    assert resp.status_code == 200
+    assert "degraded" not in body
+
+
 def test_resumes_table_404s_when_job_missing(monkeypatch: Any, client: Any) -> None:
     monkeypatch.setattr(
         api_client,

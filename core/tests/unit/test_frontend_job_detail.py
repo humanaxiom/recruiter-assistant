@@ -81,6 +81,7 @@ def _breakdown(
     parsed: int = 0,
     failed: int = 0,
     withdrawn: int = 0,
+    degraded: int = 0,
 ) -> dict[str, int]:
     return {
         "uploaded": uploaded,
@@ -88,6 +89,7 @@ def _breakdown(
         "parsed": parsed,
         "failed": failed,
         "withdrawn": withdrawn,
+        "degraded": degraded,
     }
 
 
@@ -409,6 +411,41 @@ def test_resume_status_widget_route_renders_all_zero_without_crashing(
     body = resp.get_data(as_text=True).lower()
     assert "withdrawn" in body
     assert "uploaded" in body
+
+
+def test_resume_status_widget_route_shows_degraded_sub_count(
+    monkeypatch: Any, client: Any
+) -> None:
+    """FU-7 §4 / ADR-030: the widget must show how many of the ``parsed``
+    résumés fell back to keyword-scan skills -- e.g. "N parsed (M
+    degraded)". ``degraded`` is a SUB-count, so it renders alongside
+    ``parsed``, never in place of it."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume_status_breakdown",
+        MagicMock(return_value=_breakdown(parsed=5, degraded=2)),
+    )
+    resp = client.get(f"/jobs/{job_id}/resume-status")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True).lower()
+    assert "degraded" in body
+    assert "parsed" in body
+
+
+def test_resume_status_widget_route_zero_degraded_still_renders_the_word(
+    monkeypatch: Any, client: Any
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume_status_breakdown",
+        MagicMock(return_value=_breakdown(parsed=5, degraded=0)),
+    )
+    resp = client.get(f"/jobs/{job_id}/resume-status")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True).lower()
+    assert "degraded" in body
 
 
 def test_resume_status_widget_route_calls_get_resume_status_breakdown_with_job_id(

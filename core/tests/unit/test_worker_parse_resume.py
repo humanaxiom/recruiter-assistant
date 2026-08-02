@@ -358,7 +358,7 @@ async def test_resume_parsed_validation_error_is_caught_not_raised() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.ResumeParsed.model_validate",
@@ -426,7 +426,7 @@ async def test_summary_embed_permanent_failure_records_failure_and_returns_faile
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.record_parse_failure",
@@ -483,7 +483,7 @@ async def test_chunk_embed_permanent_failure_records_failure_and_returns_failed(
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.record_parse_failure",
@@ -542,7 +542,7 @@ async def test_happy_path_no_cover_letter_returns_parsed(status: str) -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -634,7 +634,7 @@ async def test_hallucinated_evidence_chunk_ids_are_scrubbed_before_persistence()
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -707,7 +707,7 @@ async def test_skill_name_matching_candidate_identity_is_dropped_before_storage_
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -780,7 +780,7 @@ async def test_skill_name_pii_drop_is_logged_as_a_count_never_the_name(
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -831,7 +831,7 @@ async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row()
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -891,7 +891,7 @@ async def test_outbox_payload_parsed_dict_excludes_candidate_block() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -980,7 +980,7 @@ async def test_outbox_payload_never_carries_raw_chunk_text_pii() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -1108,7 +1108,7 @@ async def test_extract_skills_merged_combines_scan_and_llm_results() -> None:
             return_value=_fake_prompt("resume_skills_v2"),
         ),
     ):
-        merged = await _extract_skills_merged(llm, chunks, "res-1")
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
     names = {s.name for s in merged}
     assert names == {"Python", "SQL", "Kubernetes"}
@@ -1137,7 +1137,7 @@ async def test_extract_skills_merged_llm_failure_is_non_fatal() -> None:
             return_value=_fake_prompt("resume_skills_v2"),
         ),
     ):
-        merged = await _extract_skills_merged(llm, chunks, "res-1")
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
     assert {s.name for s in merged} == {"Python", "SQL"}
 
@@ -1169,7 +1169,7 @@ async def test_extract_skills_merged_first_non_null_years_wins_on_collision() ->
             return_value=_fake_prompt("resume_skills_v2"),
         ),
     ):
-        merged = await _extract_skills_merged(llm, chunks, "res-1")
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
     assert len(merged) == 1
     assert merged[0].years == 5
@@ -1195,7 +1195,7 @@ async def test_extract_skills_merged_is_capped_at_80() -> None:
             return_value=_fake_prompt("resume_skills_v2"),
         ),
     ):
-        merged = await _extract_skills_merged(llm, chunks, "res-1")
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
     assert len(merged) == 80
 
@@ -1240,7 +1240,9 @@ async def test_extract_skills_merged_still_drops_email_shaped_raw_names() -> Non
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
 
     names = {s.name for s in merged}
     assert "python" in names
@@ -1283,7 +1285,9 @@ async def test_extract_skills_merged_no_longer_rejects_person_shaped_raw_names(
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
 
     names = {s.name for s in merged}
     assert "python" in names
@@ -1337,7 +1341,9 @@ async def test_extract_skills_merged_keeps_vocab_known_skill(raw_name: str) -> N
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
     assert raw_name.lower() in {s.name for s in merged}
 
 
@@ -1359,7 +1365,9 @@ async def test_extract_skills_merged_keeps_multi_token_proper_noun_vocab_skill()
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
     assert "gcp" in {s.name for s in merged}
 
 
@@ -1379,7 +1387,9 @@ async def test_extract_skills_merged_keeps_technical_marker_shaped_skill(
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
     names = {s.name for s in merged}
     assert any(raw_name.lower() in n or n in raw_name.lower() for n in names), names
 
@@ -1401,8 +1411,114 @@ async def test_extract_skills_merged_keeps_seven_token_certification_name() -> N
         "src.worker.resume_tasks.load_prompt",
         return_value=_fake_prompt("resume_skills_v2"),
     ):
-        merged = await _extract_skills_merged(llm, _skills_details_chunks(), "res-1")
+        merged, _reason = await _extract_skills_merged(
+            llm, _skills_details_chunks(), "res-1"
+        )
     assert cert_name in {s.name for s in merged}
+
+
+# ── FU-7 §4 / ADR-030: _extract_skills_merged degradation-reason signal ────
+#
+# Skills extraction "degraded" means specifically: the `resume_skills_v2`
+# LLM sub-call raised `LLMOutputInvalidError` and the deterministic
+# keyword-scan floor is all that landed. `_extract_skills_merged` must now
+# return `(skills, degradation_reason)` — `degradation_reason` is `None` on
+# a clean LLM call and a non-None, PII-free string when the LLM call failed.
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_returns_none_reason_on_llm_success() -> None:
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name="SQL")])
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="SQL expert")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        merged, reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert reason is None
+    assert {s.name for s in merged} == {"SQL"}
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_returns_a_degradation_reason_on_llm_output_invalid() -> (  # noqa: E501
+    None
+):
+    """Mirrors ``test_extract_skills_merged_llm_failure_is_non_fatal`` — same
+    stub of ``llm.chat_json`` raising ``LLMOutputInvalidError`` — but pins the
+    NEW second return value instead of only the skills list."""
+    llm = MagicMock(chat_json=AsyncMock(side_effect=LLMOutputInvalidError("bad json")))
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="Python, SQL")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text",
+            MagicMock(return_value=["Python", "SQL"]),
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        merged, reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert {s.name for s in merged} == {"Python", "SQL"}  # deterministic floor
+    assert reason is not None
+    assert isinstance(reason, str)
+    assert len(reason) <= 200  # must fit ResumeParsed.degradation_reason's cap
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_degradation_reason_is_pii_free() -> None:
+    """The reason must never echo the LLM exception's ``str()`` (which can
+    include response content) — a fixed, PII-free message only."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            side_effect=LLMOutputInvalidError(
+                "raw content: Jane Doe jane@example.com 555-0100"
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="Python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text",
+            MagicMock(return_value=["Python"]),
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        _merged, reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert reason is not None
+    assert "jane" not in reason.lower()
+    assert "555-0100" not in reason
+    assert "example.com" not in reason.lower()
 
 
 # ── _parse_cover_letter ──────────────────────────────────────────────────
@@ -1826,7 +1942,7 @@ async def test_header_chunk_pii_redacted_in_embeds_full_text_stored() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -1905,7 +2021,7 @@ async def test_summary_with_candidate_name_redacted_in_embed_only() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -1974,7 +2090,7 @@ async def test_outbox_payload_parsed_dict_excludes_summary_key() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2092,7 +2208,7 @@ async def test_empty_candidate_block_header_chunk_never_reaches_embedder() -> No
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2163,7 +2279,7 @@ async def test_empty_candidate_block_non_header_chunks_still_embed() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2225,7 +2341,7 @@ async def test_empty_candidate_block_uncommon_name_skill_survives_at_parse_time(
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2294,7 +2410,7 @@ async def test_non_empty_candidate_block_uncommon_two_word_skill_kept() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=merged_skills,
+            return_value=(merged_skills, None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2419,7 +2535,7 @@ async def test_claim_parsing_false_on_retry_still_proceeds_to_parse() -> None:
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
@@ -2711,7 +2827,7 @@ async def test_llm_unavailable_from_embedder_on_last_try_records_failure() -> No
         patch(
             "src.worker.resume_tasks._extract_skills_merged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], None),
         ),
         patch(
             "src.worker.resume_tasks.get_settings",
@@ -2736,3 +2852,191 @@ async def test_llm_unavailable_from_embedder_on_last_try_records_failure() -> No
     record_failure.assert_awaited_once()
     record_parsed.assert_not_awaited()
     enqueue.assert_not_awaited()
+
+
+# ── FU-7 §4 / ADR-030: parse_resume degraded-parse visibility + exclusion ──
+#
+# Mirrors the withdrawn-during-parse skip (ADR-026) at
+# `tests/integration/test_parse_resume_withdrawn_race_pg.py` and the unit
+# mocking style used throughout this file's happy-path tests. When
+# `_extract_skills_merged` signals a non-None degradation reason, the
+# persisted `ResumeParsed.degraded` must be True (with the reason carried
+# through) AND the `resume.parsed` outbox enqueue — the event that drives
+# graph projection / ranking eligibility — must be SKIPPED, exactly like the
+# withdrawn-mid-parse race. The task must still return "parsed" (persisted,
+# visible — just excluded from ranking until re-parsed).
+
+
+@pytest.mark.asyncio
+async def test_degraded_skills_extraction_sets_degraded_true_on_persisted_parsed() -> (
+    None
+):
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    degraded_reason = "skills extraction failed (AI); using keyword-scan fallback"
+    merged_skills = [ResumeSkill(name="python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=(merged_skills, degraded_reason),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    record_parsed.assert_awaited_once()
+    flat = _flat_call_args(record_parsed.await_args)
+    stored_parsed = next(a for a in flat if isinstance(a, ResumeParsed))
+    assert stored_parsed.degraded is True
+    assert stored_parsed.degradation_reason == degraded_reason
+
+    # The load-bearing exclusion: a degraded parse must NOT enqueue the
+    # projection-triggering event — no Neo4j node, no stage-1 recall, no
+    # ranking, exactly like the withdrawn-mid-parse race.
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_degraded_skills_extraction_skips_resume_parsed_outbox_enqueue() -> None:
+    """Same scenario, isolated assertion mirroring
+    ``test_withdrawn_mid_parse_enqueues_no_resume_parsed_outbox_row`` — the
+    single load-bearing behaviour of this slice."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(summary="Backend engineer.")
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=([], "skills extraction failed (AI)"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(None, None, None, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_regression_twin_non_degraded_parse_still_enqueues_resume_parsed() -> (
+    None
+):
+    """The pairing test: an ordinary (non-degraded) parse is UNCHANGED by
+    this fix — the outbox row still enqueues and ``degraded`` stays False. A
+    builder that skips the enqueue unconditionally (rather than gating on
+    the degradation reason) passes the two tests above but fails this one."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"), summary="Backend engineer."
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [
+        ResumeChunk(id="c_001", section="summary", page=0, text="Backend engineer.")
+    ]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="python")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=(merged_skills, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as record_parsed,
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    stored_parsed = next(
+        a
+        for a in _flat_call_args(record_parsed.await_args)
+        if isinstance(a, ResumeParsed)
+    )
+    assert stored_parsed.degraded is False
+    assert stored_parsed.degradation_reason is None
+    enqueue.assert_awaited_once()

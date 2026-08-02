@@ -155,6 +155,7 @@ def _breakdown_kwargs(**over: object) -> dict[str, object]:
         "parsed": 0,
         "failed": 0,
         "withdrawn": 0,
+        "degraded": 0,
     }
     base.update(over)
     return base
@@ -485,6 +486,7 @@ def test_resume_status_breakdown_zero_job_shape_is_all_zeros() -> None:
     b = ResumeStatusBreakdown(**_breakdown_kwargs())
     for field in STATUS_BREAKDOWN_FIELDS:
         assert getattr(b, field) == 0
+    assert b.degraded == 0  # ADR-030: degraded is a sub-count, zero too
 
 
 def test_resume_status_breakdown_forbids_unknown_key() -> None:
@@ -517,3 +519,148 @@ def test_resume_status_breakdown_rejects_a_non_numeric_string_count(
     kwargs = _breakdown_kwargs(**{field: "not-a-number"})
     with pytest.raises(ValidationError):
         ResumeStatusBreakdown(**kwargs)
+
+
+# ── FU-7 §4 / ADR-030: degraded-parse visibility ────────────────────────────
+#
+# When skills extraction falls back to the deterministic keyword scan (the
+# `resume_skills_v2` `LLMOutputInvalidError` catch in
+# `src/worker/resume_tasks.py::_extract_skills_merged`), the résumé must be
+# flagged `degraded` end to end: persisted on `ResumeParsed` (rides the
+# existing `resumes.parsed` jsonb — no DDL change), surfaced on the list read
+# (`ResumeListItem.degraded`), and counted as a SUB-count of `parsed` on the
+# per-job breakdown (`ResumeStatusBreakdown.degraded`). None of these fields
+# exist yet — RED half of the TDD cycle.
+
+
+def test_resume_parsed_degraded_defaults_false_and_reason_none() -> None:
+    parsed = ResumeParsed()
+    assert parsed.degraded is False
+    assert parsed.degradation_reason is None
+
+
+def test_resume_parsed_degraded_roundtrips_through_model_validate() -> None:
+    payload = {
+        "candidate": {"name": "Jane"},
+        "summary": "Backend engineer",
+        "degraded": True,
+        "degradation_reason": (
+            "skills extraction failed (AI); using keyword-scan fallback"
+        ),
+    }
+    parsed = ResumeParsed.model_validate(payload)
+    assert parsed.degraded is True
+    assert parsed.degradation_reason == (
+        "skills extraction failed (AI); using keyword-scan fallback"
+    )
+
+    again = ResumeParsed.model_validate(parsed.model_dump())
+    assert again.degraded is True
+    assert again.degradation_reason == parsed.degradation_reason
+    assert again.model_dump() == parsed.model_dump()
+
+
+def test_resume_parsed_degradation_reason_rejects_over_200_chars() -> None:
+    with pytest.raises(ValidationError):
+        ResumeParsed(degraded=True, degradation_reason="x" * 201)
+
+
+def test_resume_parsed_degradation_reason_accepts_exactly_200_chars() -> None:
+    parsed = ResumeParsed(degraded=True, degradation_reason="x" * 200)
+    assert parsed.degradation_reason is not None
+    assert len(parsed.degradation_reason) == 200
+
+
+def test_resume_parsed_old_row_missing_degraded_keys_defaults_false() -> None:
+    """`extra="ignore"` + defaults means a row persisted BEFORE this feature
+    (no `degraded`/`degradation_reason` keys in its jsonb at all) reads back
+    as a clean, non-degraded parse rather than raising."""
+    old_row_payload = {
+        "candidate": {"name": "Jane"},
+        "summary": "Backend engineer",
+        "skills": [{"name": "Python"}],
+    }
+    parsed = ResumeParsed.model_validate(old_row_payload)
+    assert parsed.degraded is False
+    assert parsed.degradation_reason is None
+
+
+def test_resume_out_parsed_degraded_flows_through_unchanged() -> None:
+    """``ResumeOut.parsed`` is a ``ResumeParsed`` — no separate redaction or
+    remapping happens to `degraded`/`degradation_reason`; it is NOT PII."""
+    parsed = ResumeParsed(degraded=True, degradation_reason="fallback used")
+    out = ResumeOut(**_resume_out_kwargs(parsed=parsed))
+    assert out.parsed is not None
+    assert out.parsed.degraded is True
+    assert out.parsed.degradation_reason == "fallback used"
+
+
+# ── ResumeListItem.degraded ──────────────────────────────────────────────
+
+
+def test_resume_list_item_degraded_defaults_false() -> None:
+    item = ResumeListItem(
+        id=uuid4(),
+        original_filename="jane.pdf",
+        status="parsed",
+        uploaded_at=_TS,
+        parsed_at=None,
+    )
+    assert item.degraded is False
+
+
+def test_resume_list_item_carries_degraded_true() -> None:
+    item = ResumeListItem(
+        id=uuid4(),
+        original_filename="jane.pdf",
+        status="parsed",
+        uploaded_at=_TS,
+        parsed_at=None,
+        degraded=True,
+    )
+    assert item.degraded is True
+
+
+# ── ResumeStatusBreakdown.degraded (ADR-030) ────────────────────────────────
+#
+# Unlike the five mutually-exclusive lifecycle buckets, `degraded` is a
+# SUB-count of `parsed` (degraded ⊆ parsed): a job with 7 parsed résumés, 2
+# of them degraded, reports `parsed=7, degraded=2` — `parsed` never shrinks
+# to exclude the degraded ones.
+
+
+def test_resume_status_breakdown_accepts_a_degraded_count() -> None:
+    b = ResumeStatusBreakdown(**_breakdown_kwargs(parsed=7, degraded=2))
+    assert b.parsed == 7
+    assert b.degraded == 2
+
+
+def test_resume_status_breakdown_requires_the_degraded_field() -> None:
+    """No default — a service-layer bug that forgets the bucket 500s loudly
+    at construction rather than silently reporting zero, exactly like the
+    five lifecycle buckets."""
+    kwargs = _breakdown_kwargs()
+    del kwargs["degraded"]
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**kwargs)
+
+
+def test_resume_status_breakdown_rejects_a_negative_degraded_count() -> None:
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**_breakdown_kwargs(degraded=-1))
+
+
+def test_resume_status_breakdown_rejects_a_non_numeric_string_degraded_count() -> None:
+    with pytest.raises(ValidationError):
+        ResumeStatusBreakdown(**_breakdown_kwargs(degraded="not-a-number"))
+
+
+def test_resume_status_breakdown_degraded_does_not_reduce_parsed() -> None:
+    """The sub-count relationship: `degraded` rides ALONGSIDE `parsed`, never
+    in place of it — a résumé that is both `status='parsed'` and
+    `degraded=True` is counted in BOTH numbers."""
+    b = ResumeStatusBreakdown(
+        **_breakdown_kwargs(uploaded=0, parsing=0, parsed=10, failed=0, degraded=10)
+    )
+    assert b.parsed == 10
+    assert b.degraded == 10

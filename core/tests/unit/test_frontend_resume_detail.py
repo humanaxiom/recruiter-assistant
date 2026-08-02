@@ -255,6 +255,57 @@ def _mint_withdraw_lifecycle_tokens(
     return _extract_form_token(body, fragment)
 
 
+# ── FU-7 §4 / ADR-030 — degraded-parse visibility ────────────────────────
+#
+# When skills extraction fell back to the deterministic keyword scan (the
+# `resume_skills_v2` `LLMOutputInvalidError` catch), `parsed.degraded` is
+# True and `parsed.degradation_reason` carries a short, PII-free note. The
+# résumé-detail page must render a visible warning naming the reason and the
+# ranking-exclusion consequence -- the 2026-07-19 incident's blind spot was
+# exactly that nothing distinguished this from a clean parse.
+
+
+def test_resume_detail_shows_degraded_warning_with_reason(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    resume = _resume(resume_id, blinded=True)
+    resume["parsed"]["degraded"] = True
+    resume["parsed"][
+        "degradation_reason"
+    ] = "skills extraction failed (AI); using keyword-scan fallback"
+    monkeypatch.setattr(api_client, "get_resume", MagicMock(return_value=resume))
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "degraded" in body.lower()
+    assert "skills extraction failed (AI); using keyword-scan fallback" in body
+    assert "excluded from shortlists" in body.lower() or "excluded" in body.lower()
+
+
+def test_resume_detail_omits_degraded_warning_for_a_clean_parse(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    resume = _resume(resume_id, blinded=True)
+    resume["parsed"]["degraded"] = False
+    resume["parsed"]["degradation_reason"] = None
+    monkeypatch.setattr(api_client, "get_resume", MagicMock(return_value=resume))
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "degraded" not in body.lower()
+
+
+def test_resume_detail_degraded_warning_renders_regardless_of_blind_state(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Non-PII: the degraded warning must render on a NON-blind job too."""
+    resume_id = uuid4()
+    resume = _resume(resume_id, blinded=False)
+    resume["parsed"]["degraded"] = True
+    resume["parsed"]["degradation_reason"] = "skills extraction failed (AI)"
+    monkeypatch.setattr(api_client, "get_resume", MagicMock(return_value=resume))
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert "degraded" in body.lower()
+
+
 # ── section rendering ────────────────────────────────────────────────────
 
 
