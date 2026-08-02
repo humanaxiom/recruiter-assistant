@@ -214,6 +214,12 @@ class MatchWeights(BaseModel):
     overqual_slope: float = Field(default=0.1, ge=0)
     overqual_floor: float = Field(default=0.8, ge=0, le=1)
     education_partial: float = Field(default=0.5, ge=0, le=1)
+    # Field-of-study fuzzy-match bar (token_set_ratio/100). A qualifying-level
+    # degree whose field clears this against any jd.education.fields entry keeps
+    # full education credit; otherwise capped at education_partial. ADR-028.
+    # A THRESHOLD, not a weight — deliberately NOT part of either sum the
+    # ``_sums_close_to_one`` validator enforces (sibling to evidence_verify_fuzz).
+    education_field_fuzz: float = Field(default=0.85, ge=0, le=1)
     seniority_floor: float = Field(default=0.5, ge=0, lt=1)
     implied_seniority_factor: float = Field(default=1.5, ge=1)
     implied_min_coverage: float = Field(default=0.5, ge=0, le=1)

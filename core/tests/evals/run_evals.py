@@ -537,6 +537,7 @@ def _jd_view(corpus: Corpus) -> dict[str, Any]:
         "title": jd.title,
         "min_years": jd.min_years_experience or None,
         "edu_min_level": jd.education.min_level if jd.education else None,
+        "edu_fields": tuple(jd.education.fields) if jd.education else (),
         "required": required,
         "nice": nice,
         "summary_text": build_summary_text(jd),
@@ -699,8 +700,16 @@ def _breakdown_for(
         rows, weights=weights, senior=senior, today_year=_EVAL_TODAY_YEAR
     )
     exp = score_experience(total_years, jd["min_years"], weights=weights)
-    levels = [_level_from_degree(e.get("degree")) for e in parsed.get("education", [])]
-    edu = score_education(levels, jd["edu_min_level"], weights=weights)
+    edu_entries = parsed.get("education", []) or []
+    levels = [_level_from_degree(e.get("degree")) for e in edu_entries]
+    cand_fields = [e.get("field") for e in edu_entries]
+    edu = score_education(
+        levels,
+        jd["edu_min_level"],
+        candidate_fields=cand_fields,
+        jd_fields=jd["edu_fields"],
+        weights=weights,
+    )
     recent = _most_recent_title(parsed)
     seniority = (
         _seniority_subscore(jd["title"], recent, weights.seniority_floor)

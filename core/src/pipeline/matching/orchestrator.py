@@ -78,6 +78,7 @@ class JobView:
     title: str
     min_years: int | None
     education_min_level: str | None
+    education_fields: tuple[str, ...]
     required_skills: tuple[str, ...]
     nice_to_have_skills: tuple[str, ...]
 
@@ -256,6 +257,9 @@ async def load_job_view(db: asyncpg.Connection, job_id: UUID) -> JobView | None:
         title=row["title"],
         min_years=row["min_years"] or parsed.get("min_years_experience"),
         education_min_level=edu.get("min_level"),
+        education_fields=tuple(
+            f for f in (edu.get("fields") or []) if isinstance(f, str) and f.strip()
+        ),
         required_skills=tuple(
             s.get("name", "")
             for s in parsed.get("required_skills", [])
@@ -388,10 +392,18 @@ async def _stage2_per_candidate(
 
     exp = score_experience(total_years, job.min_years, weights=weights)
 
-    candidate_levels = [
-        _level_from_degree(e.get("degree")) for e in parsed.get("education", [])
-    ]
-    edu = score_education(candidate_levels, job.education_min_level, weights=weights)
+    # Build levels AND fields from the SAME iteration to guarantee index
+    # alignment (degree i's level pairs with degree i's field).
+    edu_entries = parsed.get("education", []) or []
+    candidate_levels = [_level_from_degree(e.get("degree")) for e in edu_entries]
+    candidate_fields = [e.get("field") for e in edu_entries]
+    edu = score_education(
+        candidate_levels,
+        job.education_min_level,
+        candidate_fields=candidate_fields,
+        jd_fields=job.education_fields,
+        weights=weights,
+    )
 
     # Seniority: cosine between job title + most-recent role title via embedder.
     recent_title = _most_recent_title(parsed)
