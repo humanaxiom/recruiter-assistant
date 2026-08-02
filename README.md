@@ -370,11 +370,17 @@ docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
 curl localhost:8000/health    # -> {"status":"ok"}
 ```
 
-**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot —
-it generates the required `PII_KEY`/`SKILL_HASH_SALT` if unset, checks Ollama +
-the two models, runs `docker compose up -d`, waits for health, and prints the
-URLs. `-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down,
-`-Logs` tails logs. (You still need Ollama on host metal for parsing/ranking.)
+**Host ports are parameterized** (`${API_PORT:-8000}` etc. in `docker-compose.yml`) so the
+stack can run alongside other apps without colliding. Set unique values in `.env` — the shipped
+`.env.example` uses a `29xxx` block (API `29800`, frontend `29500`, pg `29432`, redis `29379`,
+neo4j `29474`/`29687`); only the host-published side changes, so in-network DSNs are unaffected.
+
+**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot — generates the
+required `PII_KEY`/`SKILL_HASH_SALT` if unset, writes the unique host-port block into `.env`,
+checks Ollama + the two models, **preflights the ports** (clear "port N held by <container>"
+message instead of a raw bind error), runs `docker compose up -d`, waits for health, and prints
+the URLs on their resolved ports. `-Build` rebuilds the app images, `-Down [-Reset]` tears the
+stack down, `-Logs` tails logs. (You still need Ollama on host metal for parsing/ranking.)
 
 `PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
 
