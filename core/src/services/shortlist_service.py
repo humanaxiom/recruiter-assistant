@@ -53,6 +53,7 @@ from src.schemas.matching import (
     PipelineMeta,
     ScoreBreakdown,
     ShortlistEntry,
+    ShortlistStateOut,
 )
 from src.schemas.resumes import ResumeParsed
 from src.services import DbConn
@@ -154,6 +155,62 @@ async def persist_reverse_match(conn: DbConn, result: JobMatchResult) -> int:
             meta_json,
         )
     return len(result.entries)
+
+
+# ── fail-closed shortlist state (FU-7 §2, ADR-021 §2 / ADR-029) ─────────────
+#
+# A shortlist run that fails closed (a Mode A/B LLM failure during ranking —
+# ``RankingUnavailableError``) records a visible ``awaiting_llm`` state on the
+# job's dedicated nullable columns instead of persisting a silently-degraded
+# shortlist. The worker sets it before an arq retry and clears it on the next
+# successful run; the status route surfaces it so the UI can distinguish
+# "awaiting AI" from "still generating".
+
+_SET_SHORTLIST_STATE_SQL = (
+    "UPDATE jobs SET shortlist_state = 'awaiting_llm', "
+    "shortlist_state_reason = $2, shortlist_state_at = now() WHERE id = $1"
+)
+_CLEAR_SHORTLIST_STATE_SQL = (
+    "UPDATE jobs SET shortlist_state = NULL, shortlist_state_reason = NULL, "
+    "shortlist_state_at = NULL WHERE id = $1"
+)
+_GET_SHORTLIST_STATE_SQL = (
+    "SELECT shortlist_state, shortlist_state_reason, shortlist_state_at "
+    "FROM jobs WHERE id = $1"
+)
+
+
+async def set_shortlist_awaiting_llm(
+    conn: DbConn, job_id: UUID, *, reason: str
+) -> None:
+    """Record the fail-closed ``awaiting_llm`` state (with its reason + a
+    ``now()`` timestamp) on ``job_id``. Clearing/overwriting is idempotent —
+    a later run either clears it or re-sets it."""
+    await conn.execute(_SET_SHORTLIST_STATE_SQL, job_id, reason)
+
+
+async def clear_shortlist_state(conn: DbConn, job_id: UUID) -> None:
+    """Null out every ``shortlist_state*`` column for ``job_id``. A no-op on a
+    job that carries no state (the columns are already NULL) — never raises."""
+    await conn.execute(_CLEAR_SHORTLIST_STATE_SQL, job_id)
+
+
+async def get_shortlist_state(conn: DbConn, job_id: UUID) -> ShortlistStateOut | None:
+    """Read the fail-closed ranking state for ``job_id``.
+
+    Raises ``NotFoundError`` when the job does not exist (mirroring every other
+    single-entity read here — ``get_one`` / ``job_service.get_job``); returns
+    ``None`` only when the job exists but carries no ``awaiting_llm`` state."""
+    row = await conn.fetchrow(_GET_SHORTLIST_STATE_SQL, job_id)
+    if row is None:
+        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+    if row["shortlist_state"] is None:
+        return None
+    return ShortlistStateOut(
+        state=row["shortlist_state"],
+        reason=row["shortlist_state_reason"],
+        at=row["shortlist_state_at"],
+    )
 
 
 # ── reverse-match read (Phase 6) ────────────────────────────────────────────

@@ -30,6 +30,12 @@ Status strings:
   already holds the Postgres advisory lock (``src.worker.job_lock``,
   ADR-010 §1 residual); the row is never even fetched and the orchestrator is
   never called.
+* ``awaiting_llm`` — FU-7 §2 (ADR-021 §2 / ADR-029): ranking failed CLOSED (a
+  Mode A/B LLM failure, ``RankingUnavailableError``) and the arq retry ceiling
+  (``settings.shortlist_max_tries``) has been reached, so the run gives up
+  WITHOUT persisting a degraded shortlist. ``jobs.shortlist_state`` is left set
+  to ``'awaiting_llm'`` (visible; the user can re-Generate). Below the ceiling
+  the same failure raises ``arq.Retry`` instead of returning a status.
 """
 
 from __future__ import annotations
@@ -38,12 +44,20 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from arq import Retry
+
 from src.pipeline.matching.orchestrator import (
+    RankingUnavailableError,
     generate_shortlist,
     match_resume_to_jobs,
     matching_context_from_settings,
 )
-from src.services.shortlist_service import persist_reverse_match, persist_shortlist
+from src.services.shortlist_service import (
+    clear_shortlist_state,
+    persist_reverse_match,
+    persist_shortlist,
+    set_shortlist_awaiting_llm,
+)
 from src.settings import get_settings, weights_from_settings
 from src.worker.job_lock import release_job_lock, try_job_lock
 
@@ -83,17 +97,45 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
                 llm=ctx["llm"],
                 embedder=ctx["embedder"],
             )
-            result = await generate_shortlist(
-                job_id,
-                ctx=mc,
-                weights=weights_from_settings(settings),
-                coarse_k=settings.match_coarse_k,
-                evidence_k=settings.match_evidence_k,
-                top_percent=row["shortlist_top_percent"],
-            )
+            try:
+                result = await generate_shortlist(
+                    job_id,
+                    ctx=mc,
+                    weights=weights_from_settings(settings),
+                    coarse_k=settings.match_coarse_k,
+                    evidence_k=settings.match_evidence_k,
+                    top_percent=row["shortlist_top_percent"],
+                )
+            except RankingUnavailableError as exc:
+                # FU-7 §2 (ADR-021 §2 / ADR-029): fail CLOSED. Record the
+                # visible ``awaiting_llm`` state (its own transaction, so it
+                # commits even as the run bails out) and either let arq retry
+                # (below the ceiling) or give up leaving the state set. The
+                # ``finally`` below releases the advisory lock BEFORE the Retry
+                # propagates, so the re-run can re-acquire it.
+                async with conn.transaction():
+                    await set_shortlist_awaiting_llm(conn, job_id, reason=str(exc))
+                job_try = ctx.get("job_try", 1)
+                if job_try < settings.shortlist_max_tries:
+                    log.warning(
+                        "shortlist_job.awaiting_llm job_id=%s try=%s reason=%s",
+                        job_id_str,
+                        job_try,
+                        exc,
+                    )
+                    raise Retry(defer=settings.shortlist_retry_defer_s) from exc
+                log.warning(
+                    "shortlist_job.awaiting_llm_exhausted job_id=%s tries=%s",
+                    job_id_str,
+                    job_try,
+                )
+                return "awaiting_llm"
 
             async with conn.transaction():
                 await persist_shortlist(conn, result)
+                # A successful run clears any prior awaiting_llm flag (including
+                # the "empty result" case) in the SAME transaction as the write.
+                await clear_shortlist_state(conn, job_id)
         finally:
             await release_job_lock(conn, "shortlist", job_id)
 

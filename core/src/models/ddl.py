@@ -117,6 +117,21 @@ _STATEMENTS: tuple[str, ...] = (
     # column exists, which keeps this statement safely re-runnable.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_top_percent INTEGER "
     "NOT NULL DEFAULT 100 CHECK (shortlist_top_percent BETWEEN 1 AND 100)",
+    # FU-7 §2 (ADR-021 §2 / ADR-029) — fail-closed shortlist ranking state. A
+    # DEDICATED, nullable ``shortlist_state``/``shortlist_state_reason``/
+    # ``shortlist_state_at`` trio — NOT a new ``job_status`` enum value (that
+    # stays the draft/open/closed/archived lifecycle; conflating a transient
+    # ranking-retry state with it would overload the state machine, mirroring
+    # the ADR-026 withdrawal-columns reasoning). Same already-migrated-volume
+    # risk as ``shortlist_top_percent`` above, so each lands via an idempotent
+    # ALTER. All nullable with NO default so every pre-existing row reads back
+    # "no state" the instant the ALTER lands. The 1-value CHECK rides inline on
+    # the ADD COLUMN (no ``ADD CONSTRAINT IF NOT EXISTS`` pre-15) — the whole
+    # clause is skipped once the column exists, keeping it safely re-runnable.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state TEXT "
+    "CHECK (shortlist_state IN ('awaiting_llm'))",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_reason TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_at TIMESTAMPTZ",
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (
