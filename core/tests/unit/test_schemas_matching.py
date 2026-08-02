@@ -86,6 +86,7 @@ EXPECTED_DEFAULTS: tuple[tuple[str, float], ...] = (
     ("seniority", 0.15),
     ("vector", 0.10),
     ("evidence_verify_fuzz", 0.85),
+    ("education_field_fuzz", 0.85),
 )
 
 
@@ -190,6 +191,47 @@ def test_matchweights_is_frozen() -> None:
     weights = MatchWeights()
     with pytest.raises(ValidationError):
         weights.structured = 0.5  # type: ignore[misc]
+
+
+# ── education_field_fuzz: field-of-study fuzzy-match threshold (ADR-028) ────
+# A THRESHOLD knob, sibling to evidence_verify_fuzz — deliberately NOT part
+# of either the top trio or the sub-five, so setting it must never perturb
+# the _sums_close_to_one validator.
+
+
+def test_matchweights_education_field_fuzz_default_is_085() -> None:
+    assert MatchWeights().education_field_fuzz == 0.85
+
+
+def test_matchweights_education_field_fuzz_is_configurable() -> None:
+    weights = MatchWeights(education_field_fuzz=0.5)
+    assert weights.education_field_fuzz == 0.5
+
+
+def test_matchweights_education_field_fuzz_out_of_range_rejected() -> None:
+    with pytest.raises(ValidationError):
+        MatchWeights(education_field_fuzz=1.5)
+
+
+def test_matchweights_education_field_fuzz_does_not_break_sums_to_one_validator() -> (
+    None
+):
+    """It is a threshold, not a weight — it must not appear in either sum the
+    ``_sums_close_to_one`` validator enforces, so an off-default value must
+    still construct cleanly and the sums must be untouched."""
+    weights = MatchWeights(education_field_fuzz=0.99)
+    assert weights.education_field_fuzz == 0.99
+    top = weights.structured + weights.evidence + weights.motivation
+    sub = (
+        weights.skill
+        + weights.experience
+        + weights.education
+        + weights.seniority
+        + weights.vector
+    )
+    assert top == pytest.approx(1.0, abs=0.01)
+    assert sub == pytest.approx(1.0, abs=0.01)
+
 
 
 # ── Sub-score / evidence models ──────────────────────────────────────────────

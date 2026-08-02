@@ -26,9 +26,10 @@ source: ``is_senior_candidate`` (a YEARS-based boolean gate for the
 implied-experience relief — NOT the cosine-title ``seniority`` sub-score,
 which orchestrator.py computes separately with a live embedder and is
 therefore out of scope for this pure-function file), ``score_experience``,
-``score_education`` (degree LEVEL only — ``jd.education.fields`` is not
-read, by current design; see labels.json's F2 finding and
-``docs/EXTRACTION_PLAN.md``'s open decision), ``normalise_vector_scores``,
+``score_education`` (degree LEVEL, now extended to fold in
+``jd.education.fields`` fuzzy field-of-study relevance — ADR-009 §7's open
+decision is RESOLVED by ADR-028: a qualifying-level degree in a non-allowed
+field is capped at ``education_partial``), ``normalise_vector_scores``,
 ``stage4_combine``, ``_evidence_completeness``, ``_motivation_score``.
 """
 
@@ -60,6 +61,7 @@ from src.schemas.matching import (
     DEFAULT_WEIGHTS,
     CoverLetterEvidence,
     EvidenceObject,
+    MatchWeights,
     RequirementEvidence,
     ScoreBreakdown,
     _strip_control_chars,
@@ -422,7 +424,7 @@ def test_score_experience_far_overqualified_hits_floor() -> None:
     assert score_experience(100, 5, weights=DEFAULT_WEIGHTS) == pytest.approx(0.8)
 
 
-# ── score_education: degree LEVEL only, jd.education.fields NOT read ───────
+# ── score_education: degree LEVEL + field-of-study relevance (ADR-028) ────
 
 
 def test_score_education_no_min_level_is_perfect() -> None:
@@ -466,6 +468,211 @@ def test_score_education_unknown_jd_level_defaults_to_full_credit() -> None:
     default; any recognized candidate level clears that trivially."""
     assert (
         score_education(["bachelors"], "not_a_real_jd_level", weights=DEFAULT_WEIGHTS)
+        == 1.0
+    )
+
+
+# ── score_education: field-of-study relevance extension (ADR-028) ─────────
+#
+# ``jd.education.fields`` is optional per-JD, fuzzy-matched via
+# ``rapidfuzz.fuzz.token_set_ratio`` at ``weights.education_field_fuzz``
+# (default 0.85). A candidate who MEETS the level bar but whose qualifying
+# degree is in a field NOT on the JD's allowed list is capped at
+# ``education_partial`` instead of getting full credit. A JD with no
+# ``jd_fields`` stays level-only — today's (pre-ADR-028) behavior, unchanged.
+# Below-level candidates are UNAFFECTED by field: the field axis is never
+# consulted below the level bar (ADR-009 §7 / ADR-028).
+
+_ALLOWED_TECH_FIELDS = ["Computer Science", "Software Engineering", "Data Engineering"]
+
+
+def test_score_education_backward_compat_empty_jd_fields_stays_level_only() -> None:
+    """Explicit empty ``jd_fields`` (the new keyword's default) must behave
+    EXACTLY like the pre-ADR-028 level-only scorer, even when the candidate's
+    field would not have matched anything — an empty allowed list means the
+    JD asked for no particular field at all."""
+    assert (
+        score_education(
+            ["bachelors"],
+            "bachelors",
+            candidate_fields=["Communications"],
+            jd_fields=(),
+            weights=DEFAULT_WEIGHTS,
+        )
+        == 1.0
+    )
+
+
+def test_score_education_meets_level_field_in_allowed_list_is_perfect() -> None:
+    assert (
+        score_education(
+            ["bachelors"],
+            "bachelors",
+            candidate_fields=["Computer Science"],
+            jd_fields=_ALLOWED_TECH_FIELDS,
+            weights=DEFAULT_WEIGHTS,
+        )
+        == 1.0
+    )
+
+
+def test_score_education_meets_level_field_not_in_allowed_list_is_capped() -> None:
+    """MUTATION GUARD: the pre-ADR-028 level-only scorer returns 1.0 here (the
+    candidate meets the level bar) — an implementation that ignores
+    ``jd_fields`` entirely would wrongly pass this. Only a scorer that
+    actually consults the field axis returns ``education_partial`` (0.5)."""
+    result = score_education(
+        ["bachelors"],
+        "bachelors",
+        candidate_fields=["Communications"],
+        jd_fields=_ALLOWED_TECH_FIELDS,
+        weights=DEFAULT_WEIGHTS,
+    )
+    assert result == DEFAULT_WEIGHTS.education_partial
+    assert result != 1.0, (
+        "a level-only scorer that never reads jd_fields would (wrongly) "
+        "return 1.0 here"
+    )
+
+
+def test_score_education_fuzzy_field_variation_within_tolerance_still_matches() -> None:
+    """A genuine variation ("Computer Sciences", plural) that is NOT byte-equal
+    to the allowed entry after normalisation (lowercase + whitespace collapse
+    only — no stemming), but clears the default 0.85
+    ``rapidfuzz.fuzz.token_set_ratio`` bar. MEASURED:
+    ``token_set_ratio("computer sciences", "computer science") == 96.97``,
+    i.e. 0.9697 >= 0.85."""
+    assert (
+        score_education(
+            ["bachelors"],
+            "bachelors",
+            candidate_fields=["Computer Sciences"],
+            jd_fields=["Computer Science"],
+            weights=DEFAULT_WEIGHTS,
+        )
+        == 1.0
+    )
+
+
+def test_score_education_field_fuzz_threshold_is_configurable_and_flips_the_verdict() -> (
+    None
+):
+    """``weights.education_field_fuzz`` is a real, load-bearing knob, not a
+    documented-but-unused constant. MEASURED:
+    ``token_set_ratio("computer science, b.s.", "computer science") == 84.21``
+    (0.8421) — BELOW the default 0.85 bar (capped), but ABOVE a lowered 0.80
+    bar (full credit). The same candidate field flips verdict purely on the
+    threshold, proving the knob actually reaches the scorer."""
+    candidate_fields = ["Computer Science, B.S."]
+    jd_fields = ["Computer Science"]
+
+    default_result = score_education(
+        ["bachelors"],
+        "bachelors",
+        candidate_fields=candidate_fields,
+        jd_fields=jd_fields,
+        weights=DEFAULT_WEIGHTS,
+    )
+    assert default_result == DEFAULT_WEIGHTS.education_partial
+
+    lenient_weights = MatchWeights(education_field_fuzz=0.80)
+    lenient_result = score_education(
+        ["bachelors"],
+        "bachelors",
+        candidate_fields=candidate_fields,
+        jd_fields=jd_fields,
+        weights=lenient_weights,
+    )
+    assert lenient_result == 1.0
+
+
+def test_score_education_unknown_candidate_field_meets_level_is_capped() -> None:
+    """Documented decision: an unparsed/``None`` candidate field counts as NO
+    match when the JD lists allowed fields — full credit is awarded only when
+    a qualifying-level degree's field can be CONFIRMED against the allowed
+    list. (Counter-risk, noted in ADR-028: an unparsed field over-penalizes a
+    candidate who may in fact hold an allowed-field degree.)"""
+    assert (
+        score_education(
+            ["bachelors"],
+            "bachelors",
+            candidate_fields=[None],
+            jd_fields=_ALLOWED_TECH_FIELDS,
+            weights=DEFAULT_WEIGHTS,
+        )
+        == DEFAULT_WEIGHTS.education_partial
+    )
+
+
+def test_score_education_below_level_non_allowed_field_still_gets_partial_credit() -> (
+    None
+):
+    """Field is NEVER consulted below the level bar. associate(2) <
+    bachelors(3) -> education_partial * 2/3, identical to the pre-ADR-028
+    level-only result, even though "Communications" is not on the allowed
+    list — the field axis never runs."""
+    assert score_education(
+        ["associate"],
+        "bachelors",
+        candidate_fields=["Communications"],
+        jd_fields=_ALLOWED_TECH_FIELDS,
+        weights=DEFAULT_WEIGHTS,
+    ) == pytest.approx(0.5 * (2 / 3))
+
+
+def test_score_education_below_level_allowed_field_is_still_only_the_below_level_partial() -> (
+    None
+):
+    """The r14/r11-style corpus twin: an associate-level candidate whose field
+    IS on the allowed list must still get the below-level partial, NOT full
+    credit — meeting the field bar can never substitute for meeting the level
+    bar. (r11 is the below-level half of that twin; r14, a bachelors-level CS
+    candidate, gets full credit via the "meets level" tests above.)"""
+    assert score_education(
+        ["associate"],
+        "bachelors",
+        candidate_fields=["Computer Science"],
+        jd_fields=_ALLOWED_TECH_FIELDS,
+        weights=DEFAULT_WEIGHTS,
+    ) == pytest.approx(0.5 * (2 / 3))
+
+
+def test_score_education_qualifying_wrong_field_pairs_with_below_level_right_field_is_capped() -> (
+    None
+):
+    """Two degrees: a QUALIFYING-level one in the WRONG field, and a
+    BELOW-level one in the RIGHT field. The right-field degree never meets the
+    bar, so it cannot contribute full credit — only the qualifying (wrong-
+    field) degree is eligible, and it fails the field check. Also pins the
+    ``zip_longest`` index alignment: degree i's level pairs with degree i's
+    field, not any cross product."""
+    assert (
+        score_education(
+            ["bachelors", "associate"],
+            "bachelors",
+            candidate_fields=["Communications", "Computer Science"],
+            jd_fields=["Computer Science"],
+            weights=DEFAULT_WEIGHTS,
+        )
+        == DEFAULT_WEIGHTS.education_partial
+    )
+
+
+def test_score_education_qualifying_right_field_pairs_with_extra_below_level_wrong_field_is_perfect() -> (
+    None
+):
+    """The mirror of the above, sanity-checking the pairing is not merely
+    "any field matches": the QUALIFYING degree is in the right field (full
+    credit), and an extra below-level wrong-field degree must not drag it
+    down."""
+    assert (
+        score_education(
+            ["bachelors", "associate"],
+            "bachelors",
+            candidate_fields=["Computer Science", "Communications"],
+            jd_fields=["Computer Science"],
+            weights=DEFAULT_WEIGHTS,
+        )
         == 1.0
     )
 

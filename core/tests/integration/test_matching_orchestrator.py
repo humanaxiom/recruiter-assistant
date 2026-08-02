@@ -154,6 +154,7 @@ async def _insert_job(
     required_skills: list[dict[str, Any]] | None = None,
     nice_to_have_skills: list[dict[str, Any]] | None = None,
     education_min_level: str | None = None,
+    education_fields: list[str] | None = None,
 ) -> UUID:
     description_parsed = {
         "required_skills": required_skills if required_skills is not None else [],
@@ -161,7 +162,10 @@ async def _insert_job(
             nice_to_have_skills if nice_to_have_skills is not None else []
         ),
         "min_years_experience": min_years,
-        "education": {"min_level": education_min_level, "fields": []},
+        "education": {
+            "min_level": education_min_level,
+            "fields": education_fields if education_fields is not None else [],
+        },
         "location": None,
         "remote_policy": None,
         "responsibilities": [],
@@ -700,3 +704,108 @@ async def test_generate_shortlist_end_to_end_orders_candidates_and_shapes_breakd
     assert result.pipeline_meta is not None
     assert result.pipeline_meta.model_gen == "test-gen"
     assert result.pipeline_meta.model_emb == "test-emb"
+
+
+# ── ADR-028: load_job_view populates JobView.education_fields ───────────────
+#
+# DB-bound (``JobView`` is only ever built by ``load_job_view`` reading a real
+# ``jobs.description_parsed`` jsonb column), so these live here rather than in
+# the pure-function unit suite.
+
+
+@pytest.mark.asyncio
+async def test_load_job_view_populates_education_fields_from_description_parsed(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    job_id = await _insert_job(
+        pg_pool,
+        education_min_level="bachelors",
+        education_fields=["Computer Science", "Software Engineering"],
+    )
+
+    async with pg_pool.acquire() as conn:
+        job = await load_job_view(conn, job_id)
+
+    assert job is not None
+    assert job.education_fields == ("Computer Science", "Software Engineering")
+
+
+@pytest.mark.asyncio
+async def test_load_job_view_empty_fields_list_yields_empty_tuple(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    job_id = await _insert_job(
+        pg_pool, education_min_level="bachelors", education_fields=[]
+    )
+
+    async with pg_pool.acquire() as conn:
+        job = await load_job_view(conn, job_id)
+
+    assert job is not None
+    assert job.education_fields == ()
+
+
+@pytest.mark.asyncio
+async def test_load_job_view_missing_fields_key_defaults_to_empty_tuple(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The JD's ``education`` object may lack a ``fields`` key entirely (older
+    parses, or a JD with no education requirement at all) — ``load_job_view``
+    must not raise and must default to the empty tuple, not ``None`` or a
+    ``KeyError``."""
+    description_parsed = {
+        "required_skills": [],
+        "nice_to_have_skills": [],
+        "min_years_experience": None,
+        "education": {"min_level": None},  # no "fields" key at all
+        "location": None,
+        "remote_policy": None,
+        "responsibilities": [],
+    }
+    async with pg_pool.acquire() as conn:
+        job_id: UUID = await conn.fetchval(
+            "INSERT INTO jobs (title, description_raw, description_parsed, min_years) "
+            "VALUES ($1, $2, $3::jsonb, $4) RETURNING id",
+            "Backend Engineer",
+            "raw jd text (irrelevant to this test)",
+            json.dumps(description_parsed),
+            None,
+        )
+        job = await load_job_view(conn, job_id)
+
+    assert job is not None
+    assert job.education_fields == ()
+
+
+@pytest.mark.asyncio
+async def test_load_job_view_drops_non_string_and_blank_field_entries(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Mirrors ``required_skills``/``nice_to_have_skills``' own tolerance for a
+    malformed LLM parse: a non-string or blank entry in ``education.fields``
+    must be dropped, not raise or surface as a blank/garbage requirement."""
+    description_parsed = {
+        "required_skills": [],
+        "nice_to_have_skills": [],
+        "min_years_experience": None,
+        "education": {
+            "min_level": "bachelors",
+            "fields": ["Computer Science", "", None, 42, "  "],
+        },
+        "location": None,
+        "remote_policy": None,
+        "responsibilities": [],
+    }
+    async with pg_pool.acquire() as conn:
+        job_id: UUID = await conn.fetchval(
+            "INSERT INTO jobs (title, description_raw, description_parsed, min_years) "
+            "VALUES ($1, $2, $3::jsonb, $4) RETURNING id",
+            "Backend Engineer",
+            "raw jd text (irrelevant to this test)",
+            json.dumps(description_parsed),
+            None,
+        )
+        job = await load_job_view(conn, job_id)
+
+    assert job is not None
+    assert job.education_fields == ("Computer Science",)
