@@ -2,14 +2,29 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-07-31: reverse-match read consistency shipped (PR #46); everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-01: education field-of-study relevance shipped (PR #49); everything merged
 
-> **Current tip: `humanaxiom/main` == `6d8d33f`. Both repos are PUBLIC. Zero open PRs. Working tree clean
+> **Current tip: `humanaxiom/main` == `9229d61`. Both repos are PUBLIC. Zero open PRs. Working tree clean
 > (one untracked stray `compose.cas.yml` — operational scratch, not part of any branch; leave it). Nothing
-> is mid-flight.** This banner supersedes the 2026-07-30/31 "FU-7 + two live-bug fixes" banner below (kept
-> as history) and all older stale banners.
+> is mid-flight.** This banner supersedes the 2026-07-31 "reverse-match read consistency (PR #46)" banner
+> below (kept as history) and all older stale banners.
 >
 > **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **Education field-of-study relevance (resolve ADR-009 §7 / ADR-028)** — PR **#49**, squash `9229d61`.
+>   `score_education` read degree LEVEL only and ignored `jd.education.fields` (open since Phase 4c). Human
+>   decision: EXTEND the scorer. Now a candidate who MEETS the level bar but whose qualifying degree is in a
+>   NON-allowed field is capped at `education_partial` (0.5) instead of 1.0; fuzzy field match
+>   (`rapidfuzz.token_set_ratio ≥ weights.education_field_fuzz`, new knob default 0.85, settings-wired as
+>   `match_education_field_fuzz`). A JD with no `fields` stays level-only (unchanged); below-level candidates
+>   unaffected; unknown/blank candidate field counts as no-match (penalized — decision + counter-risk in
+>   ADR-028). Corpus impact measured: only r06/r12/r17 demoted (all already `must_not_surface`), precision@5
+>   stays 1.0, r14/r11 twin gap byte-identical; new mutation-killed `_assert_education_field_relevance`
+>   control. TDD (red→green→lint-chore→evals-control→docs); reviewer APPROVE (live mutation proof), security
+>   PASS, ranking-evals PASS, `./scripts/verify.sh all` + CI green. **ADR-028 added; ADR-009 §7 RESOLVED.**
+>   *Small follow-up left open:* `docs/process/ranking-metrics-explainer.html`'s policy-decision register is
+>   now stale by one (the `education_field_fuzz` / unknown-field decision).
+>
+> **Previous session (2026-07-31), now history:**
 > - **Reverse-match read hides withdrawn** — PR **#46**, squash `6d8d33f`. The mirror of PR #43, one read
 >   path over: the reverse-match (candidate → jobs) persisted read `get_reverse_match_result` /
 >   `_REVERSE_MATCH_QUERY` in `shortlist_service.py` still returned a withdrawn candidate's rows written
@@ -823,14 +838,15 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-07-31 (read the top READ-FIRST banner first).** `origin/main` == **`6d8d33f`**, both
+> **STATE AS OF 2026-08-01 (read the top READ-FIRST banner first).** `origin/main` == **`9229d61`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
 > live-integration, **FU-8 résumé withdrawal (ADR-026, PR #37)**, the **cover-letter zip pairing fix (PR
 > #42)**, the **shortlist-hides-withdrawn read fix (PR #43)**, **FU-7 §3 honest parse status (ADR-027, PR
-> #44)**, and the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)** — all on
-> `main`, CI green. **Nothing is mid-flight.**
+> #44)**, the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)**, and
+> **education field-of-study relevance (ADR-028, PR #49, `9229d61`)** — all on `main`, CI green. **Nothing is
+> mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
@@ -845,8 +861,12 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 >    reverse-match persisted read (`_REVERSE_MATCH_QUERY` in `shortlist_service.py`) now carries the
 >    correlated `_REVERSE_NOT_WITHDRAWN_SQL` guard, mirroring PR #43's shortlist filter. All five persisted
 >    read paths + export now hide withdrawn consistently (ADR-026 amendment 2026-07-31).
-> 4. **`jd.education.fields`** (ADR-009 §7, open since 4c): `score_education` ignores JD field-relevance —
->    either extend the scorer or drop `fields` from the JD contract. Touches scoring → ranking-evals applies.
+> 4. ~~**`jd.education.fields`** (ADR-009 §7, open since 4c).~~ ✅ **DONE — PR #49 (`9229d61`), 2026-08-01,
+>    ADR-028.** Extended `score_education` to read `jd.education.fields`: a qualifying-level degree in a
+>    non-allowed field caps education at `education_partial` (fuzzy `token_set_ratio` ≥
+>    `education_field_fuzz`). ADR-009 §7 RESOLVED. *Residual follow-up:* `docs/process/
+>    ranking-metrics-explainer.html`'s policy-decision register is stale by one (the `education_field_fuzz` /
+>    unknown-field decision).
 > 5. **Re-privatize + PII hygiene** once finance funds `humanaxiom` billing: flip both repos back to private
 >    (CI then needs the org's Actions quota funded) and run the `recruiter@sfu.ca → @example.test` scrub.
 > 6. **Connectors feature** (Taleo/CSV-manifest ingest) — explicitly cut in Phase 6 (ADR-012 §2), deferred by
