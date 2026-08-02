@@ -297,7 +297,7 @@ async def test_resume_status_breakdown_readable_by_every_role(
 
 
 @pytest.mark.asyncio
-async def test_resume_status_breakdown_zero_resume_job_is_the_five_bucket_shape(
+async def test_resume_status_breakdown_zero_resume_job_is_the_six_bucket_shape(
     pg_pool: asyncpg.Pool,
 ) -> None:
     job_id = await _insert_job(pg_pool)
@@ -307,12 +307,14 @@ async def test_resume_status_breakdown_zero_resume_job_is_the_five_bucket_shape(
         resp = await client.get(f"/jobs/{job_id}/resume-status")
 
     assert resp.status_code == 200
+    # FU-7 §4 (ADR-030): `degraded` is now a required sub-count of `parsed`.
     assert resp.json() == {
         "uploaded": 0,
         "parsing": 0,
         "parsed": 0,
         "failed": 0,
         "withdrawn": 0,
+        "degraded": 0,
     }
 
 
