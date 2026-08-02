@@ -15,11 +15,26 @@ a fake, settable clock instead of sleeping real seconds.
   ``RecursionError`` in the ``_strip_nuls(json.loads(...))`` chain, which is
   neither ``JSONDecodeError`` nor ``ValidationError`` — it must not escape
   ``chat_json`` uncaught.
+
+── FU-7 §2/§6 (ADR-021 §6, ADR-029) — fail-closed ranking + empty-content ──
+* §6: both ``_chat_openai`` and ``_chat_native`` already raise
+  ``LLMOutputInvalidError`` when ``content`` is not a string. Empty/
+  whitespace-only ``content`` (a string that decodes fine but carries
+  nothing — the classic "reasoning model burned its whole token budget on a
+  discarded trace" failure) must ALSO raise, with a diagnostic that says
+  whether a reasoning/thinking field was present in the response.
+* The ``_chat_openai`` ``json_mode`` comment currently claims switching to
+  ``_chat_native`` (``llm_ollama_native=True``) is "a reliable thinking-off
+  path" — per ADR-021 §6 that claim is false (neither path reliably
+  suppresses reasoning for gpt-oss:20b) and must be corrected, citing
+  ADR-021 §6, not merely deleted.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -599,3 +614,210 @@ async def test_client_built_from_settings_never_points_at_a_cloud_host() -> None
         assert not any(cloud in base for cloud in cloud_hosts)
     finally:
         await llm.aclose()
+
+
+# ── FU-7 §6 (ADR-021 §6, ADR-029) — empty-content diagnostic ────────────────
+#
+# Both `_chat_openai` and `_chat_native` already raise LLMOutputInvalidError
+# when `content` is not a string at all. Empty/whitespace-only content is a
+# DIFFERENT, common failure: a reasoning model (gpt-oss:20b et al) burns its
+# whole `max_tokens` budget on a discarded reasoning trace, so `content`
+# comes back a legitimate but EMPTY string. That must also raise, and the
+# message must say whether a reasoning/thinking field was present in the
+# response — the signal that distinguishes "reasoning ate the budget" from
+# some other cause of an empty response.
+
+
+@pytest.mark.asyncio
+async def test_chat_openai_raises_on_empty_string_content() -> None:
+    transport, _calls = _sequenced_transport([_ok_chat_response("")])
+    llm = _client(transport)
+
+    with pytest.raises(LLMOutputInvalidError):
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_openai_raises_on_whitespace_only_content() -> None:
+    transport, _calls = _sequenced_transport([_ok_chat_response("   \n\t  ")])
+    llm = _client(transport)
+
+    with pytest.raises(LLMOutputInvalidError):
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_openai_empty_content_diagnostic_notes_no_reasoning_present() -> (
+    None
+):
+    transport, _calls = _sequenced_transport([_ok_chat_response("")])
+    llm = _client(transport)
+
+    with pytest.raises(LLMOutputInvalidError) as exc_info:
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    message = str(exc_info.value).lower()
+    assert "empty" in message
+    assert "reasoning_present=false" in message.replace(" ", "")
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_openai_empty_content_diagnostic_notes_reasoning_present() -> None:
+    """When the OpenAI-compat choice/message carries a `reasoning` field
+    alongside empty `content`, the diagnostic must say reasoning WAS
+    present — the signal that this is token-budget exhaustion, not some
+    other cause."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning": "a very long discarded chain of thought",
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    llm = _client(transport)
+
+    with pytest.raises(LLMOutputInvalidError) as exc_info:
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    message = str(exc_info.value).lower()
+    assert "reasoning_present=true" in message.replace(" ", "")
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_openai_empty_content_logs_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport, _calls = _sequenced_transport([_ok_chat_response("")])
+    llm = _client(transport)
+
+    with caplog.at_level(logging.WARNING, logger="src.pipeline.llm.client"):
+        with pytest.raises(LLMOutputInvalidError):
+            await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert any(
+        "empty" in record.getMessage().lower() for record in caplog.records
+    ), "an empty-content response must log a warning, not just raise silently"
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_native_raises_on_empty_string_content() -> None:
+    transport, _calls = _sequenced_transport([_ok_native_response("")])
+    llm = _client(transport, native_chat=True)
+
+    with pytest.raises(LLMOutputInvalidError):
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_native_raises_on_whitespace_only_content() -> None:
+    transport, _calls = _sequenced_transport([_ok_native_response("  \n  ")])
+    llm = _client(transport, native_chat=True)
+
+    with pytest.raises(LLMOutputInvalidError):
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_native_empty_content_diagnostic_notes_no_reasoning_present() -> (
+    None
+):
+    transport, _calls = _sequenced_transport([_ok_native_response("")])
+    llm = _client(transport, native_chat=True)
+
+    with pytest.raises(LLMOutputInvalidError) as exc_info:
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    message = str(exc_info.value).lower()
+    assert "empty" in message
+    assert "reasoning_present=false" in message.replace(" ", "")
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_native_empty_content_diagnostic_notes_thinking_present() -> None:
+    """For the native `/api/chat` path, the presence signal is a top-level
+    `thinking` field on the response payload (per the spec: "For
+    `_chat_native`: check the response for a `thinking` field")."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": ""},
+                "thinking": "a very long discarded chain of thought",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    llm = _client(transport, native_chat=True)
+
+    with pytest.raises(LLMOutputInvalidError) as exc_info:
+        await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    message = str(exc_info.value).lower()
+    assert "reasoning_present=true" in message.replace(" ", "")
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_native_empty_content_logs_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport, _calls = _sequenced_transport([_ok_native_response("")])
+    llm = _client(transport, native_chat=True)
+
+    with caplog.at_level(logging.WARNING, logger="src.pipeline.llm.client"):
+        with pytest.raises(LLMOutputInvalidError):
+            await llm.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert any(
+        "empty" in record.getMessage().lower() for record in caplog.records
+    ), "an empty-content response must log a warning, not just raise silently"
+    await llm.aclose()
+
+
+# ── §6 comment correction (ADR-021 §6) ───────────────────────────────────
+#
+# The `_chat_openai` json_mode comment currently claims switching to
+# `_chat_native` (llm_ollama_native=True) is "a reliable thinking-off path".
+# ADR-021 §6 established that neither path reliably suppresses reasoning for
+# gpt-oss:20b — that claim is false and must be corrected (citing ADR-021
+# §6), not merely deleted. Static source check, mirroring the precedent
+# established in test_summary_text_pii.py / test_pii.py for pinning a
+# docstring/comment's factual content via inspect.getsource.
+
+
+def test_chat_openai_json_mode_comment_no_longer_claims_a_reliable_escape_hatch() -> (
+    None
+):
+    source = inspect.getsource(LLMClient._chat_openai)
+    assert "reliable thinking-off path" not in source, (
+        "the json_mode comment must stop claiming _chat_native is a "
+        "reliable escape hatch from reasoning-token exhaustion — ADR-021 §6 "
+        "found neither path reliably suppresses reasoning for gpt-oss:20b"
+    )
+    assert "ADR-021" in source or "ADR 0021" in source, (
+        "the corrected comment must cite ADR-021 §6, per the spec's "
+        "instruction to correct (not merely delete) the inert claim"
+    )
