@@ -26,7 +26,14 @@
       <tr>
         <td>{{ resume.candidate_name or '—' }}</td>
         <td>{{ resume.original_filename }}</td>
-        <td><span class="pill pill-{{ resume.status }}">{{ resume.status }}</span></td>
+        <td>
+          <span class="pill pill-{{ resume.status }}">{{ resume.status }}</span>
+          {%- if resume.degraded %}
+          {# FU-7 §4 / ADR-030: skills extraction fell back to keyword scan;
+             this résumé is excluded from shortlists until re-parsed. #}
+          <span class="pill pill-degraded" title="Skills extraction failed (AI); ranked on keyword-scan skills only — excluded from shortlists until re-parsed.">degraded</span>
+          {%- endif %}
+        </td>
         <td class="muted">{{ resume.uploaded_at or '—' }}</td>
       </tr>
       {% else %}

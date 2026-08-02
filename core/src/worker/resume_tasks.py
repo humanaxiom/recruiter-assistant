@@ -123,6 +123,14 @@ _OUTBOX_PARSED_EXCLUDE: dict[str, Any] = {
     "summary": True,
     "chunks": {"__all__": {"text"}},
     "cover_letter_chunks": {"__all__": {"text"}},
+    # FU-7 §4 / ADR-030: the degraded flag/reason are a READ-side visibility
+    # surface (persisted on `resumes.parsed`, shown in the UI), NOT part of the
+    # graph-projection payload. A degraded résumé never enqueues an outbox row
+    # at all (the skip below), and a clean parse's `degraded=False`/reason=None
+    # carry no projection signal — excluded to keep the outbox payload byte-
+    # identical to before this slice (the fixture-drift guard pins this).
+    "degraded": True,
+    "degradation_reason": True,
 }
 
 
@@ -131,16 +139,22 @@ _OUTBOX_PARSED_EXCLUDE: dict[str, Any] = {
 
 async def _extract_skills_merged(
     llm: LLMClient, chunks: list[ResumeChunk], resume_id_str: str
-) -> list[ResumeSkill]:
+) -> tuple[list[ResumeSkill], str | None]:
     """Résumé skills = a deterministic vocabulary scan (reliable, never fails)
     MERGED with a best-effort skills LLM call that also yields optional
     per-skill ``years`` / ``last_used_year``.
 
     Never raises: the LLM half is non-fatal (the lenient ``ResumeSkillDetails``
     drops malformed/looping output), so the deterministic scan is the floor and
-    a résumé still parses with names-only when the model fails. Returns
-    canonical, deduped rows capped at the ``ResumeParsed.skills`` limit;
-    years/last_used_year are carried only where the LLM stated them.
+    a résumé still parses with names-only when the model fails. Returns a
+    ``(skills, degradation_reason)`` tuple: canonical, deduped rows capped at
+    the ``ResumeParsed.skills`` limit (years/last_used_year carried only where
+    the LLM stated them), and — FU-7 §4 / ADR-030 — a PII-free
+    ``degradation_reason`` that is ``None`` on a clean LLM call and a fixed
+    fallback message when the ``resume_skills_v2`` call raised
+    ``LLMOutputInvalidError`` and only the keyword-scan floor landed. The reason
+    NEVER echoes the exception's ``str()`` (which can carry response content);
+    the raised exception is logged separately below.
 
     F3b (security re-audit round 2): ``skills_graph.reject_reason_for_skill_name``
     runs HERE, on each LLM detail's RAW ``d.name``, BEFORE it is ever handed to
@@ -156,6 +170,7 @@ async def _extract_skills_merged(
     """
     det = match_skills_in_text("\n".join(c.text for c in chunks))
     llm_details: list[ResumeSkillDetail] = []
+    degradation_reason: str | None = None
     try:
         prompt = load_prompt("resume_skills_v2", chunks=chunks)
         out = await llm.chat_json(
@@ -165,6 +180,11 @@ async def _extract_skills_merged(
     except LLMOutputInvalidError as exc:
         log.warning(
             "parse_resume.skills_llm_failed resume_id=%s error=%s", resume_id_str, exc
+        )
+        # FU-7 §4 / ADR-030: signal the degraded parse. Fixed, PII-free string
+        # — NEVER interpolate ``exc``/response content (logged above separately).
+        degradation_reason = (
+            "skills extraction failed (AI); using keyword-scan fallback"
         )
 
     kept_details: list[ResumeSkillDetail] = []
@@ -217,7 +237,7 @@ async def _extract_skills_merged(
     canonical = canonicalize_skill_names([*det, *[d.name for d in llm_details]])
     ordered = list(dict.fromkeys(canonical))[:_MAX_SKILLS]
     skills = [detail_by_canonical.get(c, ResumeSkill(name=c)) for c in ordered]
-    return _drop_smeared_years(skills, resume_id_str)
+    return _drop_smeared_years(skills, resume_id_str), degradation_reason
 
 
 # A small local instruct model often ignores the "don't copy a career total onto
@@ -651,7 +671,9 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 )
                 return "failed"
 
-            merged = await _extract_skills_merged(llm, chunks, resume_id_str)
+            merged, degradation_reason = await _extract_skills_merged(
+                llm, chunks, resume_id_str
+            )
             # F3 (security re-audit), layer 2: scrub the candidate's own
             # identity out of any skill NAME the LLM emitted, before it enters
             # `resumes.parsed`/the outbox. Must run before `cleaned_parsed` is
@@ -702,6 +724,12 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                         "education": [e.model_dump() for e in core.education],
                         "chunks": [c.model_dump() for c in chunks],
                         "cover_letter_chunks": [c.model_dump() for c in cl_chunks],
+                        # FU-7 §4 / ADR-030: persist the degraded flag + reason
+                        # verbatim in the parsed jsonb. Passed through
+                        # model_validate so they survive the lossy row-drop
+                        # cleaning into the stored `cleaned_parsed`.
+                        "degraded": degradation_reason is not None,
+                        "degradation_reason": degradation_reason,
                     }
                 )
             except ValidationError as exc:
@@ -816,6 +844,22 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 if meta.get("withdrawn_at") is not None:
                     log.info(
                         "parse_resume.withdrawn_skip_projection resume_id=%s",
+                        resume_id_str,
+                    )
+                    return "parsed"
+
+                # FU-7 §4 / ADR-030 — the degraded-parse skip, mirroring the
+                # withdrawn skip above. When skills extraction fell back to the
+                # keyword scan, the résumé is persisted + visible (status
+                # 'parsed', `degraded=True`) but must NOT re-enter the ranking
+                # pool on incomplete skills: the projection-triggering
+                # `resume.parsed` enqueue is SKIPPED, so there is no Neo4j node,
+                # no stage-1 recall, no ranking — consistent with the ADR-029
+                # fail-closed stance. A later successful re-parse (re-upload
+                # today) projects normally.
+                if cleaned_parsed.degraded:
+                    log.info(
+                        "parse_resume.degraded_skip_projection resume_id=%s",
                         resume_id_str,
                     )
                     return "parsed"

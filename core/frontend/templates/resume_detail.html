@@ -15,7 +15,30 @@
   <div class="card-header">
     <h1 style="margin:0">{{ resume.original_filename }}</h1>
     <span class="pill pill-{{ resume.status }}">{{ resume.status }}</span>
+    {%- if parsed and parsed.degraded %}
+    <span class="pill pill-degraded">degraded</span>
+    {%- endif %}
   </div>
+
+  {#
+    FU-7 §4 / ADR-030 — degraded-parse warning. Skills extraction fell back to
+    the deterministic keyword scan, so this résumé ranks on incomplete skills;
+    it is EXCLUDED from shortlists until re-parsed (via re-upload today). NON-PII
+    — renders regardless of blind/reveal state, exactly like the withdrawal
+    block below. Only rendered when `parsed.degraded` so a clean parse carries
+    no "degraded" text at all.
+  #}
+  {% if parsed and parsed.degraded %}
+  <div class="degraded-banner">
+    <span class="pill pill-degraded">⚠ degraded parse</span>
+    <p>
+      {{ parsed.degradation_reason
+         or 'Skills extraction failed (AI); using keyword-scan fallback.' }}
+      Ranked on keyword-scan skills only; this résumé is excluded from
+      shortlists until re-parsed.
+    </p>
+  </div>
+  {% endif %}
 
   {% if revealed %}
   {# The ONE place identity is rendered — reached only via the audited reveal. #}
