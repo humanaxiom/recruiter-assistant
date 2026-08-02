@@ -2,11 +2,37 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-01: education field-of-study relevance shipped (PR #49); everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed ranking shipped (PR #52); everything merged
 
-> **Current tip: `humanaxiom/main` == `9229d61`. Both repos are PUBLIC. Zero open PRs. Working tree clean
+> **Current tip: `humanaxiom/main` == `79d69ac`. Both repos are PUBLIC. Zero open PRs. Working tree clean
 > (one untracked stray `compose.cas.yml` — operational scratch, not part of any branch; leave it). Nothing
-> is mid-flight.** This banner supersedes the 2026-07-31 "reverse-match read consistency (PR #46)" banner
+> is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner below
+> (kept as history) and all older stale banners.
+>
+> **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029)** — PR **#52**, squash `79d69ac`. Closes the
+>   silent zero-score penalty (ADR-009 residual / explainer register item 11): when the LLM fails during
+>   ranking — **BOTH** Mode A (`LLMUnavailableError`, timeout/conn/5xx/429) **and** Mode B
+>   (`LLMOutputInvalidError`, invalid/empty output), per the human decision — `generate_shortlist` now raises
+>   `RankingUnavailableError` and `shortlist_job` WITHHOLDS the shortlist (does not persist silently-degraded
+>   rows), sets a job-level `awaiting_llm` state (dedicated nullable `jobs.shortlist_state`/`_reason`/`_at`
+>   columns, NOT a `job_status` enum value), and `raise arq.Retry` until `shortlist_max_tries` (bounded
+>   1..1000), clearing state on success. New `GET /jobs/{id}/shortlist/status` (job-assignment-scoped) +
+>   frontend "Waiting for AI to rank candidates…". §6: empty LLM content → `LLMOutputInvalidError` with a
+>   reasoning-present diagnostic (both compat + native), inert `think:false` comment corrected. Scoring math
+>   BYTE-UNCHANGED. **Security bug caught mid-build & fixed:** the new status route lacked FU-6/ADR-020
+>   job-assignment scoping (IDOR + 404-vs-200 existence oracle) — fixed to mirror `get_job` (scoped-unassigned
+>   == nonexistent → 404), security re-verified CLOSED. TDD (red→green→test→red→green→docs); reviewer APPROVE
+>   (7 mutations killed), security PASS, ranking-evals PASS (corpus identical), `./scripts/verify.sh all` +
+>   CI green. **Residual:** reverse-match keeps per-candidate isolation — fail-closed NOT extended there
+>   (out of scope, ADR-029; follow-up mirrors the withdrawn-read split #43→#46). Same-provider retry until
+>   FU-7 decision 1 (failover) lands.
+>
+> **Previous session (2026-08-01), now history:**
+> - **Education field-of-study relevance (ADR-028)** — PR #49, squash `9229d61`; plus the explainer follow-up
+>   PR #51 (`107e6bb`).
+>
+> **Older banner (2026-07-31), kept below as history:** This banner supersedes the "reverse-match read consistency (PR #46)" banner
 > below (kept as history) and all older stale banners.
 >
 > **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
@@ -838,25 +864,31 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-08-01 (read the top READ-FIRST banner first).** `origin/main` == **`9229d61`**, both
+> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`79d69ac`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
 > live-integration, **FU-8 résumé withdrawal (ADR-026, PR #37)**, the **cover-letter zip pairing fix (PR
 > #42)**, the **shortlist-hides-withdrawn read fix (PR #43)**, **FU-7 §3 honest parse status (ADR-027, PR
-> #44)**, the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)**, and
-> **education field-of-study relevance (ADR-028, PR #49, `9229d61`)** — all on `main`, CI green. **Nothing is
-> mid-flight.**
+> #44)**, the **reverse-match-hides-withdrawn read fix (ADR-026 amendment, PR #46, `6d8d33f`)**,
+> **education field-of-study relevance (ADR-028, PR #49, `9229d61`)**, the **explainer follow-up (PR #51,
+> `107e6bb`)**, and **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029, PR #52, `79d69ac`)** — all on
+> `main`, CI green. **Nothing is mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
 >    path (hard-delete blob + null pgcrypto columns + `resumes.parsed`, keep a non-PII tombstone), clearly
 >    separated from the routine reversible withdraw. The repo's FIRST destructive PII op — needs a human
 >    decision on consent-revocation semantics + its own security review before any code.
-> 2. **Remaining FU-7 (ADR-021 decisions 1/2/4), still DEFERRED** — decision 3 (honest parse status) shipped
->    via PR #44 / [ADR-027](docs/adr/027-honest-resume-parse-status-fu7.md). Left: 1 (LLM provider failover
->    chain), 2 (fail-closed ranking + "waiting for AI…" UI status), 4 (empty-content / degraded-parse
->    visibility). Also a minor FU-7 residual: `resume_parse_max_tries` has no upper sanity cap.
+> 2. **Remaining FU-7 (ADR-021 decisions 1 & 4)** — decision 3 (honest parse status) shipped via PR #44 /
+>    [ADR-027](docs/adr/027-honest-resume-parse-status-fu7.md); **decision 2 (fail-closed ranking + "waiting
+>    for AI…" UI) AND §6 (empty-content detection) shipped via PR #52 /
+>    [ADR-029](docs/adr/029-fail-closed-ranking-fu7.md) this session.** Left: **1** (LLM provider failover
+>    chain — most infra-heavy; offline-only local Ollama peers) and **4** (degraded-parse visibility:
+>    `degraded`/`degradation_reason` on `ResumeParsed`, a "skills unavailable (AI extraction failed)"
+>    indicator, exclude degraded résumés from ranking). Two small FU-7 residuals: `resume_parse_max_tries`
+>    has no upper sanity cap (`shortlist_max_tries` got one — mirror it), and fail-closed is NOT extended to
+>    reverse-match (ADR-029 residual; mirror the withdrawn-read split #43→#46).
 > 3. ~~**Reverse-match read consistency (small).**~~ ✅ **DONE — PR #46 (`6d8d33f`), 2026-07-31.** The
 >    reverse-match persisted read (`_REVERSE_MATCH_QUERY` in `shortlist_service.py`) now carries the
 >    correlated `_REVERSE_NOT_WITHDRAWN_SQL` guard, mirroring PR #43's shortlist filter. All five persisted
