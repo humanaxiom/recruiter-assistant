@@ -1295,9 +1295,12 @@ split.
 >    default 100).
 > 2. **`/my/jobs` hiring-manager viewer default** — commit `f3b2998` (ADR-020 §7 "viewer half"; it landed
 >    after the local FU-6 merge, so PR #31 does not contain it).
-> 3. **CAS live integration** — commits `adb55fd` (split-origin post-login redirect fix, `:5000`/`:18000`)
->    + `d54a6be` (header auth widget: user · role · Logout/Login) + the untracked operational
->    `compose.cas.yml` override that enables real SFU CAS.
+> 3. **CAS live integration** — commits `adb55fd` (split-origin post-login redirect fix) + `d54a6be`
+>    (header auth widget: user · role · Logout/Login) + the `compose.cas.yml` override that enables real
+>    SFU CAS. **(Updated PR #58, 2026-08-02: `compose.cas.yml` is now TRACKED, its CAS URLs are
+>    port-parameterized `${API_PORT}`/`${FRONTEND_PORT}` — no longer the stale `:18000`/`:5000` — and CAS is
+>    ON BY DEFAULT in `scripts/quickstart.ps1` (`-NoCas` opts out). The earlier "untracked operational
+>    scratch" description no longer applies.)**
 > 4. **User-admin roles** — ADR-025, slices 1–8 up to `45eba6d` (no-role-by-default first login, reversing
 >    ADR-019 §10a; the fail-closed `require_role_assigned` gate; admin-session-gated `GET /users` +
 >    `PATCH /users/{id}/role` with atomic `role_changed` audit + last-admin lockout; the Flask
