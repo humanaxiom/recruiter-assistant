@@ -379,8 +379,16 @@ neo4j `29474`/`29687`); only the host-published side changes, so in-network DSNs
 required `PII_KEY`/`SKILL_HASH_SALT` if unset, writes the unique host-port block into `.env`,
 checks Ollama + the two models, **preflights the ports** (clear "port N held by <container>"
 message instead of a raw bind error), runs `docker compose up -d`, waits for health, and prints
-the URLs on their resolved ports. `-Build` rebuilds the app images, `-Down [-Reset]` tears the
-stack down, `-Logs` tails logs. (You still need Ollama on host metal for parsing/ranking.)
+the URLs on their resolved ports. **CAS login (SFU auth + RBAC + user management) is ON by
+default** via `compose.cas.yml` — the browser redirects to SFU CAS and first login as the default
+admin lands as admin; pass `-NoCas` for the dev-anonymous-admin passthrough (no login screen).
+`-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down, `-Logs` tails logs.
+(You still need Ollama on host metal for parsing/ranking.)
+
+> **Auth is config-gated, not optional.** With `CAS_ENABLED=false` (a bare `docker compose up`
+> with no `compose.cas.yml`) the app runs dev-anonymous-admin — no login, no user-management UI.
+> That is a boot mode, **not** a missing feature: RBAC (ADR-018), CAS identity (ADR-019), per-job
+> scoping (ADR-020), and user administration (ADR-025) are all on `main`.
 
 `PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
 

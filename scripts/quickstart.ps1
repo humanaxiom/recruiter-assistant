@@ -29,7 +29,8 @@
     data ever leaves the machine.
 
 .PARAMETER Build      Force a rebuild of the api/worker/frontend images (--build).
-.PARAMETER Cas        Also apply compose.cas.yml (SFU CAS login), if present.
+.PARAMETER NoCas      Boot WITHOUT CAS (dev-anonymous admin, no login screen).
+                      CAS (SFU login + RBAC + user management) is ON by default.
 .PARAMETER LiveEval   Also apply compose.live-eval.yml (Tailscale peer), if present.
 .PARAMETER Down       Stop and remove the stack instead of starting it.
 .PARAMETER Reset      With -Down, also delete the pg/neo4j volumes (down -v). DESTROYS data.
@@ -46,7 +47,7 @@
 [CmdletBinding()]
 param(
     [switch] $Build,
-    [switch] $Cas,
+    [switch] $NoCas,
     [switch] $LiveEval,
     [switch] $Down,
     [switch] $Reset,
@@ -94,10 +95,15 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 # ── docker-compose file set ──────────────────────────────────────────────────
+# CAS (SFU login + RBAC + user management) is ON BY DEFAULT — the app is meant
+# to run authenticated. Pass -NoCas to boot the dev-anonymous-admin passthrough.
 $ComposeArgs = @('-f', 'docker-compose.yml')
-if ($Cas) {
-    if (Test-Path 'compose.cas.yml') { $ComposeArgs += @('-f', 'compose.cas.yml') }
-    else { Write-Warn2 'compose.cas.yml not found — ignoring -Cas.' }
+$CasOn = $false
+if (-not $NoCas) {
+    if (Test-Path 'compose.cas.yml') { $ComposeArgs += @('-f', 'compose.cas.yml'); $CasOn = $true }
+    else { Write-Warn2 'compose.cas.yml not found — booting WITHOUT CAS (dev-anonymous admin).' }
+} else {
+    Write-Warn2 'CAS disabled via -NoCas — dev-anonymous admin, no login screen.'
 }
 if ($LiveEval) {
     if (Test-Path 'compose.live-eval.yml') { $ComposeArgs += @('-f', 'compose.live-eval.yml') }
@@ -258,6 +264,14 @@ if ($apiOk) {
     Write-Host ("  API                     : http://localhost:{0}   (/health, /docs)" -f $apiPort) -ForegroundColor White
     Write-Host ("  Neo4j browser           : http://localhost:{0}   (neo4j / recruiterpass)" -f $neo4jHttp) -ForegroundColor White
     Write-Host ''
+    if ($CasOn) {
+        Write-Host ("  CAS login is ON — the browser will redirect to SFU CAS; first login as the" ) -ForegroundColor White
+        Write-Host ("  default admin lands you as admin (RBAC + /admin/users). Boot with -NoCas to skip.") -ForegroundColor White
+        Write-Host ''
+    } else {
+        Write-Warn2 'CAS is OFF (dev-anonymous admin) — no login, no user management UI. Drop -NoCas to enable.'
+        Write-Host ''
+    }
     Write-Host '  Logs : docker compose logs -f            Stop : ./scripts/quickstart.ps1 -Down' -ForegroundColor DarkGray
 } else {
     Write-Warn2 "API /health did not go green within ${TimeoutSeconds}s. Inspect with:"
