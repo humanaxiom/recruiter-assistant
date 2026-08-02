@@ -369,6 +369,12 @@ docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
 curl localhost:8000/health    # -> {"status":"ok"}
 ```
 
+**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot —
+it generates the required `PII_KEY`/`SKILL_HASH_SALT` if unset, checks Ollama +
+the two models, runs `docker compose up -d`, waits for health, and prints the
+URLs. `-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down,
+`-Logs` tails logs. (You still need Ollama on host metal for parsing/ranking.)
+
 `PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
 
 ---
