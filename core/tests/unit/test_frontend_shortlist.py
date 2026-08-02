@@ -50,6 +50,17 @@ _REAL_NAME = "Zzyzxqrst Wibblesworth"
 _REAL_EMAIL = "zzyzxqrst.wibblesworth@example.test"
 _REAL_PHONE = "604-555-0192"
 
+# The two tests below exercise the REAL api_client.get_shortlist_status
+# passthrough (their own httpx.MockTransport handler) -- the autouse
+# _default_shortlist_status fixture below must not monkeypatch it out from
+# under them.
+_REAL_SHORTLIST_STATUS_TESTS = frozenset(
+    {
+        "test_get_shortlist_status_gets_the_status_path",
+        "test_get_shortlist_status_maps_5xx_to_backend_unavailable",
+    }
+)
+
 
 @pytest.fixture
 def client() -> Any:
@@ -58,11 +69,21 @@ def client() -> Any:
 
 
 @pytest.fixture(autouse=True)
-def _default_shortlist_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def _default_shortlist_status(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Default stub for the new FU-7 status endpoint — see module docstring.
     ``raising=False`` because ``api_client.get_shortlist_status`` does not
     exist yet on the real module; once it does, this simply overrides it with
-    a benign default that every pre-existing test in this file can rely on."""
+    a benign default that every pre-existing test in this file can rely on.
+
+    The two tests in ``_REAL_SHORTLIST_STATUS_TESTS`` exercise the REAL
+    ``api_client.get_shortlist_status`` passthrough against their own
+    ``httpx.MockTransport`` -- this fixture must NOT shadow it for them, or
+    their handler never runs (the monkeypatched stub answers first).
+    """
+    if request.node.name in _REAL_SHORTLIST_STATUS_TESTS:
+        return
     monkeypatch.setattr(
         api_client,
         "get_shortlist_status",

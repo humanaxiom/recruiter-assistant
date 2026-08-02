@@ -92,6 +92,7 @@ def _acm(return_value: Any = None) -> MagicMock:
 def _make_conn(fetchrow_result: Any) -> MagicMock:
     conn = MagicMock(name="conn")
     conn.fetchrow = AsyncMock(return_value=fetchrow_result)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
     return conn
 
 
