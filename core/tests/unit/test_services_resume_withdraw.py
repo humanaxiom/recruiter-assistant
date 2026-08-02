@@ -494,6 +494,7 @@ async def test_status_breakdown_zero_resume_job_is_all_zero_buckets() -> None:
     assert result.parsed == 0
     assert result.failed == 0
     assert result.withdrawn == 0
+    assert result.degraded == 0  # ADR-030: sub-count, zero too
 
 
 @pytest.mark.asyncio
@@ -521,6 +522,33 @@ async def test_status_breakdown_maps_bucket_rows_onto_the_five_fields() -> None:
     assert result.parsed == 7
     assert result.failed == 3
     assert result.withdrawn == 4
+
+
+@pytest.mark.asyncio
+async def test_status_breakdown_maps_degraded_bucket_row_as_a_sub_count() -> None:
+    """ADR-030: `degraded` rides ALONGSIDE `parsed` in the same bucket-row
+    query shape (a 6th `bucket='degraded'` row), never replacing it."""
+    from src.services.resume_service import status_breakdown
+
+    class _Row(dict[str, Any]):
+        def __getitem__(self, key: str) -> Any:
+            return dict.get(self, key)
+
+    rows = [
+        _Row({"bucket": "uploaded", "n": 2}),
+        _Row({"bucket": "parsing", "n": 1}),
+        _Row({"bucket": "parsed", "n": 7}),
+        _Row({"bucket": "failed", "n": 3}),
+        _Row({"bucket": "withdrawn", "n": 4}),
+        _Row({"bucket": "degraded", "n": 2}),
+    ]
+    conn = MagicMock(name="conn")
+    conn.fetch = AsyncMock(return_value=rows)
+
+    result = await status_breakdown(conn, uuid4())
+
+    assert result.parsed == 7, "parsed must stay the FULL parsed count"
+    assert result.degraded == 2, "degraded is an ADDITIONAL sub-count of parsed"
 
 
 @pytest.mark.asyncio

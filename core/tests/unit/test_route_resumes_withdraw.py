@@ -387,7 +387,7 @@ async def test_resume_status_breakdown_is_readable_by_every_role(
 ) -> None:
     job_id = uuid4()
     breakdown = ResumeStatusBreakdown(
-        uploaded=0, parsing=0, parsed=0, failed=0, withdrawn=0
+        uploaded=0, parsing=0, parsed=0, failed=0, withdrawn=0, degraded=0
     )
     status_mock = AsyncMock(return_value=breakdown)
     monkeypatch.setattr(resumes_routes.resume_service, "status_breakdown", status_mock)
@@ -409,7 +409,7 @@ async def test_resume_status_breakdown_zero_resume_job_returns_the_five_bucket_s
 ) -> None:
     job_id = uuid4()
     breakdown = ResumeStatusBreakdown(
-        uploaded=0, parsing=0, parsed=0, failed=0, withdrawn=0
+        uploaded=0, parsing=0, parsed=0, failed=0, withdrawn=0, degraded=0
     )
     monkeypatch.setattr(
         resumes_routes.resume_service,
@@ -429,6 +429,7 @@ async def test_resume_status_breakdown_zero_resume_job_returns_the_five_bucket_s
         "parsed": 0,
         "failed": 0,
         "withdrawn": 0,
+        "degraded": 0,
     }
 
 
@@ -439,7 +440,7 @@ async def test_resume_status_breakdown_forwards_the_job_id(
     job_id = uuid4()
     status_mock = AsyncMock(
         return_value=ResumeStatusBreakdown(
-            uploaded=1, parsing=0, parsed=2, failed=0, withdrawn=1
+            uploaded=1, parsing=0, parsed=2, failed=0, withdrawn=1, degraded=0
         )
     )
     monkeypatch.setattr(resumes_routes.resume_service, "status_breakdown", status_mock)

@@ -198,6 +198,15 @@ class ResumeParsed(BaseModel):
     # evidence citations never collide with résumé `c_NNN`. Empty when there's
     # no cover letter.
     cover_letter_chunks: list[ResumeChunk] = Field(default_factory=list, max_length=100)
+    # FU-7 §4 / ADR-030: degraded-parse visibility. Set True when skills
+    # extraction fell back to the deterministic keyword scan (the
+    # `resume_skills_v2` `LLMOutputInvalidError` catch in the worker). Rides the
+    # existing `resumes.parsed` jsonb verbatim — NO DDL change. `extra="ignore"`
+    # + these defaults mean pre-feature rows (no keys) read back non-degraded.
+    # NOT PII — flows through `ResumeOut` unredacted. A degraded parse is
+    # persisted + visible but NOT projected to Neo4j → excluded from ranking.
+    degraded: bool = False
+    degradation_reason: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="before")
     @classmethod
@@ -428,6 +437,11 @@ class ResumeListItem(BaseModel):
     # résumé that has never been withdrawn. NOT PII — no redaction applies.
     withdrawn_at: dt.datetime | None = None
     withdrawal_reason: str | None = None
+    # FU-7 §4 / ADR-030: True when this résumé's skills extraction fell back to
+    # the keyword scan. Read from the `resumes.parsed` jsonb
+    # (`COALESCE((parsed->>'degraded')::bool, false)`). Surfaces the incident's
+    # blind spot — a degraded résumé looked complete in the list. NOT PII.
+    degraded: bool = False
 
 
 class ResumeOut(BaseModel):
@@ -488,7 +502,15 @@ class ResumeStatusBreakdown(BaseModel):
     (no per-field default) so a service-layer bug that forgets one 500s loudly
     at construction rather than silently reporting zero. ``withdrawn`` is a
     peer bucket, counted from ``withdrawn_at IS NOT NULL`` rather than the
-    ``resume_status`` enum (which has no ``withdrawn`` value)."""
+    ``resume_status`` enum (which has no ``withdrawn`` value).
+
+    FU-7 §4 / ADR-030: ``degraded`` is a SUB-count of ``parsed`` (degraded ⊆
+    parsed), NOT a disjoint peer bucket like ``withdrawn``. ``parsed`` still
+    counts ALL parsed rows; ``degraded`` additionally reports how many of them
+    fell back to the keyword scan. A job with 7 parsed résumés, 2 degraded,
+    reports ``parsed=7, degraded=2`` — never double-count them out of
+    ``parsed``. Required (no default), same fail-loud contract as the five
+    lifecycle buckets."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -497,6 +519,7 @@ class ResumeStatusBreakdown(BaseModel):
     parsed: int = Field(ge=0)
     failed: int = Field(ge=0)
     withdrawn: int = Field(ge=0)
+    degraded: int = Field(ge=0)
 
 
 class ResumeDeleteOut(BaseModel):

@@ -211,7 +211,7 @@ async def _skills_via_real_extraction() -> list[dict[str, Any]]:
             )
         )
     )
-    merged = await _extract_skills_merged(llm, chunks, "sweep-resume")
+    merged, _reason = await _extract_skills_merged(llm, chunks, "sweep-resume")
     return [s.model_dump() for s in merged]
 
 

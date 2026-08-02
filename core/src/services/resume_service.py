@@ -442,7 +442,11 @@ _LIST_SQL_BASE = (
     "(cover_letter_blob_key IS NOT NULL OR cover_letter_text IS NOT NULL) "
     "AS has_cover_letter, "
     # ADR-026 (FU-8): the withdrawal lifecycle pair — NOT PII, no redaction.
-    "withdrawn_at, withdrawal_reason "
+    "withdrawn_at, withdrawal_reason, "
+    # FU-7 §4 / ADR-030: the degraded flag, read from the parsed jsonb. A
+    # pre-feature / never-parsed row (parsed IS NULL or no key) COALESCEs to
+    # false. NOT PII — surfaces in the list even under blind review.
+    "COALESCE((parsed->>'degraded')::bool, false) AS degraded "
     "FROM resumes WHERE job_id = $1"
 )
 
@@ -525,6 +529,10 @@ async def list_for_job(
             has_cover_letter=r["has_cover_letter"],
             withdrawn_at=r["withdrawn_at"],
             withdrawal_reason=r["withdrawal_reason"],
+            # ``COALESCE(... , false)`` in the SQL guarantees a real bool from
+            # a live row; ``bool(...)`` also folds a ``None`` (a pre-feature
+            # row / a mocked Record without the key) to ``False``.
+            degraded=bool(r["degraded"]),
         )
         for r in rows
     ]
@@ -739,10 +747,21 @@ _LAST_PARSED_PAYLOAD_SQL = (
     "ORDER BY delivered_at DESC, id DESC LIMIT 1"
 )
 
+# The five lifecycle buckets partition the job's résumés, PLUS a SIXTH
+# ``'degraded'`` row (FU-7 §4 / ADR-030) UNIONed into the SAME result set — a
+# SUB-count of ``parsed`` (degraded ⊆ parsed), never a peer bucket, so
+# ``parsed`` keeps counting ALL parsed rows. The degraded row is emitted even
+# at zero. A withdrawn-then-degraded row is excluded from the degraded row (it
+# lands in the ``withdrawn`` peer bucket, so counting it here would break the
+# ⊆-parsed invariant); a ``parsed IS NULL`` row COALESCEs to false.
 _STATUS_BREAKDOWN_SQL = (
     "SELECT CASE WHEN withdrawn_at IS NOT NULL THEN 'withdrawn' "
     "ELSE status::text END AS bucket, count(*) AS n "
-    "FROM resumes WHERE job_id = $1 GROUP BY 1"
+    "FROM resumes WHERE job_id = $1 GROUP BY 1 "
+    "UNION ALL "
+    "SELECT 'degraded' AS bucket, count(*) AS n FROM resumes "
+    "WHERE job_id = $1 AND withdrawn_at IS NULL AND status = 'parsed' "
+    "AND COALESCE((parsed->>'degraded')::bool, false) IS TRUE"
 )
 
 
@@ -855,6 +874,12 @@ async def status_breakdown(conn: DbConn, job_id: UUID) -> ResumeStatusBreakdown:
     regardless of its parse ``status`` (the CASE puts it in that bucket), so
     the five counts partition the job's résumés. Absent buckets zero-fill, so
     a job with no résumés still yields the full five-bucket shape.
+
+    FU-7 §4 / ADR-030: ``degraded`` is a SUB-count of ``parsed`` (degraded ⊆
+    parsed), carried as a SIXTH ``'degraded'`` bucket row UNIONed into the same
+    query so ``parsed`` keeps counting ALL parsed rows. A parsed résumé whose
+    skills extraction fell back to the keyword scan is counted in BOTH
+    ``parsed`` and ``degraded``.
     """
     rows = await conn.fetch(_STATUS_BREAKDOWN_SQL, job_id)
     counts: dict[str, int] = {
@@ -863,6 +888,9 @@ async def status_breakdown(conn: DbConn, job_id: UUID) -> ResumeStatusBreakdown:
         "parsed": 0,
         "failed": 0,
         "withdrawn": 0,
+        # FU-7 §4 / ADR-030: SUB-count of parsed, carried as a 6th bucket row
+        # in the same query — parsed above stays the FULL parsed count.
+        "degraded": 0,
     }
     for row in rows:
         bucket = row["bucket"]
