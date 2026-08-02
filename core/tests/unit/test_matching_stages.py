@@ -554,7 +554,7 @@ def test_score_education_fuzzy_field_variation_within_tolerance_still_matches() 
     )
 
 
-def test_score_education_field_fuzz_threshold_is_configurable_and_flips_the_verdict() -> (
+def test_score_education_field_fuzz_threshold_is_configurable_and_flips_the_verdict() -> (  # noqa: E501
     None
 ):
     """``weights.education_field_fuzz`` is a real, load-bearing knob, not a
@@ -620,7 +620,7 @@ def test_score_education_below_level_non_allowed_field_still_gets_partial_credit
     ) == pytest.approx(0.5 * (2 / 3))
 
 
-def test_score_education_below_level_allowed_field_is_still_only_the_below_level_partial() -> (
+def test_score_education_below_level_allowed_field_is_still_only_the_below_level_partial() -> (  # noqa: E501
     None
 ):
     """The r14/r11-style corpus twin: an associate-level candidate whose field
@@ -637,7 +637,7 @@ def test_score_education_below_level_allowed_field_is_still_only_the_below_level
     ) == pytest.approx(0.5 * (2 / 3))
 
 
-def test_score_education_qualifying_wrong_field_pairs_with_below_level_right_field_is_capped() -> (
+def test_score_education_qualifying_wrong_field_pairs_with_below_level_right_field_is_capped() -> (  # noqa: E501
     None
 ):
     """Two degrees: a QUALIFYING-level one in the WRONG field, and a
@@ -658,7 +658,7 @@ def test_score_education_qualifying_wrong_field_pairs_with_below_level_right_fie
     )
 
 
-def test_score_education_qualifying_right_field_pairs_with_extra_below_level_wrong_field_is_perfect() -> (
+def test_score_education_qualifying_right_field_pairs_with_extra_below_level_wrong_field_is_perfect() -> (  # noqa: E501
     None
 ):
     """The mirror of the above, sanity-checking the pairing is not merely

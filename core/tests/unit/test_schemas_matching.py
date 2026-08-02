@@ -233,7 +233,6 @@ def test_matchweights_education_field_fuzz_does_not_break_sums_to_one_validator(
     assert sub == pytest.approx(1.0, abs=0.01)
 
 
-
 # ── Sub-score / evidence models ──────────────────────────────────────────────
 
 
