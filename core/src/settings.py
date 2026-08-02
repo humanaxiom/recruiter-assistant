@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     match_overqual_slope: float = 0.1
     match_overqual_floor: float = 0.8
     match_education_partial: float = 0.5
+    match_education_field_fuzz: float = 0.85
     match_seniority_floor: float = 0.5
     match_implied_seniority_factor: float = 1.5
     match_implied_min_coverage: float = 0.5
@@ -350,6 +351,7 @@ def weights_from_settings(settings: Settings) -> MatchWeights:
         overqual_slope=settings.match_overqual_slope,
         overqual_floor=settings.match_overqual_floor,
         education_partial=settings.match_education_partial,
+        education_field_fuzz=settings.match_education_field_fuzz,
         seniority_floor=settings.match_seniority_floor,
         implied_seniority_factor=settings.match_implied_seniority_factor,
         implied_min_coverage=settings.match_implied_min_coverage,

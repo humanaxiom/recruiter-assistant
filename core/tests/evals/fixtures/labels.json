@@ -774,6 +774,54 @@
       ]
     }
   },
+  "education_field_relevance": {
+    "_rationale": [
+      "--- ADR-028 / ADR-009 §7 resolution: score_education reads jd.education.fields ---",
+      "Ranking-evals falsifiability control for the NEW field-of-study cap added",
+      "on branch feat/education-field-relevance. It closes the round-5 F2 'OPEN",
+      "DECISION' recorded above (score_education ignored jd.education.fields, so",
+      "field-relevance was DECORATIVE). Human decision (2026-08-01): EXTEND the",
+      "scorer -- a candidate who MEETS the JD's degree-LEVEL bar but whose",
+      "qualifying degree is in a NON-allowed field is capped at",
+      "MatchWeights.education_partial (0.5) instead of 1.0, via rapidfuzz",
+      "token_set_ratio >= MatchWeights.education_field_fuzz (0.85).",
+      "",
+      "MEASURED corpus impact (allowed JD fields: Computer Science, Software",
+      "Engineering, Data Engineering): the ONLY three fixtures whose education",
+      "sub-score changes are r06 (Design and Computation), r12 (Communications)",
+      "and r17 (Visual Communication Design) -- all bachelor-LEVEL (they clear",
+      "the bar) but in a non-allowed field, each demoted 1.0 -> 0.5, a -0.030",
+      "score_final delta each (0.6 * weights.education(0.10) * 0.5). All three",
+      "are already 'weak'/must_not_surface_in_topk, so they sink FURTHER; no",
+      "strong/borderline fixture moves. The r14/r11 education ordering twin is",
+      "UNTOUCHED: r14's field is CS (allowed -> 1.0) and r11 is a sub-bachelor",
+      "associate (below the level bar, so the field axis is never consulted --",
+      "0.333 either way); its gap is byte-identical to before this branch.",
+      "",
+      "WHY THIS BLOCK EXISTS (gate philosophy: new scoring behaviour must be",
+      "provable AND mutation-killable). Because the three demoted fixtures were",
+      "ALREADY at the bottom and already must_not_surface, an INERT field cap",
+      "leaves every existing gate GREEN -- precision@5 stays 1.0, r09 stays",
+      "outside top-5, every ordering pair still clears its gap. So the corpus",
+      "was blind to whether the cap fires at all. run_evals.py's",
+      "_assert_education_field_relevance closes that: for each fixture below it",
+      "asserts, under the REAL engine, level-only(jd_fields=())==1.0 (it CLEARS",
+      "the level bar, isolating the FIELD cap from r11's below-level partial),",
+      "fields-on==education_partial (the cap fires -- kills a scorer reverted to",
+      "level-only), and education_field_fuzz=0.0==1.0 (the fuzzy-match knob is",
+      "load-bearing -- kills a match-everything mutation). Both mutations were",
+      "watched RED. Same class of single-fixture obligation as",
+      "_assert_must_have_penalty_fires_on_r18; deliberately NOT a new",
+      "thresholds.toml key (that would force an out-of-scope edit to the",
+      "three-way-contract consumers) -- enforced unconditionally in _run_corpus,",
+      "so run_evals.main() fails if the cap goes inert."
+    ],
+    "field_demoted": [
+      "r06_drew_patel",
+      "r12_reese_dawson",
+      "r17_harper_nakamura"
+    ]
+  },
   "ordering_controls": [
     {
       "dimension": "education",

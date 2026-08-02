@@ -84,6 +84,7 @@ def test_match_education_and_seniority_curve_defaults() -> None:
     assert s.match_seniority_floor == 0.5
     assert s.match_implied_seniority_factor == 1.5
     assert s.match_implied_min_coverage == 0.5
+    assert s.match_education_field_fuzz == 0.85
 
 
 def test_match_evidence_and_motivation_confidence_defaults() -> None:
@@ -138,6 +139,7 @@ def test_match_llm_concurrency_and_max_tokens_defaults() -> None:
         "match_overqual_slope",
         "match_overqual_floor",
         "match_education_partial",
+        "match_education_field_fuzz",
         "match_seniority_floor",
         "match_implied_seniority_factor",
         "match_implied_min_coverage",
@@ -206,6 +208,7 @@ def test_weights_from_settings_fields_equal_settings_values() -> None:
     assert weights.evidence_verify_fuzz == s.match_evidence_verify_fuzz
     assert weights.evidence_min_quote_chars == s.match_evidence_min_quote_chars
     assert weights.motivation_min_confidence == s.match_motivation_min_confidence
+    assert weights.education_field_fuzz == s.match_education_field_fuzz
 
 
 def test_weights_from_settings_passes_its_own_sums_to_one_validator() -> None:
@@ -332,6 +335,18 @@ def test_env_override_of_match_evidence_verify_fuzz_flows_into_weights(
     monkeypatch.setenv("MATCH_EVIDENCE_VERIFY_FUZZ", "0.5")
     weights = weights_from_settings(Settings())
     assert weights.evidence_verify_fuzz == pytest.approx(0.5)
+
+
+def test_env_override_of_match_education_field_fuzz_flows_into_weights(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """ADR-028's field-of-study fuzzy-match threshold, wired the same way its
+    sibling ``evidence_verify_fuzz`` is: a non-default env value must reach
+    ``weights_from_settings(Settings()).education_field_fuzz``, not just the
+    declared-but-unwired ``Settings`` field."""
+    monkeypatch.setenv("MATCH_EDUCATION_FIELD_FUZZ", "0.6")
+    weights = weights_from_settings(Settings())
+    assert weights.education_field_fuzz == pytest.approx(0.6)
 
 
 def test_env_override_of_match_evidence_min_quote_chars_flows_into_weights(

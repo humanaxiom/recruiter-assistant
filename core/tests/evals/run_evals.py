@@ -489,6 +489,9 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     # ── must_have_miss_penalty is WIRED (review obligation on r18 alone) ───
     _assert_must_have_penalty_fires_on_r18(corpus)
 
+    # ── ADR-028 education field-of-study relevance (single-fixture guard) ──
+    _assert_education_field_relevance(corpus, weights)
+
     # ── pii leak-check ─────────────────────────────────────────────────────
     if thresholds["pii"]["leak_check"]:
         _assert_no_pii_leak(corpus, scored, topk_ids)
@@ -537,6 +540,7 @@ def _jd_view(corpus: Corpus) -> dict[str, Any]:
         "title": jd.title,
         "min_years": jd.min_years_experience or None,
         "edu_min_level": jd.education.min_level if jd.education else None,
+        "edu_fields": tuple(jd.education.fields) if jd.education else (),
         "required": required,
         "nice": nice,
         "summary_text": build_summary_text(jd),
@@ -699,8 +703,16 @@ def _breakdown_for(
         rows, weights=weights, senior=senior, today_year=_EVAL_TODAY_YEAR
     )
     exp = score_experience(total_years, jd["min_years"], weights=weights)
-    levels = [_level_from_degree(e.get("degree")) for e in parsed.get("education", [])]
-    edu = score_education(levels, jd["edu_min_level"], weights=weights)
+    edu_entries = parsed.get("education", []) or []
+    levels = [_level_from_degree(e.get("degree")) for e in edu_entries]
+    cand_fields = [e.get("field") for e in edu_entries]
+    edu = score_education(
+        levels,
+        jd["edu_min_level"],
+        candidate_fields=cand_fields,
+        jd_fields=jd["edu_fields"],
+        weights=weights,
+    )
     recent = _most_recent_title(parsed)
     seniority = (
         _seniority_subscore(jd["title"], recent, weights.seniority_floor)
@@ -1225,6 +1237,102 @@ def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:
         f"must_have_miss_penalty is not wired: score_final(0.5)={lo:.4f} is not "
         f"measurably below score_final(1.0)={hi:.4f}"
     )
+
+
+def _assert_education_field_relevance(corpus: Corpus, weights: Any) -> None:
+    """ADR-028 / ADR-009 §7 field-of-study relevance control (ranking-evals).
+
+    Falsifiable guard for score_education's field-of-study cap: a candidate who
+    MEETS the JD's degree-LEVEL bar but whose qualifying degree is in a
+    NON-allowed field is capped at ``weights.education_partial`` instead of 1.0
+    (fuzzy match via ``token_set_ratio >= weights.education_field_fuzz``).
+
+    Without this the new behaviour is UNGATED by the corpus: the only demoted
+    fixtures (r06/r12/r17) are already weak/must_not_surface and sit at the
+    bottom of the ranking, so making the cap inert -- revert the scorer to
+    level-only, set ``education_field_fuzz=0.0`` so every field "matches", or
+    empty ``jd.education.fields`` -- leaves precision@5, the adversarial
+    backstop and every ordering pair GREEN. This closes the round-5 F2 "open
+    decision" labels.json documents (score_education ignoring jd.education.fields).
+
+    For each labels.json ``education_field_relevance.field_demoted`` fixture,
+    under the REAL engine:
+      * level-only (``jd_fields=()``) == 1.0 -- it genuinely CLEARS the level
+        bar, so the demotion isolates the FIELD cap, not a below-level partial
+        (this is what distinguishes it from r11's 0.333 associate case);
+      * fields-on == ``weights.education_partial`` -- the cap fires (kills a
+        scorer reverted to level-only);
+      * ``education_field_fuzz=0.0`` == 1.0 -- the fuzzy-match knob is
+        load-bearing (kills a match-everything mutation).
+    Same class of single-fixture obligation as
+    ``_assert_must_have_penalty_fires_on_r18``; enforced unconditionally in
+    ``_run_corpus`` rather than via a new thresholds.toml key.
+    """
+    from src.pipeline.matching.orchestrator import _level_from_degree
+    from src.pipeline.matching.stages import score_education
+    from src.schemas.matching import MatchWeights
+
+    labels = _labels()
+    block = labels.get("education_field_relevance") or {}
+    demoted = list(block.get("field_demoted") or [])
+    assert demoted, (
+        "labels.json education_field_relevance.field_demoted is empty -- the "
+        "ADR-028 field-relevance control has no fixture to prove"
+    )
+    jd = _jd_view(corpus)
+    assert jd["edu_fields"], (
+        "the JD lists no education.fields, so the field-relevance control is "
+        "vacuous -- did the JD fixture lose its allowed-fields list?"
+    )
+    parsed_by_id = {r.resume_id: r.parsed for r in corpus.resumes}
+    partial = weights.education_partial
+    for rid in demoted:
+        assert (
+            rid in parsed_by_id
+        ), f"education_field_relevance names unknown fixture {rid!r}"
+        edu_entries = parsed_by_id[rid].get("education", []) or []
+        levels = [_level_from_degree(e.get("degree")) for e in edu_entries]
+        fields = [e.get("field") for e in edu_entries]
+        level_only = score_education(
+            levels,
+            jd["edu_min_level"],
+            candidate_fields=fields,
+            jd_fields=(),
+            weights=weights,
+        )
+        real = score_education(
+            levels,
+            jd["edu_min_level"],
+            candidate_fields=fields,
+            jd_fields=jd["edu_fields"],
+            weights=weights,
+        )
+        inert = score_education(
+            levels,
+            jd["edu_min_level"],
+            candidate_fields=fields,
+            jd_fields=jd["edu_fields"],
+            weights=MatchWeights(education_field_fuzz=0.0),
+        )
+        assert level_only == 1.0, (
+            f"{rid}: an education_field_relevance fixture must CLEAR the level "
+            f"bar (level-only score == 1.0) so its demotion isolates the FIELD "
+            f"cap; got {level_only}"
+        )
+        assert real == partial, (
+            f"{rid}: score_education did NOT cap a non-allowed-field degree at "
+            f"education_partial ({partial}); got {real}. The ADR-028 field cap "
+            "is inert -- do NOT relax this control, fix the scorer."
+        )
+        assert inert == 1.0, (
+            f"{rid}: with education_field_fuzz=0.0 (every field matches) the "
+            f"cap must lift to 1.0; got {inert}. The fuzzy-match knob is not "
+            "load-bearing."
+        )
+        assert real < level_only, (
+            f"{rid}: field cap did not lower the education sub-score "
+            f"(real={real} !< level_only={level_only})"
+        )
 
 
 def _assert_no_pii_leak(

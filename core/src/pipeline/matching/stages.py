@@ -28,6 +28,7 @@ import datetime as dt
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import Any, Generic, TypeVar
 from uuid import UUID
 
@@ -220,23 +221,77 @@ def score_experience(
     )
 
 
+def _normalise_field(value: str) -> str:
+    """Lowercase + strip control chars + collapse whitespace for field compare.
+
+    Kept deliberately simple — ``token_set_ratio`` handles word order and
+    partial token overlap, so no stemming/synonym expansion here. "Computer
+    Science" vs "Computer Science" -> 100/100; "Communications" vs the tech
+    fields -> well below the bar.
+    """
+    return _collapse_whitespace(_strip_control_chars(value)).lower()
+
+
+def _field_matches(
+    field: str | None, allowed_normalised: Iterable[str], *, threshold: float
+) -> bool:
+    """True iff ``field`` fuzzy-matches any allowed (already-normalised) field.
+
+    Unknown/blank candidate field counts as NO match (documented decision,
+    ADR-028): the JD asked for a field, so we award full credit only when a
+    qualifying-level degree in an allowed field can be CONFIRMED. The
+    counter-risk (an unparsed field over-penalizes a candidate who may hold an
+    allowed-field degree) is recorded in the ADR.
+    """
+    if not field or not field.strip():
+        return False
+    f = _normalise_field(field)
+    return any(
+        fuzz.token_set_ratio(f, a) / 100.0 >= threshold for a in allowed_normalised
+    )
+
+
 def score_education(
     candidate_levels: Iterable[str | None],
     jd_min_level: str | None,
     *,
+    candidate_fields: Iterable[str | None] = (),
+    jd_fields: Iterable[str] = (),
     weights: MatchWeights = DEFAULT_WEIGHTS,
 ) -> float:
+    """Degree LEVEL score, extended with field-of-study relevance (ADR-028).
+
+    When the JD lists ``education.fields`` AND the candidate meets the level
+    bar but their qualifying degree is in a NON-allowed field, education is
+    capped at ``weights.education_partial`` instead of 1.0. A JD with no
+    ``fields`` stays level-only (pre-ADR-028 behaviour). Below-level candidates
+    are unaffected by field — the field axis is never consulted below the bar.
+    """
     if not jd_min_level:
         return 1.0
     req = _LEVEL_ORDER.get(jd_min_level, 0)
-    cand = [_LEVEL_ORDER.get(lvl, 0) for lvl in candidate_levels if lvl]
-    if not cand:
+    # Pair levels with fields preserving order (index i's level <-> field).
+    pairs = zip_longest(candidate_levels, candidate_fields, fillvalue=None)
+    ranked = [(_LEVEL_ORDER.get(lvl, 0), fld) for lvl, fld in pairs if lvl]
+    if not ranked:
         return 0.0
-    best = max(cand)
-    if best >= req:
+    best = max(rank for rank, _ in ranked)
+    if best < req:
+        # Field is irrelevant below the level bar.
+        return weights.education_partial * (best / req) if req else 0.0
+    # best >= req (meets level).
+    allowed = [_normalise_field(f) for f in jd_fields if f and f.strip()]
+    if not allowed:
+        # JD lists no fields -> level-only (unchanged behaviour).
         return 1.0
-    # Partial credit.
-    return weights.education_partial * (best / req) if req else 0.0
+    qualifying = [fld for rank, fld in ranked if rank >= req]
+    if any(
+        _field_matches(fld, allowed, threshold=weights.education_field_fuzz)
+        for fld in qualifying
+    ):
+        return 1.0
+    # Meets level, wrong/unknown field -> capped.
+    return weights.education_partial
 
 
 # ---------------- vector normalisation ----------------
