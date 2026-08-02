@@ -313,7 +313,7 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 |---|---|---|---|
 | **Configurable shortlist size** | `2e2da05` | [024](docs/adr/024-configurable-shortlist-size.md) | Per-job `shortlist_top_percent` (1–100%, default 100 = keep-all) caps the persisted forward shortlist to the top P% of the ranked pool |
 | **`/my/jobs` hiring-manager viewer default** | `f3b2998` | [020](docs/adr/020-per-job-assignment-scoping.md) | ADR-020 §7 "viewer half" — a hiring_manager lands on the assignment-scoped `/my/jobs` view by default; landed after the local FU-6 merge, so it was not part of PR #31 |
-| **CAS live integration** | `adb55fd`+`d54a6be` | [019](docs/adr/019-cas-identity-attributable-audit.md) | Turned the FU-5 CAS flow on against real SFU CAS via `compose.cas.yml`: split-origin (`:5000`/`:18000`) post-login redirect fix + a header auth widget (user · role · Logout/Login) |
+| **CAS live integration** | `adb55fd`+`d54a6be` | [019](docs/adr/019-cas-identity-attributable-audit.md) | Turned the FU-5 CAS flow on against real SFU CAS via `compose.cas.yml` (now tracked + port-parameterized, on by default in the quickstart): split-origin (frontend/API) post-login redirect fix + a header auth widget (user · role · Logout/Login) |
 | **User admin — granular roles** | `45eba6d` (slices 1–8) | [025](docs/adr/025-user-admin-roles.md) | No-role-by-default first login (fail-closed, reverses ADR-019 §10a), the `require_role_assigned` gate, an admin-session-gated `GET /users` + `PATCH /users/{id}/role` (atomic `role_changed` audit, last-admin lockout), and a Flask `/admin/users` role-assignment page |
 | **FU-8 — Résumé withdrawal** | PR #37, squash `0162302` | [026](docs/adr/026-resume-withdrawal-lifecycle.md) | A candidate-withdrawal action (audited, `POST /resumes/{id}/withdraw` + `/reinstate`) that un-projects the résumé from Neo4j so it drops out of new shortlists/reverse-matches, distinct from a parse `failed`; reinstate replays the last parse rather than re-embedding; and a per-job résumé-status breakdown (`GET /jobs/{id}/resume-status`). All five gates green + CI green in-cloud on merge. The §4 consent-revocation purge path stays deferred |
 
@@ -370,11 +370,25 @@ docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
 curl localhost:8000/health    # -> {"status":"ok"}
 ```
 
-**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot —
-it generates the required `PII_KEY`/`SKILL_HASH_SALT` if unset, checks Ollama +
-the two models, runs `docker compose up -d`, waits for health, and prints the
-URLs. `-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down,
-`-Logs` tails logs. (You still need Ollama on host metal for parsing/ranking.)
+**Host ports are parameterized** (`${API_PORT:-8000}` etc. in `docker-compose.yml`) so the
+stack can run alongside other apps without colliding. Set unique values in `.env` — the shipped
+`.env.example` uses a `29xxx` block (API `29800`, frontend `29500`, pg `29432`, redis `29379`,
+neo4j `29474`/`29687`); only the host-published side changes, so in-network DSNs are unaffected.
+
+**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot — generates the
+required `PII_KEY`/`SKILL_HASH_SALT` if unset, writes the unique host-port block into `.env`,
+checks Ollama + the two models, **preflights the ports** (clear "port N held by <container>"
+message instead of a raw bind error), runs `docker compose up -d`, waits for health, and prints
+the URLs on their resolved ports. **CAS login (SFU auth + RBAC + user management) is ON by
+default** via `compose.cas.yml` — the browser redirects to SFU CAS and first login as the default
+admin lands as admin; pass `-NoCas` for the dev-anonymous-admin passthrough (no login screen).
+`-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down, `-Logs` tails logs.
+(You still need Ollama on host metal for parsing/ranking.)
+
+> **Auth is config-gated, not optional.** With `CAS_ENABLED=false` (a bare `docker compose up`
+> with no `compose.cas.yml`) the app runs dev-anonymous-admin — no login, no user-management UI.
+> That is a boot mode, **not** a missing feature: RBAC (ADR-018), CAS identity (ADR-019), per-job
+> scoping (ADR-020), and user administration (ADR-025) are all on `main`.
 
 `PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
 

@@ -24,6 +24,14 @@ below for the merge trail and `HANDOFF.md`'s "Next session" section for what a h
 
 **CUT:** review workflow (stages, SLA, next-action, approvals, comments, assignments, notifications, email), JD-Harmonizer / JD-Bank / Taleo, the Next.js `apps/web`, CAS (replace with minimal auth). Keep only `jd_import_service.extract_jd_text` (used by plain job creation).
 
+> **Post-v1 note (2026-08-02):** CAS was **re-added** after v1 as **FU-5** (real SFU CAS identity + session
+> store + attributable audit, [ADR-019](adr/019-cas-identity-attributable-audit.md)), then extended by
+> per-job assignment scoping ([ADR-020](adr/020-per-job-assignment-scoping.md)), RBAC
+> ([ADR-018](adr/018-rbac-keyed-roles.md)), and user administration
+> ([ADR-025](adr/025-user-admin-roles.md)). It is enabled via the (now tracked) `compose.cas.yml` override
+> and is **ON by default** in the dev boot (`scripts/quickstart.ps1`; `-NoCas` for the dev-anonymous-admin
+> passthrough). This CUT line reflects the ORIGINAL v1 scope only.
+
 **Decoupling surgery (two files):** `shortlist_service.py` — drop `record_decision`/`transition_stage` and the review sub-selects in the read/export SQL; `routes/shortlist.py` — drop decision/stage endpoints, the `collab_service` import, and review CSV columns.
 
 ## The ranking algorithm (ported verbatim)
