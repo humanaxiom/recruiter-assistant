@@ -366,7 +366,7 @@
 
 <p>The system reads résumés, compares them against a job description, and produces a ranked shortlist. Each candidate gets a single headline score between <strong>0 and 1</strong>, built from smaller scores underneath it.</p>
 
-<p>None of those numbers are objective facts. They are the arithmetic consequence of choices someone made — that skills matter more than education, that a missing must-have halves a score rather than disqualifying, that a degree in any field counts equally. Those are <em>hiring policy</em>, written as decimals. This document exposes each one so you can ratify it, change it, or reject it.</p>
+<p>None of those numbers are objective facts. They are the arithmetic consequence of choices someone made — that skills matter more than education, that a missing must-have halves a score rather than disqualifying, that a degree outside the fields a job named earns only partial education credit. Those are <em>hiring policy</em>, written as decimals. This document exposes each one so you can ratify it, change it, or reject it.</p>
 
 <p>Where you see <span class="chip ratify">Needs ratification</span>, the question is not "is this working?" It is "is this what we intend?"</p>
 
@@ -514,8 +514,8 @@ flowchart LR
 
 <div class="metric flag">
   <div class="metric-head"><span class="metric-name">Education</span><span class="metric-weight">0.10</span></div>
-  <p>Reads the <em>level</em> only — high school through PhD. Meeting or exceeding the required level scores full marks; a lower level earns partial credit; no degree scores 0.</p>
-  <p><strong>The field of study is ignored entirely.</strong> A PhD in an unrelated discipline scores identically to a PhD in the exact field required.</p>
+  <p>Reads the <em>level</em> — high school through PhD. Meeting or exceeding the required level scores full marks; a lower level earns partial credit; no degree scores 0.</p>
+  <p><strong>Field of study now counts</strong> when the job names specific fields: a candidate who meets the level but whose qualifying degree is in a field the job did not name is capped at partial credit. The match is fuzzy, so a minor spelling or format variation of a named field still counts. A job that names no fields still scores on level alone, exactly as before. A degree whose field could not be read from the résumé is treated as a non-match — see register item 3 for that trade-off. (ADR-028)</p>
 </div>
 
 <div class="metric">
@@ -661,9 +661,9 @@ sequenceDiagram
     </tr>
     <tr>
       <td class="num">3</td>
-      <td>Field of study is ignored — only degree level counts.</td>
-      <td>An unrelated PhD scores identically to a directly relevant one. Documented as unresolved.</td>
-      <td><span class="chip gap">Gap</span></td>
+      <td>Field of study caps education at partial credit when a qualifying-level degree is in a field the job did not name; a degree whose field cannot be read is treated as non-matching; the field match is fuzzy at a 0.85 similarity bar.</td>
+      <td>Resolves the former "field ignored" gap (ADR-028), but the cap size, the fuzzy bar, and penalising an unreadable field are hiring-policy choices — the last can under-credit a genuinely qualified candidate whose résumé parse dropped the field. All three are configurable without a code change.</td>
+      <td><span class="chip ratify">Ratify</span></td>
     </tr>
     <tr>
       <td class="num">4</td>
@@ -751,8 +751,8 @@ sequenceDiagram
 
 <h2>Suggested next steps</h2>
 <ol>
-  <li><strong>Assign an owner to each of the fifteen register items.</strong> The eleven marked "Ratify" need a documented yes or a changed number; all of them are configurable without code changes.</li>
-  <li><strong>Treat items 3, 13 and 14 as blocking</strong> if these scores will inform real hiring decisions — ignored field of study, unattributable reveals, and unaudited un-blinding are the three that would be hardest to defend if challenged.</li>
+  <li><strong>Assign an owner to each of the fifteen register items.</strong> The ten marked "Ratify" need a documented yes or a changed number; all of them are configurable without code changes.</li>
+  <li><strong>Treat items 13 and 14 as blocking</strong> if these scores will inform real hiring decisions — unattributable reveals and unaudited un-blinding are the two that would be hardest to defend if challenged.</li>
   <li><strong>Decide whether items 7 and 8 survive legal review</strong> before first production use. Over-qualification dampening and skill-recency banding are the two most likely to produce adverse impact.</li>
 </ol>
 
