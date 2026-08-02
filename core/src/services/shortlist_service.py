@@ -178,6 +178,17 @@ _GET_SHORTLIST_STATE_SQL = (
     "SELECT shortlist_state, shortlist_state_reason, shortlist_state_at "
     "FROM jobs WHERE id = $1"
 )
+# FU-6/ADR-020 §3 single-entity row-scoping predicate, mirroring
+# ``job_service._JOB_ASSIGNEE_EXISTS_SQL`` VERBATIM — keyed on ``jobs.id`` (the
+# read below is on the ``jobs`` table itself). This is deliberately NOT the
+# sibling ``_SHORTLIST_ASSIGNEE_EXISTS_SQL`` above, which is keyed on
+# ``{table}.job_id`` for reads OFF the shortlist tables (``jobs`` has no
+# ``job_id`` column). A local constant keeps this off a cross-service import.
+_JOBS_ASSIGNEE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM job_assignees "
+    "WHERE job_assignees.job_id = jobs.id "
+    "AND job_assignees.user_id = $2)"
+)
 
 
 async def set_shortlist_awaiting_llm(
@@ -195,13 +206,31 @@ async def clear_shortlist_state(conn: DbConn, job_id: UUID) -> None:
     await conn.execute(_CLEAR_SHORTLIST_STATE_SQL, job_id)
 
 
-async def get_shortlist_state(conn: DbConn, job_id: UUID) -> ShortlistStateOut | None:
+async def get_shortlist_state(
+    conn: DbConn, job_id: UUID, *, user_id: UUID | None = None
+) -> ShortlistStateOut | None:
     """Read the fail-closed ranking state for ``job_id``.
 
-    Raises ``NotFoundError`` when the job does not exist (mirroring every other
-    single-entity read here — ``get_one`` / ``job_service.get_job``); returns
-    ``None`` only when the job exists but carries no ``awaiting_llm`` state."""
-    row = await conn.fetchrow(_GET_SHORTLIST_STATE_SQL, job_id)
+    Raises ``NotFoundError`` when the job does not resolve (mirroring every
+    other single-entity read here — ``get_one`` / ``job_service.get_job``);
+    returns ``None`` only when the job resolves but carries no ``awaiting_llm``
+    state.
+
+    FU-6/ADR-020 §3/§5 (IDOR fix) — ``user_id`` row-scopes the read to a
+    hiring_manager SESSION's assigned jobs via an ``EXISTS`` predicate against
+    ``job_assignees``, keyed on ``jobs.id`` exactly like
+    ``job_service.get_job``. A job that exists but is NOT assigned to
+    ``user_id`` is filtered out at the SQL layer (0 rows) and surfaces as
+    ``NotFoundError`` — observationally IDENTICAL to a genuinely nonexistent
+    job id, so a scoped reader gains no 404-vs-200 existence oracle and cannot
+    read another job's ranking state. ``None`` (the default, for
+    admin/recruiter/auditor) leaves the query byte-identical to the unscoped
+    read — no predicate, no extra bind arg."""
+    if user_id is None:
+        row = await conn.fetchrow(_GET_SHORTLIST_STATE_SQL, job_id)
+    else:
+        query = f"{_GET_SHORTLIST_STATE_SQL} AND {_JOBS_ASSIGNEE_EXISTS_SQL}"
+        row = await conn.fetchrow(query, job_id, user_id)
     if row is None:
         raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
     if row["shortlist_state"] is None:

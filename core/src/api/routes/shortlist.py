@@ -149,13 +149,19 @@ async def shortlist_status(
     """FU-7 §2 (ADR-021 §2 / ADR-029) — the fail-closed ranking state the
     frontend poll consults to tell "awaiting AI" apart from "still generating".
 
-    Same RBAC readers as ``list_shortlist`` (all four roles), including the
-    ADR-020 §3 fail-closed hiring_manager-needs-a-real-session check via
-    ``scoped_user_id_or_403``. A missing job 404s (``get_shortlist_state``
-    raises ``NotFoundError``); an existing job with no ``awaiting_llm`` state
-    returns ``state=null``."""
-    await scoped_user_id_or_403(user, role)
-    state = await shortlist_service.get_shortlist_state(db, job_id)
+    FU-6 slice 7 (ADR-020 §3/§5) — row-scoped exactly like ``list_shortlist``:
+    the resolved ``user_id`` is forwarded into ``get_shortlist_state``. For a
+    hiring_manager SESSION (not the key role — see ``scoped_user_id_or_403``)
+    the read is scoped to their assigned jobs; a job they are not assigned to,
+    and a genuinely nonexistent job, BOTH surface as 404 (never 403), so the
+    404-vs-200 split cannot be used as a job-existence oracle and one manager
+    cannot read another job's ranking state. admin/recruiter/auditor read
+    unscoped (``user_id=None``). A hiring_manager KEY with no verifiable
+    session 403s before the service is ever reached (``scoped_user_id_or_403``).
+    An existing, assigned job with no ``awaiting_llm`` state returns
+    ``state=null``."""
+    user_id = await scoped_user_id_or_403(user, role)
+    state = await shortlist_service.get_shortlist_state(db, job_id, user_id=user_id)
     if state is None:
         return ShortlistStatusResponse(job_id=job_id)
     return ShortlistStatusResponse(
