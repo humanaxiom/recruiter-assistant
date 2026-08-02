@@ -403,3 +403,126 @@ async def test_clear_shortlist_state_on_an_already_clear_job_is_a_no_op(
     row = await _job_state_row(pg_pool, job_id)
     assert row is not None
     assert row["shortlist_state"] is None
+
+
+# ── IDOR fix (security + reviewer finding) — get_shortlist_state row-scoping
+#
+# GET /jobs/{job_id}/shortlist/status resolves a scoped user_id but never
+# forwarded it into get_shortlist_state, unlike its sibling list_for_job.
+# An unassigned hiring_manager could read another job's ranking state, and
+# the 404-vs-200 split doubled as a job-existence oracle. Mirrors
+# job_service.get_job's precedent (job_service.py:402,
+# _JOB_ASSIGNEE_EXISTS_SQL): a scoped user_id that is NOT assigned collapses
+# to the SAME NotFoundError as a genuinely nonexistent job.
+#
+# get_shortlist_state(conn, job_id, user_id=...) does not exist yet -- every
+# test below fails today with TypeError (unexpected keyword argument
+# 'user_id'), a valid RED for the missing param.
+
+
+async def _insert_user(pool: asyncpg.Pool, *, role: str) -> UUID:
+    async with pool.acquire() as conn:
+        user_id: UUID = await conn.fetchval(
+            "INSERT INTO users (cas_username, display_name, email, role) "
+            "VALUES ($1, $2, $3, $4) RETURNING id",
+            f"{role}-{uuid4().hex}",
+            role,
+            None,
+            role,
+        )
+    return user_id
+
+
+async def _assign(
+    pool: asyncpg.Pool, *, job_id: UUID, user_id: UUID, assigned_by: UUID
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO job_assignees (job_id, user_id, assigned_by) "
+            "VALUES ($1, $2, $3)",
+            job_id,
+            user_id,
+            assigned_by,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_state_assigned_hiring_manager_sees_the_state(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.shortlist_service import (
+        get_shortlist_state,
+        set_shortlist_awaiting_llm,
+    )
+
+    job_id = await _insert_job(pg_pool)
+    admin_id = await _insert_user(pg_pool, role="admin")
+    hm_id = await _insert_user(pg_pool, role="hiring_manager")
+    await _assign(pg_pool, job_id=job_id, user_id=hm_id, assigned_by=admin_id)
+
+    async with pg_pool.acquire() as conn:
+        await set_shortlist_awaiting_llm(conn, job_id, reason="empty response")
+        state = await get_shortlist_state(conn, job_id, user_id=hm_id)
+
+    assert state is not None
+    assert state.state == "awaiting_llm"
+    assert state.reason == "empty response"
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_state_unassigned_hiring_manager_gets_not_found(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.errors import NotFoundError
+    from src.services.shortlist_service import (
+        get_shortlist_state,
+        set_shortlist_awaiting_llm,
+    )
+
+    job_id = await _insert_job(pg_pool)
+    unassigned_hm_id = await _insert_user(pg_pool, role="hiring_manager")
+    # Deliberately NOT assigned -- no job_assignees row for this (job, user).
+
+    async with pg_pool.acquire() as conn:
+        await set_shortlist_awaiting_llm(conn, job_id, reason="empty response")
+        with pytest.raises(NotFoundError):
+            await get_shortlist_state(conn, job_id, user_id=unassigned_hm_id)
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_state_unscoped_user_id_none_is_unchanged(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """admin/recruiter/auditor pass user_id=None -- today's unscoped
+    behaviour must be byte-identical (no predicate, sees every job's
+    state)."""
+    from src.services.shortlist_service import (
+        get_shortlist_state,
+        set_shortlist_awaiting_llm,
+    )
+
+    job_id = await _insert_job(pg_pool)
+
+    async with pg_pool.acquire() as conn:
+        await set_shortlist_awaiting_llm(conn, job_id, reason="empty response")
+        state = await get_shortlist_state(conn, job_id, user_id=None)
+
+    assert state is not None
+    assert state.state == "awaiting_llm"
+
+
+@pytest.mark.asyncio
+async def test_get_shortlist_state_scoped_nonexistent_job_is_not_found_same_as_unassigned(  # noqa: E501
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The oracle this closes: a scoped hiring_manager must see IDENTICAL
+    NotFoundError for "job exists but I'm not assigned" and "job doesn't
+    exist at all" -- no observable difference either could reveal."""
+    from src.errors import NotFoundError
+    from src.services.shortlist_service import get_shortlist_state
+
+    hm_id = await _insert_user(pg_pool, role="hiring_manager")
+
+    async with pg_pool.acquire() as conn:
+        with pytest.raises(NotFoundError):
+            await get_shortlist_state(conn, uuid4(), user_id=hm_id)

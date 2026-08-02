@@ -31,6 +31,21 @@ overridden.
 explicitly says "reuse its dependency") — mirrors
 ``test_list_shortlist_is_readable_by_every_role`` in ``test_route_shortlist.py``,
 including the ADR-020 §3 fail-closed hiring_manager-needs-a-real-session fix.
+
+**IDOR fix (security + reviewer finding, post-GREEN follow-up)**: the route
+already resolves a scoped ``user_id`` via ``scoped_user_id_or_403`` but
+discards it — ``get_shortlist_state`` is called with NO ``user_id``, unlike
+its sibling ``list_shortlist`` (which forwards ``user_id`` to
+``list_for_job``). An unassigned ``hiring_manager`` could therefore read
+ANOTHER job's ranking state, and the 404-vs-200 split doubled as a
+job-existence oracle. The fix mirrors ``job_service.get_job``'s
+single-entity precedent (``job_service.py:402``,
+``_JOB_ASSIGNEE_EXISTS_SQL``): the route must forward the resolved
+``user_id`` into ``get_shortlist_state(db, job_id, user_id=...)``, exactly
+like ``list_shortlist`` does today — the "route forwards user_id" tests
+below pin THAT wiring; the real Postgres row-scoping proof (an unassigned
+hiring_manager's read actually collapses to 0 rows / ``NotFoundError``) is
+``test_shortlist_fail_closed_pg.py``'s job, mandatory, not optional.
 """
 
 from __future__ import annotations
@@ -55,6 +70,11 @@ from src.schemas.auth import User
 _NOW = dt.datetime(2026, 8, 1, tzinfo=dt.UTC)
 
 _ALL_ROLES: tuple[Role, ...] = tuple(Role)
+_UNSCOPED_KEY_ROLES: tuple[tuple[Role, str], ...] = (
+    (Role.ADMIN, "admin"),
+    (Role.RECRUITER, "recruiter"),
+    (Role.AUDITOR, "auditor"),
+)
 
 
 def _acm() -> MagicMock:
@@ -213,6 +233,10 @@ async def test_status_is_readable_by_every_role(
         app.dependency_overrides[resolve_user] = lambda: _identity_user(
             cas_username="hm", role="hiring_manager"
         )
+    # The service is mocked here — this test is about ROLE-gating (does the
+    # dependency chain let the request through at all), not about row-level
+    # assignment scoping (that's the dedicated "passes_user_id" tests below,
+    # and the real filtering proof is test_shortlist_fail_closed_pg.py).
     get_state = AsyncMock(return_value=None)
     monkeypatch.setattr(
         shortlist_routes.shortlist_service, "get_shortlist_state", get_state
@@ -267,3 +291,133 @@ async def test_status_route_is_registered_not_a_plain_404(
         await client.get(f"/jobs/{job_id}/shortlist/status")
 
     get_state.assert_awaited_once()
+
+
+# ── IDOR fix — GET /jobs/{job_id}/shortlist/status forwards user_id ────────
+#
+# Mirrors test_route_shortlist.py's identically-shaped
+# "list_shortlist_passes_user_id_for_a_hiring_manager_session" /
+# "..._passes_user_id_none_for_unscoped_roles" / "..._403s_and_never_calls..."
+# trio. Currently RED: the route calls
+# ``shortlist_service.get_shortlist_state(db, job_id)`` with NO ``user_id``
+# kwarg at all, so ``get_state.await_args.kwargs.get("user_id")`` is always
+# ``None`` — including for a real hiring_manager session, where it must be
+# that session's own id.
+
+
+@pytest.mark.asyncio
+async def test_status_passes_user_id_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    get_state.assert_awaited_once()
+    assert get_state.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.asyncio
+async def test_status_passes_user_id_for_a_hiring_manager_even_with_the_shared_recruiter_key(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap ADR-020 §4/§3 calls out explicitly: the Flask viewer's shared
+    "recruiter" API key resolves ``key_role`` to ``Role.RECRUITER`` even when
+    the signed-in human is a hiring_manager. Scoping must key off the SESSION
+    identity, not the key role."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.RECRUITER)
+    hm = _identity_user(cas_username="hm", role="hiring_manager")
+    app.dependency_overrides[resolve_user] = lambda: hm
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    get_state.assert_awaited_once()
+    assert get_state.await_args.kwargs.get("user_id") == hm.id
+
+
+@pytest.mark.parametrize("key_role,session_role", _UNSCOPED_KEY_ROLES)
+@pytest.mark.asyncio
+async def test_status_passes_user_id_none_for_unscoped_roles(
+    key_role: Role, session_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=key_role)
+    session_user = _identity_user(cas_username="someone", role=session_role)
+    app.dependency_overrides[resolve_user] = lambda: session_user
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    get_state.assert_awaited_once()
+    assert get_state.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_status_passes_user_id_none_for_dev_anonymous_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient default (no ``resolve_user`` override): the synthetic
+    dev-anonymous admin identity resolves. Must stay unscoped."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.ADMIN)
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    get_state.assert_awaited_once()
+    assert get_state.await_args.kwargs.get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_status_403s_and_never_calls_the_service_for_hiring_manager_key_with_no_session(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-closed (ADR-020 §3 final paragraph): a hiring_manager KEY with no
+    verifiable session identity must 403 and must NEVER reach the service
+    layer unscoped. Already true today (``scoped_user_id_or_403`` raises
+    before the service call) — pinned here as a regression guard alongside
+    the new user_id-forwarding tests."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn, role=Role.HIRING_MANAGER)
+    app.dependency_overrides[resolve_user] = lambda: None
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 403
+    get_state.assert_not_awaited()
