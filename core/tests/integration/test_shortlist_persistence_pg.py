@@ -24,6 +24,11 @@ What a REAL Postgres proves that the mocked-conn unit tests
   trip: a worker task invoked against a NON-default ``Settings`` persists a
   ``pipeline_meta`` whose ``weights`` match ``weights_from_settings(settings)``
   when read back from the table — not merely captured by a mock.
+* "Why this rank?" defense pack, slice 1 (added below): the READ side
+  (``get_one``) must surface ``score_structured``/``score_evidence``/
+  ``pipeline_meta.weights`` back onto the DTO after a REAL asyncpg jsonb
+  round trip — floats coming back out of a real jsonb codec, not merely
+  captured by a mock connection, which is what the unit suite can prove.
 """
 
 from __future__ import annotations
@@ -433,3 +438,67 @@ async def test_reverse_match_job_e2e_persists_pipeline_meta_weights(
         meta = json.loads(meta)
     assert meta["git_sha"] == "rev-sha-1"
     assert meta["weights"] == json.loads(expected_weights.model_dump_json())
+
+
+# ── "Why this rank?" defense pack, slice 1 — score_structured/score_evidence/
+#    pipeline_meta round-trip through a REAL Postgres jsonb column ─────────
+
+
+@pytest.mark.asyncio
+async def test_persist_then_get_one_round_trips_structured_evidence_and_weights(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """``persist_shortlist`` folds ``score_structured``/``score_evidence``
+    into the ``score_breakdown`` jsonb at write time (ADR-010 §2);
+    ``get_one`` must surface them back onto the DTO — and
+    ``pipeline_meta.weights`` (the GENERATION-TIME weights, not whatever
+    Settings default to today) must round-trip byte-for-byte through
+    asyncpg's real jsonb float codec. The mocked-conn unit suite
+    (``test_services_shortlist_read.py``) hands python floats straight
+    through a fake connection and so cannot prove this; only a real
+    Postgres round trip can."""
+    from src.services.shortlist_service import get_one, persist_shortlist
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume(pg_pool, job_id)
+    custom_weights = MatchWeights(
+        structured=0.5,
+        evidence=0.4,
+        motivation=0.1,
+        skill=0.55,
+        experience=0.15,
+        education=0.10,
+        seniority=0.10,
+        vector=0.10,
+    )
+    assert custom_weights.structured != DEFAULT_WEIGHTS.structured
+    assert custom_weights.skill != DEFAULT_WEIGHTS.skill
+
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn,
+            ShortlistResult(
+                job_id=job_id,
+                entries=[_shortlist_entry(resume_id, rank=1)],
+                pipeline_meta=_meta(weights=custom_weights, git_sha="abc123def"),
+            ),
+        )
+
+    async with pg_pool.acquire() as conn:
+        entry_id = await conn.fetchval(
+            "SELECT id FROM shortlist_entries WHERE job_id = $1", job_id
+        )
+        entry = await get_one(conn, entry_id)
+
+    # score_structured=0.8 / score_evidence=0.7 come from _shortlist_entry().
+    assert entry.score_structured == pytest.approx(0.8)
+    assert entry.score_evidence == pytest.approx(0.7)
+    assert entry.pipeline_meta is not None
+    assert entry.pipeline_meta.weights.structured == pytest.approx(0.5)
+    assert entry.pipeline_meta.weights.skill == pytest.approx(0.55)
+    # The honesty guard, proven against a real round trip: the weights that
+    # come back are NOT today's defaults.
+    assert entry.pipeline_meta.weights.structured != pytest.approx(
+        DEFAULT_WEIGHTS.structured
+    )
+    assert entry.pipeline_meta.weights.skill != pytest.approx(DEFAULT_WEIGHTS.skill)

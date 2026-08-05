@@ -29,6 +29,22 @@ with ``raising=False`` so every EXISTING test in this file (written before the
 ``awaiting_llm`` state existed) keeps passing once ``shortlist_cards`` starts
 consulting the status endpoint unconditionally — a job with no fail-closed
 state at all is overwhelmingly the common case this whole file exercises.
+
+**"Why this rank?" defense pack, slice 1 (added below).** The shortlist
+ENTRY DETAIL page (``GET /shortlist/<entry_id>``, ``shortlist_entry.html``) is
+currently a 16-line stub — rank/label/score-final and a résumé link, nothing
+else. This slice adds a deterministic score-composition table (top-level
+structured/evidence/motivation, each with weight × sub-score = contribution,
+plus the five structured sub-rows) and a verified-evidence panel
+(met/partial/missing badges per requirement, collapsible source context, a
+fixed forward-direction banner). The route (``shortlist_entry_detail``) and
+``api_client.get_shortlist_entry`` already exist and need no code change —
+only the template. Every number asserted below is INDEPENDENTLY hand-computed
+in the ``_full_entry_detail`` fixture's own comments (weights × sub-score),
+not re-derived from whatever formula the template ends up using, and
+``_assert_number_rendered`` tolerates several reasonable numeric renderings
+(raw float str, 1/2/3-decimal, or rounded percentage) so the test pins the
+ARITHMETIC, not a specific formatting choice.
 """
 
 from __future__ import annotations
@@ -811,3 +827,335 @@ def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
     )
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     assert resp.status_code == 404
+
+
+# ── "Why this rank?" defense pack, slice 1 — entry detail panel ───────────
+#
+# GET /shortlist/<entry_id> (shortlist_entry_detail / shortlist_entry.html).
+# The route already exists and needs NO code change — only the template.
+# ``api_client.get_shortlist_entry`` returns the raw JSON dict the FastAPI
+# backend sends back (already extended, per the read-path RED tests in
+# test_services_shortlist_read.py / test_services_explanation.py, with
+# score_structured/score_evidence/pipeline_meta); this file exercises the
+# TEMPLATE only, over a hand-built dict standing in for that response.
+
+_REAL_EMPLOYER = "Wibblesworth Aerodynamics Ltd"
+_REAL_SCHOOL = "Zzyzxqrst Institute of Technology"
+_SOURCE_CONTEXT_MARKER = "SOURCE-CONTEXT-MARKER-full-chunk-text-about-python-work"
+
+# Hand-computed contribution table for the fixture below (weight * score):
+#
+#   top level:
+#     structured: weight=0.50, score=0.68, contribution=0.34
+#     evidence:   weight=0.30, score=0.80, contribution=0.24
+#     motivation: weight=0.20, score=0.60, contribution=0.12
+#     sum(contribution) = 0.70 == score_final
+#
+#   structured sub-rows:
+#     skill:       weight=0.40, score=0.80, contribution=0.32
+#     experience:  weight=0.25, score=0.60, contribution=0.15
+#     education:   weight=0.15, score=0.40, contribution=0.06
+#     seniority:   weight=0.10, score=0.50, contribution=0.05
+#     vector:      weight=0.10, score=1.00, contribution=0.10
+#     sum(contribution) = 0.68 == score_breakdown.structured
+
+_ENTRY_WEIGHTS = {
+    "structured": 0.50,
+    "evidence": 0.30,
+    "motivation": 0.20,
+    "skill": 0.40,
+    "experience": 0.25,
+    "education": 0.15,
+    "seniority": 0.10,
+    "vector": 0.10,
+    "must_have_miss_penalty": 0.5,
+    "implied_experience_relief": 0.75,
+    "recency_recent_years": 2,
+    "recency_mid_years": 5,
+    "recency_recent": 1.0,
+    "recency_mid": 0.7,
+    "recency_old": 0.4,
+    "overqual_ratio": 2.0,
+    "overqual_slope": 0.1,
+    "overqual_floor": 0.8,
+    "education_partial": 0.5,
+    "education_field_fuzz": 0.85,
+    "seniority_floor": 0.5,
+    "implied_seniority_factor": 1.5,
+    "implied_min_coverage": 0.5,
+    "evidence_met_confidence": 0.7,
+    "evidence_partial_weight": 0.5,
+    "evidence_verify_fuzz": 0.85,
+    "evidence_min_quote_chars": 16,
+    "motivation_min_confidence": 0.7,
+}
+
+
+def _full_entry_detail(entry_id: Any) -> dict[str, Any]:
+    return {
+        "id": str(entry_id),
+        "job_id": str(uuid4()),
+        "resume_id": str(uuid4()),
+        "rank": 2,
+        "score_final": 0.70,
+        "score_structured": 0.68,
+        "score_evidence": 0.80,
+        "score_breakdown": {
+            "skill": 0.80,
+            "experience": 0.60,
+            "education": 0.40,
+            "seniority": 0.50,
+            "vector": 1.00,
+            "structured": 0.68,
+            "motivation": 0.60,
+            "implied_experience": False,
+            "skill_contributions": [],
+        },
+        "evidence": {
+            "requirements": [
+                {
+                    "requirement": "Python",
+                    "status": "met",
+                    "evidence": "Built the payments service in Python for four years.",
+                    "evidence_chunk_ids": ["c_001"],
+                    "confidence": 0.92,
+                    "source_context": _SOURCE_CONTEXT_MARKER,
+                },
+                {
+                    "requirement": "Kubernetes",
+                    "status": "partial",
+                    "evidence": "Some exposure to Helm charts.",
+                    "evidence_chunk_ids": ["c_002"],
+                    "confidence": 0.55,
+                },
+                {
+                    # Demoted by verify_evidence (anti-fabrication scrub):
+                    # quote blanked, status demoted met -> missing, confidence
+                    # capped at SCRUBBED_CONFIDENCE_CAP (0.3).
+                    "requirement": "AWS certification",
+                    "status": "missing",
+                    "evidence": "",
+                    "evidence_chunk_ids": ["c_003"],
+                    "confidence": 0.3,
+                },
+            ],
+            "overall_summary": "Strong backend candidate overall.",
+            "cover_letter_presence": False,
+            "cover_letter_evidence": [],
+            "overall_motivation": "",
+        },
+        "pipeline_meta": {
+            "model_gen": "gpt-oss:20b",
+            "model_emb": "nomic-embed-text",
+            "prompt_versions": {"shortlist_evidence": "shortlist_evidence_v1"},
+            "weights": _ENTRY_WEIGHTS,
+            "git_sha": "deadbeef",
+            "generated_at": "2026-07-15T00:00:00+00:00",
+            "timings_ms": {},
+        },
+        "generated_at": "2026-07-15T00:00:00+00:00",
+        "blinded": True,
+        "display_label": "Candidate B",
+    }
+
+
+def _num_variants(value: float) -> list[str]:
+    """Every reasonable textual rendering of ``value`` this test will accept:
+    the raw float repr, 1/2/3-decimal fixed formatting, and a rounded
+    percentage integer. Tolerates the coder's formatting choice while still
+    pinning the underlying ARITHMETIC — a wrong weight or sub-score produces
+    a value whose variants don't match any of these."""
+    return list(
+        {
+            str(value),
+            f"{value:.1f}",
+            f"{value:.2f}",
+            f"{value:.3f}",
+            str(int(round(value * 100))),
+        }
+    )
+
+
+def _assert_number_rendered(body: str, value: float, *, label: str) -> None:
+    variants = _num_variants(value)
+    assert any(
+        v in body for v in variants
+    ), f"expected {label} ({value}) to render as one of {variants}"
+
+
+def test_entry_detail_renders_contribution_table(monkeypatch: Any, client: Any) -> None:
+    """The top-level score composition (structured/evidence/motivation), each
+    with its GENERATION-TIME weight, its own sub-score, and
+    weight * score = contribution, must be visible on the entry detail page."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    normalized = _norm(body)
+    for label in ("structured", "evidence", "motivation"):
+        assert label in normalized
+    # structured: weight 0.50, score 0.68, contribution 0.34
+    _assert_number_rendered(body, 0.50, label="structured weight")
+    _assert_number_rendered(body, 0.68, label="structured score")
+    _assert_number_rendered(body, 0.34, label="structured contribution")
+    # evidence: weight 0.30, score 0.80, contribution 0.24
+    _assert_number_rendered(body, 0.30, label="evidence weight")
+    _assert_number_rendered(body, 0.24, label="evidence contribution")
+    # motivation: weight 0.20, score 0.60, contribution 0.12
+    _assert_number_rendered(body, 0.20, label="motivation weight")
+    _assert_number_rendered(body, 0.12, label="motivation contribution")
+
+
+def test_entry_detail_renders_structured_sub_contribution_rows(
+    monkeypatch: Any, client: Any
+) -> None:
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    body = resp.get_data(as_text=True)
+    normalized = _norm(body)
+    for label in ("skill", "experience", "education", "seniority", "vector"):
+        assert label in normalized
+    # skill: weight 0.40, score 0.80, contribution 0.32
+    _assert_number_rendered(body, 0.40, label="skill weight")
+    _assert_number_rendered(body, 0.32, label="skill contribution")
+    # education: weight 0.15, score 0.40, contribution 0.06
+    _assert_number_rendered(body, 0.15, label="education weight")
+    _assert_number_rendered(body, 0.06, label="education contribution")
+    # seniority: weight 0.10, contribution 0.05
+    _assert_number_rendered(body, 0.05, label="seniority contribution")
+
+
+def test_entry_detail_renders_requirement_status_badges(
+    monkeypatch: Any, client: Any
+) -> None:
+    """met/partial/missing badges per requirement, mirroring the
+    ``badge badge-{status}`` convention already used on the candidate card
+    (shortlist_cards.html). The demoted AWS row must render as missing —
+    NEVER as met, which would silently re-fabricate the confidence the
+    anti-fabrication scrub just stripped out."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    body = resp.get_data(as_text=True)
+    assert body.count("badge-met") == 1
+    assert body.count("badge-partial") == 1
+    assert body.count("badge-missing") == 1
+
+    aws_idx = body.find("AWS certification")
+    assert aws_idx != -1
+    nearby = body[max(0, aws_idx - 400) : aws_idx + 400]
+    assert "badge-missing" in nearby
+    assert "badge-met" not in nearby
+
+
+def test_entry_detail_renders_forward_direction_banner(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Guards the ADR-009 reverse-match 0.9-cap ambiguity: this panel must
+    state, unambiguously, that it explains the ranking FOR this job's
+    requirements (not "what jobs suit this candidate" — the reverse-match
+    direction lives on a different page entirely)."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    body = resp.get_data(as_text=True)
+    assert "for this job's requirements" in _norm(body)
+
+
+def test_entry_detail_source_context_is_collapsible(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Matches the ``<details class="source-context">`` house style already
+    used on the candidate card (shortlist_cards.html) — the resolved chunk
+    text must NOT render inline by default."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    body = resp.get_data(as_text=True)
+    assert _SOURCE_CONTEXT_MARKER in body
+
+    found_in_details = False
+    for m in re.finditer(r"<details[^>]*>(.*?)</details>", body, re.DOTALL):
+        if _SOURCE_CONTEXT_MARKER in m.group(1):
+            found_in_details = True
+            break
+    assert found_in_details, (
+        "source_context must render inside a collapsible <details> block, "
+        "not inline by default"
+    )
+
+
+def test_entry_detail_black_box_pii_scan_under_blind_job(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The load-bearing privacy guard — existing scans (e.g.
+    test_black_box_scan_no_pii_in_blind_shortlist_entry in
+    test_services_shortlist_read.py) only cover the SERVICE layer. This scans
+    the actual RENDERED HTML of the new panel: a planted candidate
+    name/email/phone/employer/school must appear NOWHERE in the response,
+    even though the panel now surfaces considerably more of the entry than
+    the old stub did."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["candidate_name"] = _REAL_NAME
+    entry["candidate"] = {
+        "name": _REAL_NAME,
+        "email": _REAL_EMAIL,
+        "phone": _REAL_PHONE,
+        "employer": _REAL_EMPLOYER,
+        "school": _REAL_SCHOOL,
+    }
+    entry["_c_name"] = _REAL_NAME
+    entry["_c_email"] = _REAL_EMAIL
+    entry["_c_phone"] = _REAL_PHONE
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    # Sanity: the new panel actually rendered (this scan is meaningless
+    # against the old 16-line stub, which shows none of this).
+    _assert_number_rendered(body, 0.34, label="structured contribution")
+    assert _REAL_NAME not in body
+    assert _REAL_EMAIL not in body
+    assert _REAL_PHONE not in body
+    assert _REAL_EMPLOYER not in body
+    assert _REAL_SCHOOL not in body
+
+
+def test_entry_detail_shows_weights_unavailable_when_pipeline_meta_missing(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Legacy rows written before this slice carry no pipeline_meta. The
+    panel must say weights are unavailable rather than silently computing a
+    contribution table against today's defaults (the honesty guard, pinned
+    at the service layer in test_services_explanation.py, must also hold at
+    the template boundary)."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["pipeline_meta"] = None
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "weights unavailable" in _norm(body)

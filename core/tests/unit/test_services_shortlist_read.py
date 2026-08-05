@@ -33,6 +33,17 @@ THE TWO LOAD-BEARING TESTS IN THIS FILE:
    / ``overall_motivation`` — a real gap: a cover-letter quote can carry the
    candidate's own name. This project's read layer MUST close that gap (a
    must-fix-beyond-verbatim-port, not an accepted residual).
+
+RED-FIRST EXTENSION ("Why this rank?" defense pack, slice 1) — the two fold
+tests above are EXTENDED (not weakened) to additionally assert that
+``score_structured``/``score_evidence`` — which the fold strips out of
+``score_breakdown`` before ``ScoreBreakdown.model_validate`` — SURVIVE onto
+the ``ShortlistEntry`` DTO itself, rather than being discarded once stripped.
+Until now discarding them was correct (``ShortlistEntry`` had no fields to
+put them in and no consumer needed them); this flip is a deliberate,
+legitimate RED-first extension, not a contradiction of the original test's
+intent — the fold-safety guard they already prove stays intact byte-for-byte,
+this only adds a further assertion on the same read path.
 """
 
 from __future__ import annotations
@@ -181,6 +192,12 @@ async def test_score_breakdown_fold_does_not_break_read() -> None:
     assert entry.score_breakdown.skill == pytest.approx(0.8)
     assert entry.score_breakdown.experience == pytest.approx(0.6)
     assert entry.score_breakdown.structured == pytest.approx(0.55)
+    # RED-FIRST EXTENSION (Why-this-rank? slice 1): the two folded keys are
+    # stripped from score_breakdown before ScoreBreakdown.model_validate (the
+    # assertions above), but they must not simply vanish — they belong on the
+    # ShortlistEntry DTO itself so the defense-pack panel can show them.
+    assert entry.score_structured == pytest.approx(0.77)
+    assert entry.score_evidence == pytest.approx(0.66)
 
 
 @pytest.mark.asyncio
@@ -200,6 +217,10 @@ async def test_score_breakdown_fold_does_not_break_read_via_get_one() -> None:
 
     assert isinstance(entry.score_breakdown, ScoreBreakdown)
     assert entry.score_breakdown.skill == pytest.approx(0.8)
+    # RED-FIRST EXTENSION (Why-this-rank? slice 1) — see the sibling
+    # assertion above; same guard, proven through get_one's own path.
+    assert entry.score_structured == pytest.approx(0.77)
+    assert entry.score_evidence == pytest.approx(0.66)
 
 
 # ── landmine 2 setup: the evidence={} residual (documented, not a bug) ──────
