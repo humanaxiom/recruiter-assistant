@@ -75,12 +75,12 @@ from src.schemas.matching import (
 #          guard test has something to distinguish.
 #
 # structured sub-scores: skill=0.8, experience=0.6, education=0.4,
-#                         seniority=0.5, vector=0.3
+#                         seniority=0.5, vector=0.7
 #   skill:      0.5 * 0.8 = 0.40
 #   experience: 0.2 * 0.6 = 0.12
 #   education:  0.1 * 0.4 = 0.04
 #   seniority:  0.1 * 0.5 = 0.05
-#   vector:     0.1 * 0.3 = 0.03
+#   vector:     0.1 * 0.7 = 0.07
 #   sum = 0.68  == score_breakdown.structured
 #
 # top-level: structured score=0.68, evidence score=0.75,
@@ -110,7 +110,7 @@ def _breakdown(*, motivation: float = 0.20) -> ScoreBreakdown:
         experience=0.6,
         education=0.4,
         seniority=0.5,
-        vector=0.3,
+        vector=0.7,
         structured=0.68,
         motivation=motivation,
     )
@@ -166,6 +166,14 @@ def _meta(weights: MatchWeights) -> PipelineMeta:
     )
 
 
+class _Unset:
+    """Sentinel so ``evidence=None`` can mean "this entry genuinely has no
+    evidence object" rather than "caller did not pass evidence"."""
+
+
+_UNSET = _Unset()
+
+
 def _entry(
     *,
     weights: MatchWeights | None,
@@ -173,7 +181,7 @@ def _entry(
     score_structured: float = 0.68,
     score_evidence: float = 0.75,
     breakdown: ScoreBreakdown | None = None,
-    evidence: EvidenceObject | None = None,
+    evidence: EvidenceObject | None | _Unset = _UNSET,
 ) -> ShortlistEntry:
     return ShortlistEntry(
         id=uuid4(),
@@ -184,7 +192,7 @@ def _entry(
         score_structured=score_structured,
         score_evidence=score_evidence,
         score_breakdown=breakdown or _breakdown(),
-        evidence=evidence if evidence is not None else _evidence(),
+        evidence=_evidence() if isinstance(evidence, _Unset) else evidence,
         pipeline_meta=_meta(weights) if weights is not None else None,
         generated_at=dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
     )
@@ -268,7 +276,8 @@ def test_structured_sub_contribution_values_match_hand_computed_expectations() -
     assert explanation.seniority.contribution == pytest.approx(0.05, abs=1e-9)
 
     assert explanation.vector.weight == pytest.approx(0.1)
-    assert explanation.vector.contribution == pytest.approx(0.03, abs=1e-9)
+    assert explanation.vector.score == pytest.approx(0.7)
+    assert explanation.vector.contribution == pytest.approx(0.07, abs=1e-9)
 
 
 # ── the honesty guard ────────────────────────────────────────────────────
