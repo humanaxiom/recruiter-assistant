@@ -525,9 +525,16 @@ class ShortlistEntry(BaseModel):
     # UNHANDLED 500 on a compliance page. Not candidate-reachable today
     # (Postgres rejects bare ``NaN``/``Infinity`` JSON literals and
     # ``persist_shortlist`` writes pipeline floats), so this is defence in
-    # depth: with the bound, a corrupt row degrades through the route's
-    # existing ``ValidationError`` fallback ("explanation unavailable") instead
-    # of 500ing.
+    # depth. It only pays off on the frontend: the Flask route
+    # (``core/frontend/app.py::shortlist_entry_detail``) wraps its own
+    # ``ShortlistEntry.model_validate`` call in a ``try/except ValidationError``
+    # and degrades to "explanation unavailable" instead of 500ing. The backend
+    # API read path (``_row_to_entry``/``_row_to_blind_entry`` in
+    # ``shortlist_service.py``) validates **uncaught** — a corrupt stored value
+    # would raise a 500 out of the API route rather than degrade there —
+    # matching ``_parse_entry_jsonb``'s own docstring, which states this same
+    # caveat for the folded ``score_structured``/``score_evidence`` values it
+    # reads back.
     score_structured: float | None = Field(default=None, ge=0, le=1)
     score_evidence: float | None = Field(default=None, ge=0, le=1)
     score_breakdown: ScoreBreakdown

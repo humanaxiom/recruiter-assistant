@@ -145,7 +145,7 @@ Five tables (`jobs`, `resumes`, `shortlist_entries`, `reverse_match_entries`, `o
 |---|---|
 | `jobs.py` | `JobCreate`/`JobUpdate`/`JobTransition`/`JobOut`/`JobDeleteOut`/`JobListItem`, `JDExtractText`, `BulkJobResult` (job API DTOs); `Skill`/`Education`/`JDExtracted` (LLM extraction → `jobs.description_parsed` jsonb). |
 | `resumes.py` | `ResumeParsed`/`ResumeCore`/`ResumeSkill*`, `CandidateInfo`, `CoverLetterParsed` (LLM/jsonb parse shapes); `ResumeOut`/`ResumeListItem`/`ResumeUploadResult`/`ResumeDeleteOut` (resume API DTOs). Carries `_coerce_year` (two-digit-year pivot) and the lossy `_drop_invalid_rows`/`_coerce_*` pre-validators so one malformed row never fails a whole parse. |
-| `matching.py` | `MatchWeights` (+ `DEFAULT_WEIGHTS`) — the ranking-weight contract; `ScoreBreakdown`/`EvidenceObject`/`PipelineMeta` (jsonb shapes); `ShortlistEntry`/`JobMatchEntry`/`JobMatchResultOut` (shortlist / reverse-match DTOs). |
+| `matching.py` | `MatchWeights` (+ `DEFAULT_WEIGHTS`) — the ranking-weight contract; `ScoreBreakdown`/`EvidenceObject`/`PipelineMeta` (jsonb shapes); `ShortlistEntry`/`JobMatchEntry`/`JobMatchResultOut` (shortlist / reverse-match DTOs). `ShortlistEntry` also carries `score_structured`/`score_evidence`/`pipeline_meta` (surfaced from the same jsonb columns for the "Why this rank?" panel, ADR-031). |
 
 **Review workflow cut.** The 2nd-review pipeline the source carried is not ported and is not importable: `PipelineStage`, `DispositionReason`, `ShortlistDecision*`, `StageTransition*` are gone, `ShortlistEntry` drops `current_decision`/`current_stage` (keeping only the blind-review `blinded`/`display_label`), and `JobListItem` drops the Taleo/JD-comment columns. A merge-blocking cut-guard test keeps them out.
 
@@ -177,6 +177,8 @@ Embeddings **exclude** name/email/phone by construction. 768-d `nomic-embed-text
 `shortlist_job` catches `RankingUnavailableError` (ADR-029) and writes a dedicated, nullable `jobs.shortlist_state`/`_reason`/`_at` column trio — NOT a `job_status` enum value, same reasoning as ADR-026's withdrawal columns — instead of persisting a degraded shortlist. Below `settings.shortlist_max_tries` it raises `arq.Retry(defer=settings.shortlist_retry_defer_s)`; at the ceiling it returns `"awaiting_llm"` and leaves the state visible for a human to re-trigger. A success persists the shortlist and clears the state in one transaction. The Flask workflow UI's shortlist poll renders "Waiting for AI to rank candidates…" (distinct from "Generating…") while this state is set, via `GET /jobs/{id}/shortlist/status`.
 
 **Read + export path (Phase 5, `core/src/services/{shortlist_service,resume_service,redaction}.py`):** `shortlist_service.list_for_job`/`get_one`/`export_rows` and `resume_service.list_for_job`/`get_one(reveal=...)` read the same tables back. Under blind review (`jobs.blind_review`, default `TRUE`), every one of these paths redacts BEFORE building the response DTO — never after — closing [ADR-006](docs/adr/006-schema-port-trim-ddl-alignment.md) §4's redaction-boundary contract in code: `redact_text` masks name/email/phone-shaped substrings and relabels employers/schools to stable pseudonyms ("Employer A"), `pseudonym(rank)` replaces the candidate's name in shortlist rows, and foreign (non-Canadian) locations are masked while Canadian ones stay visible. This is **display-only** — it changes what a blind caller's response contains, not what Postgres stores; ADR-007 §6/§7's cleartext-at-rest posture is unchanged. `shortlist_csv`/`shortlist_evidence_csv`/`shortlist_json` are pure formatters over `export_rows`' already-redacted output. `original_filename` is also masked under blind (`redacted_filename()` returns a generic `resume<ext>`) — closed by a post-first-green fix rather than left open. Full boundary + accepted residuals: [ADR-011](docs/adr/011-display-redaction-read-export-boundary.md).
+
+`shortlist_entry_detail`'s panel (below) reads `ShortlistEntry.score_structured`/`score_evidence`/`pipeline_meta` — folded/selected off the same jsonb columns by the read layer above, on both blind and non-blind paths — through one pure display-only function, `src/services/explanation.py::shortlist_entry_explanation`, which never re-derives or re-reads anything: [ADR-031](docs/adr/031-why-this-rank-defense-pack.md).
 
 ---
 
@@ -267,7 +269,8 @@ status-filter pills) → job detail (`/jobs/<uuid>`, 3s-polled "parsing…" badg
 blind-review toggle, consent-gated résumé upload + 3s-polled résumé status table) → résumé detail
 (`/resumes/<uuid>`, always blind) → shortlist (`/jobs/<uuid>/shortlist`, Generate/Regenerate button that
 polls until ranked, per-candidate cards with rank/score/sub-score tiles/skill chips/evidence, three
-anonymized export formats).
+anonymized export formats) → shortlist entry detail (`/shortlist/<uuid>`, the "Why this rank?" score
+-composition + verified-evidence panel, ADR-031).
 
 **Blind-only by construction, carried forward from Phase 7.** The workflow UI never sends `reveal` to the
 backend, even though it is now write-enabled — `get_resume` stays hardcoded `reveal=False`;
@@ -326,6 +329,8 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 | **§4 — degraded-parse visibility** | branch `feat/fu7-degraded-parse-visibility` | [030](docs/adr/030-fu7-degraded-parse-visibility.md) | A résumé whose skills extraction fell back to the keyword scan is marked `degraded` (rides the existing `resumes.parsed` jsonb, no DDL), badged in the list/detail UI and a per-job status-breakdown sub-count, and excluded from ranking (its graph-projection outbox event is skipped, mirroring the ADR-026 withdrawn-during-parse skip) until re-parsed via re-upload |
 
 **Still open (ADR-021 decision 1, not yet scheduled):** an ordered multi-provider chain with per-provider circuit breakers and failover on availability errors.
+
+**"Why this rank?" defense pack (`docs/ROADMAP.md` card #1), slice 1** — branch `feat/why-this-rank-defense-pack`, PR pending, [ADR-031](docs/adr/031-why-this-rank-defense-pack.md). A deterministic score-composition + verified-evidence panel on the shortlist entry detail page (`GET /shortlist/{id}`, both API and Flask UI) — no LLM, no DDL, no scoring-math change; every number was already persisted in `score_breakdown`/`evidence`/`pipeline_meta`. Weights shown are the ones recorded in `pipeline_meta` at generation time, never current settings — a missing or malformed stamp renders "weights unavailable" rather than a substituted default, and an unrecorded sub-score renders "not recorded" rather than an affirmative "0%". Forward-shortlist only (reverse-match's `score_final` scale isn't comparable, ADR-009). Slice 2 (optional grounded-LLM narrative + decision-rationale export) is deferred.
 
 A plain-language explainer of the scoring model, written for HR and compliance review — including the fifteen policy decisions currently encoded as configuration defaults — is at [docs/process/ranking-metrics-explainer.html](docs/process/ranking-metrics-explainer.html).
 
