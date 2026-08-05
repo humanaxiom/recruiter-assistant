@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ entry.display_label }} — Why this rank?{% endblock %}
+{% block title %}{{ entry.display_label or 'Shortlist entry' }} — Why this rank?{% endblock %}
 {#
   "Why this rank?" defense pack, slice 1. The score-composition/evidence
   panels render ONLY from ``explanation`` (a ``ShortlistExplanation`` built by
@@ -13,9 +13,15 @@
   explanation object already computed.
 
   The bare identity block above the panels (rank/label/score/résumé link)
-  still reads off the raw ``entry`` dict -- unchanged from the pre-slice
-  stub -- so the page degrades gracefully to that alone when ``explanation``
-  is None (a malformed/legacy row that failed validation; see the route).
+  reads off ``entry``, which is ALWAYS a validated ``ShortlistEntry`` DTO --
+  or, when validation failed, the coerced ``_EntryHeader`` carrying exactly
+  those four display fields (see the route). It is never the raw backend
+  payload, so a field the backend should not have sent has no route here.
+
+  ``display_label`` is a BLIND-REVIEW field: ``_row_to_entry`` (the NON-blind
+  path) never sets it, so it is None on every entry of a job with
+  blind_review = FALSE. Every read of it below therefore carries a fallback --
+  interpolating it raw rendered the literal text "None" at the reader.
 
   PRIVACY: renders ONLY fields ``explanation``/``entry`` expose. Never
   re-fetches the résumé, never reaches around either object for a raw field.
@@ -23,22 +29,28 @@
 {% macro pct(v) -%}
 {{- (v * 100)|round|int if v is not none else '—' -}}
 {%- endmacro %}
+{# A SCORE the row never recorded is reported as such. Not "0%": an absent
+   number and a zero are different claims about a candidate, and only one of
+   them is true here. Mirrors the "weights unavailable" wording below. #}
+{% macro score_cell(v) -%}
+{{- pct(v) if v is not none else 'not recorded' -}}
+{%- endmacro %}
 
 {% block content %}
 {# ADR-009 guard: this page explains ranking FOR this job's requirements —
    never the reverse ("what jobs suit this candidate"), which lives on a
    separate reverse-match view. #}
 <div class="direction-banner">
-  <span>This panel explains how {{ entry.display_label }} was scored
-    <strong>for this job's requirements</strong> — it is not a reverse match
-    and does not indicate what other jobs might suit this candidate.</span>
+  <span>This panel explains how {{ entry.display_label or 'this candidate' }} was
+    scored <strong>for this job's requirements</strong> — it is not a reverse
+    match and does not indicate what other jobs might suit this candidate.</span>
 </div>
 
 <div class="card">
   <div class="card-header">
     <span class="rank">#{{ entry.rank }}</span>
-    <h2 style="margin:0">{{ entry.display_label }}</h2>
-    <span class="score-final">{{ pct(entry.get('score_final')) }}</span>
+    <h2 style="margin:0">{{ entry.display_label or 'Shortlist entry' }}</h2>
+    <span class="score-final">{{ pct(entry.score_final) }}</span>
   </div>
   {% if entry.resume_id %}
   <p><a class="btn btn-secondary btn-sm"
@@ -57,6 +69,12 @@
     sub-scores below are still the ones this entry was ranked with; only the
     weight and the weight × score contribution columns are omitted.</p>
   {% endif %}
+  {% if not explanation.scores_available %}
+  <p class="muted">Some sub-scores were not recorded for this entry, so they
+    are shown as "not recorded" rather than as 0% — an absent score and a
+    score of zero are different claims, and only the first one is true here.
+    No contribution is shown for a sub-score that was never recorded.</p>
+  {% endif %}
 
   <table class="table contribution-table">
     <thead>
@@ -71,7 +89,7 @@
       <tr>
         <td>{{ label }}</td>
         <td>{{ pct(row.weight) }}</td>
-        <td>{{ pct(row.score) }}</td>
+        <td>{{ score_cell(row.score) }}</td>
         <td>{{ pct(row.contribution) }}</td>
       </tr>
       {% endfor %}
@@ -94,7 +112,7 @@
       <tr>
         <td>{{ label }}</td>
         <td>{{ pct(row.weight) }}</td>
-        <td>{{ pct(row.score) }}</td>
+        <td>{{ score_cell(row.score) }}</td>
         <td>{{ pct(row.contribution) }}</td>
       </tr>
       {% endfor %}

@@ -976,10 +976,43 @@ def _num_variants(value: float) -> list[str]:
     )
 
 
+_CONTRIBUTION_TABLE_RE = re.compile(
+    r'<table[^>]*class="[^"]*contribution-table[^"]*"[^>]*>(.*?)</table>',
+    re.DOTALL,
+)
+
+
+def _contribution_html(body: str) -> str:
+    """ONLY the contribution tables, not the whole page.
+
+    Substring-searching the whole body for a 2-digit percentage is close to
+    vacuous: the page carries a random ``resume_id`` UUID, so "68" has a real
+    chance of matching random hex and passing an assertion that the number was
+    rendered when the table is in fact wrong (or absent). Scoping the haystack
+    to the ``contribution-table`` blocks removes that accident."""
+    blocks = _CONTRIBUTION_TABLE_RE.findall(body)
+    assert blocks, "no contribution-table block rendered on the entry page"
+    return "\n".join(blocks)
+
+
+def _contribution_rows(body: str) -> list[tuple[str, str, str, str]]:
+    """The contribution tables' data rows as
+    ``(component, weight, score, contribution)`` cell text -- so a column can
+    be asserted on directly instead of substring-searching for a number that
+    another column legitimately also contains."""
+    rows: list[tuple[str, str, str, str]] = []
+    for tr in re.findall(r"<tr>(.*?)</tr>", _contribution_html(body), re.DOTALL):
+        cells = [c.strip() for c in re.findall(r"<td>(.*?)</td>", tr, re.DOTALL)]
+        if len(cells) == 4:
+            rows.append((cells[0], cells[1], cells[2], cells[3]))
+    return rows
+
+
 def _assert_number_rendered(body: str, value: float, *, label: str) -> None:
+    haystack = _contribution_html(body)
     variants = _num_variants(value)
     assert any(
-        v in body for v in variants
+        v in haystack for v in variants
     ), f"expected {label} ({value}) to render as one of {variants}"
 
 
@@ -1159,3 +1192,143 @@ def test_entry_detail_shows_weights_unavailable_when_pipeline_meta_missing(
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "weights unavailable" in _norm(body)
+
+
+def test_entry_detail_weights_unavailable_shows_no_fabricated_weight(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The other half of the "weights unavailable" contract: saying it is not
+    enough, the page must ALSO not print a weight. A legacy row rendered with
+    today's DEFAULT_WEIGHTS (0.6/0.3/0.1 top level, 0.40 skill) would present
+    a fabricated arithmetic as an audit trail, which is exactly what the
+    backend's ``_parse_pipeline_meta -> None`` exists to prevent."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["pipeline_meta"] = None
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "weights unavailable" in _norm(body)
+
+    # Asserted COLUMN-WISE rather than "0.6 is absent from the page": the raw
+    # sub-scores legitimately include 0.60, so a substring check would collide
+    # with them. Every WEIGHT and every CONTRIBUTION cell must be the omitted
+    # marker -- nothing numeric, borrowed or otherwise.
+    rows = _contribution_rows(body)
+    assert len(rows) == 8, "3 top-level + 5 structured sub-rows"
+    for label, weight, score, contribution in rows:
+        assert weight == "—", f"{label}: weight must be omitted, got {weight!r}"
+        assert (
+            contribution == "—"
+        ), f"{label}: contribution must be omitted, got {contribution!r}"
+        # The raw sub-SCORES came off the row itself and are not in question.
+        assert score not in ("", "—"), f"{label}: sub-score must still be shown"
+    assert rows[0][2] == "68", "structured sub-score still rendered"
+
+
+def test_entry_detail_non_blind_entry_never_renders_the_word_none(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``display_label`` is a BLIND-review field -- ``_row_to_entry`` (the
+    non-blind path) never sets it, so it is ``None`` on every entry of a job
+    with ``blind_review = FALSE``. Interpolating it raw produced "This panel
+    explains how None was scored...". The page must degrade to a neutral
+    phrase instead."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["blinded"] = False
+    entry["display_label"] = None
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    banner = re.search(r'<div class="direction-banner">(.*?)</div>', body, re.DOTALL)
+    assert banner is not None, "direction banner must still render"
+    banner_text = _norm(banner.group(1))
+    assert "none" not in banner_text
+    assert "this candidate" in banner_text
+    assert "for this job's requirements" in banner_text
+    # The <title> and the <h2> read off the SAME field and had the same
+    # defect, so they are pinned here too rather than left to regress.
+    title = re.search(r"<title>(.*?)</title>", body, re.DOTALL)
+    assert title is not None
+    assert "None" not in title.group(1)
+    heading = re.search(r"<h2[^>]*>(.*?)</h2>", body, re.DOTALL)
+    assert heading is not None
+    assert "None" not in heading.group(1)
+
+
+def test_entry_detail_unrecorded_subscores_render_as_not_recorded(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A row that never recorded the two composed sub-scores must say so.
+    Rendering ``0.0`` as "0%" is a positive false claim about the candidate
+    and is asymmetric with the "weights unavailable" treatment right beside
+    it."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    del entry["score_structured"]
+    del entry["score_evidence"]
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    assert "not recorded" in _norm(body)
+    tables = _contribution_html(body)
+    # No affirmative zero anywhere in the top-level rows, and no contribution
+    # derived from a score that was never recorded (0.5 * 0.0 = 0.0).
+    assert ">0%<" not in tables.replace(" ", "")
+    assert ">0.0<" not in tables.replace(" ", "")
+    # The structured SUB-rows are unaffected -- they came off score_breakdown.
+    _assert_number_rendered(body, 0.32, label="skill contribution")
+
+
+def test_entry_detail_non_dict_payload_degrades_instead_of_500ing(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``api_client.get_shortlist_entry`` returns whatever JSON the backend
+    sent (``-> Any``). A non-object payload must degrade to the bare page,
+    not raise ``AttributeError: 'list' object has no attribute 'items'`` --
+    that 500 defeats the graceful degradation the route is built around."""
+    entry_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=["not", "a", "dict"])
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    assert "explanation unavailable" in _norm(resp.get_data(as_text=True))
+
+
+def test_entry_detail_malformed_payload_is_logged_not_swallowed_silently(
+    monkeypatch: Any, client: Any, caplog: Any
+) -> None:
+    """The explanation panel is a COMPLIANCE artifact. A payload that fails
+    validation degrades the page silently today, so genuine corruption is
+    indistinguishable from an ordinary legacy row and invisible to whoever
+    operates this. It must leave a warning -- carrying the entry id and NO
+    candidate fields."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_final"] = "not-a-number"
+    entry["candidate_name"] = _REAL_NAME
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    with caplog.at_level("WARNING"):
+        resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "a malformed entry payload must be logged, not swallowed"
+    text = " ".join(r.getMessage() for r in warnings)
+    assert str(entry_id) in text
+    assert _REAL_NAME not in text

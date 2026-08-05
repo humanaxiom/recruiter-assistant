@@ -14,6 +14,8 @@ no such parameter).
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
@@ -36,13 +38,68 @@ from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import get_settings
 
+logger = logging.getLogger(__name__)
+
 # The known ShortlistEntry field names, computed once at import time. Any key
 # on the raw dict from ``api_client.get_shortlist_entry`` that is NOT one of
-# these is dropped before validation -- a defense-in-depth whitelist so a
-# stray/extra field (e.g. a backend bug that leaked a ``candidate`` blob onto
-# the payload) can never reach ``shortlist_entry_explanation`` or the
-# template, regardless of ShortlistEntry's own ``extra="forbid"`` config.
+# these is dropped before validation.
+#
+# WHAT THIS IS FOR: ROBUSTNESS, not PII control. ``ShortlistEntry`` is
+# ``extra="forbid"``, so the day the backend adds a field to the shortlist
+# payload, an unfiltered ``model_validate`` would start raising and the
+# explanation panel would silently vanish from every entry page until the
+# frontend caught up. Dropping unknown keys first means a forward-compatible
+# payload still renders.
+#
+# WHAT IT IS NOT: it is NOT the redaction boundary. That is enforced
+# server-side by ``shortlist_service._row_to_blind_entry`` BEFORE the DTO is
+# ever built (ADR-006 §4/ADR-011/012) -- this hop is downstream of it and
+# cannot un-leak anything the backend already sent. The reason a stray
+# ``candidate`` blob cannot reach the template is not this whitelist, it is
+# that the template is handed the VALIDATED DTO (below), which structurally
+# has no field to carry one.
 _SHORTLIST_ENTRY_FIELDS = frozenset(ShortlistEntry.model_fields)
+
+
+@dataclass(frozen=True)
+class _EntryHeader:
+    """The bare identity block (rank / label / final score / résumé link) for
+    an entry payload that FAILED ``ShortlistEntry`` validation.
+
+    The template renders the same four attribute names off either this or a
+    real ``ShortlistEntry``, so the degraded page stays identical to the
+    pre-slice stub without the template ever touching a raw dict. Every field
+    is defensively coerced -- a malformed payload is exactly the case this
+    exists for, so it must not itself raise."""
+
+    rank: int | None
+    display_label: str | None
+    score_final: float | None
+    resume_id: UUID | None
+
+
+def _entry_header(raw: dict[str, Any]) -> _EntryHeader:
+    rank = raw.get("rank")
+    label = raw.get("display_label")
+    score = raw.get("score_final")
+    raw_resume_id = raw.get("resume_id")
+    resume_id: UUID | None = None
+    if raw_resume_id is not None:
+        try:
+            resume_id = UUID(str(raw_resume_id))
+        except (ValueError, TypeError):
+            resume_id = None
+    # bool is a subclass of int/float here, and "True" is not a rank.
+    score_final: float | None = None
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
+        score_final = float(score)
+    return _EntryHeader(
+        rank=rank if isinstance(rank, int) and not isinstance(rank, bool) else None,
+        display_label=label if isinstance(label, str) else None,
+        score_final=score_final,
+        resume_id=resume_id,
+    )
+
 
 # The backend caps résumé uploads at ~10 MB/file and up to 20 files per
 # request (`src.api.routes.resumes`), plus the (much smaller) JD-extract
@@ -743,13 +800,35 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
     # (identical to the pre-slice stub), it just omits the score-composition
     # and evidence panels, which cannot be shown honestly without a
     # well-formed DTO.
+    #
+    # ``api_client.get_shortlist_entry`` is typed ``-> Any`` (whatever JSON the
+    # backend sent), so a non-object payload must degrade here too rather than
+    # raise ``AttributeError`` on ``.items()`` -- a 500 defeats the whole point
+    # of the fallback.
+    payload: dict[str, Any] = raw if isinstance(raw, dict) else {}
     explanation: ShortlistExplanation | None
-    known = {k: v for k, v in raw.items() if k in _SHORTLIST_ENTRY_FIELDS}
+    entry: ShortlistEntry | _EntryHeader
+    known = {k: v for k, v in payload.items() if k in _SHORTLIST_ENTRY_FIELDS}
     try:
-        explanation = shortlist_entry_explanation(ShortlistEntry.model_validate(known))
-    except ValidationError:
+        entry = ShortlistEntry.model_validate(known)
+        explanation = shortlist_entry_explanation(entry)
+    except ValidationError as exc:
+        # NOT silent: this page is a compliance artifact, and a silent swallow
+        # makes genuine corruption indistinguishable from an ordinary legacy
+        # row. Logs the entry id ONLY -- never a candidate field, and never the
+        # payload, which would defeat the redaction boundary in the log file.
+        logger.warning(
+            "shortlist entry %s: detail payload failed ShortlistEntry "
+            "validation (%d error(s)); rendering without the explanation panel",
+            entry_id,
+            exc.error_count(),
+        )
+        entry = _entry_header(payload)
         explanation = None
-    return render_template("shortlist_entry.html", entry=raw, explanation=explanation)
+    # The template is handed the VALIDATED DTO (or the coerced header), never
+    # the raw payload -- so a field the backend should not have sent has no
+    # route to the page at all.
+    return render_template("shortlist_entry.html", entry=entry, explanation=explanation)
 
 
 @app.get("/resumes/<uuid:resume_id>")

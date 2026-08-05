@@ -39,6 +39,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -66,6 +67,8 @@ from src.services.redaction import (
     redact_text,
     redacted_filename,
 )
+
+logger = logging.getLogger(__name__)
 
 _DELETE_SHORTLIST_SQL = "DELETE FROM shortlist_entries WHERE job_id = $1"
 
@@ -507,7 +510,31 @@ async def get_one(
     return _row_to_entry(row)
 
 
-def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float, float]:
+def _folded_subscore(value: Any, *, key: str, entry_id: Any) -> float | None:
+    """One folded sub-score out of the ``score_breakdown`` jsonb, or ``None``.
+
+    ``float(value)`` is NOT safe to run bare here: a corrupted/legacy jsonb
+    value raises ``ValueError``/``TypeError``, NEITHER of which is a
+    ``ValidationError``, so it would escape every tolerance on this read path
+    and 500 the whole shortlist PERMANENTLY (nothing can rewrite the stored
+    row). Degrading to ``None`` — "not recorded" — matches how
+    ``_parse_pipeline_meta`` treats an unreadable stamp."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "shortlist entry %s: score_breakdown.%s is not numeric (%s); "
+            "reporting it as not recorded",
+            entry_id,
+            key,
+            type(value).__name__,
+        )
+        return None
+
+
+def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float | None, float | None]:
     """In-place: coerce the jsonb score_breakdown/evidence columns into their
     pydantic models. RETURNS the two UNFOLDED sub-scores
     ``(score_structured, score_evidence)`` for the caller to put on the DTO.
@@ -518,14 +545,17 @@ def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float, float]:
     stripped before validating or every 4d row raises ValidationError. They are
     still popped here for exactly that reason — but they are no longer
     DISCARDED once popped: the "Why this rank?" panel explains the score
-    composition, which needs both. ``0.0`` stands for "the row never recorded
-    one" (a pre-4d row, or an entry built without them).
+    composition, which needs both. ``None`` stands for "the row never recorded
+    one" (a pre-4d row, or one whose folded value was unreadable) and renders
+    as "not recorded"; it is deliberately NOT ``0.0``, which would render as an
+    affirmative "0% contribution" the row does not support.
 
     Same rule for the evidence jsonb: it is validated with the TOLERANT
     ``EvidenceObject``, never an ingest variant. Both validates below are
     uncaught and run on already-stored bytes, so any length cap reached from
     here 500s the entire shortlist for the job — permanently, since nothing
     can rewrite the row."""
+    entry_id = raw.get("id")
     sb = raw["score_breakdown"]
     if isinstance(sb, str):
         sb = json.loads(sb)
@@ -538,12 +568,12 @@ def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float, float]:
         ev = json.loads(ev)
     raw["evidence"] = EvidenceObject.model_validate(ev) if ev is not None else None
     return (
-        float(folded_structured) if folded_structured is not None else 0.0,
-        float(folded_evidence) if folded_evidence is not None else 0.0,
+        _folded_subscore(folded_structured, key="score_structured", entry_id=entry_id),
+        _folded_subscore(folded_evidence, key="score_evidence", entry_id=entry_id),
     )
 
 
-def _parse_pipeline_meta(raw_meta: Any) -> PipelineMeta | None:
+def _parse_pipeline_meta(raw_meta: Any, *, entry_id: Any = None) -> PipelineMeta | None:
     """The ``pipeline_meta`` jsonb -> ``PipelineMeta``, or ``None``.
 
     TOLERANT on purpose, by the same rule as the evidence validate above: this
@@ -554,24 +584,48 @@ def _parse_pipeline_meta(raw_meta: Any) -> PipelineMeta | None:
     permanent 500 on the whole shortlist read. ``None`` is the honest answer —
     the explanation panel reports "weights unavailable" for it and never
     substitutes ``DEFAULT_WEIGHTS``, so a malformed stamp can never be
-    mistaken for the weights that actually produced the score."""
+    mistaken for the weights that actually produced the score.
+
+    That last sentence is NOT enforced by this comment. It is enforced by the
+    ``_parse_pipeline_meta`` tests in
+    ``tests/unit/test_services_shortlist_read.py``, which kill the mutant that
+    resurrects a failed stamp as ``DEFAULT_WEIGHTS``.
+
+    The two refusals are LOGGED (WARNING, entry id only — never candidate
+    fields): the explanation panel is a compliance artifact, so genuine
+    corruption must not be indistinguishable from an ordinary legacy row."""
     if raw_meta is None:
         return None
     if isinstance(raw_meta, str):
         try:
             raw_meta = json.loads(raw_meta)
         except (ValueError, TypeError):
+            logger.warning(
+                "shortlist entry %s: pipeline_meta is not valid JSON; "
+                "reporting weights as unavailable",
+                entry_id,
+            )
             return None
     try:
         return PipelineMeta.model_validate(raw_meta)
-    except ValidationError:
+    except ValidationError as exc:
+        logger.warning(
+            "shortlist entry %s: pipeline_meta failed validation (%d error(s), "
+            "first at %s); reporting weights as unavailable rather than "
+            "substituting today's defaults",
+            entry_id,
+            exc.error_count(),
+            ".".join(str(p) for p in (exc.errors()[0]["loc"] if exc.errors() else ())),
+        )
         return None
 
 
 def _row_to_entry(row: Any) -> ShortlistEntry:
     raw = dict(row)
     raw["score_structured"], raw["score_evidence"] = _parse_entry_jsonb(raw)
-    raw["pipeline_meta"] = _parse_pipeline_meta(raw.get("pipeline_meta"))
+    raw["pipeline_meta"] = _parse_pipeline_meta(
+        raw.get("pipeline_meta"), entry_id=raw.get("id")
+    )
     return ShortlistEntry.model_validate(raw)
 
 
@@ -725,7 +779,9 @@ def _row_to_blind_entry(row: Any) -> ShortlistEntry:
     labels = labels_from_parsed(parsed_raw)
     location = location_from_parsed(parsed_raw)
     raw["score_structured"], raw["score_evidence"] = _parse_entry_jsonb(raw)
-    raw["pipeline_meta"] = _parse_pipeline_meta(raw.get("pipeline_meta"))
+    raw["pipeline_meta"] = _parse_pipeline_meta(
+        raw.get("pipeline_meta"), entry_id=raw.get("id")
+    )
     # Redaction happens BEFORE the DTO is built (ADR-006 §4): no decrypted PII
     # ever reaches ShortlistEntry.
     raw["evidence"] = _redact_evidence(

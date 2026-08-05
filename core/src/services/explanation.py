@@ -28,6 +28,15 @@ sub-SCORES are still shown — those came off the row itself and are not in
 question. The UI says "weights unavailable" instead of rendering a number that
 looks authoritative but was invented.
 
+THE SECOND FALLBACK, told the same way on purpose. When the ROW never recorded
+a composed sub-score (``entry.score_structured`` / ``entry.score_evidence`` is
+``None`` — a pre-4d row, or one whose folded value was unreadable), that row's
+``score`` AND ``contribution`` are ``None`` and ``scores_available`` is
+``False``. It is deliberately NOT reported as ``0.0``: "this candidate scored
+0% on structured" is a positive false claim, whereas "not recorded" is true.
+An absent number and a zero are different statements and the panel makes only
+the one it can support — the same rule as the weights fallback above.
+
 THE PII BOUNDARY. This function consumes an ALREADY-REDACTED
 ``ShortlistEntry``. Under blind review the redaction has already happened
 inside ``shortlist_service._row_to_blind_entry``, BEFORE the DTO was built
@@ -60,12 +69,15 @@ class ContributionRow(BaseModel):
     contribution``.
 
     ``weight``/``contribution`` are ``None`` — never a borrowed default —
-    when the entry carries no generation-time weights (see THE FALLBACK)."""
+    when the entry carries no generation-time weights (see THE FALLBACK).
+    ``score`` is ``None`` when the ROW never recorded that sub-score (see THE
+    SECOND FALLBACK), which likewise zeroes out ``contribution``: there is no
+    honest product of a known weight and an unknown score."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     weight: float | None = None
-    score: float
+    score: float | None = None
     contribution: float | None = None
 
 
@@ -104,15 +116,22 @@ class ShortlistExplanation(BaseModel):
     vector: ContributionRow
     requirements: list[RequirementRow] = Field(default_factory=list)
     weights_available: bool = False
+    # False when the row never recorded the two COMPOSED sub-scores
+    # (``score_structured``/``score_evidence``). Sibling of
+    # ``weights_available`` and computed here for the same reason: the UI must
+    # not have to re-derive "is this number available", or the two copies of
+    # that rule drift.
+    scores_available: bool = False
 
 
-def _row(score: float, weight: float | None) -> ContributionRow:
-    """One table line. ``weight is None`` (no generation-time stamp) means no
+def _row(score: float | None, weight: float | None) -> ContributionRow:
+    """One table line. ``weight is None`` (no generation-time stamp) or
+    ``score is None`` (the row never recorded that sub-score) both mean no
     contribution can be stated honestly, so none is."""
     return ContributionRow(
         weight=weight,
         score=score,
-        contribution=None if weight is None else weight * score,
+        contribution=None if weight is None or score is None else weight * score,
     )
 
 
@@ -158,6 +177,9 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
             for r in reqs
         ],
         weights_available=weights is not None,
+        scores_available=(
+            entry.score_structured is not None and entry.score_evidence is not None
+        ),
     )
 
 

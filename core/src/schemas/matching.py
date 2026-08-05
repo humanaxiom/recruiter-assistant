@@ -501,13 +501,21 @@ class ShortlistEntry(BaseModel):
     # ``persist_shortlist`` FOLDS them into the ``score_breakdown`` jsonb and
     # ``shortlist_service._parse_entry_jsonb`` unfolds them back onto here.
     #
-    # DEFAULTED (unlike ``JobMatchEntry``, where they are required) rather than
-    # required: this DTO predates the "Why this rank?" panel and is constructed
-    # in several places that have no composed sub-scores to offer. A row that
-    # genuinely carries them always sets them; 0.0 marks "not recorded", and
-    # the explanation panel never derives a WEIGHT from them.
-    score_structured: float = 0.0
-    score_evidence: float = 0.0
+    # OPTIONAL (unlike ``JobMatchEntry``, where they are required, because that
+    # table HAS dedicated NOT NULL columns for them) and defaulted to ``None``,
+    # not ``0.0``. Every instance of this DTO is built by ``model_validate``
+    # from a stored row — ``grep -rn "ShortlistEntry(" core/src core/frontend``
+    # returns no direct construction site at all — and a pre-4d row simply has
+    # no folded sub-scores to unfold.
+    #
+    # ``None`` means "this row never recorded one" and renders as "not
+    # recorded". ``0.0`` would render as an affirmative "0% contribution": a
+    # POSITIVE FALSE CLAIM about a candidate, and asymmetric with the
+    # ``pipeline_meta=None`` -> "weights unavailable" handling immediately
+    # below, which already refuses to state what it does not know. The two
+    # unavailability stories are deliberately told the same way.
+    score_structured: float | None = None
+    score_evidence: float | None = None
     score_breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
     # The reproducibility stamp in force WHEN THIS ROW WAS GENERATED, read back

@@ -178,8 +178,8 @@ def _entry(
     *,
     weights: MatchWeights | None,
     score_final: float = 0.66,
-    score_structured: float = 0.68,
-    score_evidence: float = 0.75,
+    score_structured: float | None = 0.68,
+    score_evidence: float | None = 0.75,
     breakdown: ScoreBreakdown | None = None,
     evidence: EvidenceObject | None | _Unset = _UNSET,
 ) -> ShortlistEntry:
@@ -410,3 +410,62 @@ def test_explanation_is_pure_and_deterministic() -> None:
     first = shortlist_entry_explanation(entry)
     second = shortlist_entry_explanation(entry)
     assert first.model_dump() == second.model_dump()
+
+
+# ── unrecorded sub-scores: "not recorded", never an affirmative 0% ────────
+
+
+def test_unrecorded_subscores_are_none_not_an_affirmative_zero() -> None:
+    """A fold-less row (a pre-4d row, or one whose folded sub-scores were
+    unreadable) must surface as "not recorded", NOT as ``0.0``.
+
+    ``0.0`` renders as an affirmative "0% contribution" -- a POSITIVE FALSE
+    CLAIM about a candidate, and asymmetric with the ``pipeline_meta=None``
+    handling in the very same object, which already refuses to state a weight
+    it does not know. Both unavailability stories must read the same way."""
+    from src.services.explanation import shortlist_entry_explanation
+
+    entry = _entry(
+        weights=_custom_weights(), score_structured=None, score_evidence=None
+    )
+    explanation = shortlist_entry_explanation(entry)
+
+    assert explanation.structured.score is None
+    assert explanation.structured.contribution is None
+    assert explanation.evidence.score is None
+    assert explanation.evidence.contribution is None
+    assert explanation.scores_available is False
+    # The WEIGHTS are still known and still honest to show -- this fallback is
+    # independent of the weights fallback, not a merged "everything unknown".
+    assert explanation.weights_available is True
+    assert explanation.structured.weight == pytest.approx(0.5)
+    assert explanation.evidence.weight == pytest.approx(0.4)
+    # Sub-scores that DID come off the row are unaffected.
+    assert explanation.skill.score == pytest.approx(0.8)
+    assert explanation.skill.contribution == pytest.approx(0.40, abs=1e-9)
+
+
+def test_recorded_subscores_report_scores_available() -> None:
+    """Positive control for the flag above: an ordinary row must NOT be
+    flagged as missing sub-scores."""
+    from src.services.explanation import shortlist_entry_explanation
+
+    explanation = shortlist_entry_explanation(_entry(weights=_custom_weights()))
+
+    assert explanation.scores_available is True
+    assert explanation.structured.score == pytest.approx(0.68)
+
+
+def test_unrecorded_subscore_and_missing_weights_compose() -> None:
+    """Both fallbacks at once (a genuinely legacy row): no weight, no score,
+    no contribution -- and still no substituted default anywhere."""
+    from src.services.explanation import shortlist_entry_explanation
+
+    entry = _entry(weights=None, score_structured=None, score_evidence=None)
+    explanation = shortlist_entry_explanation(entry)
+
+    assert explanation.weights_available is False
+    assert explanation.scores_available is False
+    assert explanation.structured.weight is None
+    assert explanation.structured.score is None
+    assert explanation.structured.contribution is None

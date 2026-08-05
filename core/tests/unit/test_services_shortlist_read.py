@@ -55,9 +55,16 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from src.errors import NotFoundError
-from src.schemas.matching import EvidenceObject, ScoreBreakdown
+from src.schemas.matching import (
+    DEFAULT_WEIGHTS,
+    EvidenceObject,
+    MatchWeights,
+    PipelineMeta,
+    ScoreBreakdown,
+)
 
 
 class _Row(dict[str, Any]):
@@ -552,3 +559,206 @@ async def test_get_one_blind_returns_masked_entry() -> None:
     assert entry.display_label == "Candidate C"
     assert entry.evidence is not None
     assert "Jane Smith" not in entry.evidence.requirements[0].evidence
+
+
+# ── the malformed-stamp guard (Why-this-rank? slice 1) ──────────────────────
+#
+# ``_parse_pipeline_meta``'s ``return None`` on the failure branch is the ONLY
+# thing that makes the module docstring's central claim true: "a malformed
+# stamp can never be mistaken for the weights that actually produced the
+# score". It was previously enforced by a COMMENT ONLY -- review proved that
+# this mutant survived the entire gate with EXIT=0:
+#
+#     except ValidationError:
+#   +     if isinstance(raw_meta, dict) and "weights" in raw_meta:
+#   +         return PipelineMeta(model_gen="", model_emb="", prompt_versions={},
+#   +                             weights=DEFAULT_WEIGHTS,
+#   +                             generated_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+#         return None
+#
+# i.e. a malformed stamp rendering as TODAY's DEFAULT_WEIGHTS, presented to a
+# recruiter as the weights that produced a historical score. That is precisely
+# the dishonesty this whole feature exists to prevent, so it gets real tests.
+
+
+def _valid_meta_dict() -> dict[str, Any]:
+    """A well-formed stamp, as JSON round-tripped bytes -- exactly the shape
+    ``_meta_json``/``model_dump_json`` writes to the jsonb column."""
+    return dict(
+        json.loads(
+            PipelineMeta(
+                model_gen="gpt-oss:20b",
+                model_emb="nomic-embed-text",
+                prompt_versions={"shortlist_evidence": "shortlist_evidence_v1"},
+                weights=DEFAULT_WEIGHTS,
+                git_sha="abc123def",
+                generated_at=dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+                timings_ms={},
+            ).model_dump_json()
+        )
+    )
+
+
+def test_parse_pipeline_meta_accepts_a_well_formed_stamp() -> None:
+    """POSITIVE CONTROL. Every ``is None`` assertion below is only meaningful
+    if the parser actually accepts a genuine stamp -- otherwise a parser that
+    returned ``None`` unconditionally would pass them all."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    meta = _parse_pipeline_meta(_valid_meta_dict())
+
+    assert meta is not None
+    assert meta.git_sha == "abc123def"
+    assert meta.model_emb == "nomic-embed-text"
+
+
+def test_parse_pipeline_meta_accepts_a_stamp_arriving_as_a_json_string() -> None:
+    """POSITIVE CONTROL for the other codec: asyncpg hands jsonb back as a
+    dict OR as a JSON string depending on the codec in force."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    meta = _parse_pipeline_meta(json.dumps(_valid_meta_dict()))
+
+    assert meta is not None
+    assert meta.git_sha == "abc123def"
+
+
+def test_parse_pipeline_meta_degenerate_write_path_stamp_is_none() -> None:
+    """THE stamp the write path itself produces. ``_meta_json(None)`` writes
+    ``{"weights": DEFAULT_WEIGHTS}`` and NOTHING else -- purely to satisfy
+    ``pipeline_meta JSONB NOT NULL`` for a job that vanished mid-run. Those
+    weights are a placeholder that never ranked anything, so the read path must
+    refuse the whole stamp rather than let the panel present them as the
+    generation-time weights."""
+    from src.services.shortlist_service import _meta_json, _parse_pipeline_meta
+
+    degenerate = json.loads(_meta_json(None))
+    # The exact shape the surviving mutant keyed on: a dict WITH "weights".
+    assert isinstance(degenerate, dict)
+    assert "weights" in degenerate
+
+    assert _parse_pipeline_meta(degenerate) is None
+
+
+def test_parse_pipeline_meta_unknown_extra_key_is_none() -> None:
+    """``PipelineMeta`` is ``extra="forbid"``. A stamp carrying a key this
+    build does not know (a row written by a newer build, or a hand-edited row)
+    must be refused WHOLESALE -- never silently downgraded to today's
+    defaults, which is what makes the refusal honest."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    drifted = {**_valid_meta_dict(), "sampling_temperature": 0.2}
+
+    assert _parse_pipeline_meta(drifted) is None
+
+
+def test_parse_pipeline_meta_weights_failing_the_sum_validator_is_none() -> None:
+    """THE REALISTIC FUTURE TRIGGER. There is no migration framework here, so
+    the day ``MatchWeights`` gains or renames a field, EVERY historical stamp
+    starts failing validation at once. Simulated with weights whose top-level
+    sum breaks ``MatchWeights._sums_close_to_one`` (0.9+0.9+0.1). The panel
+    must fall back to "weights unavailable"; substituting DEFAULT_WEIGHTS
+    would turn a schema drift into a silent, fabricated audit trail on every
+    row in the table."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    raw = _valid_meta_dict()
+    weights = dict(raw["weights"])
+    weights["structured"] = 0.9
+    weights["evidence"] = 0.9
+    raw["weights"] = weights
+    # Sanity: these weights really are rejected by MatchWeights itself.
+    with pytest.raises(ValidationError):
+        MatchWeights.model_validate(weights)
+
+    assert _parse_pipeline_meta(raw) is None
+
+
+def test_parse_pipeline_meta_unparseable_string_is_none() -> None:
+    """A jsonb column value that is not JSON at all (nothing can rewrite the
+    row, so a raise here would 500 the whole shortlist permanently)."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    assert _parse_pipeline_meta("{not json at all") is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_stamp_row_explains_as_weights_unavailable() -> None:
+    """END-TO-END, stored bytes -> the panel the recruiter reads: a row whose
+    ``pipeline_meta`` is the degenerate write-path stamp must arrive at the
+    explanation as "weights unavailable", with NO weight and NO contribution on
+    ANY row -- never today's DEFAULT_WEIGHTS wearing the costume of the weights
+    that produced this score."""
+    from src.services.explanation import shortlist_entry_explanation
+    from src.services.shortlist_service import _meta_json, get_one
+
+    entry_id = uuid4()
+    row = _entry_row(job_id=uuid4(), entry_id=entry_id, evidence={})
+    row["pipeline_meta"] = _meta_json(None)
+    conn = _mock_conn(blind=False, row=row)
+
+    entry = await get_one(conn, entry_id)
+    assert entry.pipeline_meta is None
+
+    explanation = shortlist_entry_explanation(entry)
+    assert explanation.weights_available is False
+    for name in (
+        "structured",
+        "evidence",
+        "motivation",
+        "skill",
+        "experience",
+        "education",
+        "seniority",
+        "vector",
+    ):
+        contribution_row = getattr(explanation, name)
+        assert contribution_row.weight is None, name
+        assert contribution_row.contribution is None, name
+
+
+# ── absent fold: "not recorded", never an affirmative 0% ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_row_without_folded_subscores_reports_none_not_zero() -> None:
+    """A row whose ``score_breakdown`` carries NO folded
+    ``score_structured``/``score_evidence`` (a pre-4d row) must surface them as
+    ``None`` -- "not recorded" -- not as ``0.0``. ``0.0`` renders as an
+    affirmative "0% contribution", a POSITIVE FALSE CLAIM, and it is asymmetric
+    with the ``pipeline_meta=None`` handling right beside it, which already
+    refuses to state what it does not know."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    unfolded = _breakdown_dict()
+    assert "score_structured" not in unfolded
+    row = _entry_row(job_id=job_id, score_breakdown=unfolded, evidence={})
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    assert entries[0].score_structured is None
+    assert entries[0].score_evidence is None
+
+
+@pytest.mark.asyncio
+async def test_non_numeric_folded_subscore_degrades_instead_of_500ing() -> None:
+    """``float(folded)`` on a corrupted jsonb value raises ``ValueError``, NOT
+    ``ValidationError`` -- so it escapes ``_parse_pipeline_meta``'s tolerance
+    and would 500 the entire shortlist read permanently (nothing can rewrite
+    the row). It must degrade to "not recorded" like every other unreadable
+    field on this path."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    corrupt = _breakdown_dict()
+    corrupt["score_structured"] = "not-a-number"
+    corrupt["score_evidence"] = {"nested": "garbage"}
+    row = _entry_row(job_id=job_id, score_breakdown=corrupt, evidence={})
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    assert entries[0].score_structured is None
+    assert entries[0].score_evidence is None
