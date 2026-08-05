@@ -4,7 +4,7 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 ### ⚠️⚠️ READ FIRST — SESSION 2026-08-02/04: FU-7 §2/§4 + reproducible dev-boot (unique ports · CAS · peer LLM); everything merged
 
-> **Current tip: `humanaxiom/main` == `e6e35d9`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
+> **Current tip: `humanaxiom/main` == `8d664c3`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
 > Nothing is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner
 > below (kept as history) and all older stale banners.
 >
@@ -910,7 +910,7 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-08-04 (read the top READ-FIRST banner first).** `origin/main` == **`e6e35d9`**, both
+> **STATE AS OF 2026-08-04 (read the top READ-FIRST banner first).** `origin/main` == **`8d664c3`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
@@ -926,6 +926,14 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 > `e6e35d9`)** — all on `main`, CI green. **Nothing is mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
+>
+> **🌟 NEXT-GEN "WOW" FEATURE MENU → [`docs/ROADMAP.md`](docs/ROADMAP.md).** Session wrapped 2026-08-04 for a
+> fresh start on greater features. The roadmap details three flagship candidates — **(1) "Why this rank?"
+> per-candidate defense pack, (2) "Ask the pool" NL evidence-grounded search, (3) Policy Studio live
+> weight-ratification** — each framed with pitch / why-wow / thesis-fit / reuses / first-slice / risks. **Pick
+> ONE to build first.** All honour offline-only (aria-gb10), evidence-backed, privacy-first. The smaller
+> carried-over items (below + roadmap's tail) remain valid.
+>
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
 >    path (hard-delete blob + null pgcrypto columns + `resumes.parsed`, keep a non-PII tombstone), clearly
 >    separated from the routine reversible withdraw. The repo's FIRST destructive PII op — needs a human
