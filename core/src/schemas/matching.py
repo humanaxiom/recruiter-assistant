@@ -494,8 +494,30 @@ class ShortlistEntry(BaseModel):
     resume_id: UUID
     rank: int
     score_final: float
+    # The two composed sub-scores, named exactly as on ``JobMatchEntry`` (the
+    # reverse-match sibling) so one convention covers both directions. The
+    # difference is purely where they live at rest: ``reverse_match_entries``
+    # has dedicated columns, ``shortlist_entries`` does not, so
+    # ``persist_shortlist`` FOLDS them into the ``score_breakdown`` jsonb and
+    # ``shortlist_service._parse_entry_jsonb`` unfolds them back onto here.
+    #
+    # DEFAULTED (unlike ``JobMatchEntry``, where they are required) rather than
+    # required: this DTO predates the "Why this rank?" panel and is constructed
+    # in several places that have no composed sub-scores to offer. A row that
+    # genuinely carries them always sets them; 0.0 marks "not recorded", and
+    # the explanation panel never derives a WEIGHT from them.
+    score_structured: float = 0.0
+    score_evidence: float = 0.0
     score_breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
+    # The reproducibility stamp in force WHEN THIS ROW WAS GENERATED, read back
+    # off the ``pipeline_meta`` jsonb column. The explanation panel takes its
+    # weights from here and NEVER from current settings / ``DEFAULT_WEIGHTS``:
+    # explaining a historical score with today's weights would be dishonest.
+    # ``None`` on a legacy row (or one whose stamp is unreadable), which the
+    # panel must surface as "weights unavailable" rather than substituting
+    # defaults.
+    pipeline_meta: PipelineMeta | None = None
     generated_at: dt.datetime
     blinded: bool = False
     display_label: str | None = None
