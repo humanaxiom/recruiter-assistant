@@ -2,22 +2,34 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-02: FU-7 §2 fail-closed + §4 degraded-parse + dev-boot fix; everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-02/04: FU-7 §2/§4 + reproducible dev-boot (unique ports · CAS · peer LLM); everything merged
 
-> **Current tip: `humanaxiom/main` == `f7dadc5`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
+> **Current tip: `humanaxiom/main` == `e6e35d9`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
 > Nothing is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner
 > below (kept as history) and all older stale banners.
 >
-> **⚠️ `compose.cas.yml` IS NOW TRACKED (PR #58) — the old "untracked stray, leave it" guidance is DEAD.**
-> It is the real CAS override (port-parameterized `${API_PORT}`/`${FRONTEND_PORT}`). **CAS (SFU login + RBAC
-> + user management) is ON BY DEFAULT** in `scripts/quickstart.ps1`; a *plain* `docker compose up` (no
-> override) runs `cas_enabled=False` = dev-anonymous-admin (no login screen) — that is a BOOT MODE, not a
-> missing feature. **Standing orders (do not violate):** (1) publish UNIQUE host ports (29xxx block in
-> `.env.example`; `docker-compose.yml` reads `${X_PORT:-<stock>}`) — never stock 5432/6379/7474/7687/8000/5000,
-> which collide with other apps on this machine; (2) never ship tooling/config that silently drops a feature
-> (e.g. CAS) without asking.
+> **⚠️ Dev-boot is now REPRODUCIBLE on a fresh box (PR #60) — `scripts/quickstart.ps1` is the way in.** It
+> writes the ENTIRE `.env` (secrets + unique 29xxx ports + inference config), verifies both models at
+> `LLM_BASE_URL`, port-preflights, and boots with CAS on. `.env` is permission-protected (agent can't
+> read/write it — the user/script does). **Inference endpoint is `.env`-driven** (`docker-compose.yml` reads
+> `${LLM_BASE_URL:-http://host.docker.internal:11434/v1}` + `${LLM_TIMEOUT_S:-120}`); `.env.example` ships the
+> **team's shared Tailscale Ollama** `http://100.88.247.106:11434/v1` (has `gpt-oss:20b` + `nomic-embed-text`;
+> box must be on the tailnet) with `LLM_TIMEOUT_S=300`, local metal alternative documented. **`compose.live-eval.yml`
+> and the `-LiveEval` flag are GONE** — the peer is just `LLM_BASE_URL` now (one mechanism).
+> **`compose.cas.yml` IS TRACKED (PR #58) — the old "untracked stray, leave it" guidance is DEAD;** CAS is
+> ON BY DEFAULT (dev-anonymous-admin only via `-NoCas`/plain `docker compose up`, a BOOT MODE not a missing
+> feature). **Standing orders (do not violate):** (1) UNIQUE host ports (29xxx), never stock
+> 5432/6379/7474/7687/8000/5000; (2) never silently drop a feature (e.g. CAS) in tooling/config without asking;
+> (3) inference runs on local/tailnet Ollama only — never a cloud endpoint.
 >
 > **What landed on `origin/main` this session (CI-verified green, then squash-merged):**
+> - **Reproducible fresh-box boot (PR #60, `e6e35d9`).** `.env.example` is a complete copy-and-go template
+>   (unique ports + peer LLM + timeout 300 + local alternative); `docker-compose.yml` parameterizes
+>   `LLM_BASE_URL`/`LLM_TIMEOUT_S`/`LLM_MODEL_*`; `quickstart.ps1` writes the full `.env` and verifies both
+>   models at the configured endpoint; removed the buggy untracked `compose.live-eval.yml` + `-LiveEval`.
+>   README quick-start is now the definitive fresh-box guide. **Diagnosed live this session:** a shortlist
+>   sat at `awaiting_llm` (FU-7 §2 fail-closed working AS DESIGNED) because LOCAL Ollama had **no models**;
+>   repointing api/worker at the peer (which has them) → shortlist generated in ~60s. No feature code changed.
 > - **Dev-boot fix — unique host ports + CAS on by default (PR #58, `f7dadc5`).** A stock `docker compose up`
 >   hit `Bind for 0.0.0.0:8000 failed` (held by `bccb-api-1`) and, separately, booted CAS-off so RBAC/
 >   user-management *looked* gone. Fix: `docker-compose.yml` host ports parameterized `${X_PORT:-<stock>}`
@@ -896,7 +908,7 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 
 ## Next session
 
-> **STATE AS OF 2026-08-02 (read the top READ-FIRST banner first).** `origin/main` == **`f7dadc5`**, both
+> **STATE AS OF 2026-08-04 (read the top READ-FIRST banner first).** `origin/main` == **`e6e35d9`**, both
 > repos PUBLIC, **zero open PRs**, working tree clean. Everything below in this section is
 > the older historical log. **Shipped through this session:** all of v1 (phases 0–7), the Workflow UI,
 > FU-1..FU-6, user-admin roles (ADR-025), configurable shortlist size (ADR-024), `/my/jobs`, CAS
@@ -906,9 +918,10 @@ hardening backlog, inherited from Phase 6/7, not introduced or worsened by this 
 > **education field-of-study relevance (ADR-028, PR #49, `9229d61`)**, the **explainer follow-up (PR #51,
 > `107e6bb`)**, **FU-7 §2 fail-closed ranking + §6 empty-content (ADR-029, PR #52, `79d69ac`)**, the
 > **AI-usage one-pager (PR #54)**, the **Windows quickstart `scripts/quickstart.ps1` (PR #56)**,
-> **FU-7 §4 degraded-parse visibility (ADR-030, PR #55, `3df47de`)**, and the **dev-boot fix — unique host
-> ports + CAS-on-by-default + tracked `compose.cas.yml` (PR #58, `f7dadc5`)** — all on `main`, CI green.
-> **Nothing is mid-flight.**
+> **FU-7 §4 degraded-parse visibility (ADR-030, PR #55, `3df47de`)**, the **dev-boot fix — unique host
+> ports + CAS-on-by-default + tracked `compose.cas.yml` (PR #58, `f7dadc5`)**, and the **reproducible
+> fresh-box boot — complete `.env` + `.env`-driven peer LLM + `compose.live-eval.yml` removed (PR #60,
+> `e6e35d9`)** — all on `main`, CI green. **Nothing is mid-flight.**
 >
 > **Plan — options for the next session (a human picks; none auto-starts):**
 > 1. **ADR-026 §4 — revoke-and-purge (consent-erasure).** The natural FU-8 follow-on: a destructive PII-erase
