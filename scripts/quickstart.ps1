@@ -14,9 +14,10 @@
            stack never fights another app for 5432/6379/7474/7687/8000/5000.
            (docker-compose.yml reads these as ${X_PORT:-<stock>}; only the HOST
            side changes — in-network service DSNs are unchanged.)
-      3. (Best-effort) checks Ollama is reachable on host metal with the two
-         required models — inference is HOST-ONLY, so parsing/ranking stall
-         without it, but the stack still boots.
+      3. Ensures .env carries the inference config (LLM_BASE_URL / LLM_TIMEOUT_S)
+         and checks that BOTH required models (gpt-oss:20b + nomic-embed-text)
+         are reachable at LLM_BASE_URL — the shared Tailscale Ollama by default.
+         Parsing/ranking stall without them, so this warns loudly if not.
       4. Preflights every required host port and fails with a clear
          "port N is held by <container>" message (not a raw Docker bind error)
          if a FOREIGN process already owns one.
@@ -25,13 +26,12 @@
       6. Waits for the data tier + API /health to go green, then prints the URLs
          on their resolved ports.
 
-    Offline-only by design: LLM_BASE_URL points at local Ollama; no candidate
-    data ever leaves the machine.
+    Offline-only by design: LLM_BASE_URL points at a local/tailnet Ollama; no
+    candidate data ever leaves your machines. No cloud endpoints, ever.
 
 .PARAMETER Build      Force a rebuild of the api/worker/frontend images (--build).
 .PARAMETER NoCas      Boot WITHOUT CAS (dev-anonymous admin, no login screen).
                       CAS (SFU login + RBAC + user management) is ON by default.
-.PARAMETER LiveEval   Also apply compose.live-eval.yml (Tailscale peer), if present.
 .PARAMETER Down       Stop and remove the stack instead of starting it.
 .PARAMETER Reset      With -Down, also delete the pg/neo4j volumes (down -v). DESTROYS data.
 .PARAMETER Logs       After starting, follow the combined container logs.
@@ -48,7 +48,6 @@
 param(
     [switch] $Build,
     [switch] $NoCas,
-    [switch] $LiveEval,
     [switch] $Down,
     [switch] $Reset,
     [switch] $Logs,
@@ -90,6 +89,16 @@ $PortVars = [ordered]@{
     NEO4J_BOLT_PORT = 29687
 }
 
+# Inference config written into .env if absent (matches .env.example). Default
+# is the team's shared Tailscale Ollama (has gpt-oss:20b + nomic-embed-text) —
+# your box must be on the tailnet. For fully-local metal instead, set
+# LLM_BASE_URL=http://host.docker.internal:11434/v1 + LLM_TIMEOUT_S=120 in .env
+# and `ollama pull gpt-oss:20b nomic-embed-text`.
+$EnvDefaults = [ordered]@{
+    LLM_BASE_URL  = 'http://100.88.247.106:11434/v1'
+    LLM_TIMEOUT_S = '300'
+}
+
 # Repo root = parent of this script's directory (scripts/quickstart.ps1).
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
@@ -104,10 +113,6 @@ if (-not $NoCas) {
     else { Write-Warn2 'compose.cas.yml not found — booting WITHOUT CAS (dev-anonymous admin).' }
 } else {
     Write-Warn2 'CAS disabled via -NoCas — dev-anonymous admin, no login screen.'
-}
-if ($LiveEval) {
-    if (Test-Path 'compose.live-eval.yml') { $ComposeArgs += @('-f', 'compose.live-eval.yml') }
-    else { Write-Warn2 'compose.live-eval.yml not found — ignoring -LiveEval.' }
 }
 
 # ── 0. Docker up? ────────────────────────────────────────────────────────────
@@ -136,8 +141,8 @@ if ($Down) {
     return
 }
 
-# ── 1. .env — required secrets + unique host ports ───────────────────────────
-Write-Step 'Checking .env (secrets + unique host ports)'
+# ── 1. .env — required secrets + unique host ports + inference config ─────────
+Write-Step 'Checking .env (secrets + unique host ports + inference config)'
 if (-not (Test-Path '.env')) {
     Copy-Item '.env.example' '.env'
     Write-Ok 'Created .env from .env.example.'
@@ -160,14 +165,22 @@ foreach ($key in @('PII_KEY', 'SKILL_HASH_SALT')) {
     }
 }
 
-# Host ports: write the unique default only if the key is ENTIRELY ABSENT
-# (respect any value the user has already chosen).
+# Host ports + inference config: write the default only if the key is ENTIRELY
+# ABSENT (respect any value the user has already chosen).
 foreach ($key in $PortVars.Keys) {
     $has = $envLines | Where-Object { $_ -match "^\s*$key\s*=" }
     if (-not $has) {
         $envLines += "$key=$($PortVars[$key])"
         $changed = $true
         Write-Ok "Set $key=$($PortVars[$key]) (unique host port)."
+    }
+}
+foreach ($key in $EnvDefaults.Keys) {
+    $has = $envLines | Where-Object { $_ -match "^\s*$key\s*=" }
+    if (-not $has) {
+        $envLines += "$key=$($EnvDefaults[$key])"
+        $changed = $true
+        Write-Ok "Set $key=$($EnvDefaults[$key])."
     }
 }
 
@@ -191,24 +204,33 @@ $resolved = [ordered]@{
     'neo4j-http'   = $neo4jHttp
     'neo4j-bolt'   = [int](Get-EnvValue $envLines 'NEO4J_BOLT_PORT' $PortVars['NEO4J_BOLT_PORT'])
 }
+$llmBase = Get-EnvValue $envLines 'LLM_BASE_URL' $EnvDefaults['LLM_BASE_URL']
+$genModel = Get-EnvValue $envLines 'LLM_MODEL_GENERATION' 'gpt-oss:20b'
+$embModel = Get-EnvValue $envLines 'LLM_MODEL_EMBEDDING'  'nomic-embed-text'
 
 # The filesystem BlobStore bind-mounts ./data.
 if (-not (Test-Path 'data')) { New-Item -ItemType Directory -Path 'data' | Out-Null }
 
-# ── 2. Ollama on host (best-effort) ──────────────────────────────────────────
-Write-Step 'Checking Ollama on host metal (localhost:11434)'
-$needModels = @('gpt-oss:20b', 'nomic-embed-text')
+# ── 2. Inference endpoint — must have BOTH models reachable at LLM_BASE_URL ────
+Write-Step "Checking inference at LLM_BASE_URL ($llmBase)"
+# Ollama's model list lives at the host root, not under /v1.
+$tagsUrl = ($llmBase -replace '/v1/?$', '') + '/api/tags'
+$needModels = @($genModel, $embModel)
 try {
-    $tags = Invoke-RestMethod -Uri 'http://localhost:11434/api/tags' -TimeoutSec 4
+    $tags = Invoke-RestMethod -Uri $tagsUrl -TimeoutSec 6
     $have = @($tags.models | ForEach-Object { $_.name })
     $missing = $needModels | Where-Object { $m = $_; -not ($have | Where-Object { $_ -like "$m*" }) }
     if ($missing) {
-        Write-Warn2 "Ollama is up but missing model(s): $($missing -join ', ')."
-        Write-Warn2 "Pull them:  ollama pull $($missing -join ' ')"
-    } else { Write-Ok 'Ollama reachable with both required models.' }
+        Write-Warn2 "Reachable, but missing model(s): $($missing -join ', '). Parsing/ranking will FAIL closed."
+        Write-Warn2 "On that Ollama host, run:  ollama pull $($missing -join ' ')"
+    } else { Write-Ok "Reachable with both models ($genModel, $embModel)." }
 } catch {
-    Write-Warn2 'Ollama not reachable on localhost:11434 — the stack will boot, but parsing/ranking need it.'
-    Write-Warn2 'Start it:  ollama serve   then   ollama pull gpt-oss:20b nomic-embed-text'
+    Write-Warn2 "Cannot reach the Ollama at $llmBase — the stack boots, but parsing/ranking FAIL closed until it's up."
+    if ($llmBase -match '100\.\d+\.\d+\.\d+|:\/\/100\.') {
+        Write-Warn2 'That is a Tailscale address — is THIS box joined to the tailnet and is the peer up?'
+    }
+    Write-Warn2 'Or point LLM_BASE_URL at local metal in .env (http://host.docker.internal:11434/v1, LLM_TIMEOUT_S=120)'
+    Write-Warn2 'and: ollama serve  then  ollama pull gpt-oss:20b nomic-embed-text'
 }
 
 # ── 3. Port preflight — clear message instead of a raw Docker bind error ──────
@@ -263,6 +285,7 @@ if ($apiOk) {
     Write-Host ("  Frontend (recruiter UI) : http://localhost:{0}" -f $frontendPort) -ForegroundColor White
     Write-Host ("  API                     : http://localhost:{0}   (/health, /docs)" -f $apiPort) -ForegroundColor White
     Write-Host ("  Neo4j browser           : http://localhost:{0}   (neo4j / recruiterpass)" -f $neo4jHttp) -ForegroundColor White
+    Write-Host ("  Inference (Ollama)      : {0}" -f $llmBase) -ForegroundColor White
     Write-Host ''
     if ($CasOn) {
         Write-Host ("  CAS login is ON — the browser will redirect to SFU CAS; first login as the" ) -ForegroundColor White

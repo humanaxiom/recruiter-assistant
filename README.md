@@ -350,47 +350,35 @@ Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture deci
 
 ---
 
-## Quick start
+## Quick start (fresh box)
 
-```bash
-# 0. Prereq on host: Ollama running on metal with the two models pulled
-ollama serve &
-ollama pull gpt-oss:20b nomic-embed-text
+**Prerequisites**
+1. **Docker Desktop** (with Compose v2) running.
+2. **An Ollama endpoint with both models** — `gpt-oss:20b` (generation) + `nomic-embed-text` (embeddings). Two supported setups, pick one in `.env` (`LLM_BASE_URL`):
+   - **Shared Tailscale Ollama (this team's default):** a tailnet peer already has both models. **Your box must be joined to the tailnet.** `.env.example` ships this endpoint + `LLM_TIMEOUT_S=300`.
+   - **Fully local Ollama:** no tailnet needed, but pull the models yourself — `ollama serve` then `ollama pull gpt-oss:20b nomic-embed-text` (gpt-oss:20b is ~13 GB) — and set `LLM_BASE_URL=http://host.docker.internal:11434/v1`, `LLM_TIMEOUT_S=120` in `.env`.
 
-# 1. Configure — PII_KEY is REQUIRED (32 random bytes, base64)
-cp .env.example .env
-#   set PII_KEY, e.g.:  openssl rand -base64 32
-
-# 2. Bring up the stack
-docker compose up -d          # postgres, neo4j, redis, api, worker, frontend
-# Postgres tables + Neo4j vector indexes are created on API startup —
-# no separate migration step.
-
-# 3. Check the API
-curl localhost:8000/health    # -> {"status":"ok"}
+**Windows (PowerShell) — one command:**
+```powershell
+./scripts/quickstart.ps1
 ```
+It generates the required `PII_KEY`/`SKILL_HASH_SALT` if unset, writes the unique host ports + inference config into `.env`, **verifies both models are reachable at `LLM_BASE_URL`**, port-preflights (clear "port N held by <container>" message), brings the stack up **with CAS on**, waits for health, and prints the URLs. Flags: `-Build` (rebuild images), `-NoCas` (dev-anonymous-admin, no login), `-Down [-Reset]` (stop / wipe volumes), `-Logs`.
 
-**Host ports are parameterized** (`${API_PORT:-8000}` etc. in `docker-compose.yml`) so the
-stack can run alongside other apps without colliding. Set unique values in `.env` — the shipped
-`.env.example` uses a `29xxx` block (API `29800`, frontend `29500`, pg `29432`, redis `29379`,
-neo4j `29474`/`29687`); only the host-published side changes, so in-network DSNs are unaffected.
+**Any OS — manual:**
+```bash
+cp .env.example .env
+#   set PII_KEY and SKILL_HASH_SALT (32 random bytes, base64 each):  openssl rand -base64 32
+#   confirm LLM_BASE_URL points at your Ollama (peer or local)
+docker compose -f docker-compose.yml -f compose.cas.yml up -d   # CAS on (drop -f compose.cas.yml for anonymous)
+curl localhost:29800/health    # -> {"status":"ok"}   (API_PORT default 29800)
+```
+Postgres tables + Neo4j vector indexes are created on API startup — no migration step.
 
-**Windows (PowerShell):** `./scripts/quickstart.ps1` does steps 1–3 in one shot — generates the
-required `PII_KEY`/`SKILL_HASH_SALT` if unset, writes the unique host-port block into `.env`,
-checks Ollama + the two models, **preflights the ports** (clear "port N held by <container>"
-message instead of a raw bind error), runs `docker compose up -d`, waits for health, and prints
-the URLs on their resolved ports. **CAS login (SFU auth + RBAC + user management) is ON by
-default** via `compose.cas.yml` — the browser redirects to SFU CAS and first login as the default
-admin lands as admin; pass `-NoCas` for the dev-anonymous-admin passthrough (no login screen).
-`-Build` rebuilds the app images, `-Down [-Reset]` tears the stack down, `-Logs` tails logs.
-(You still need Ollama on host metal for parsing/ranking.)
+**Unique host ports.** `docker-compose.yml` publishes `${X_PORT:-<stock>}`, and `.env.example` ships a `29xxx` block (API `29800`, frontend `29500`, pg `29432`, redis `29379`, neo4j `29474`/`29687`) so the stack never collides with other apps on the machine. Only the host side changes — in-network DSNs are unchanged.
 
-> **Auth is config-gated, not optional.** With `CAS_ENABLED=false` (a bare `docker compose up`
-> with no `compose.cas.yml`) the app runs dev-anonymous-admin — no login, no user-management UI.
-> That is a boot mode, **not** a missing feature: RBAC (ADR-018), CAS identity (ADR-019), per-job
-> scoping (ADR-020), and user administration (ADR-025) are all on `main`.
+> **Auth is config-gated, not optional.** CAS (SFU login + RBAC + user management) is **on by default** in `quickstart.ps1` / with `-f compose.cas.yml`. A *plain* `docker compose up` (no CAS override) runs `cas_enabled=False` = dev-anonymous-admin (no login screen) — a **boot mode, not a missing feature**: RBAC (ADR-018), CAS identity (ADR-019), per-job scoping (ADR-020), and user administration (ADR-025) are all on `main`.
 
-`PII_KEY` protects every encrypted candidate column. Losing it makes those columns unrecoverable; never commit it.
+`PII_KEY` / `SKILL_HASH_SALT` protect every encrypted candidate column and the skill-graph keys. Losing `PII_KEY` makes those columns unrecoverable; `.env` is gitignored — never commit it.
 
 ---
 
