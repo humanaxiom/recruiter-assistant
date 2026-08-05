@@ -50,6 +50,7 @@ ARITHMETIC, not a specific formatting choice.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from collections.abc import Callable
 from typing import Any
@@ -839,8 +840,13 @@ def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
 # score_structured/score_evidence/pipeline_meta); this file exercises the
 # TEMPLATE only, over a hand-built dict standing in for that response.
 
-_REAL_EMPLOYER = "Wibblesworth Aerodynamics Ltd"
-_REAL_SCHOOL = "Zzyzxqrst Institute of Technology"
+# Deliberately share NO token with ``_REAL_NAME``: ``redact_text`` masks the
+# name (and each of its parts) BEFORE the employer/school term_map runs, so an
+# employer literally containing "Wibblesworth" would come out as
+# "[name redacted] Aerodynamics Ltd" and the "Employer A" label assertions
+# below would be testing the name pass, not the term_map pass.
+_REAL_EMPLOYER = "Quibbleflux Aerodynamics Ltd"
+_REAL_SCHOOL = "Marrowbank Institute of Technology"
 _SOURCE_CONTEXT_MARKER = "SOURCE-CONTEXT-MARKER-full-chunk-text-about-python-work"
 
 # Hand-computed contribution table for the fixture below (weight * score):
@@ -1138,15 +1144,41 @@ def test_entry_detail_source_context_is_collapsible(
 def test_entry_detail_black_box_pii_scan_under_blind_job(
     monkeypatch: Any, client: Any
 ) -> None:
-    """The load-bearing privacy guard — existing scans (e.g.
-    test_black_box_scan_no_pii_in_blind_shortlist_entry in
-    test_services_shortlist_read.py) only cover the SERVICE layer. This scans
-    the actual RENDERED HTML of the new panel: a planted candidate
-    name/email/phone/employer/school must appear NOWHERE in the response,
-    even though the panel now surfaces considerably more of the entry than
-    the old stub did."""
+    """Downstream scan of the fields the panel ACTUALLY renders.
+
+    **This test does not prove redaction, and must not be read as if it did.**
+    THE REDACTION BOUNDARY IS SERVER-SIDE, in
+    ``shortlist_service._row_to_blind_entry``, which scrubs the evidence BEFORE
+    the ``ShortlistEntry`` DTO is built (ADR-006 §4). Everything in this file
+    monkeypatches ``api_client.get_shortlist_entry``, so the route renders
+    whatever dict it is handed and can only ever be downstream of that
+    boundary. The end-to-end guard that DOES prove redaction — a raw-PII row
+    driven through the real ``_row_to_blind_entry`` and then rendered — is
+    ``test_entry_detail_real_blind_read_renders_no_pii`` immediately below;
+    that one fails if the redaction call loses its arguments, this one does
+    not.
+
+    What this test honestly pins is two things:
+
+    1. **The whitelist.** Extra top-level candidate keys on the payload
+       (``candidate_name`` / ``candidate`` / the ``_c_*`` join aliases) are
+       dropped by ``_SHORTLIST_ENTRY_FIELDS`` and structurally cannot ride a
+       ``ShortlistEntry``, so none of them can reach the page.
+    2. **Marker fidelity on the rendered surface.** The panel renders the
+       requirement quote and its resolved ``source_context`` verbatim — that
+       is the feature, so planting RAW PII in a quote and asserting its
+       absence would fail by design and would be a dishonest assertion to
+       write. Instead the evidence here is what the SERVER would emit: already
+       redacted. The page must carry those redaction markers through intact
+       (``[name redacted]`` / ``[contact redacted]`` / ``Employer A`` /
+       ``Institution A``) and must not resurrect the underlying identity from
+       any other source — a template that reached around the DTO for a raw
+       field, or dropped the scrubbed text in favour of an unscrubbed one,
+       breaks here.
+    """
     entry_id = uuid4()
     entry = _full_entry_detail(entry_id)
+    # (1) The extra-top-level-key plants: dropped by the whitelist.
     entry["candidate_name"] = _REAL_NAME
     entry["candidate"] = {
         "name": _REAL_NAME,
@@ -1158,6 +1190,29 @@ def test_entry_detail_black_box_pii_scan_under_blind_job(
     entry["_c_name"] = _REAL_NAME
     entry["_c_email"] = _REAL_EMAIL
     entry["_c_phone"] = _REAL_PHONE
+    # (2) The rendered surface, carrying SERVER-REDACTED evidence — exactly the
+    # shape ``_row_to_blind_entry`` produces for a blind job.
+    reqs = entry["evidence"]["requirements"]
+    reqs[0][
+        "evidence"
+    ] = "[name redacted] built the payments service at Employer A for four years."
+    reqs[0]["source_context"] = (
+        f"{_SOURCE_CONTEXT_MARKER}\n\n"
+        "[name redacted] — [contact redacted] — [contact redacted]\n"
+        "Employer A, Senior Engineer. Institution A, BSc."
+    )
+    reqs[1]["evidence"] = "Some exposure to Helm charts at Employer A."
+    entry["evidence"]["overall_summary"] = "[name redacted] is a strong backend fit."
+    entry["evidence"]["overall_motivation"] = "[name redacted] wants this job."
+    entry["evidence"]["cover_letter_presence"] = True
+    entry["evidence"]["cover_letter_evidence"] = [
+        {
+            "theme": "motivation",
+            "evidence": "Reach [name redacted] at [contact redacted].",
+            "evidence_chunk_ids": ["cl_001"],
+            "confidence": 0.8,
+        }
+    ]
     monkeypatch.setattr(
         api_client, "get_shortlist_entry", MagicMock(return_value=entry)
     )
@@ -1167,11 +1222,157 @@ def test_entry_detail_black_box_pii_scan_under_blind_job(
     # Sanity: the new panel actually rendered (this scan is meaningless
     # against the old 16-line stub, which shows none of this).
     _assert_number_rendered(body, 0.34, label="structured contribution")
+    # Sanity: the evidence quote + source context really are ON the page, so
+    # the marker assertions below are not vacuous.
+    assert "payments service" in body
+    assert _SOURCE_CONTEXT_MARKER in body
+    # The server's redaction markers survive to the reader, unaltered.
+    assert body.count("[name redacted]") >= 2
+    assert "[contact redacted]" in body
+    assert "Employer A" in body
+    assert "Institution A" in body
+    # And nothing re-materialises the identity behind them.
     assert _REAL_NAME not in body
     assert _REAL_EMAIL not in body
     assert _REAL_PHONE not in body
     assert _REAL_EMPLOYER not in body
     assert _REAL_SCHOOL not in body
+
+
+def test_entry_detail_real_blind_read_renders_no_pii(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE load-bearing privacy guard for this page: stored row -> the REAL
+    ``shortlist_service._row_to_blind_entry`` -> the serialized DTO the API
+    returns -> the rendered HTML.
+
+    Every other test in this file hands the route a hand-built dict, so none of
+    them executes the redaction at all — security proved that by stripping the
+    arguments off ``_row_to_blind_entry``'s ``_redact_evidence`` call and
+    watching the old "load-bearing privacy guard" here still PASS while four
+    service tests failed. This test closes that: the row carries the
+    candidate's real name/email/phone in the evidence quote AND in the résumé
+    chunk that ``source_context`` resolves from, and both of those fields are
+    rendered verbatim by ``shortlist_entry.html``. Drop the redaction and the
+    name/employer/school land on the page.
+
+    NOTE on what a mutation here proves. ``redact_text`` masks email/phone by
+    PATTERN, so those two stay redacted even with ``name``/``term_map``
+    stripped; the name, employer and school are the fields that actually leak,
+    and they are asserted individually below rather than as one blanket scan
+    so a partial regression cannot hide behind the others."""
+    from src.services.shortlist_service import _row_to_blind_entry
+
+    entry_id = uuid4()
+    chunk_text = (
+        f"{_SOURCE_CONTEXT_MARKER} {_REAL_NAME} — {_REAL_EMAIL} — {_REAL_PHONE}. "
+        f"Senior Engineer at {_REAL_EMPLOYER}. {_REAL_SCHOOL}, BSc."
+    )
+    row: dict[str, Any] = {
+        "id": entry_id,
+        "job_id": uuid4(),
+        "resume_id": uuid4(),
+        "rank": 2,
+        "score_final": 0.70,
+        "score_breakdown": json.dumps(
+            {
+                "skill": 0.80,
+                "experience": 0.60,
+                "education": 0.40,
+                "seniority": 0.50,
+                "vector": 1.00,
+                "structured": 0.68,
+                "motivation": 0.60,
+                "implied_experience": False,
+                "skill_contributions": [],
+                "score_structured": 0.68,
+                "score_evidence": 0.80,
+            }
+        ),
+        "evidence": json.dumps(
+            {
+                "requirements": [
+                    {
+                        "requirement": "Python",
+                        "status": "met",
+                        "evidence": (
+                            f"{_REAL_NAME} built the payments service at "
+                            f"{_REAL_EMPLOYER} for four years."
+                        ),
+                        "evidence_chunk_ids": ["c_001"],
+                        "confidence": 0.92,
+                    }
+                ],
+                "overall_summary": f"{_REAL_NAME} studied at {_REAL_SCHOOL}.",
+                "cover_letter_presence": True,
+                "cover_letter_evidence": [
+                    {
+                        "theme": "motivation",
+                        "evidence": f"Reach {_REAL_NAME} at {_REAL_EMAIL}.",
+                        "evidence_chunk_ids": [],
+                        "confidence": 0.8,
+                    }
+                ],
+                "overall_motivation": f"{_REAL_NAME} really wants this job.",
+            }
+        ),
+        "pipeline_meta": json.dumps(
+            {
+                "model_gen": "gpt-oss:20b",
+                "model_emb": "nomic-embed-text",
+                "prompt_versions": {"shortlist_evidence": "shortlist_evidence_v1"},
+                "weights": _ENTRY_WEIGHTS,
+                "git_sha": "deadbeef",
+                "generated_at": "2026-07-15T00:00:00+00:00",
+                "timings_ms": {},
+            }
+        ),
+        "generated_at": "2026-07-15T00:00:00+00:00",
+        "_c_name": _REAL_NAME,
+        "_c_email": _REAL_EMAIL,
+        "_c_phone": _REAL_PHONE,
+        "_c_parsed": json.dumps(
+            {
+                "candidate": {
+                    "name": _REAL_NAME,
+                    "email": _REAL_EMAIL,
+                    "phone": _REAL_PHONE,
+                },
+                "experience": [{"company": _REAL_EMPLOYER, "title": "Senior Engineer"}],
+                "education": [{"degree": "BSc", "institution": _REAL_SCHOOL}],
+                "chunks": [{"id": "c_001", "text": chunk_text}],
+                "cover_letter_chunks": [],
+            }
+        ),
+    }
+
+    dto = _row_to_blind_entry(row)
+    # The route consumes the API's JSON, so round-trip through it rather than
+    # handing the route a live pydantic object it would never receive.
+    payload = json.loads(dto.model_dump_json())
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=payload)
+    )
+
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    # Sanity, so the absence assertions cannot pass by the panel simply not
+    # rendering: the quote AND the resolved source context are both on the page.
+    _assert_number_rendered(body, 0.34, label="structured contribution")
+    assert "payments service" in body
+    assert _SOURCE_CONTEXT_MARKER in body
+
+    assert _REAL_NAME not in body, "candidate name reached the rendered panel"
+    assert _REAL_EMAIL not in body, "candidate email reached the rendered panel"
+    assert _REAL_PHONE not in body, "candidate phone reached the rendered panel"
+    assert _REAL_EMPLOYER not in body, "employer name reached the rendered panel"
+    assert _REAL_SCHOOL not in body, "school name reached the rendered panel"
+    # Positive control on the substitutions themselves.
+    assert "[name redacted]" in body
+    assert "Employer A" in body
+    assert "Institution A" in body
 
 
 def test_entry_detail_shows_weights_unavailable_when_pipeline_meta_missing(

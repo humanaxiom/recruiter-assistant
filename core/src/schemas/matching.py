@@ -514,8 +514,22 @@ class ShortlistEntry(BaseModel):
     # ``pipeline_meta=None`` -> "weights unavailable" handling immediately
     # below, which already refuses to state what it does not know. The two
     # unavailability stories are deliberately told the same way.
-    score_structured: float | None = None
-    score_evidence: float | None = None
+    #
+    # BOUNDED ``ge=0, le=1`` like every field on ``ScoreBreakdown`` and
+    # ``MatchWeights``. That bound is what keeps ``NaN``/``inf`` off this DTO:
+    # ``_folded_subscore``'s ``float(value)`` degrades only NON-numeric jsonb
+    # (``TypeError``/``ValueError``), so a stored ``"Infinity"``/``"NaN"``
+    # string parses to a real ``inf``/``nan`` and would reach the explanation
+    # panel, whose ``pct()`` macro (``(v * 100)|round|int``) raises
+    # ``OverflowError``/``ValueError`` out of Jinja's ``int`` filter — an
+    # UNHANDLED 500 on a compliance page. Not candidate-reachable today
+    # (Postgres rejects bare ``NaN``/``Infinity`` JSON literals and
+    # ``persist_shortlist`` writes pipeline floats), so this is defence in
+    # depth: with the bound, a corrupt row degrades through the route's
+    # existing ``ValidationError`` fallback ("explanation unavailable") instead
+    # of 500ing.
+    score_structured: float | None = Field(default=None, ge=0, le=1)
+    score_evidence: float | None = Field(default=None, ge=0, le=1)
     score_breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
     # The reproducibility stamp in force WHEN THIS ROW WAS GENERATED, read back

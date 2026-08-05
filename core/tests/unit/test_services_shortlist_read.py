@@ -742,6 +742,150 @@ async def test_row_without_folded_subscores_reports_none_not_zero() -> None:
     assert entries[0].score_evidence is None
 
 
+# ── the read path's WARNING logs carry no candidate field ────────────────────
+#
+# ``_parse_pipeline_meta``/``_folded_subscore`` are the only two log sites on
+# this read path, and both run on a row that (under blind review) has just been
+# joined to DECRYPTED candidate PII. Their docstring promises "entry id only --
+# never candidate fields", and by construction they emit only ``entry_id``, the
+# jsonb key name, ``type(value).__name__``, ``exc.error_count()`` and the
+# pydantic error *loc* path (field NAMES, never values).
+#
+# That is safe TODAY and unenforced: nothing failed if a future edit widened a
+# format string to ``%s`` the payload, which on this path would write decrypted
+# candidate text into the application log -- defeating the redaction boundary
+# in exactly the place a compliance artifact must not. The frontend sibling
+# (``test_entry_detail_malformed_payload_is_logged_not_swallowed_silently`` in
+# test_frontend_shortlist.py) already pins its own log site this way; these are
+# the missing service-side halves.
+#
+# Mutation-proven: widening EITHER log call to also emit the offending value
+# (e.g. adding ``raw_meta``/``value`` as a trailing ``%s`` argument) fails the
+# corresponding test below.
+
+_LOG_PII_NAME = "Zzyzxqrst Wibblesworth"
+_LOG_PII_EMAIL = "zzyzxqrst.wibblesworth@example.test"
+_LOG_PII_PHONE = "604-555-0192"
+
+
+def test_parse_pipeline_meta_validation_warning_logs_no_candidate_field(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed stamp whose VALUES carry candidate identity must be logged
+    with the entry id and the failure shape only."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    entry_id = uuid4()
+    raw = _valid_meta_dict()
+    raw["model_gen"] = _LOG_PII_NAME
+    raw["prompt_versions"] = {"shortlist_evidence": _LOG_PII_EMAIL}
+    raw["git_sha"] = _LOG_PII_PHONE
+    # Forces the ValidationError branch (``extra="forbid"``).
+    raw["sampling_temperature"] = 0.2
+
+    with caplog.at_level("WARNING"):
+        assert _parse_pipeline_meta(raw, entry_id=entry_id) is None
+
+    assert caplog.records, "a refused stamp must be logged, not swallowed"
+    assert str(entry_id) in caplog.text
+    assert _LOG_PII_NAME not in caplog.text
+    assert _LOG_PII_EMAIL not in caplog.text
+    assert _LOG_PII_PHONE not in caplog.text
+
+
+def test_parse_pipeline_meta_bad_json_warning_logs_no_candidate_field(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other refusal branch: a jsonb value that is not JSON at all. The
+    unparseable bytes are the ROW's own content and must not be echoed."""
+    from src.services.shortlist_service import _parse_pipeline_meta
+
+    entry_id = uuid4()
+    corrupt = f"{{not json at all -- {_LOG_PII_NAME} <{_LOG_PII_EMAIL}>"
+
+    with caplog.at_level("WARNING"):
+        assert _parse_pipeline_meta(corrupt, entry_id=entry_id) is None
+
+    assert caplog.records, "an unparseable stamp must be logged, not swallowed"
+    assert str(entry_id) in caplog.text
+    assert _LOG_PII_NAME not in caplog.text
+    assert _LOG_PII_EMAIL not in caplog.text
+
+
+def test_folded_subscore_warning_logs_no_candidate_field(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``_folded_subscore``'s refusal log names the jsonb KEY and the value's
+    TYPE — never the value, which on a corrupted row can be arbitrary stored
+    text."""
+    from src.services.shortlist_service import _folded_subscore
+
+    entry_id = uuid4()
+
+    with caplog.at_level("WARNING"):
+        assert (
+            _folded_subscore(
+                f"{_LOG_PII_NAME} {_LOG_PII_EMAIL} {_LOG_PII_PHONE}",
+                key="score_structured",
+                entry_id=entry_id,
+            )
+            is None
+        )
+
+    assert caplog.records, "an unreadable sub-score must be logged, not swallowed"
+    assert str(entry_id) in caplog.text
+    assert "score_structured" in caplog.text
+    assert _LOG_PII_NAME not in caplog.text
+    assert _LOG_PII_EMAIL not in caplog.text
+    assert _LOG_PII_PHONE not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_blind_read_warning_logs_no_candidate_field_end_to_end(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same guard on the REAL path: a BLIND row (joined to decrypted PII)
+    whose stamp and folded sub-score are both corrupt. Neither refusal may put
+    the candidate's decrypted name/email/phone into the log."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    corrupt = _breakdown_dict()
+    corrupt["score_structured"] = _LOG_PII_NAME
+    parsed = {
+        "candidate": {
+            "name": _LOG_PII_NAME,
+            "email": _LOG_PII_EMAIL,
+            "phone": _LOG_PII_PHONE,
+        },
+        "experience": [],
+        "education": [],
+        "chunks": [],
+        "cover_letter_chunks": [],
+    }
+    row = _blind_entry_row(
+        job_id=job_id,
+        evidence={},
+        score_breakdown=corrupt,
+        parsed=parsed,
+        name=_LOG_PII_NAME,
+        email=_LOG_PII_EMAIL,
+        phone=_LOG_PII_PHONE,
+    )
+    row["pipeline_meta"] = "{not json at all"
+    conn = _mock_conn(blind=True, rows=[row])
+
+    with caplog.at_level("WARNING"):
+        entries = await list_for_job(conn, job_id=job_id)
+
+    assert entries[0].score_structured is None
+    assert entries[0].pipeline_meta is None
+    assert caplog.records, "both refusals must be logged, not swallowed"
+    assert _LOG_PII_NAME not in caplog.text
+    assert _LOG_PII_EMAIL not in caplog.text
+    assert _LOG_PII_PHONE not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_non_numeric_folded_subscore_degrades_instead_of_500ing() -> None:
     """``float(folded)`` on a corrupted jsonb value raises ``ValueError``, NOT

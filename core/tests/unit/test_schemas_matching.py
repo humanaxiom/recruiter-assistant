@@ -294,6 +294,50 @@ def test_shortlist_entry_minimal_valid() -> None:
     assert entry.display_label is None
 
 
+def _shortlist_entry_payload(field: str, value: float | None) -> dict[str, object]:
+    return {
+        "id": uuid4(),
+        "job_id": uuid4(),
+        "resume_id": uuid4(),
+        "rank": 1,
+        "score_final": 0.9,
+        "score_breakdown": _score_breakdown(),
+        "evidence": None,
+        "generated_at": _TS,
+        field: value,
+    }
+
+
+@pytest.mark.parametrize("field", ["score_structured", "score_evidence"])
+@pytest.mark.parametrize("bad", [1.5, -0.1, float("inf"), float("-inf"), float("nan")])
+def test_shortlist_entry_composed_subscore_bounds(field: str, bad: float) -> None:
+    """The two composed sub-scores are bounded ``ge=0, le=1`` like every field
+    on ``ScoreBreakdown``/``MatchWeights``.
+
+    The load-bearing cases are ``inf``/``nan``. ``_folded_subscore`` degrades
+    only NON-numeric jsonb, so a stored ``"Infinity"``/``"NaN"`` literal parses
+    to a real float and rides onto this DTO unchallenged; the explanation
+    panel's ``pct()`` macro (``(v * 100)|round|int``) then raises
+    ``OverflowError``/``ValueError`` out of Jinja's ``int`` filter, which the
+    filter does NOT catch -> an unhandled 500 on a compliance page. Rejecting
+    the value here routes it through the entry-detail route's existing
+    ``ValidationError`` fallback instead."""
+    with pytest.raises(ValidationError):
+        ShortlistEntry.model_validate(_shortlist_entry_payload(field, bad))
+
+
+@pytest.mark.parametrize("field", ["score_structured", "score_evidence"])
+@pytest.mark.parametrize("good", [0.0, 0.5, 1.0, None])
+def test_shortlist_entry_composed_subscore_accepts_the_legal_range(
+    field: str, good: float | None
+) -> None:
+    """POSITIVE CONTROL for the bound above — the endpoints and ``None`` ("not
+    recorded") must all still be accepted, or the bound would have broken the
+    honest-absence contract it sits beside."""
+    entry = ShortlistEntry.model_validate(_shortlist_entry_payload(field, good))
+    assert getattr(entry, field) == good
+
+
 # ── jsonb round-trip fidelity (stored verbatim in Postgres jsonb) ────────────
 
 
