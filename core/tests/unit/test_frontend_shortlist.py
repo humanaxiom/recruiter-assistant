@@ -1284,6 +1284,12 @@ def test_entry_detail_unrecorded_subscores_render_as_not_recorded(
 
     assert "not recorded" in _norm(body)
     tables = _contribution_html(body)
+    # Pin the marker in the TABLE CELL, not merely somewhere on the page: the
+    # explanatory banner hardcodes "not recorded" whenever scores_available is
+    # False, so the page-wide assertion above passes even if the cell's marker
+    # drifts out of sync with the banner promising it.
+    rows = {r[0]: r for r in _contribution_rows(body)}
+    assert rows["Structured"][2] == "not recorded", rows["Structured"]
     # No affirmative zero anywhere in the top-level rows, and no contribution
     # derived from a score that was never recorded (0.5 * 0.0 = 0.0).
     assert ">0%<" not in tables.replace(" ", "")
