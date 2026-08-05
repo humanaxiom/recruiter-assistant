@@ -89,13 +89,13 @@ $PortVars = [ordered]@{
     NEO4J_BOLT_PORT = 29687
 }
 
-# Inference config written into .env if absent (matches .env.example). Default
-# is the team's shared Tailscale Ollama (has gpt-oss:20b + nomic-embed-text) —
-# your box must be on the tailnet. For fully-local metal instead, set
-# LLM_BASE_URL=http://host.docker.internal:11434/v1 + LLM_TIMEOUT_S=120 in .env
-# and `ollama pull gpt-oss:20b nomic-embed-text`.
+# Inference config written into .env if absent (matches .env.example). Inference
+# runs on the GPU host aria-gb10 over Tailscale (its tailnet IP below; has
+# gpt-oss:20b + nomic-embed-text) — your box must be on the tailnet. Only if you
+# run your OWN Ollama on the app box instead: LLM_BASE_URL=
+# http://host.docker.internal:11434/v1 + LLM_TIMEOUT_S=120 (+ pull the models).
 $EnvDefaults = [ordered]@{
-    LLM_BASE_URL  = 'http://100.88.247.106:11434/v1'
+    LLM_BASE_URL  = 'http://100.88.247.106:11434/v1'   # aria-gb10 over Tailscale
     LLM_TIMEOUT_S = '300'
 }
 
@@ -226,11 +226,12 @@ try {
     } else { Write-Ok "Reachable with both models ($genModel, $embModel)." }
 } catch {
     Write-Warn2 "Cannot reach the Ollama at $llmBase — the stack boots, but parsing/ranking FAIL closed until it's up."
-    if ($llmBase -match '100\.\d+\.\d+\.\d+|:\/\/100\.') {
-        Write-Warn2 'That is a Tailscale address — is THIS box joined to the tailnet and is the peer up?'
+    if ($llmBase -match '://100\.\d+\.\d+\.\d+') {
+        Write-Warn2 'That is aria-gb10 over Tailscale — is THIS box joined to the tailnet and is aria-gb10 up?'
     }
-    Write-Warn2 'Or point LLM_BASE_URL at local metal in .env (http://host.docker.internal:11434/v1, LLM_TIMEOUT_S=120)'
-    Write-Warn2 'and: ollama serve  then  ollama pull gpt-oss:20b nomic-embed-text'
+    Write-Warn2 'Only if you run your OWN Ollama on this box instead: set LLM_BASE_URL='
+    Write-Warn2 'http://host.docker.internal:11434/v1 + LLM_TIMEOUT_S=120 in .env, then'
+    Write-Warn2 'ollama serve  and  ollama pull gpt-oss:20b nomic-embed-text'
 }
 
 # ── 3. Port preflight — clear message instead of a raw Docker bind error ──────

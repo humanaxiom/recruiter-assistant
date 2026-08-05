@@ -12,10 +12,12 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > writes the ENTIRE `.env` (secrets + unique 29xxx ports + inference config), verifies both models at
 > `LLM_BASE_URL`, port-preflights, and boots with CAS on. `.env` is permission-protected (agent can't
 > read/write it — the user/script does). **Inference endpoint is `.env`-driven** (`docker-compose.yml` reads
-> `${LLM_BASE_URL:-http://host.docker.internal:11434/v1}` + `${LLM_TIMEOUT_S:-120}`); `.env.example` ships the
-> **team's shared Tailscale Ollama** `http://100.88.247.106:11434/v1` (has `gpt-oss:20b` + `nomic-embed-text`;
-> box must be on the tailnet) with `LLM_TIMEOUT_S=300`, local metal alternative documented. **`compose.live-eval.yml`
-> and the `-LiveEval` flag are GONE** — the peer is just `LLM_BASE_URL` now (one mechanism).
+> `${LLM_BASE_URL:-http://host.docker.internal:11434/v1}` + `${LLM_TIMEOUT_S:-120}`). **Inference runs on the
+> GPU host `aria-gb10` over Tailscale — there is NO local Ollama in this setup.** `.env.example` ships
+> `LLM_BASE_URL=http://100.88.247.106:11434/v1` (aria-gb10's tailnet IP — the container resolves the IP, NOT
+> the `aria-gb10` hostname; box must be on the tailnet) + `LLM_TIMEOUT_S=300`; the `host.docker.internal`
+> default is only for someone running their own Ollama on the app box. **`compose.live-eval.yml` and the
+> `-LiveEval` flag are GONE** — the endpoint is just `LLM_BASE_URL` now (one mechanism).
 > **`compose.cas.yml` IS TRACKED (PR #58) — the old "untracked stray, leave it" guidance is DEAD;** CAS is
 > ON BY DEFAULT (dev-anonymous-admin only via `-NoCas`/plain `docker compose up`, a BOOT MODE not a missing
 > feature). **Standing orders (do not violate):** (1) UNIQUE host ports (29xxx), never stock

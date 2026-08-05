@@ -59,10 +59,11 @@ services:
       NEO4J_PASSWORD: recruiterpass
       REDIS_URL: redis://redis:6379/0
       # OpenAI-compatible Ollama endpoint — set in .env (see .env.example).
-      # Local metal: http://host.docker.internal:11434/v1 (needs the models
-      # pulled). Shared Tailscale Ollama: http://<tailnet-ip>:11434/v1 (the
-      # box must be on the tailnet). NEVER a cloud endpoint. The timeout must
-      # clear the model's slowest call (gpt-oss:20b ~131s at 3072 tokens; use 300).
+      # This team runs inference on the GPU host **aria-gb10** over Tailscale
+      # (LLM_BASE_URL = its tailnet IP; the box must be on the tailnet). Only if
+      # you run your OWN Ollama on the app box instead:
+      # http://host.docker.internal:11434/v1. NEVER a cloud endpoint. The timeout
+      # must clear the model's slowest call (gpt-oss:20b ~131s at 3072 tok; use 300).
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       LLM_MODEL_GENERATION: ${LLM_MODEL_GENERATION:-gpt-oss:20b}
       LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}

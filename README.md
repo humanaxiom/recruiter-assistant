@@ -354,9 +354,7 @@ Full plan: [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md). Architecture deci
 
 **Prerequisites**
 1. **Docker Desktop** (with Compose v2) running.
-2. **An Ollama endpoint with both models** — `gpt-oss:20b` (generation) + `nomic-embed-text` (embeddings). Two supported setups, pick one in `.env` (`LLM_BASE_URL`):
-   - **Shared Tailscale Ollama (this team's default):** a tailnet peer already has both models. **Your box must be joined to the tailnet.** `.env.example` ships this endpoint + `LLM_TIMEOUT_S=300`.
-   - **Fully local Ollama:** no tailnet needed, but pull the models yourself — `ollama serve` then `ollama pull gpt-oss:20b nomic-embed-text` (gpt-oss:20b is ~13 GB) — and set `LLM_BASE_URL=http://host.docker.internal:11434/v1`, `LLM_TIMEOUT_S=120` in `.env`.
+2. **Reach the inference host.** Inference does **not** run on the app box — it runs on the dedicated GPU host **`aria-gb10`** over **Tailscale**, which already has both models (`gpt-oss:20b` + `nomic-embed-text`) pulled and calibrated. **Your box must be joined to the tailnet.** `.env.example` ships `LLM_BASE_URL` = aria-gb10's tailnet IP + `LLM_TIMEOUT_S=300`. (Only if you deliberately run your *own* Ollama on the app box instead: set `LLM_BASE_URL=http://host.docker.internal:11434/v1`, `LLM_TIMEOUT_S=120`, and `ollama pull gpt-oss:20b nomic-embed-text` — ~13 GB.)
 
 **Windows (PowerShell) — one command:**
 ```powershell
