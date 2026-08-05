@@ -58,12 +58,16 @@ services:
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: recruiterpass
       REDIS_URL: redis://redis:6379/0
-      # Ollama on host metal — OpenAI-compatible. Never a cloud endpoint.
-      LLM_BASE_URL: http://host.docker.internal:11434/v1
-      LLM_MODEL_GENERATION: gpt-oss:20b
-      LLM_MODEL_EMBEDDING: nomic-embed-text
+      # OpenAI-compatible Ollama endpoint — set in .env (see .env.example).
+      # Local metal: http://host.docker.internal:11434/v1 (needs the models
+      # pulled). Shared Tailscale Ollama: http://<tailnet-ip>:11434/v1 (the
+      # box must be on the tailnet). NEVER a cloud endpoint. The timeout must
+      # clear the model's slowest call (gpt-oss:20b ~131s at 3072 tokens; use 300).
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_MODEL_GENERATION: ${LLM_MODEL_GENERATION:-gpt-oss:20b}
+      LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
       LLM_EMBEDDING_DIM: "768"
-      LLM_TIMEOUT_S: "120"
+      LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-120}"
       STORAGE_DIR: /data
       PII_KEY: ${PII_KEY:?PII_KEY must be set — 32 random bytes, base64}
       # ADR-008: required — an empty salt would key every non-vocab Skill
