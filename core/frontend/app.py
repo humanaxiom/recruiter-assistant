@@ -29,9 +29,20 @@ from flask import (
     request,
     url_for,
 )
+from pydantic import ValidationError
 
 from frontend import api_client, csrf
+from src.schemas.matching import ShortlistEntry
+from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import get_settings
+
+# The known ShortlistEntry field names, computed once at import time. Any key
+# on the raw dict from ``api_client.get_shortlist_entry`` that is NOT one of
+# these is dropped before validation -- a defense-in-depth whitelist so a
+# stray/extra field (e.g. a backend bug that leaked a ``candidate`` blob onto
+# the payload) can never reach ``shortlist_entry_explanation`` or the
+# template, regardless of ShortlistEntry's own ``extra="forbid"`` config.
+_SHORTLIST_ENTRY_FIELDS = frozenset(ShortlistEntry.model_fields)
 
 # The backend caps résumé uploads at ~10 MB/file and up to 20 files per
 # request (`src.api.routes.resumes`), plus the (much smaller) JD-extract
@@ -715,12 +726,30 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
 @app.get("/shortlist/<uuid:entry_id>")
 def shortlist_entry_detail(entry_id: UUID) -> Any:
     try:
-        entry = api_client.get_shortlist_entry(entry_id)
+        raw = api_client.get_shortlist_entry(entry_id)
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template("shortlist_entry.html", entry=entry)
+    # THE HONESTY GUARD (weight * score = contribution, "no generation-time
+    # weights -> no contribution shown") lives in EXACTLY ONE place:
+    # ``src.services.explanation.shortlist_entry_explanation``. This route
+    # never re-derives that arithmetic itself, and the template renders only
+    # what the explanation object already computed.
+    #
+    # A raw payload that fails validation (a legacy/malformed row missing a
+    # field ``ShortlistEntry`` requires) degrades to ``explanation=None``
+    # rather than a 500 -- the template still shows the bare rank/label/score
+    # (identical to the pre-slice stub), it just omits the score-composition
+    # and evidence panels, which cannot be shown honestly without a
+    # well-formed DTO.
+    explanation: ShortlistExplanation | None
+    known = {k: v for k, v in raw.items() if k in _SHORTLIST_ENTRY_FIELDS}
+    try:
+        explanation = shortlist_entry_explanation(ShortlistEntry.model_validate(known))
+    except ValidationError:
+        explanation = None
+    return render_template("shortlist_entry.html", entry=raw, explanation=explanation)
 
 
 @app.get("/resumes/<uuid:resume_id>")

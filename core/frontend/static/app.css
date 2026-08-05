@@ -515,6 +515,23 @@ details.newjob summary {
   font-weight: 500;
 }
 
+/* ── shortlist entry detail ("Why this rank?" defense pack) ─────────────── */
+
+.direction-banner {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: 0 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.contribution-table {
+  margin: 12px 0 20px;
+}
+
 /* ── résumé detail ───────────────────────────────────────────────────── */
 
 .blind-banner {
