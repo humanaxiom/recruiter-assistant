@@ -1292,6 +1292,37 @@ def test_entry_detail_unrecorded_subscores_render_as_not_recorded(
     _assert_number_rendered(body, 0.32, label="skill contribution")
 
 
+def test_entry_detail_affirmative_zero_subscores_render_as_zero(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The mirror of the test above. When a sub-score genuinely IS ``0.0`` --
+    the common case for motivation, since ``_motivation_score`` returns
+    ``0.0`` for every candidate who submitted no cover letter -- it must
+    render as an affirmative zero, never be disguised as "not recorded".
+
+    This pins the ``v is not none`` boundary in BOTH ``pct`` and
+    ``score_cell`` in the other direction from the test above: a
+    ``v is not none`` -> ``v`` (truthiness) mutant on either macro collapses
+    a real ``0.0`` into the same branch as an unrecorded ``None`` and would
+    pass every other test in this file undetected."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_structured"] = 0.0
+    entry["score_breakdown"]["motivation"] = 0.0
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    rows = {row[0]: row for row in _contribution_rows(body)}
+    assert rows["Structured"][2] == "0", rows["Structured"]
+    assert rows["Motivation"][2] == "0", rows["Motivation"]
+    tables = _contribution_html(body)
+    assert "not recorded" not in tables
+
+
 def test_entry_detail_non_dict_payload_degrades_instead_of_500ing(
     monkeypatch: Any, client: Any
 ) -> None:
@@ -1332,3 +1363,9 @@ def test_entry_detail_malformed_payload_is_logged_not_swallowed_silently(
     text = " ".join(r.getMessage() for r in warnings)
     assert str(entry_id) in text
     assert _REAL_NAME not in text
+    # Black-box PII scan of the rendered BODY too -- this is the only render
+    # path (the degraded ``_EntryHeader`` fallback) with no such check above.
+    # Structurally it cannot leak (``_entry_header``/``known`` only ever carry
+    # the four ``ShortlistEntry`` display fields), but this is belt-and-braces
+    # on the one uncovered path.
+    assert _REAL_NAME not in resp.get_data(as_text=True)

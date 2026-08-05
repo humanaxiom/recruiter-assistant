@@ -823,7 +823,7 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
             entry_id,
             exc.error_count(),
         )
-        entry = _entry_header(payload)
+        entry = _entry_header(known)
         explanation = None
     # The template is handed the VALIDATED DTO (or the coerced header), never
     # the raw payload -- so a field the backend should not have sent has no
