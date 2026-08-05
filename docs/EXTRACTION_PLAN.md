@@ -2,6 +2,9 @@
 
 Extract the **resume-ranking feature** from `C:\repos\hris` into a bare-essentials, local-first app built on the [golden template](../USING_THIS_TEMPLATE.md). No review workflow, no JD-Harmonizer. Keep anonymization, evidence-backed ranking, shortlists, and exports.
 
+> **This is the frozen v1 plan (Phases 0–7, all shipped).** For what to build NEXT — the flagship "wow"
+> feature candidates seeded 2026-08-04 — see **[`docs/ROADMAP.md`](ROADMAP.md)** and the HANDOFF Next-session menu.
+
 ## Decisions (locked)
 
 | # | Decision | Choice |
