@@ -4,9 +4,10 @@
 AI touches a candidate's data. **Scope:** every LLM call, every embedding, and the guardrails around them.
 
 > **Three principles that constrain everything below.**
-> 1. **Offline-only.** All inference runs on a **local** OpenAI-compatible endpoint (Ollama on host metal
->    at `host.docker.internal:11434/v1`, or a Tailscale peer via a compose override). **No cloud AI call
->    exists anywhere in the codebase**, by design (PIPEDA/FIPPA).
+> 1. **Offline-only.** All inference runs on a self-hosted, OpenAI-compatible Ollama endpoint set via
+>    `LLM_BASE_URL` — this team's is the GPU host **aria-gb10** over Tailscale (`host.docker.internal:11434`
+>    only if you run your own Ollama on the app box). **No cloud AI call exists anywhere in the codebase**,
+>    by design (PIPEDA/FIPPA).
 > 2. **PII never enters an embedding.** Candidate identity is redacted before any text is embedded, and the
 >    skill graph is PII-free *by construction*. See [Privacy boundaries](#privacy-boundaries).
 > 3. **AI is assistive, not authoritative.** Every LLM output is validated against a strict schema; the
