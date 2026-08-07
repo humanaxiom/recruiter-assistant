@@ -177,6 +177,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import tomllib
@@ -196,6 +197,18 @@ _EVALS_DIR = Path(__file__).resolve().parent
 _CORE_ROOT = _EVALS_DIR.parents[1]
 if str(_CORE_ROOT) not in sys.path:
     sys.path.insert(0, str(_CORE_ROOT))
+
+# ADR-008: settings.skill_hash_salt must be non-empty for any code path that
+# hashes a non-vocab skill name (src.pipeline.skills_graph._hash_key) to
+# succeed. This script runs standalone (`python tests/evals/run_evals.py`),
+# NEVER through pytest, so core/tests/conftest.py's session-wide
+# `os.environ.setdefault("SKILL_HASH_SALT", ...)` never executes here --
+# without this line, the first non-vocab JD skill (the corpus-blindness fix
+# below deliberately adds one -- see `_skill_rows_for`) makes `_hash_key`
+# raise `RuntimeError: skill_hash_salt is empty` the moment `main()` reaches
+# it. `setdefault` never overrides an already-set SKILL_HASH_SALT in the
+# real environment.
+os.environ.setdefault("SKILL_HASH_SALT", "eval-corpus-only-salt-do-not-use-in-prod")
 
 FIXTURES_DIR = _EVALS_DIR / "fixtures"
 THRESHOLDS_PATH = _EVALS_DIR / "thresholds.toml"
@@ -561,10 +574,39 @@ def _candidate_families(canonicals: set[str]) -> set[str]:
 def _skill_rows_for(parsed: dict[str, Any], jd: dict[str, Any]) -> list[Any]:
     """Reproduce _stage2_skill_rows against fixture JSON: direct match ->
     ontology_weight 1.0; shared curated family -> 0.5; else 0.0. REQUIRES-only
-    (blocker #5: nice-to-haves never feed this)."""
+    (blocker #5: nice-to-haves never feed this).
+
+    ADR-008 parity fix (corpus-blindness fix): ``skill=`` is now keyed via the
+    REAL ``_canonical_key_for_normalised`` -- a vocab hit stays the cleartext
+    normalised name, a non-vocab name becomes ``h:<hash>`` -- matching what
+    ``_stage2_skill_rows``'s Cypher actually returns
+    (``reqSkill.canonical_key``) against a real Neo4j. The OLD
+    ``skill=_basic_normalise(name)`` could NEVER produce a hashed key, so this
+    corpus was structurally blind to ADR-008's canonical-key hashing even
+    though the production code has hashed non-vocab skills since ADR-008
+    landed: every JD required skill in this fixture corpus is a vocab hit, so
+    ``_canonical_key_for_normalised`` returns its input UNCHANGED for every
+    one of them and this swap is a byte-for-byte no-op against the existing
+    corpus (see the JD fixture's new non-vocab NICE-TO-HAVE skill for where a
+    hashed key actually enters the corpus -- nice-to-have skills never reach
+    this function at all, per blocker #5 above, so that addition cannot
+    perturb the required-skill rows built here).
+
+    Matching (``canon in cand``) and the curated-family ontology lookup
+    (``categories_for(canon)`` / ``_candidate_families``) deliberately stay on
+    the PRE-hash normalised string, not the canonical key: mirroring
+    production's ``ensure_categories(tx, canonical)`` (which stamps categories
+    off the POST-hash key, so a non-vocab skill's category is always empty in
+    production) would change which fixture rows get family credit -- and
+    every current fixture is vocab-only, so it is unobservable either way
+    today. Keeping the pre-hash string here confines this fix to the ONE
+    thing the bug report is about: the inert ``skill=`` label
+    (``SkillContribution.skill``), never the scoring arithmetic
+    (``score_skill_breakdown`` never reads ``.skill`` -- see stages.py).
+    """
     from src.pipeline.matching.stages import _SkillRowFromCypher
     from src.pipeline.skills import _basic_normalise
-    from src.pipeline.skills_graph import categories_for
+    from src.pipeline.skills_graph import _canonical_key_for_normalised, categories_for
 
     cand: dict[str, dict[str, Any]] = {}
     for s in parsed.get("skills", []):
@@ -575,11 +617,12 @@ def _skill_rows_for(parsed: dict[str, Any], jd: dict[str, Any]) -> list[Any]:
 
     rows: list[Any] = []
     for _name, canon, min_years in jd["required"]:
+        canonical_key = _canonical_key_for_normalised(canon)
         if canon in cand:
             s = cand[canon]
             rows.append(
                 _SkillRowFromCypher(
-                    skill=canon,
+                    skill=canonical_key,
                     req_years=min_years,
                     is_must_have=True,
                     years=s.get("years"),
@@ -594,7 +637,7 @@ def _skill_rows_for(parsed: dict[str, Any], jd: dict[str, Any]) -> list[Any]:
         weight = 0.5 if req_fams & cand_fams else 0.0
         rows.append(
             _SkillRowFromCypher(
-                skill=canon,
+                skill=canonical_key,
                 req_years=min_years,
                 is_must_have=True,
                 years=None,
