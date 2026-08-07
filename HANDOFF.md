@@ -2,7 +2,102 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-02/04: FU-7 §2/§4 + reproducible dev-boot (unique ports · CAS · peer LLM); everything merged
+### ⚠️⚠️ READ FIRST — SESSION 2026-08-04/05: "Why this rank?" defense pack, slice 1 (ADR-031) — gates green, PR pending
+
+> **Branch `feat/why-this-rank-defense-pack`, HEAD `637c6bd`, off `main` @ `6d452e5`. Tree clean. All three
+> merge-blocking gates GREEN locally (reviewer APPROVE, security PASS, ranking-evals PASS). PR pending — not
+> yet opened; the human opens it next. `gh pr merge` is classifier-blocked in this environment (standing
+> finding, unrelated to this branch) — drive the PR to green and hand the merge command to the human, don't
+> attempt it.** This banner supersedes the 2026-08-02/04 "FU-7 §2/§4 + reproducible dev-boot" banner below
+> (kept as history) and all older stale banners.
+>
+> **What shipped this session (`docs/ROADMAP.md` card #1, slice 1 of 2):** a **deterministic**
+> score-composition + verified-evidence panel on the shortlist entry detail page
+> (`GET /shortlist/<uuid:entry_id>`, both the API route and the Flask workflow-UI page). **No LLM, no DDL, no
+> scoring-math change** — every number rendered was already persisted in `shortlist_entries.score_breakdown`
+> / `evidence` / `pipeline_meta` jsonb; this slice only stopped throwing two of those three away on read.
+> `ShortlistEntry` gained `score_structured`/`score_evidence`/`pipeline_meta`; a new pure module,
+> `core/src/services/explanation.py::shortlist_entry_explanation`, is the **single source** of the
+> `weight × score = contribution` arithmetic (no DB/LLM/clock/randomness, no `src.pipeline` import) — the
+> Flask template renders its output and computes nothing itself. Full detail: **[ADR-031](docs/adr/031-why-this-rank-defense-pack.md)**.
+>
+> **The honesty decisions (the actual point of this slice — read ADR-031 in full before touching this
+> surface again):** (1) weights come from `entry.pipeline_meta.weights` — the weights **in force when that
+> row was generated** — never current settings/`DEFAULT_WEIGHTS`; this matters more once ROADMAP card #3
+> (Policy Studio) potentially makes weights tunable. (2) no `pipeline_meta` → `weights_available=False`,
+> every weight/contribution `None`, UI says "weights unavailable", never a silently substituted default.
+> (3) a malformed stamp is treated as unavailable, never resurrected as `DEFAULT_WEIGHTS` — this was a
+> **surviving mutant** the reviewer found (the invariant lived only in a docstring); now test-enforced.
+> (4) an unrecorded sub-score renders "not recorded", never an affirmative "0%" — **and, symmetrically, a
+> genuine `0.0` renders as "0", never "not recorded"**; the second direction was itself a surviving mutant
+> introduced by the fix for the first (`_motivation_score` returns `0.0` for every candidate with no cover
+> letter, so real zeros are the common case, not an edge case). (5) anti-fabrication verdicts (met/missing,
+> scrubbed-quote demotion) are copied **faithfully** off `entry.evidence.requirements`, never re-derived.
+> **Direction boundary (ADR-009 residual, unchanged):** forward-shortlist only — reverse-match's
+> `score_final` tops out at 0.9 (no motivation term), so a shared panel would mislabel scales; the helper is
+> named forward-only and reverse-match extension stays unscoped future work.
+>
+> **Privacy finding, recorded honestly:** the *original* black-box HTML PII scan for this panel was
+> **inert** — it planted PII only in extra top-level keys the redaction whitelist drops and monkeypatched
+> the API client, so it never drove a request through the real server-side redaction boundary
+> (`shortlist_service._row_to_blind_entry`) at all, and it still passed with that boundary hypothetically
+> removed. Replaced with `test_entry_detail_real_blind_read_renders_no_pii`, which drives a raw-PII row
+> through the *real* redaction function, round-trips through `model_dump_json()`, and renders — killing both
+> known redaction mutants (M1, M2). **No live PII leak ever existed**; the server-side boundary was
+> mutation-proven throughout — the gap was only in one test's ability to prove it.
+>
+> **Gate verdicts, final, HEAD `637c6bd`:** reviewer APPROVE, security PASS (0 critical/high/unresolved
+> -medium), ranking-evals PASS. `./scripts/verify.sh all` green: **4153 unit tests @ 94.03% coverage, 470
+> integration tests**. ranking-evals proved ranking **byte-identical to `main`** — ran the corpus against a
+> `main` worktree and diffed full-precision metric dumps: **identical md5sums**
+> (`ada3e283774cc642cfccba9d3ff9994f`), precision@5 = 1.0, evidence verification rate = 1.0, r09 held at rank
+> 12, all 5 ordering pairs enforced, determinism `max_score_delta` 0.0.
+>
+> **Accepted residuals (recorded, not fixed — see ADR-031 for full rationale):**
+> - **PipelineMeta disclosure widened (security finding 2, Low, accepted).** The full `PipelineMeta`
+>   (`model_gen`/`model_emb`/`prompt_versions`/`git_sha`/`timings_ms`/`weights`) now serializes to **all four
+>   roles** on both the detail route and every entry of `GET /jobs/{job_id}/shortlist` — previously gated to
+>   admin/recruiter, others saw only `git_sha[:12]` via the export. No PII, `extra="forbid"`, nothing
+>   rendered into HTML, offline app, and the reproducibility trail is the point of an auditor's defense pack.
+>   Optional later hardening (not done): truncate to `git_sha[:12]` for parity, or gate
+>   `prompt_versions`/`timings_ms` specifically.
+> - **Payload growth**: `pipeline_meta` on every shortlist list entry (~200-400 bytes/entry); no detail-only
+>   response model split out for slice 1.
+> - **Backend read path validates uncaught (security N-3, unreachable today)**: the new `ge=0, le=1` bound on
+>   `score_evidence`/`score_structured` is a genuinely new rejection surface, proven unreachable for every
+>   `MatchWeights` the model accepts across all 20 corpus fixtures — but a hand-corrupted row would still
+>   raise uncaught on the **API** read path (the Flask frontend route degrades gracefully; the backend API
+>   route does not). Joins a pre-existing family of uncaught read-path validates.
+> - **Slice 2 deferred**: the optional grounded-LLM narrative and the PDF/timestamped decision-rationale
+>   export named in the ROADMAP card are **not** in this slice.
+>
+> **Carried-forward corpus finding (NOT from this branch, present identically on `main`) — now recorded in
+> `core/tests/evals/README_4c_twins.md` §6, owned by the corpus owner as a follow-up:** **N-1** — the
+> `skill_missing_must` ordering pair is **inert** against `weights.skill = 0` (measured `+4.895691e-03` in
+> `score_final` units on both input orders, ~4900× above `min_score_gap`); root cause is a vector-embedding
+> residual from the `Skills:` line differing between `r18`/`r01`, not the intended arithmetic gap — same
+> shape as the round-5/round-7 vector confounds already documented there. That README's §4 had explicitly
+> flagged this as unmeasured; it is now measured. **N-2** (doc nit) — §4's stated `must_have_miss_penalty`
+> gap for `r18` was written as ≈0.048; measured value is **0.096** (`0.6*0.40*0.40`); the obligation itself
+> (`_assert_must_have_penalty_fires_on_r18`) was already green, this only corrects the prose.
+>
+> **Environment observation for the next session (not a regression):** the integration suite **flaked
+> twice** on this box this session, on two unrelated tests —
+> `test_auditor_read_logging_pg::test_get_resume_nonexistent_auditor_404_writes_zero_audit_rows`, then
+> `test_matching_orchestrator::test_load_job_view_missing_fields_key_defaults_to_empty_tuple` — each passed
+> clean on an identical immediate re-run. Worth knowing before treating a single unrelated integration
+> `ERROR` as a real regression on this box.
+>
+> **Standing orders — verified unviolated this session:** unique 29xxx host ports (untouched, no compose
+> change this session); CAS on by default (untouched); inference is offline-only on `aria-gb10` over
+> Tailscale, no cloud call added (this slice added zero LLM calls — the whole point of "no LLM" scope).
+>
+> **Next session:** open the PR, get it merged (human-driven, `gh pr merge` is classifier-blocked — see the
+> memory note), then either slice 2 of this card (optional grounded-LLM narrative + PDF/decision-rationale
+> export, gate-proven to only cite verified quotes) or one of the other two ROADMAP flagship cards ("Ask the
+> pool" NL search, Policy Studio). The N-1/N-2 corpus findings are the corpus owner's pickup, not blocking.
+
+#### (history) READ FIRST — SESSION 2026-08-02/04: FU-7 §2/§4 + reproducible dev-boot (unique ports · CAS · peer LLM); everything merged
 
 > **Current tip: `humanaxiom/main` == `8d664c3`. Both repos are PUBLIC. Zero open PRs. Working tree clean.
 > Nothing is mid-flight.** This banner supersedes the 2026-08-01 "education field relevance (PR #49)" banner

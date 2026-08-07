@@ -189,3 +189,38 @@ python tests/evals/run_evals.py
 # ranking-evals: src.pipeline.matching.orchestrator is not implemented yet ...
 echo $?  # 1
 ```
+
+## 6. Post-4c finding N-1/N-2 (measured on branch `feat/why-this-rank-defense-pack`, present identically on `main`)
+
+Section 4 above flagged the `skill_missing_must` mutation obligation as leaving an **unmeasured** vector
+residual — "4c must measure its sign before trusting this pair's verdict at the `min_score_gap` boundary."
+It is now measured, as a side effect of the `ranking-evals` run for the "Why this rank?" defense pack
+(ADR-031). This finding is **not caused by that change** — the ordering pair and both fixtures are unchanged
+— and reproduces identically against a `main` worktree.
+
+- **N-1: the `skill_missing_must` ordering pair is inert against `weights.skill = 0`.** Measured: with
+  `weights.skill = 0` the pair stays correctly ordered by `+4.895691e-03` in `score_final` units, on **both**
+  input orders — roughly 4900x above `min_score_gap = 1e-6`. Root cause: `r18` is `r01` minus one skill
+  entry, and `_build_summary_text` embeds the `Skills:` line, so the vector encoder sees a different string
+  for the two fixtures even though `_build_summary_text` was designed, for the corpus's other twin pairs, to
+  produce byte-identical embedding input. The resulting **vector** residual is `0.08159484562693509` (vector
+  units); at `weights.vector = 0.6 * 0.10`, that is `+0.00490` of `score_final` — which is what survives when
+  the `weights.skill = 0` mutation removes the pair's intended `0.144` arithmetic gap and points the surviving
+  gap at `r01`, the higher twin (the correct direction, just not for the intended reason). Same shape as the
+  round-5 F2 and round-7 R7-2 vector confounds this corpus already documents elsewhere. **Verdict: inert** —
+  the mutation does not flip or collapse the pair's ordering, so it does not currently threaten the gate, but
+  the pair is not actually gating what its name claims (a genuinely-missing-skill penalty) once `weights.skill
+  = 0` is in play; it is gating a residual embedding artifact instead. Adjacent to, but distinct from, the
+  standing R1 residual.
+- **N-2 (doc nit): §4's stated `must_have_miss_penalty` gap for `r18` is wrong; the number directly above it
+  in the same section is right.** §4's prose states the penalty-mutated gap as "approximately 0.048
+  (0.6*0.40*0.20)". Measured: **0.096** (`0.6*0.40*0.40`) — `r18`'s skill mean goes `0.40 -> 0.80` under the
+  `must_have_miss_penalty: 0.5 -> 1.0` mutation, a delta of `0.40`, not `0.20`; the bullet list immediately
+  above that sentence in §4 already states the `0.40` delta correctly. The underlying obligation is satisfied
+  regardless — `_assert_must_have_penalty_fires_on_r18` is green — this is a correction to the write-up's
+  arithmetic only, not to any fixture, threshold, or test.
+
+**Follow-up ownership:** both are corpus-level findings, owned by the round's corpus tester per this file's
+own ownership boundary (section "Ownership boundary" above), not by whatever feature branch happened to run
+`ranking-evals` and notice them. Recorded here so a future round doesn't have to re-derive the sign; not
+fixed as part of this note.

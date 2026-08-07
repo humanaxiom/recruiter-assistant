@@ -24,6 +24,11 @@ What a REAL Postgres proves that the mocked-conn unit tests
   trip: a worker task invoked against a NON-default ``Settings`` persists a
   ``pipeline_meta`` whose ``weights`` match ``weights_from_settings(settings)``
   when read back from the table — not merely captured by a mock.
+* "Why this rank?" defense pack, slice 1 (added below): the READ side
+  (``get_one``) must surface ``score_structured``/``score_evidence``/
+  ``pipeline_meta.weights`` back onto the DTO after a REAL asyncpg jsonb
+  round trip — floats coming back out of a real jsonb codec, not merely
+  captured by a mock connection, which is what the unit suite can prove.
 """
 
 from __future__ import annotations
@@ -81,15 +86,35 @@ async def pg_pool(pg_dsn: str) -> AsyncIterator[asyncpg.Pool]:
 
 
 async def _insert_job(
-    pool: asyncpg.Pool, *, description_parsed: dict[str, Any] | None = None
+    pool: asyncpg.Pool,
+    *,
+    description_parsed: dict[str, Any] | None = None,
+    blind_review: bool | None = None,
 ) -> UUID:
+    """``blind_review=None`` leaves the column at its table DEFAULT (TRUE), so
+    every pre-existing caller is byte-unchanged. Pass it explicitly to reach
+    the NON-blind read path (``_row_to_entry``), which the default hides."""
     async with pool.acquire() as conn:
-        job_id: UUID = await conn.fetchval(
-            "INSERT INTO jobs (title, description_raw, description_parsed) "
-            "VALUES ($1, $2, $3::jsonb) RETURNING id",
+        if blind_review is None:
+            job_id: UUID = await conn.fetchval(
+                "INSERT INTO jobs (title, description_raw, description_parsed) "
+                "VALUES ($1, $2, $3::jsonb) RETURNING id",
+                "Senior Backend Engineer",
+                "raw jd text (irrelevant to these tests)",
+                (
+                    json.dumps(description_parsed)
+                    if description_parsed is not None
+                    else None
+                ),
+            )
+            return job_id
+        job_id = await conn.fetchval(
+            "INSERT INTO jobs (title, description_raw, description_parsed, "
+            "blind_review) VALUES ($1, $2, $3::jsonb, $4) RETURNING id",
             "Senior Backend Engineer",
             "raw jd text (irrelevant to these tests)",
             json.dumps(description_parsed) if description_parsed is not None else None,
+            blind_review,
         )
     return job_id
 
@@ -433,3 +458,81 @@ async def test_reverse_match_job_e2e_persists_pipeline_meta_weights(
         meta = json.loads(meta)
     assert meta["git_sha"] == "rev-sha-1"
     assert meta["weights"] == json.loads(expected_weights.model_dump_json())
+
+
+# ── "Why this rank?" defense pack, slice 1 — score_structured/score_evidence/
+#    pipeline_meta round-trip through a REAL Postgres jsonb column ─────────
+
+
+@pytest.mark.parametrize("blind_review", [True, False])
+@pytest.mark.asyncio
+async def test_persist_then_get_one_round_trips_structured_evidence_and_weights(
+    pg_pool: asyncpg.Pool, blind_review: bool
+) -> None:
+    """``persist_shortlist`` folds ``score_structured``/``score_evidence``
+    into the ``score_breakdown`` jsonb at write time (ADR-010 §2);
+    ``get_one`` must surface them back onto the DTO — and
+    ``pipeline_meta.weights`` (the GENERATION-TIME weights, not whatever
+    Settings default to today) must round-trip byte-for-byte through
+    asyncpg's real jsonb float codec. The mocked-conn unit suite
+    (``test_services_shortlist_read.py``) hands python floats straight
+    through a fake connection and so cannot prove this; only a real
+    Postgres round trip can.
+
+    PARAMETRIZED over ``jobs.blind_review`` because ``get_one`` forks into two
+    ENTIRELY SEPARATE row-to-DTO functions on it (``_row_to_blind_entry`` vs
+    ``_row_to_entry``), and the column DEFAULTS to TRUE — so the unparametrized
+    version of this test exercised only the blind branch and left the
+    non-blind unfold with no real-Postgres coverage at all."""
+    from src.services.shortlist_service import get_one, persist_shortlist
+
+    job_id = await _insert_job(pg_pool, blind_review=blind_review)
+    resume_id = await _insert_resume(pg_pool, job_id)
+    custom_weights = MatchWeights(
+        structured=0.5,
+        evidence=0.4,
+        motivation=0.1,
+        skill=0.55,
+        experience=0.15,
+        education=0.10,
+        seniority=0.10,
+        vector=0.10,
+    )
+    assert custom_weights.structured != DEFAULT_WEIGHTS.structured
+    assert custom_weights.skill != DEFAULT_WEIGHTS.skill
+
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn,
+            ShortlistResult(
+                job_id=job_id,
+                entries=[_shortlist_entry(resume_id, rank=1)],
+                pipeline_meta=_meta(weights=custom_weights, git_sha="abc123def"),
+            ),
+        )
+
+    async with pg_pool.acquire() as conn:
+        entry_id = await conn.fetchval(
+            "SELECT id FROM shortlist_entries WHERE job_id = $1", job_id
+        )
+        entry = await get_one(conn, entry_id)
+
+    # The two row-to-DTO paths really were exercised separately.
+    assert entry.blinded is blind_review
+    if blind_review:
+        assert entry.display_label == "Candidate A"
+    else:
+        assert entry.display_label is None
+
+    # score_structured=0.8 / score_evidence=0.7 come from _shortlist_entry().
+    assert entry.score_structured == pytest.approx(0.8)
+    assert entry.score_evidence == pytest.approx(0.7)
+    assert entry.pipeline_meta is not None
+    assert entry.pipeline_meta.weights.structured == pytest.approx(0.5)
+    assert entry.pipeline_meta.weights.skill == pytest.approx(0.55)
+    # The honesty guard, proven against a real round trip: the weights that
+    # come back are NOT today's defaults.
+    assert entry.pipeline_meta.weights.structured != pytest.approx(
+        DEFAULT_WEIGHTS.structured
+    )
+    assert entry.pipeline_meta.weights.skill != pytest.approx(DEFAULT_WEIGHTS.skill)

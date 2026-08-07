@@ -494,8 +494,59 @@ class ShortlistEntry(BaseModel):
     resume_id: UUID
     rank: int
     score_final: float
+    # The two composed sub-scores, named exactly as on ``JobMatchEntry`` (the
+    # reverse-match sibling) so one convention covers both directions. The
+    # difference is purely where they live at rest: ``reverse_match_entries``
+    # has dedicated columns, ``shortlist_entries`` does not, so
+    # ``persist_shortlist`` FOLDS them into the ``score_breakdown`` jsonb and
+    # ``shortlist_service._parse_entry_jsonb`` unfolds them back onto here.
+    #
+    # OPTIONAL (unlike ``JobMatchEntry``, where they are required, because that
+    # table HAS dedicated NOT NULL columns for them) and defaulted to ``None``,
+    # not ``0.0``. Every instance of this DTO is built by ``model_validate``
+    # from a stored row — ``grep -rn "ShortlistEntry(" core/src core/frontend``
+    # returns no direct construction site at all — and a pre-4d row simply has
+    # no folded sub-scores to unfold.
+    #
+    # ``None`` means "this row never recorded one" and renders as "not
+    # recorded". ``0.0`` would render as an affirmative "0% contribution": a
+    # POSITIVE FALSE CLAIM about a candidate, and asymmetric with the
+    # ``pipeline_meta=None`` -> "weights unavailable" handling immediately
+    # below, which already refuses to state what it does not know. The two
+    # unavailability stories are deliberately told the same way.
+    #
+    # BOUNDED ``ge=0, le=1`` like every field on ``ScoreBreakdown`` and
+    # ``MatchWeights``. That bound is what keeps ``NaN``/``inf`` off this DTO:
+    # ``_folded_subscore``'s ``float(value)`` degrades only NON-numeric jsonb
+    # (``TypeError``/``ValueError``), so a stored ``"Infinity"``/``"NaN"``
+    # string parses to a real ``inf``/``nan`` and would reach the explanation
+    # panel, whose ``pct()`` macro (``(v * 100)|round|int``) raises
+    # ``OverflowError``/``ValueError`` out of Jinja's ``int`` filter — an
+    # UNHANDLED 500 on a compliance page. Not candidate-reachable today
+    # (Postgres rejects bare ``NaN``/``Infinity`` JSON literals and
+    # ``persist_shortlist`` writes pipeline floats), so this is defence in
+    # depth. It only pays off on the frontend: the Flask route
+    # (``core/frontend/app.py::shortlist_entry_detail``) wraps its own
+    # ``ShortlistEntry.model_validate`` call in a ``try/except ValidationError``
+    # and degrades to "explanation unavailable" instead of 500ing. The backend
+    # API read path (``_row_to_entry``/``_row_to_blind_entry`` in
+    # ``shortlist_service.py``) validates **uncaught** — a corrupt stored value
+    # would raise a 500 out of the API route rather than degrade there —
+    # matching ``_parse_entry_jsonb``'s own docstring, which states this same
+    # caveat for the folded ``score_structured``/``score_evidence`` values it
+    # reads back.
+    score_structured: float | None = Field(default=None, ge=0, le=1)
+    score_evidence: float | None = Field(default=None, ge=0, le=1)
     score_breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
+    # The reproducibility stamp in force WHEN THIS ROW WAS GENERATED, read back
+    # off the ``pipeline_meta`` jsonb column. The explanation panel takes its
+    # weights from here and NEVER from current settings / ``DEFAULT_WEIGHTS``:
+    # explaining a historical score with today's weights would be dishonest.
+    # ``None`` on a legacy row (or one whose stamp is unreadable), which the
+    # panel must surface as "weights unavailable" rather than substituting
+    # defaults.
+    pipeline_meta: PipelineMeta | None = None
     generated_at: dt.datetime
     blinded: bool = False
     display_label: str | None = None

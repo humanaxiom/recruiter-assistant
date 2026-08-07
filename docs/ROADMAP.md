@@ -13,6 +13,11 @@ number without a cited source), **privacy-first** (PIPEDA/FIPPA; PII never embed
 
 ## ⭐ 1. "Why this rank?" — the per-candidate defense pack
 
+**Slice 1 SHIPPED** (branch `feat/why-this-rank-defense-pack`, PR pending; [ADR-031](adr/031-why-this-rank-defense-pack.md)):
+the deterministic score-composition + verified-evidence panel on the shortlist entry detail page, per the
+"First slice" scope below — no LLM, no DDL, no scoring-math change. Slice 2 (the optional grounded-LLM
+narrative + PDF/timestamped decision-rationale export) is still open; see ADR-031's accepted residuals.
+
 **Pitch.** One click on any shortlisted candidate opens a plain-language explanation of *why* they sit
 where they do: each sub-score's contribution to `score_final` (skill 0.40 · experience 0.25 · education
 0.10 · seniority 0.15 · vector 0.10, blended structured 0.6 / evidence 0.3 / motivation 0.1), the **actual
@@ -36,8 +41,10 @@ reveal-audit sink, CSV/JSON export.
 missing status. Ship that, *then* add the optional grounded narrative + PDF/record export as slice 2.
 
 **Risks/decisions.** Reverse-match scores top out at 0.9 (no motivation term) — the panel must label which
-direction it's explaining (ADR-009 residual). The optional narrative must be gate-proven to never cite an
-unverified quote.
+direction it's explaining (ADR-009 residual). **Slice 1 addressed this by scoping forward-only**
+(`shortlist_entry_explanation` only accepts a `ShortlistEntry`, never a `JobMatchEntry`); a reverse-match
+panel is unscoped future work, so ADR-009's residual stays open there. The optional narrative must be
+gate-proven to never cite an unverified quote.
 
 ---
 
