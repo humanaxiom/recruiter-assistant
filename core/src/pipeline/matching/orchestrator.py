@@ -16,12 +16,15 @@ with the Phase 4c blocker fixes:
 * **blocker #4** — ``_stage2_skill_rows`` keys off ``reqSkill.canonical_key``
   (ADR-008 renamed it from ``canonical_name``); a verbatim port returns
   ``skill=None`` and a pydantic ValidationError against a real Neo4j. The
-  recruiter-facing ``skill`` LABEL now resolves through a three-way fallback
-  (per-job ``req.display_name`` -> node ``reqSkill.display_name`` ->
-  ``canonical_key``) so a non-vocab skill renders its JD wording instead of
-  ADR-008's ``h:<hash>``; both display names are JD-authored cleartext (never
-  résumé-derived), and the label is inert — ``score_skill_breakdown`` never
-  reads it, so no score moves.
+  recruiter-facing ``skill`` LABEL now resolves through a two-way fallback
+  (the PER-JOB ``req.display_name`` -> ``reqSkill.canonical_key``) so a
+  non-vocab skill renders its JD wording instead of ADR-008's ``h:<hash>``.
+  The label is JD-authored cleartext (never résumé-derived) and inert —
+  ``score_skill_breakdown`` never reads it, so no score moves. The node-level
+  ``reqSkill.display_name`` is deliberately NOT a rung: it is a GLOBAL,
+  last-writer-wins property and reading it leaks another job's JD wording
+  across the per-job authorization boundary — see ``_stage2_skill_rows``'s
+  docstring (security findings S1/S2).
 * **blocker #5** — NICE_TO_HAVE skills feed stage-3's evidence prompt but never
   the stage-2 structured skill sub-score (only ``REQUIRES`` feeds it).
 * **blocker #7** — stage-3 chunk text sources from ``resumes.parsed`` (Postgres),
@@ -333,15 +336,38 @@ async def _stage2_skill_rows(
     family_weight: float = _FAMILY_MATCH_WEIGHT,
     non_matchable_families: tuple[str, ...] = _NON_MATCHABLE_FAMILIES,
 ) -> list[_SkillRowFromCypher]:
+    """One row per REQUIRES edge, joined to the résumé's HAS_SKILL edge when
+    it has one.
+
+    ``skill`` is an INERT display label — ``score_skill_breakdown`` never
+    reads it, so nothing below changes the scoring math. Two security-gate
+    findings constrain where that label may come from, and both are pinned by
+    ``tests/unit/test_stage2_skill_label_source.py`` (source-level) and
+    ``tests/integration/test_skill_display_names_pg.py`` (behavioural):
+
+    * **S1 — the label is JD-authored ONLY.** Only ``req.*`` (the per-job
+      REQUIRES relationship) and ``reqSkill.*`` (the required Skill node) may
+      feed it. A ``has.*`` property is résumé-derived — ``has.evidence_chunk_id``
+      is ADR-008 residual #3, a pointer back to a résumé region — and must
+      never be rendered as a skill name.
+    * **S2 — no ``reqSkill.display_name`` rung.** That node property is
+      written GLOBALLY, last-writer-wins, by
+      ``src.worker.tasks._job_projection_tx`` (``MATCH (s:Skill
+      {canonical_key: $cname}) SET s.display_name = $display`` — no job in the
+      pattern), so reading it here renders whichever job projected LAST. For
+      every edge projected before the per-job ``req.display_name`` write
+      landed — i.e. the whole pre-existing graph until a re-parse — job A's
+      shortlist would show job B's JD wording to job A's assignees, crossing
+      the per-job authorization boundary. A stale edge therefore renders the
+      opaque ``canonical_key``; a re-parse restores readability.
+    """
     async with neo4j.session() as session:
         result = await session.run(
             """
             MATCH (j:Job {id: $jid})-[req:REQUIRES]->(reqSkill:Skill)
             OPTIONAL MATCH (r:Resume {id: $rid})-[has:HAS_SKILL]->(reqSkill)
             RETURN
-              coalesce(
-                req.display_name, reqSkill.display_name, reqSkill.canonical_key
-              )                     AS skill,
+              coalesce(req.display_name, reqSkill.canonical_key) AS skill,
               req.min_years           AS req_years,
               coalesce(req.is_must_have, true) AS is_must_have,
               has.years               AS years,
