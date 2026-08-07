@@ -533,11 +533,6 @@ SKILL_EVIDENCE_MARKERS: dict[str, str] = {
     "kubernetes": "kubernetes",
     "kafka": "kafka",
     "terraform": "terraform",
-    # ADR-008 corpus-blindness fix: non-vocab -- src.pipeline.skills_graph
-    # hashes this to an "h:<hash>" canonical_key. No fixture claims it (see
-    # jd_backend_data_engineer.json), so it is a pure "no candidate claims
-    # it" nice-to-have -- evidence/ontology-neutral by construction.
-    "zetabyte log wrangling": "zetabyte log wrangling",
 }
 
 # The fixture corpus's baseline "today" for recency-bucket math -- every

@@ -5,7 +5,7 @@
     "phone": "555-0109",
     "location": "Regina, SK"
   },
-  "summary": "Results-driven Backend Data Engineer with expertise in Python, PostgreSQL, Apache Airflow, Docker, REST API design, Kubernetes, Kafka, Terraform, and Zetabyte Log Wrangling, consistently exceeding expectations in fast-paced, cross-functional environments.",
+  "summary": "Results-driven Backend Data Engineer with expertise in Python, PostgreSQL, Apache Airflow, Docker, REST API design, Kubernetes, Kafka, and Terraform, consistently exceeding expectations in fast-paced, cross-functional environments.",
   "total_years_experience": 8,
   "skills": [
     { "name": "Python", "years": 8, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
@@ -15,8 +15,7 @@
     { "name": "REST API design", "years": 7, "last_used_year": 2026, "evidence_chunk_ids": ["c_005"] },
     { "name": "Kubernetes", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
     { "name": "Kafka", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
-    { "name": "Terraform", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] },
-    { "name": "Zetabyte Log Wrangling", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_004"] }
+    { "name": "Terraform", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_003"] }
   ],
   "experience": [
     {

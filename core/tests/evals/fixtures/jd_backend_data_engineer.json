@@ -10,8 +10,7 @@
   "nice_to_have_skills": [
     { "name": "Kubernetes" },
     { "name": "Kafka" },
-    { "name": "Terraform" },
-    { "name": "Zetabyte Log Wrangling" }
+    { "name": "Terraform" }
   ],
   "min_years_experience": 5,
   "education": {
