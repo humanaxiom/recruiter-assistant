@@ -263,6 +263,23 @@ async def _job_projection_tx(
             miny=skill.get("min_years"),
             must=True,
         )
+        # Per-job display name (fix/skill-display-names): the node-level
+        # property above is global and last-writer-wins — two jobs requiring
+        # the same canonical skill with different wording ("ReactJS" vs
+        # "React JS") would stomp each other. Stamping the JD's own wording on
+        # THIS job's edge lets Stage 2 render each job's own text. Same
+        # ADR-008 posture as the node write (JD text only, never résumé
+        # text), and likewise its own statement so the edge MERGE's params
+        # never carry the raw name.
+        await tx.run(
+            """
+            MATCH (:Job {id: $jid})-[r:REQUIRES]->(:Skill {canonical_key: $cname})
+            SET r.display_name = $display
+            """,
+            jid=job_id,
+            cname=canonical,
+            display=raw_name,
+        )
 
     for skill in extracted.get("nice_to_have_skills", []):
         raw_name = skill["name"]
@@ -288,6 +305,16 @@ async def _job_projection_tx(
             jid=job_id,
             cname=canonical,
             miny=skill.get("min_years"),
+        )
+        # Per-job display name — see the REQUIRES branch above.
+        await tx.run(
+            """
+            MATCH (:Job {id: $jid})-[r:NICE_TO_HAVE]->(:Skill {canonical_key: $cname})
+            SET r.display_name = $display
+            """,
+            jid=job_id,
+            cname=canonical,
+            display=raw_name,
         )
 
     # R8: no Company/Institution writes from this module.

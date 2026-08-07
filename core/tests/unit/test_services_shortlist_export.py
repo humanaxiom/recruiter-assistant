@@ -601,3 +601,210 @@ def test_shortlist_json_empty_rows_yields_empty_json_array() -> None:
     from src.services.shortlist_service import shortlist_json
 
     assert json.loads(shortlist_json([])) == []
+
+
+# ── CSV formula injection (merge-blocking security gate, finding S3) ───────
+#
+# Excel/Sheets EXECUTE a cell whose first character is one of = + - @ TAB CR
+# as a formula on open (``=cmd|'/c calc'!A1`` is the classic RCE-via-DDE
+# payload). Neither writer neutralized anything. The exposure is pre-existing
+# via candidate_name / evidence_summary / quote / requirement / resume_file,
+# and the display-name branch WIDENED it: skills_matched / skills_missing /
+# must_have_missing moved from a closed set (curated vocab, or an opaque
+# ``h:<32 hex>``) to arbitrary JD text, and ``reject_reason_for_skill_name``
+# only screens length / token count / email / phone SHAPE — a skill literally
+# named ``=cmd|'/c calc'!A1`` passes it and reaches the export.
+#
+# The fix is file-wide (one helper applied to EVERY string cell in both
+# writers), not per-column: special-casing the skills columns would leave the
+# identical bug on the five other text fields.
+#
+# NUL is deliberately NOT in this list: a real 0x00 byte in a source file
+# breaks pytest collection and git. TAB/CR are built with ``chr()`` for the
+# same reason (see the repo memory note on NUL propagation).
+_DANGEROUS_LEADING = ["=", "+", "-", "@", chr(9), chr(13)]
+
+
+def _contribution(name: str, *, reason: str | None = None) -> dict[str, Any]:
+    return {
+        "skill": name,
+        "score": 0.0 if reason == "missing" else 1.0,
+        "years": None,
+        "recency": None,
+        "ontology_weight": 0.0 if reason == "missing" else 1.0,
+        "is_must_have": True,
+        "reason": reason,
+    }
+
+
+@pytest.mark.parametrize("lead", _DANGEROUS_LEADING)
+def test_shortlist_csv_neutralises_formula_injection_in_text_columns(
+    lead: str,
+) -> None:
+    from src.services.shortlist_service import shortlist_csv
+
+    payload = f"{lead}cmd|'/c calc'!A1"
+    breakdown = _breakdown_dict()
+    breakdown["skill_contributions"] = [
+        _contribution(payload),
+        _contribution(payload, reason="missing"),
+    ]
+    row = _export_row(
+        candidate_name=payload,
+        candidate_email=payload,
+        candidate_phone=payload,
+        original_filename=payload,
+        job_title=payload,
+        job_department=payload,
+        score_breakdown=breakdown,
+        evidence={
+            "requirements": [
+                {
+                    "requirement": payload,
+                    "status": "met",
+                    "evidence": payload,
+                    "evidence_chunk_ids": [],
+                    "confidence": 0.9,
+                }
+            ],
+            "overall_summary": payload,
+        },
+    )
+
+    data = next(csv.DictReader(io.StringIO(shortlist_csv([row]))))
+
+    for column in (
+        "candidate_name",
+        "candidate_email",
+        "candidate_phone",
+        "resume_file",
+        "job_title",
+        "job_department",
+        "evidence_summary",
+        "skills_matched",
+        "skills_missing",
+        "must_have_missing",
+    ):
+        assert data[column].startswith("'"), (
+            f"shortlist_csv column {column!r} passed a formula-injection "
+            f"payload through unescaped: {data[column]!r} (leading "
+            f"{lead!r}) -- security finding S3"
+        )
+        assert payload in data[column], (
+            f"column {column!r} lost the original text instead of merely "
+            f"prefixing it: {data[column]!r}"
+        )
+
+
+@pytest.mark.parametrize("lead", _DANGEROUS_LEADING)
+def test_shortlist_evidence_csv_neutralises_formula_injection(lead: str) -> None:
+    from src.services.shortlist_service import shortlist_evidence_csv
+
+    payload = f"{lead}cmd|'/c calc'!A1"
+    row = _export_row(
+        candidate_name=payload,
+        original_filename=payload,
+        job_title=payload,
+        evidence={
+            "requirements": [
+                {
+                    "requirement": payload,
+                    "status": "met",
+                    "evidence": payload,
+                    "evidence_chunk_ids": [payload],
+                    "confidence": 0.9,
+                    "source_context": payload,
+                }
+            ]
+        },
+    )
+
+    data = next(csv.DictReader(io.StringIO(shortlist_evidence_csv([row]))))
+
+    for column in (
+        "candidate_name",
+        "resume_file",
+        "job_title",
+        "requirement",
+        "quote",
+        "evidence_chunk_ids",
+        "evidence_context",
+    ):
+        assert data[column].startswith("'"), (
+            f"shortlist_evidence_csv column {column!r} passed a "
+            f"formula-injection payload through unescaped: {data[column]!r} "
+            f"(leading {lead!r}) -- security finding S3"
+        )
+
+
+@pytest.mark.parametrize("lead", _DANGEROUS_LEADING)
+def test_shortlist_evidence_csv_neutralises_placeholder_row_columns(
+    lead: str,
+) -> None:
+    """The zero-requirement candidate still gets a row — its identity cells
+    come from the same ``base`` dict and must be neutralised too."""
+    from src.services.shortlist_service import shortlist_evidence_csv
+
+    payload = f'{lead}HYPERLINK("http://evil.test")'
+    row = _export_row(
+        candidate_name=payload,
+        original_filename=payload,
+        job_title=payload,
+        evidence={"requirements": []},
+    )
+
+    data = next(csv.DictReader(io.StringIO(shortlist_evidence_csv([row]))))
+
+    assert data["requirement"] == "(no evidence generated)"
+    for column in ("candidate_name", "resume_file", "job_title"):
+        assert data[column].startswith("'"), (
+            f"placeholder row leaked an unescaped payload in {column!r}: "
+            f"{data[column]!r} -- security finding S3"
+        )
+
+
+def test_shortlist_csv_does_not_mangle_legitimate_values() -> None:
+    """The neutralisation must be surgical: only a DANGEROUS leading
+    character gets the apostrophe. Ordinary skill names, filenames and every
+    NUMERIC cell (including a negative number, whose ``-`` would be dangerous
+    if it were a string) must round-trip byte-identically."""
+    from src.services.shortlist_service import shortlist_csv
+
+    breakdown = _breakdown_dict()
+    breakdown["skill_contributions"] = [
+        _contribution("Python"),
+        _contribution("C++"),
+        _contribution("Distributed Systems Design", reason="missing"),
+    ]
+    row = _export_row(
+        candidate_name="Jane Smith",
+        original_filename="resume.pdf",
+        job_title="Senior Engineer",
+        job_department="Platform",
+        score_final=-0.5,  # numeric: not a string cell, must NOT be prefixed
+        score_breakdown=breakdown,
+    )
+
+    data = next(csv.DictReader(io.StringIO(shortlist_csv([row]))))
+
+    assert data["candidate_name"] == "Jane Smith"
+    assert data["resume_file"] == "resume.pdf"
+    assert data["job_title"] == "Senior Engineer"
+    assert data["job_department"] == "Platform"
+    assert data["skills_matched"] == "Python; C++"
+    assert data["skills_missing"] == "Distributed Systems Design"
+    assert (
+        data["score_final"] == "-0.5"
+    ), "a numeric cell was mangled -- only STRING cells may be prefixed"
+
+
+def test_shortlist_csv_empty_string_cells_are_untouched() -> None:
+    from src.services.shortlist_service import shortlist_csv
+
+    row = _export_row(candidate_name=None, candidate_email=None, candidate_phone=None)
+
+    data = next(csv.DictReader(io.StringIO(shortlist_csv([row]))))
+
+    assert data["candidate_name"] == ""
+    assert data["candidate_email"] == ""
+    assert data["candidate_phone"] == ""

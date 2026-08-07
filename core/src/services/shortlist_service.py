@@ -1072,6 +1072,49 @@ def _evidence_coverage(evidence: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── CSV formula injection (security gate finding S3) ──────────────────────
+#
+# Excel / Google Sheets EXECUTE a cell whose FIRST character is one of
+# ``= + - @ TAB CR`` as a formula when the file is opened — the classic
+# ``=cmd|'/c calc'!A1`` DDE payload turns a recruiter's shortlist download
+# into code execution. Neither writer neutralized anything.
+#
+# The exposure is pre-existing via ``candidate_name`` / ``evidence_summary``
+# / ``quote`` / ``requirement`` / ``resume_file``, and the per-job
+# display-name work WIDENED it: ``skills_matched`` / ``skills_missing`` /
+# ``must_have_missing`` used to be a closed set (curated vocabulary, or an
+# opaque ``h:<32 hex>`` ADR-008 key) and are now arbitrary JD text.
+# ``skills_graph.reject_reason_for_skill_name`` screens only length, token
+# count, and email/phone SHAPE — a skill named ``=cmd|'/c calc'!A1`` passes
+# it untouched.
+#
+# The guard is therefore applied file-wide, to EVERY string cell in BOTH
+# writers (``_csv_row``), not per-column: special-casing the skills columns
+# would leave the identical bug on the other six text fields, and on the
+# next column anyone adds.
+#
+# NUL (0x00) is deliberately absent: writing that escape materialises a real
+# NUL byte that breaks pytest collection and git. TAB/CR are built with
+# ``chr()`` for the same reason.
+_CSV_FORMULA_LEADERS = frozenset({"=", "+", "-", "@", chr(9), chr(13)})
+
+
+def _csv_safe(v: str) -> str:
+    """Neutralise a spreadsheet formula-injection payload by prefixing an
+    apostrophe — the standard escape both Excel and Sheets honour: the cell
+    renders as literal text and the apostrophe is not part of the value.
+    Anything not starting with a dangerous character is returned unchanged
+    (a legitimate skill name, filename or summary is never mangled)."""
+    return "'" + v if v[:1] in _CSV_FORMULA_LEADERS else v
+
+
+def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``_csv_safe`` to every STRING cell of one CSV row. Numeric cells
+    (scores, counts, ranks, confidences) pass through untouched — a negative
+    score must stay ``-0.5``, not ``'-0.5``."""
+    return {k: _csv_safe(v) if isinstance(v, str) else v for k, v in row.items()}
+
+
 _CSV_FIELDS = [
     "rank",
     "candidate_name",
@@ -1123,39 +1166,43 @@ def shortlist_csv(rows: list[dict[str, Any]]) -> str:
         meta = _as_obj(r["pipeline_meta"])
         skills = _skill_summary(sb)
         coverage = _evidence_coverage(ev)
+        # _csv_row: EVERY string cell is formula-injection-neutralised, so no
+        # column can be forgotten here or in a future addition (finding S3).
         writer.writerow(
-            {
-                "rank": r["rank"],
-                "candidate_name": r["candidate_name"] or "",
-                "candidate_email": r["candidate_email"] or "",
-                "candidate_phone": r["candidate_phone"] or "",
-                "resume_file": r["original_filename"] or "",
-                "job_title": r["job_title"] or "",
-                "job_department": r["job_department"] or "",
-                "score_final": round(float(r["score_final"]), 4),
-                "must_have_missing": skills["must_have_missing"],
-                "skills_missing": skills["skills_missing"],
-                "skills_matched_count": skills["skills_matched_count"],
-                "skills_total": skills["skills_total"],
-                "must_have_count": skills["must_have_count"],
-                "score_structured": sb.get("structured"),
-                "score_evidence_completeness": coverage["evidence_completeness"],
-                "score_motivation": sb.get("motivation"),
-                "skill": sb.get("skill"),
-                "experience": sb.get("experience"),
-                "education": sb.get("education"),
-                "seniority": sb.get("seniority"),
-                "vector": sb.get("vector"),
-                "requirement_count": coverage["requirement_count"],
-                "requirements_met": coverage["requirements_met"],
-                "requirements_partial": coverage["requirements_partial"],
-                "requirements_missing": coverage["requirements_missing"],
-                "evidence_summary": coverage["evidence_summary"],
-                "skills_matched": skills["skills_matched"],
-                "generated_at": r["generated_at"].isoformat(),
-                "pipeline_version": str(meta.get("git_sha") or "")[:12],
-                "resume_id": str(r["resume_id"]),
-            }
+            _csv_row(
+                {
+                    "rank": r["rank"],
+                    "candidate_name": r["candidate_name"] or "",
+                    "candidate_email": r["candidate_email"] or "",
+                    "candidate_phone": r["candidate_phone"] or "",
+                    "resume_file": r["original_filename"] or "",
+                    "job_title": r["job_title"] or "",
+                    "job_department": r["job_department"] or "",
+                    "score_final": round(float(r["score_final"]), 4),
+                    "must_have_missing": skills["must_have_missing"],
+                    "skills_missing": skills["skills_missing"],
+                    "skills_matched_count": skills["skills_matched_count"],
+                    "skills_total": skills["skills_total"],
+                    "must_have_count": skills["must_have_count"],
+                    "score_structured": sb.get("structured"),
+                    "score_evidence_completeness": coverage["evidence_completeness"],
+                    "score_motivation": sb.get("motivation"),
+                    "skill": sb.get("skill"),
+                    "experience": sb.get("experience"),
+                    "education": sb.get("education"),
+                    "seniority": sb.get("seniority"),
+                    "vector": sb.get("vector"),
+                    "requirement_count": coverage["requirement_count"],
+                    "requirements_met": coverage["requirements_met"],
+                    "requirements_partial": coverage["requirements_partial"],
+                    "requirements_missing": coverage["requirements_missing"],
+                    "evidence_summary": coverage["evidence_summary"],
+                    "skills_matched": skills["skills_matched"],
+                    "generated_at": r["generated_at"].isoformat(),
+                    "pipeline_version": str(meta.get("git_sha") or "")[:12],
+                    "resume_id": str(r["resume_id"]),
+                }
+            )
         )
     return buf.getvalue()
 
@@ -1196,26 +1243,31 @@ def shortlist_evidence_csv(rows: list[dict[str, Any]]) -> str:
             else []
         )
         if not req_list:
-            writer.writerow({**base, "requirement": "(no evidence generated)"})
+            writer.writerow(
+                _csv_row({**base, "requirement": "(no evidence generated)"})
+            )
             continue
         for req in req_list:
             chunks = req.get("evidence_chunk_ids")
+            # _csv_row: see the finding-S3 note above _CSV_FIELDS.
             writer.writerow(
-                {
-                    **base,
-                    "requirement": str(req.get("requirement") or ""),
-                    "status": str(req.get("status") or ""),
-                    "confidence": req.get("confidence"),
-                    "quote": str(req.get("evidence") or "").replace("\n", " "),
-                    "evidence_chunk_ids": (
-                        "; ".join(str(c) for c in chunks)
-                        if isinstance(chunks, list)
-                        else ""
-                    ),
-                    "evidence_context": str(req.get("source_context") or "").replace(
-                        "\n", " "
-                    ),
-                }
+                _csv_row(
+                    {
+                        **base,
+                        "requirement": str(req.get("requirement") or ""),
+                        "status": str(req.get("status") or ""),
+                        "confidence": req.get("confidence"),
+                        "quote": str(req.get("evidence") or "").replace("\n", " "),
+                        "evidence_chunk_ids": (
+                            "; ".join(str(c) for c in chunks)
+                            if isinstance(chunks, list)
+                            else ""
+                        ),
+                        "evidence_context": str(
+                            req.get("source_context") or ""
+                        ).replace("\n", " "),
+                    }
+                )
             )
     return buf.getvalue()
 

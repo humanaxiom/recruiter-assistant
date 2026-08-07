@@ -1,6 +1,193 @@
-# Roadmap — next-gen "wow" features
+# Roadmap — HR pilot readiness, then next-gen features
 
-Seed menu for the **next session**. v1 (Phases 0–7) + FU-1..FU-8 + FU-7 §2/§3/§4 are all shipped and
+> **⚠️ 2026-08-07 — this file now leads with PILOT READINESS.** An HR demo and pilot are imminent. The
+> "wow features" menu is intact further down and remains the post-pilot plan, but **none of it should be
+> built before the P0 items below.** Every finding here was verified against the working tree with file:line
+> evidence; nothing is carried on assertion.
+
+---
+
+# PART A — HR demo and pilot readiness
+
+## A0. Demo guardrails — today, no code required
+
+Four things that make the difference between a demo that lands and one that discredits the product:
+
+1. **Use a curated-vocabulary job description** (the shape of `core/tests/evals/fixtures/jd_backend_data_engineer.json`).
+   **Do not demo against a real SFU posting.** See A2 — skill scores collapse toward zero and are then halved,
+   and the chips render a wall of red *"— missing · must-have"* for skills the candidates plainly have.
+   **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
+   that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
+   wrong red badges is not.
+2. **Sign in as admin or recruiter only.** Do not hand out hiring-manager or auditor accounts during the
+   demo or the early pilot — see A1.
+3. **Do not circulate `docs/process/ranking-metrics-explainer.html`.** It is marked draft/not-for-circulation
+   and contains a **false safety claim** (see A5).
+4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
+   `Evidence 0%` it never actually measured — see A4.
+
+## A1. P0 · Authorization — the human's role is not enforced on writes
+
+**Highest-severity finding. This is the one that blocks handing accounts to HR.**
+
+The Flask BFF attaches a single shared **recruiter** API key to every browser request
+(`core/frontend/api_client.py:118-119`). Backend write routes authorize that *key* via `require_role`;
+`require_role_assigned` only rejects a session whose role is `None` (`core/src/api/deps.py:309-313`) — it
+never intersects the human's CAS role with the key's role. Assignment scoping (`scoped_user_id_or_403`) is
+applied on **reads only** (`jobs.py:179,230`; `resumes.py:238,268,356`; `shortlist.py:90,138,163,186`).
+
+Every writer control renders unconditionally — the only role-conditional template in the entire tree is the
+admin nav link (`base.html:16`).
+
+**What a hiring-manager or auditor session can actually do through the normal UI today:**
+
+| Action | Effect |
+|---|---|
+| Turn blind review off (`app.py:641`) | Permanently un-blinds every candidate on a job, for every future viewer |
+| Reveal identity (`app.py:866`) | De-anonymizes a candidate. hiring_manager → assigned jobs. **auditor → UNSCOPED, company-wide** (`deps.py:347-356`) |
+| Withdraw / reinstate (`app.py:899,924`) | Removes or restores any candidate from ranking — no assignment scoping |
+| Regenerate shortlist (`app.py:715`) | Overwrites any job's ranking |
+| Create/close jobs, upload résumés, trigger reverse match | Full writer authority |
+
+**An auditor — a read-only oversight role whose reads are logged as a compensating control (ADR-020 §6) —
+can un-blind every candidate in the system.** For a blind-hiring pilot, that is precisely the control HR
+will be relying on.
+
+**Why the gates missed it:** `test_route_jobs.py:276` and `test_api_resumes_withdraw_pg.py:147` parametrize
+the **API-key** role. **No test anywhere exercises recruiter-key + hiring_manager/auditor-session — the only
+combination that occurs in production.** They read like coverage and are not.
+
+**Plan (Red first).** (i) Add the missing test axis and watch it fail. (ii) Add a `require_session_role(*allowed)`
+dependency mirroring the pattern `users.py::_require_admin_session` already uses correctly, applied to every
+writer route, intersecting session role with key role. (iii) Extend `scoped_user_id_or_403` to writes.
+(iv) Extend CSRF to all 12 state-changing Flask routes (currently 3). Template-level role gating is
+defence-in-depth, **not** the fix. **Interim pilot mitigation:** issue only recruiter/admin accounts.
+
+## A2. P0 · Skill matching does not work on real job descriptions
+
+**Highest product-value finding — this decides whether a pilot produces meaningful output at all.**
+
+| Job | Hashed reqs | Total | Avg skill sub-score |
+|---|---|---|---|
+| 20251023 00101827 JDFN APSA 20260106 | 16 | 19 | **0.0033** |
+| Application Administrator | 15 | 20 | **0.0375** |
+| Program Director, SFU Morris J. Wosk Centre | 5 | 6 | **0.0000** |
+| Backend Data Engineer *(corpus fixture)* | 0 | 5 | 0.6425 |
+| Senior Backend Data Engineer *(corpus fixture)* | 0 | 6 | 0.5000 |
+
+**Mechanism, verified.** ADR-008 hashes any skill outside the curated vocabulary. `ensure_categories`
+(`skills_graph.py:358-369`) stamps categories *only* from `categories.yaml` (~19 families) — its docstring
+says "no LLM backfill in v1" — so a hashed node has **no `categories` property**. Stage 2's family-credit
+branch requires `reqSkill.categories IS NOT NULL` (`orchestrator.py:377`). Measured across the live graph:
+`hashed_total=288, with_categories=0`. So a non-vocabulary requirement scores `1.0` on an identical
+normalised string and `0.0` otherwise — **no alias resolution, no family partial credit, nothing between.**
+
+It then compounds: **every `REQUIRES` edge is written `must=True`** (`tasks.py:264`), so the
+`is_must_have=False` branch is dead code and the ×0.5 `must_have_miss_penalty` (`stages.py:185-194`) fires
+for nearly every candidate.
+
+**Every real SFU posting is 47-84% outside the vocabulary; both corpus fixtures are 0%.** That is exactly why
+the evals gate never saw it.
+
+**Plan.** Grow `aliases.yaml`/`categories.yaml` toward the job families actually being posted (highest
+value per hour, and no scoring-math change if additive); and/or enable LLM category backfill for hashed
+nodes (`worker.skill_category_task`, deferred); and/or a scoped fuzzy path for non-vocabulary JD↔résumé
+skills. **Changes ranking → `ranking-evals` gated, and needs A3 first to be measurable.** The `must=True`
+question is an **HR policy decision**, not an engineering one.
+
+## A3. P0 · The evals harness cannot see what it grades
+
+Every scoring fix above is only as trustworthy as the gate, and the gate is blind in three specific ways:
+
+- **Blind to ADR-008 hashing by construction.** `run_evals.py::_skill_rows_for` reimplements the stage-2
+  Cypher in Python and keys via `_basic_normalise`, so it can **never** produce an `h:` key. The only five
+  labels the whole corpus emits are `airflow`, `docker`, `postgresql`, `python`, `rest api design`.
+  *An attempt to close this was reverted* (ADR-032) because it inverted the bait-below-strong ordering while
+  producing no hashed key at all. Doing it properly needs the non-vocab skill in `required_skills`, which
+  forces a must-have miss for every honest fixture and re-bands the corpus — margins must be **re-measured**.
+- **Assertions that do not run.** `expected_rank_band` is never referenced by `run_evals.py` — and r18
+  currently violates its own declared band (tagged `strong`, band `{1,9}`, actual rank 11). *"The bait is
+  BELOW EVERY STRONG FIXTURE"* is prose in `thresholds.toml:217`, not a gated key: a change that violated it
+  still exited 0. The `skill_missing_must` ordering pair is inert against `weights.skill = 0`.
+- **Recommended first move** — needs no new fixtures and no measured constants, passes today, and would have
+  caught the reverted change: add `[adversarial] must_rank_below_every_strong = true`, enforced as an order
+  relation over tags. **Do not** enforce `expected_rank_band` wholesale; it goes red immediately on r18,
+  which needs its own reconciliation.
+
+## A4. P0 · Two ranking defects that affect what HR will see
+
+**M1 — stage 3 fails OPEN on a non-LLM exception.** `orchestrator.py:637-639` catches bare `Exception`
+per candidate and sets `results[id] = None`. For a **top-15** candidate that silently zeroes 40% of
+`score_final` and persists it, unmarked. The systematic evidence cliff provably *cannot* reorder the
+displayed list; **this one displaces real candidates inside the visible top ranks**, only when a transient
+Neo4j/Postgres hiccup happens to hit them. It contradicts the fail-closed posture ADR-029 claims.
+**`ranking-evals` gated.**
+
+**M2 — stage-1 recall is a global vector query.** `resume_summary_idx` (`neo4j_bootstrap.py:105`) is not
+job-partitioned; `orchestrator.py:303-320` applies `WHERE r.job_id` *after* the global index returns its top
+~150. Past ~150 résumés corpus-wide, a job's own candidates get crowded out **even when that job's pool is
+well under `coarse_k`**. A pilot that loads several hundred résumés will hit this. **Raising `coarse_k` does
+not fix it** and would mask it. **`ranking-evals` gated.**
+
+**The evidence cliff and the defense pack (ADR-031).** `evidence_k=15`, but all of `candidates_s2` goes to
+`stage4_combine`, so candidates past 15 get `0.0` evidence *and* motivation — 40% of the score — from compute
+placement, not merit. `shortlist_top_percent` defaults to **100**, so this is live on any job with >15
+recalled candidates. Rank order is provably unaffected (`0.6·s_i + (≥0) ≥ 0.6·s_j`), but **the number is not
+comparable across the boundary and upward mobility is suppressed** — a rank-16 candidate with strong evidence
+can never demonstrate it.
+
+Worse for HR-facing honesty: `stage4_combine` produces **real `0.0` floats**, so `explanation.py:180-182`
+sets `scores_available=True` and the panel renders `Evidence · 30% · 0% · 0.00` **affirmatively** —
+indistinguishable from a candidate evaluated and found lacking. **ADR-031's "not recorded" guard protects an
+*unreadable* row, not a *never-computed* one.** The honest fix needs a persisted `evidence_evaluated` marker
+(write-path → `ranking-evals` gated). **Do not** infer it from `requirements == []` in the template — that is
+inferring pipeline state from a display artifact.
+
+## A5. P0 · Documents that currently state the opposite of the code
+
+Each is a claim someone could rely on:
+
+- **`docs/process/ranking-metrics-explainer.html:401`** states in bold that a Hiring Manager **"cannot reveal
+  a candidate's identity."** A1 falsifies exactly that. Keep the file out of circulation until A1 lands.
+  The same file is *partially* updated (`:418`, `:407`, `:723-728`, `:636-637` obsolete; `:711-715` current),
+  which is worse than uniformly stale — a reader cannot tell which half to trust.
+- **`README.md:3,14`** — "data never leaves the machine" is false for the Tailscale peer inference setup.
+- **`CLAUDE.md:10,79`** — specify "SQLAlchemy async"; there is no SQLAlchemy dependency anywhere. The harness
+  contract misleads every session.
+- **`compose.cas.yml:31`** ships `FLASK_SECRET_KEY: dev-only-change-me` — the *authenticated* boot signs
+  sessions with a committed secret. `make up` also diverges from `quickstart.ps1` (which correctly adds CAS).
+
+## A6. P1 · Before the pilot widens
+
+Retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a **recorded deferral**
+(ADR-026 §4) needing an HR decision, not a rediscovery; reverse match fails *open* at stage 3 and is
+**unwrapped at stage 2** (`orchestrator.py:847-854`), so a stage-3-only fix leaves half the problem; blobs
+are permission-gated but unencrypted (`blob_store.py:116-121`); the email hash is unsalted (`pii.py:101`)
+while the skill hash *refuses to boot* unsalted (`skills_graph.py:276-282`) — the codebase disagrees with
+itself; audit immutability is convention only (`ddl.py:317-338`); `/health` is shallow with no readiness,
+metrics, tracing or correlation IDs.
+
+Two smaller scoring defects worth folding into any A2/A4 work: `normalise_vector_scores` returns `1.0` for
+**everyone** on a degenerate pool (`stages.py:300-311`), and `seniority = 0.0` on an unparseable title
+(`orchestrator.py:454-462`) — a candidate loses the full 15% sub-weight for a *parsing* failure.
+
+## A7. The pattern worth naming
+
+Across the external review and this session's gate work the same defect shape appears **nine times**: an
+invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
+The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
+exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
+one was invisible to a fully green 4,100-test suite and was found only by mutating the code and watching what
+*failed to complain*.
+
+**Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
+have caught it** — Red first.
+
+---
+
+# PART B — next-gen "wow" features (post-pilot)
+
+Seed menu for **after** Part A. v1 (Phases 0–7) + FU-1..FU-8 + FU-7 §2/§3/§4 are all shipped and
 merged; the dev-boot is reproducible (see the HANDOFF banner). These are **flagship candidates** — pick
 **one** to build first; they are framed, not committed, and each honours the project's non-negotiables:
 **offline-only** (inference on `aria-gb10` over Tailscale — no cloud, ever), **evidence-backed** (never a

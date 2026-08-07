@@ -392,3 +392,145 @@ async def test_job_write_transaction_callback_never_receives_llm_or_embedder() -
 def test_job_projection_tx_signature_has_no_llm_or_embedder_parameter() -> None:
     params = set(inspect.signature(_job_projection_tx).parameters)
     assert not params & {"llm", "embedder"}
+
+
+# ── target implementation item 1: per-job REQUIRES/NICE_TO_HAVE display_name ──
+#
+# The bug this pins (skill-display-names-and-corpus-gap): `display_name` was
+# previously written ONLY on the Skill node -- a single, global, last-writer-
+# -wins property. Two jobs requiring the SAME canonical skill with DIFFERENT
+# raw wording ("ReactJS" vs "React JS") stomp each other's node-level
+# `display_name`, so whichever job's projection ran LAST wins for every job.
+# The fix adds a SECOND, per-job display name on the REQUIRES/NICE_TO_HAVE
+# RELATIONSHIP itself (`r.display_name`) -- kept as its OWN dedicated Cypher
+# statement (never folded into the REQUIRES/NICE_TO_HAVE MERGE), matching this
+# file's existing `test_display_name_write_is_a_dedicated_statement_not_
+# folded_into_edge` pin for the node-level write above: the edge MERGE's own
+# params must never carry the raw JD text directly.
+
+
+def _relationship_display_calls(
+    tx: _RecordingTx, edge_type: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """Calls whose Cypher sets `display_name` AND mentions the relationship
+    type -- distinguishes the NEW per-job (relationship) write from the
+    EXISTING node-only write (`MATCH (s:Skill {canonical_key: $cname}) SET
+    s.display_name = $display`), whose Cypher text never mentions
+    REQUIRES/NICE_TO_HAVE at all."""
+    return [
+        (c, p)
+        for c, p in tx.calls
+        if "display_name" in c and re.search(rf"\b{edge_type}\b", c)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_required_skill_relationship_gets_its_own_per_job_display_name() -> None:
+    required = [{"name": "Apache Airflow", "min_years": 2}]
+    tx, _driver, _events = await _project(
+        _payload(required=required, nice_to_have=[]), {"Apache Airflow": "airflow"}
+    )
+    rel_calls = _relationship_display_calls(tx, "REQUIRES")
+    assert rel_calls, (
+        "expected a dedicated Cypher statement setting a per-job display_name "
+        "on the REQUIRES relationship -- got none"
+    )
+    assert any(p.get("display") == "Apache Airflow" for _c, p in rel_calls)
+
+
+@pytest.mark.asyncio
+async def test_nice_to_have_skill_relationship_gets_its_own_per_job_display_name() -> (
+    None
+):
+    nice_to_have = [{"name": "Kube Native Tooling", "min_years": None}]
+    tx, _driver, _events = await _project(
+        _payload(required=[], nice_to_have=nice_to_have),
+        {"Kube Native Tooling": "h:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    )
+    rel_calls = _relationship_display_calls(tx, "NICE_TO_HAVE")
+    assert rel_calls, (
+        "expected a dedicated Cypher statement setting a per-job display_name "
+        "on the NICE_TO_HAVE relationship -- got none"
+    )
+    assert any(p.get("display") == "Kube Native Tooling" for _c, p in rel_calls)
+
+
+@pytest.mark.asyncio
+async def test_relationship_display_name_write_is_scoped_by_job_id() -> None:
+    """The whole point of the relationship-level write is PER-JOB scoping --
+    a call that carries `display` but no `jid` param cannot be the per-job
+    write (the existing node-level write has no `jid` param at all: it
+    MATCHes the Skill node globally, by `canonical_key` alone)."""
+    required = [{"name": "Apache Airflow", "min_years": 2}]
+    job_id = uuid4()
+    driver, tx, resolve_mock, _events = _fake_driver_and_tx(
+        {"Apache Airflow": "airflow"}
+    )
+    llm = MagicMock(chat_json=AsyncMock())
+    embedder = MagicMock(embed=AsyncMock())
+    with patch("src.worker.tasks.skills_graph.resolve_canonical_names", resolve_mock):
+        await _project_job(
+            driver,
+            job_id,
+            _payload(required=required, nice_to_have=[]),
+            llm=llm,
+            embedder=embedder,
+        )
+    rel_calls = _relationship_display_calls(tx, "REQUIRES")
+    assert rel_calls
+    assert any(
+        p.get("jid") == str(job_id) and p.get("display") == "Apache Airflow"
+        for _c, p in rel_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_relationship_display_name_keeps_the_node_level_write() -> None:
+    """The node-level `display_name` write (ADR-008, pre-existing) must stay,
+    for ADR-008 continuity -- but it is NOT a fallback rung and MUST NEVER be
+    rendered.
+
+    `Skill.display_name` is written `MATCH (s:Skill {canonical_key: $cname})`
+    -- global, last-writer-wins across every job. Rendering it was a cross-job
+    information disclosure (job A's shortlist showing job B's JD wording to
+    job A's assignees); the security gate caught it and the node rung was
+    removed from the label chain, which is now the two-rung
+    `coalesce(req.display_name, reqSkill.canonical_key)`. A stale edge
+    therefore renders an opaque `h:<hex>` deliberately -- do not "fix" that by
+    re-adding the node rung. See ADR-032 and
+    `test_stage2_skill_label_source.py`, which fails loud if anyone does."""
+    required = [{"name": "Apache Airflow", "min_years": 2}]
+    tx, _driver, _events = await _project(
+        _payload(required=required, nice_to_have=[]), {"Apache Airflow": "airflow"}
+    )
+    node_only_calls = [
+        (c, p)
+        for c, p in tx.calls
+        if "display_name" in c and "MERGE" not in c.upper() and "REQUIRES" not in c
+    ]
+    assert node_only_calls, "the existing node-level display_name write regressed"
+    assert any(p.get("display") == "Apache Airflow" for _c, p in node_only_calls)
+    rel_calls = _relationship_display_calls(tx, "REQUIRES")
+    assert rel_calls, "the new relationship-level display_name write is missing"
+
+
+@pytest.mark.asyncio
+async def test_relationship_display_name_not_folded_into_requires_merge() -> None:
+    """Mirrors the sibling node-level pin
+    (`test_display_name_write_is_a_dedicated_statement_not_folded_into_edge`):
+    the REQUIRES MERGE's own params must never carry the raw JD text -- the
+    relationship display_name write must be issued as ITS OWN statement, not
+    folded into `MERGE (j)-[r:REQUIRES]->(s) SET r.min_years = ..., r.
+    is_must_have = ...`."""
+    required = [{"name": "Apache Airflow", "min_years": 2}]
+    tx, _driver, _events = await _project(
+        _payload(required=required, nice_to_have=[]), {"Apache Airflow": "airflow"}
+    )
+    merge_calls = [
+        (c, p) for c, p in tx.calls if "REQUIRES" in c and "MERGE" in c.upper()
+    ]
+    assert merge_calls
+    assert not any("Apache Airflow" in p.values() for _c, p in merge_calls), (
+        "the REQUIRES MERGE call's own params carry the raw JD text -- the "
+        "relationship display_name write must be a SEPARATE statement"
+    )
