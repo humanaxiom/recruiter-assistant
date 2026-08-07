@@ -486,9 +486,19 @@ async def test_relationship_display_name_write_is_scoped_by_job_id() -> None:
 
 @pytest.mark.asyncio
 async def test_relationship_display_name_keeps_the_node_level_write() -> None:
-    """The node-level `display_name` write (ADR-008, pre-existing) must stay
-    -- the fallback chain (relationship -> node -> canonical_key) needs BOTH
-    to exist for old rows that predate the relationship property."""
+    """The node-level `display_name` write (ADR-008, pre-existing) must stay,
+    for ADR-008 continuity -- but it is NOT a fallback rung and MUST NEVER be
+    rendered.
+
+    `Skill.display_name` is written `MATCH (s:Skill {canonical_key: $cname})`
+    -- global, last-writer-wins across every job. Rendering it was a cross-job
+    information disclosure (job A's shortlist showing job B's JD wording to
+    job A's assignees); the security gate caught it and the node rung was
+    removed from the label chain, which is now the two-rung
+    `coalesce(req.display_name, reqSkill.canonical_key)`. A stale edge
+    therefore renders an opaque `h:<hex>` deliberately -- do not "fix" that by
+    re-adding the node rung. See ADR-032 and
+    `test_stage2_skill_label_source.py`, which fails loud if anyone does."""
     required = [{"name": "Apache Airflow", "min_years": 2}]
     tx, _driver, _events = await _project(
         _payload(required=required, nice_to_have=[]), {"Apache Airflow": "airflow"}
