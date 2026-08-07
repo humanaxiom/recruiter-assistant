@@ -13,9 +13,15 @@ ranks them with the same pure combine the DB path uses.
 Ported from hris ``packages/pipeline/src/pipeline/matching/orchestrator.py``
 with the Phase 4c blocker fixes:
 
-* **blocker #4** — ``_stage2_skill_rows`` reads ``reqSkill.canonical_key``
+* **blocker #4** — ``_stage2_skill_rows`` keys off ``reqSkill.canonical_key``
   (ADR-008 renamed it from ``canonical_name``); a verbatim port returns
-  ``skill=None`` and a pydantic ValidationError against a real Neo4j.
+  ``skill=None`` and a pydantic ValidationError against a real Neo4j. The
+  recruiter-facing ``skill`` LABEL now resolves through a three-way fallback
+  (per-job ``req.display_name`` -> node ``reqSkill.display_name`` ->
+  ``canonical_key``) so a non-vocab skill renders its JD wording instead of
+  ADR-008's ``h:<hash>``; both display names are JD-authored cleartext (never
+  résumé-derived), and the label is inert — ``score_skill_breakdown`` never
+  reads it, so no score moves.
 * **blocker #5** — NICE_TO_HAVE skills feed stage-3's evidence prompt but never
   the stage-2 structured skill sub-score (only ``REQUIRES`` feeds it).
 * **blocker #7** — stage-3 chunk text sources from ``resumes.parsed`` (Postgres),
@@ -333,7 +339,9 @@ async def _stage2_skill_rows(
             MATCH (j:Job {id: $jid})-[req:REQUIRES]->(reqSkill:Skill)
             OPTIONAL MATCH (r:Resume {id: $rid})-[has:HAS_SKILL]->(reqSkill)
             RETURN
-              reqSkill.canonical_key AS skill,
+              coalesce(
+                req.display_name, reqSkill.display_name, reqSkill.canonical_key
+              )                     AS skill,
               req.min_years           AS req_years,
               coalesce(req.is_must_have, true) AS is_must_have,
               has.years               AS years,
