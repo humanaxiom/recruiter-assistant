@@ -2,121 +2,80 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-07 (later): the triage below was RE-CHECKED against the code; five verdicts changed and four S1 defects were added
+### ⚠️⚠️ READ FIRST — 2026-08-07: HR DEMO + PILOT IMMINENT. Read the four demo guardrails before showing anything.
 
-> **This supersedes the banner immediately below it, which remains accurate in shape but was not
-> evidence-backed.** That triage marked **21 of 21 CodeX findings "Confirmed" with zero file:line citations**.
-> A 100% acceptance rate on an external review is itself a warning sign, and under this repo's own rule an
-> assertion is not evidence. Re-checking every finding against the working tree agreed with most of it but
-> found **five dispositions wrong or imprecise** and **four missed defects more severe than several that were
-> accepted**. The corrected, cited version is in **[docs/ROADMAP.md](docs/ROADMAP.md)** — use that, not the
-> uncited table.
+> **The plan of record is now [docs/ROADMAP.md](docs/ROADMAP.md) PART A — HR pilot readiness.** Every finding
+> below was verified against the working tree with file:line evidence. This supersedes the banner below it
+> (kept as history).
 >
-> **Do not fund these (the review was wrong):** "a compose override pins the Tailscale peer IP" — it does
-> not; `docker-compose.yml:67` defaults to `host.docker.internal` and the IP lives in `.env.example:50`, so
-> fixing the named file would leave the boundary undocumented. "Base Compose disables CAS" — `quickstart.ps1`
-> already adds CAS by default per the standing order; the real defect is narrower and worse
-> (`make up` diverges from it, and **`compose.cas.yml:31` ships `FLASK_SECRET_KEY: dev-only-change-me`, so
-> even the authenticated boot signs sessions with a committed secret**). "Nice-to-have skills don't affect
-> the score" — structurally true, but they feed the evidence prompt and so drive 30% of `score_final`. And
-> revoke-and-purge is a **recorded decision** (ADR-026 §4), not an unnoticed defect — do not re-discover it.
+> **An external review was dropped in `CodeX/` (left untouched, as instructed). CodeX also wrote to
+> `HANDOFF.md` and `docs/ROADMAP.md` outside its folder — that was reversed on 2026-08-07;** its two stray
+> `- Copy.md` files were moved to the session scratchpad, not deleted. The review is directionally useful but
+> **was not evidence-backed**: re-checking every finding found five verdicts wrong or imprecise (they would
+> have funded the wrong work) and **four missed defects more severe than several it accepted**. Use ROADMAP
+> Part A, not the raw review.
 >
-> **Four S1/S2 defects the review MISSED** (full detail + evidence in ROADMAP): **M1** stage 3 fails *open*
-> on a non-LLM exception (`orchestrator.py:637-639`) — unlike the evidence cliff, this displaces real
-> candidates *inside* the displayed top 15; **M2** stage-1 recall is a **global** vector query, so a job's
-> own candidates get crowded out past ~150 résumés corpus-wide *even when its pool is under `coarse_k`* —
-> raising `coarse_k` will not fix it; **M3** every JD skill is written `must=True` (`tasks.py:264`), making
-> the ×0.5 must-have penalty fire on any unmatched skill — the dominant real-world scoring effect, never
-> reviewed; **M6** the negative authz tests parametrize the **API-key** role and **no test exercises
-> recruiter-key + hiring_manager/auditor-session**, which is *how* a security gate passed the P0 authz defect.
+> ### DEMO GUARDRAILS — four things, no code needed
+> 1. **Demo with a curated-vocabulary JD** (shape of `tests/evals/fixtures/jd_backend_data_engineer.json`).
+>    **NOT a real SFU posting** — skill scores collapse to ~0 and are then halved; the chips render a wall of
+>    red *"— missing · must-have"* for skills candidates plainly have. Say the limitation out loud.
+> 2. **Sign in as admin or recruiter only.** Do not issue hiring-manager or auditor accounts yet.
+> 3. **Do not circulate `docs/process/ranking-metrics-explainer.html`** — draft, and it contains a false
+>    safety claim (below).
+> 4. **Stay within the top ~15 candidates** when opening the "Why this rank?" panel.
 >
-> **The authz blast radius is worse than stated:** an **auditor** — a read-only oversight role whose reads
-> are logged as a compensating control — can **un-blind every candidate in the system** (unscoped, per
-> `deps.py:347-356`) and toggle blind review off entirely. Every writer control renders unconditionally;
-> the only role-conditional template is the admin nav link.
+> ### P0 — blocks giving HR accounts
+> - **Authorization: the human's role is not enforced on writes.** The BFF sends a shared **recruiter** key on
+>   every browser request (`frontend/api_client.py:118-119`); `require_role_assigned` never intersects the CAS
+>   role with the key role (`deps.py:309-313`); assignment scoping is applied on **reads only**. Every writer
+>   control renders unconditionally. **An auditor — a read-only oversight role — can un-blind every candidate
+>   in the system, unscoped** (`deps.py:347-356`), and toggle blind review off. *Why the gates missed it:* the
+>   negative authz tests parametrize the **API-key** role; **no test exercises recruiter-key +
+>   hiring_manager/auditor-session**, the only combination that occurs in production. Fix Red-first: add that
+>   test axis, then intersect session∩key role on writers, then scope writes by assignment, then CSRF on all
+>   12 routes (currently 3).
+> - **Skill matching does not work on real JDs.** Measured: real SFU postings are 47-84% outside the curated
+>   vocabulary and score **0.0000-0.0375** on skill; both corpus fixtures are 0% hashed and score 0.50-0.64.
+>   Hashed nodes get **no categories** (`hashed_total=288, with_categories=0`), so family credit is unreachable
+>   and only exact string equality matches. Compounded by **every JD skill being written `must=True`**
+>   (`tasks.py:264`), firing the ×0.5 penalty on nearly everyone.
+> - **The evals gate cannot see any of this** — `run_evals.py::_skill_rows_for` reimplements the Cypher and can
+>   never produce an `h:` key; `expected_rank_band` is never asserted (and r18 violates its own band);
+>   "bait below every strong fixture" is prose, not a gated key.
+> - **Two ranking defects HR would see:** stage 3 **fails open** on non-LLM exceptions
+>   (`orchestrator.py:637-639`), displacing real candidates *inside* the visible top 15; and stage-1 recall is
+>   a **global** vector query (`neo4j_bootstrap.py:105`), so a job's candidates get crowded out past ~150
+>   résumés corpus-wide — a pilot loading several hundred résumés will hit this. Raising `coarse_k` will not
+>   fix it.
+> - **Documents that state the opposite of the code:** the explainer says in bold that a Hiring Manager
+>   **"cannot reveal a candidate's identity"** (`:401`) — falsified by the authz defect; `README.md:3,14`
+>   ("data never leaves the machine"); **`CLAUDE.md:10,79` ("SQLAlchemy async" — no SQLAlchemy exists here)**;
+>   and `compose.cas.yml:31` ships `FLASK_SECRET_KEY: dev-only-change-me`, so the *authenticated* boot signs
+>   sessions with a committed secret.
 >
-> **⚠️ A false safety claim is live in an HR-facing document:**
-> `docs/process/ranking-metrics-explainer.html:401` states a Hiring Manager **"cannot reveal a candidate's
-> identity."** The P0 authz defect falsifies exactly that. The file is marked draft/not-for-circulation —
-> **keep it that way until the authz fix lands.** `README.md:3,14` ("data never leaves the machine") and
-> **`CLAUDE.md:10,79` ("SQLAlchemy async" — there is no SQLAlchemy dependency anywhere)** are also false.
->
-> **`CodeX/` was left completely untouched, as instructed.** `HANDOFF - Copy.md` and
-> `docs/ROADMAP - Copy.md` are untracked backups that appeared during this session; not mine, not touched.
->
-> **The recurring failure mode, now named in the plan:** at least nine times across this review and this
-> session's gate work, the defect was **an invariant stated in a comment, docstring, ADR, threshold file or
-> HR document with nothing enforcing it** — every one invisible to a fully green 4,100-test suite, found only
-> by mutating the code and watching what *failed to complain*. Planning consequence: for each P0/P1 item the
-> deliverable is the fix **plus the assertion that would have caught it**, Red first.
->
-> **Shipped this session, gates green, not yet merged:**
-> - **PR #65 — "Why this rank?" defense pack slice 1 (ADR-031).** CI green, `MERGEABLE`. Awaiting the human's
->   `gh pr merge 65 --squash --delete-branch`.
->   **⚠️ Known hole, recorded as ROADMAP item 4c:** for any entry at structured-rank ≥ 16 the panel renders
->   `Evidence 0%` / `Motivation 0%` **affirmatively**, because `stage4_combine` produces real `0.0` floats and
->   `explanation.py` therefore sets `scores_available=True`. ADR-031's "not recorded" guard covers an
->   *unreadable* row, not a *never-computed* one. The honest fix needs a persisted `evidence_evaluated`
->   marker (write-path → `ranking-evals`-gated). **Do not** infer it from `requirements == []` in the template.
+> ### Also shipped this session
 > - **Branch `fix/skill-display-names-and-corpus-gap` (ADR-032)** — skill chips showed `h:<hex>` because
->   `Skill.display_name` was written by the JD side but **never read anywhere in `core/src/`**. Now
->   `coalesce(req.display_name, reqSkill.canonical_key)`, with the per-job wording projected onto the
->   `REQUIRES`/`NICE_TO_HAVE` relationship. reviewer APPROVE, security PASS, ranking-evals PASS; PR not yet
->   opened. **Two things to carry:** (1) **`Skill.display_name` is global/last-writer-wins and must NEVER be
->   rendered** — the obvious three-way fallback was a cross-job leak (job A's shortlist rendering job B's JD
->   wording), so a stale edge deliberately renders an opaque hash; do not "fix" that by re-adding the node
->   rung. (2) pre-existing `shortlist_entries` keep hashed labels until regenerated — read-time repair was
->   rejected as *unsound*, not merely costly.
+>   `Skill.display_name` was written by the JD side but **never read anywhere in `core/src/`**. reviewer
+>   APPROVE, security PASS, ranking-evals PASS; PR not yet opened. **Carry two things:** (1) **`Skill.display_name`
+>   is global/last-writer-wins and must NEVER be rendered** — the obvious three-way fallback was a cross-job
+>   leak (job A rendering job B's JD wording), so a stale edge deliberately shows an opaque hash; do not "fix"
+>   that by re-adding the node rung. (2) Pre-existing `shortlist_entries` keep hashed labels until regenerated;
+>   read-time repair was rejected as *unsound*, not merely costly.
+> - **PR #65's known hole:** for entries at structured-rank ≥ 16 the defense-pack panel renders `Evidence 0%` /
+>   `Motivation 0%` **affirmatively**, because `stage4_combine` emits real `0.0` floats and `explanation.py`
+>   therefore sets `scores_available=True`. ADR-031's "not recorded" guard covers an *unreadable* row, not a
+>   *never-computed* one. Honest fix needs a persisted `evidence_evaluated` marker (write-path →
+>   `ranking-evals` gated); **do not** infer it from `requirements == []` in the template.
 > - **ranking-evals disclosed its own blindness:** mutating the skill label to `'MUTANT-LABEL'` produced an
->   identical corpus md5, so its PASS on that branch is **non-regression, not correctness**.
+>   identical corpus md5 — its PASS on that branch is **non-regression, not correctness**.
+>
+> ### The pattern, named
+> Nine times across the review and this session's gate work, the defect was **an invariant stated in a comment,
+> docstring, ADR, threshold file or HR document with nothing enforcing it** — each invisible to a green
+> 4,100-test suite, found only by mutating code and watching what *failed to complain*. For every P0 item the
+> deliverable is the fix **plus the assertion that would have caught it**, Red first.
 
-### (superseded 2026-08-07) READ FIRST — SESSION 2026-08-07: external architecture review triaged; risk-first roadmap adopted
-
-> **Planning/documentation-only session. No product code or tests were changed.** The independent review
-> artifacts in `CodeX/` were read and deliberately left untouched. The validated response and ordered work
-> now live in **[docs/ROADMAP.md](docs/ROADMAP.md)**; that roadmap supersedes the older instruction below to
-> choose the next “wow” feature. Existing feature cards remain candidates only after the pilot blockers and
-> governance foundations are addressed.
->
-> **P0 — confirmed authorization defect/design gap.** The Flask BFF attaches its single shared recruiter
-> API key to every browser request (`core/frontend/api_client.py::build_client`). Route write authorization
-> checks that key through `require_role`, while `require_role_assigned` only rejects a real session whose
-> role is `None`; it does **not** intersect the human CAS role with the key role. A real
-> `hiring_manager`/`auditor` session can therefore ride recruiter-key authority into writer routes exposed by
-> the frontend. Row scoping protects hiring-manager reads but does not correct write authorization. **Next
-> implementation must start here:** define the human/service principal contract, add a route/action matrix,
-> write negative tests, then make browser authorization depend on the CAS role and assignment (or the strict
-> intersection of CAS and service permissions). Do not build another workflow surface first.
->
-> **P0 — confirmed score comparability defect.** Forward ranking computes evidence only for
-> `candidates_s2[:evidence_k]` (`evidence_k=15`) but sends every recalled candidate to `stage4_combine`.
-> Candidates outside the evidence batch therefore receive `0` for evidence completeness and motivation —
-> **40% of the configured final score** — due to compute placement rather than evaluated merit. HR must
-> choose between (a) evidence-evaluating every candidate that can be displayed/retained, or (b) an explicit
-> two-pass workflow with separate, non-comparable score labels. Until then, do not present the headline score
-> as uniformly evaluated across a pool larger than 15.
->
-> **P1 foundations, in order:** (1) HR ratification of scoring semantics and advisory-only use; (2) broader
-> HR-labelled/live-model quality and fairness gates; (3) retention/erasure across PostgreSQL, Neo4j, Redis,
-> blobs, exports and backups; (4) hardened deployment plus readiness/observability/recovery; (5) versioned
-> migrations and graph-projection freshness/version gates. **P2:** human decision/override records,
-> generalized audit viewer, documentation reconciliation, browser/accessibility/resilience tests, then the
-> previously proposed Policy Studio / defense-pack slice 2 / Ask-the-pool features.
->
-> **Findings accepted with qualification:** base Compose is intentionally development-oriented, but a
-> production profile must fail closed rather than rely on warnings; Tailscale Ollama is self-hosted but is
-> not “same machine,” so privacy language must name the approved inference boundary; the fixed eval corpus is
-> a strong regression gate but not evidence of cross-job fairness/generalization; raw blob permissions are a
-> useful control but are not equivalent to encrypted storage with key rotation. Full disposition and
-> acceptance criteria are in `docs/ROADMAP.md`.
->
-> **First slice for the next coding session:** authorization principal unification only. Before coding, write
-> an ADR that inventories every browser/API/service route and resolves service-key-only behavior, CAS-disabled
-> development behavior, role intersection, assignment scoping, and audit attribution. TDD must prove that
-> `hiring_manager` and `auditor` sessions cannot create/update jobs, upload/withdraw resumes, or generate
-> shortlists through the recruiter-key BFF. Run `./scripts/verify.sh all` and the security review gate.
-
-### ⚠️⚠️ READ FIRST — SESSION 2026-08-04/05: "Why this rank?" defense pack, slice 1 (ADR-031) — gates green, PR pending
+### (history) READ FIRST — SESSION 2026-08-04/05: "Why this rank?" defense pack, slice 1 (ADR-031) — gates green, PR pending
 
 > **Branch `feat/why-this-rank-defense-pack`, HEAD `637c6bd`, off `main` @ `6d452e5`. Tree clean. All three
 > merge-blocking gates GREEN locally (reviewer APPROVE, security PASS, ranking-evals PASS). PR pending — not
