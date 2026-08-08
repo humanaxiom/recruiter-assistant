@@ -21,25 +21,73 @@ deliberate, recorded action. Nothing is sent to any outside service.
 
 ---
 
+## Setting up a job
+
+*Half the system, and the half you have the most control over.*
+
+You create a requisition by giving the system the posting itself — the description text, pasted or uploaded.
+**The system then reads that posting with AI and extracts a structured set of requirements from it:** a job
+title, the required skills (each with an optional minimum number of years), the skills that are desirable
+rather than required, an overall minimum years of experience, a required education level and any named
+fields of study, plus location and responsibilities.
+
+> ### The single most important thing to understand about this tool
+>
+> **Candidates are scored against what the system extracted, not against your prose.** If the extraction
+> misses a requirement, no candidate is ever credited for it. If it turns a passing mention into a required
+> skill, every candidate is penalised for lacking it. The extracted requirements are shown to you on the job
+> page — **read them before you generate a shortlist**, every time. It is thirty seconds and it is the
+> difference between a shortlist you can defend and one you cannot.
+>
+> This matters more than usual right now, because of two things. Every skill the system pulls out of a
+> posting is currently treated as *mandatory* — the "desirable" distinction is extracted but not yet used in
+> scoring (decision 4). And the vocabulary problem in "what is not finished" below means requirements written
+> in ordinary administrative language are often not recognised at all.
+
+### The settings you choose per job
+
+- **Blind review** — on by default. Hides candidate identity from the shortlist. It can be turned off for a
+  job, which permanently un-blinds every candidate on it for everyone thereafter; that action is recorded.
+- **Retention period** — between 30 and 730 days, 180 by default. See the caveat in "what is not finished":
+  it is recorded but not yet enforced automatically.
+- **Shortlist size** — you can keep the whole ranked list or cap it to a top percentage. The default keeps
+  everything.
+- **Assigned hiring managers** — this is what controls access. A hiring manager sees only the requisitions
+  they are assigned to.
+
+### The lifecycle
+
+A job moves **draft → open → closed → archived**, and only in that direction. There is no way back: a closed
+requisition cannot be reopened, it would have to be recreated. Worth knowing before you close one.
+
+Jobs can also be created in bulk from a spreadsheet, which runs the same extraction on each.
+
+---
+
 ## What it does, step by step
 
 ```mermaid
 flowchart TD
+  JD["Recruiter creates a job<br/>from the posting text"] --> JX["AI extracts the requirements:<br/>skills, years, education, fields"]
+  JX --> JREV["Recruiter reviews<br/>what was extracted"]
+  JREV --> POOL
+
   U["Recruiter uploads résumés<br/>and confirms consent"] --> CG{"Consent<br/>confirmed?"}
   CG -->|No| STOP["Nothing is stored.<br/>The file never leaves the browser"]
   CG -->|Yes| ST["Stored, with identifying<br/>details encrypted"]
   ST --> P["The document is read<br/>and split into passages"]
   P --> LLM["Experience, education and<br/>skills are extracted"]
-  LLM --> RDY["Ready to rank"]
-  RDY --> S1["A pool of the closest<br/>candidates is selected"]
-  S1 --> S2["Each is scored on five<br/>measurable dimensions"]
+  LLM --> POOL["A pool of the closest<br/>candidates is selected"]
+
+  POOL --> S2["Each is scored on five<br/>measurable dimensions"]
   S2 --> S3["For the strongest, supporting<br/>quotes are found and verified"]
   S3 --> S4["Scores are combined<br/>and candidates ranked"]
   S4 --> SL["Anonymised shortlist"]
   SL --> HM["Hiring manager reviews"]
 ```
 
-*Consent is a hard gate at the very front: without the tick, no candidate data is stored at all.*
+*Both sides are read by AI. Consent is a hard gate on the candidate side: without the tick, no candidate data
+is stored at all.*
 
 **Selecting the pool.** The system picks up to 50 résumés whose content is closest to the job description, by
 meaning rather than keyword. Only résumés uploaded for that specific job are eligible.
@@ -56,14 +104,32 @@ sees it.
 
 ---
 
+## Finding jobs for a candidate — the other direction
+
+The system also runs the comparison the other way round: take one candidate and find which requisitions they
+fit. Useful when someone strong applies for a role that is already filled, or when you want to know where
+else a shortlisted person could go.
+
+Two things to know. It uses the same measured dimensions and the same evidence checking, but **it does not
+include the cover-letter component**, so its scores top out at 0.9 rather than 1.0. **Never put a
+reverse-match score next to a shortlist score** — they are on different scales. And this direction has had
+less testing than the shortlist direction; treat its output as a prompt to go and look, not as a ranking to
+act on.
+
+---
+
 ## How to get good results from it
 
 *The practical things that make the difference. Worth reading once before you start.*
 
+**Read what the system extracted from your posting.** Covered above and repeated here because it is the whole
+game: scoring runs against the extracted requirements, not your text. Check them on the job page before
+generating a shortlist.
+
 **Write the job description in specifics, not adjectives.** The system matches on named skills and stated
 requirements. "Strong communicator with attention to detail" gives it nothing to work with; "three years
 administering student records systems" does. The clearer and more concrete the posting, the better the
-shortlist. This is the single biggest lever you control.
+extraction — and therefore the shortlist.
 
 **Treat rank 16 and below as "not yet assessed", not "weak".** Evidence gathering runs for the top 15 only,
 and evidence is a large share of the final number. A candidate sitting at 16 has not been examined in the
