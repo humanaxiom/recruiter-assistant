@@ -44,24 +44,19 @@ audit row was written and the résumé was never decrypted — a role check that
 runs AFTER the audit/decrypt would still 403 the HTTP response while having
 already performed the very de-anonymization it exists to prevent.
 
-**FU-6 slice 6 (ADR-020 §3/§5) — row-scoping for a hiring_manager SESSION.**
-``_REVEALERS`` (the API-KEY role gate) stays admin/recruiter ONLY — a raw
-``hiring_manager`` KEY is still rejected by ``require_role`` before this
-route body ever runs (see ``test_reveal_403s_for_hiring_manager_and_auditor``
-above). The scoping this slice adds targets a DIFFERENT, real scenario ADR-020
-§3/§4 documents explicitly: the Flask viewer presents the ONE shared
-``recruiter`` API key for every signed-in human, so a hiring_manager browsing
-through that shared key satisfies ``require_role`` as ``Role.RECRUITER`` —
-only the CAS SESSION identity (``resolve_user``'s resolved ``user.role ==
-"hiring_manager"``) can still scope such a caller to their own assigned
-jobs. Per the task's explicit ordering: human-gate -> scoping-404 -> audit ->
-decrypt. An unassigned (or nonexistent) résumé must 404 BEFORE any audit_log
-row is written and BEFORE any decryption — observationally identical to a
-genuinely nonexistent résumé (ADR-020 §5), so NO NEW distinguishable status
-code is introduced; only the WIRING (whether the scoping check blocks the
-audit/decrypt at all) is proven here. The real ``EXISTS``-against-
-``job_assignees`` filtering is ``test_resume_scoping_pg.py``'s job (real
-Postgres, ADR-020 §3, mandatory).
+**FU-6 slice 6 (ADR-020 §3/§5) — row-scoping for a hiring_manager SESSION,
+SUPERSEDED 2026-08-07 for THIS route (`fix/session-role-on-writes`; ADR-020
+§9, ADR-033).** Slice 6 originally let a scoped, assigned hiring_manager
+SESSION reveal here, gated only by ``scoped_user_id_or_403``. That directly
+contradicted ``_REVEALERS = (admin, recruiter)`` and is now reversed by
+human decision: reveal is recruiter/admin ONLY, and a hiring_manager SESSION
+403s unconditionally via the new ``require_session_role(*_REVEALERS)`` gate
+— see the dedicated section near the bottom of this file for the full
+account and the two tests that replaced slice 6's assigned/200 vs.
+unassigned/404 pair. ``scoped_user_id_or_403`` is still called on this route
+(defence in depth — ADR-033) but its hiring_manager branch is now
+unreachable here; it remains load-bearing for the READ routes, which ADR-020
+§3/§4/§5 continue to govern unchanged.
 """
 
 from __future__ import annotations
@@ -556,32 +551,47 @@ async def test_reveal_403_for_auditor_even_though_auditor_can_read_blind(
     assert resp.status_code == 403
 
 
-# ── FU-6 slice 6 (ADR-020 §3/§5) — scoped hiring_manager SESSION reveal ────
+# ── Reversal (fix/session-role-on-writes, 2026-08-07; ADR-020 §9, ADR-033) ─
 #
-# The RBAC key-role gate (``_REVEALERS = (admin, recruiter)``) is untouched —
-# see ``test_reveal_403s_for_hiring_manager_and_auditor`` above for the raw
-# hiring_manager-KEY 403, which stays exactly as it was. The scenario below
-# is the ADR-020 §3/§4 "shared browser key" trap: the caller's KEY resolves
-# to ``Role.RECRUITER`` (so RBAC alone lets the request through, satisfied by
-# ``_build_app``'s default ``role=Role.ADMIN``/``Role.RECRUITER``), but the
-# CAS SESSION identity is a real hiring_manager — only the row-scoping check
-# may still block such a caller, keyed on THEIR OWN assigned jobs.
+# FU-6 slice 6 originally built a scoped hiring_manager SESSION reveal path
+# here (a hiring_manager browsing through the shared recruiter KEY could
+# still reveal a résumé under a job they were assigned to, blocked only when
+# unassigned — see the two tests this section used to contain, and ADR-020
+# §3's now-struck-through reveal bullet). **That guidance is SUPERSEDED and
+# must not be followed.** It directly contradicted `_REVEALERS = (admin,
+# recruiter)` above and the HR explainer's own claim that a hiring manager
+# cannot reveal and must go through a recruiter — the shared recruiter key
+# meant neither side of the contradiction ever failed its own tests, until
+# `test_route_resumes_session_gate.py` exercised the actual production
+# combination (recruiter key + hiring_manager session) and forced the
+# reconciliation. See ADR-020 §9 for the full account and ADR-033 for the
+# `require_session_role` gate that now enforces this.
+#
+# **Human decision:** reveal is recruiter/admin ONLY. A hiring_manager
+# SESSION now 403s on every reveal attempt, assigned or not — the new
+# `require_session_role(*_REVEALERS)` gate on the route's own decorator
+# (`resumes.py`) fires BEFORE `scoped_user_id_or_403`'s hiring_manager-
+# scoping branch is ever reached, so that branch is now unreachable from
+# this specific route (it stays reachable, and load-bearing, for the READ
+# routes — ADR-020 §4/§5 is unchanged for those). The two tests below
+# replace the old assigned/unassigned pair: under the new policy the two
+# cases are deliberately INDISTINGUISHABLE to the caller — both 403, no
+# audit row, no decrypt — which means this endpoint no longer leaks, to a
+# hiring manager, whether they are assigned to a given résumé's job at all.
+# Do NOT "restore" the old 200/404 split from ADR-020 §3 alone; that
+# guidance is exactly what this reversal supersedes.
 
 
 @pytest.mark.asyncio
-async def test_reveal_scoped_hiring_manager_unassigned_404s_writes_no_audit_no_decrypt(
+async def test_reveal_hiring_manager_session_403s_when_unassigned_writes_no_audit_no_decrypt(  # noqa: E501
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scoped hiring_manager session revealing a résumé under a job they
-    are NOT assigned to must 404 — and, critically, must write NO audit_log
-    row and never decrypt — even though an UNSCOPED existence probe alone
-    would find the résumé (``_mock_conn_scoped(assigned=False, ...)``
-    returns truthy for a bare, single-arg probe). Against the pre-slice-6
-    route (which never looks at the session for this check), the mocked
-    ``fetchval`` only ever receives a single positional arg and therefore
-    always resolves truthy — so this test is RED until the route forwards
-    the scoped identity into an existence check that can actually block it,
-    per the mandated order: human-gate -> scoping-404 -> audit -> decrypt."""
+    """Reversal (see section docstring above, ADR-020 §9 / ADR-033): a
+    hiring_manager SESSION may no longer reveal at all, so an unassigned job
+    403s — the session-role gate fires before the (now unreachable, for this
+    route) scoping check ever runs. No audit_log row is written and the
+    résumé is never decrypted, exactly like every other disallowed-role 403
+    on this route."""
     resume_id = uuid4()
     hm = _identity_user(cas_username="hm", role="hiring_manager")
     audit, get_one, order = _tracking_mocks(resume_id)
@@ -594,19 +604,22 @@ async def test_reveal_scoped_hiring_manager_unassigned_404s_writes_no_audit_no_d
     async with await _client(app) as client:
         resp = await client.post(f"/resumes/{resume_id}/reveal")
 
-    assert resp.status_code == 404
+    assert resp.status_code == 403
     audit.assert_not_awaited()
     get_one.assert_not_awaited()
     assert order == []
 
 
 @pytest.mark.asyncio
-async def test_reveal_scoped_hiring_manager_assigned_writes_audit_then_decrypts(
+async def test_reveal_hiring_manager_session_403s_when_assigned_writes_no_audit_no_decrypt(  # noqa: E501
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pairing test to the one above: a scoped hiring_manager session
-    revealing a résumé under a job they ARE assigned to must still succeed —
-    exactly one audit row, written BEFORE the decrypting read."""
+    """The pairing case to the one above (see section docstring, ADR-020 §9 /
+    ADR-033): even a hiring_manager session ASSIGNED to the résumé's job now
+    403s — assigned and unassigned are deliberately indistinguishable under
+    the new policy, so this route no longer leaks assignment status to a
+    hiring manager. No audit_log row is written and the résumé is never
+    decrypted."""
     resume_id = uuid4()
     hm = _identity_user(cas_username="hm", role="hiring_manager")
     audit, get_one, order = _tracking_mocks(resume_id)
@@ -619,10 +632,10 @@ async def test_reveal_scoped_hiring_manager_assigned_writes_audit_then_decrypts(
     async with await _client(app) as client:
         resp = await client.post(f"/resumes/{resume_id}/reveal")
 
-    assert resp.status_code == 200
-    audit.assert_awaited_once()
-    get_one.assert_awaited_once()
-    assert order == ["audit", "get_one"]
+    assert resp.status_code == 403
+    audit.assert_not_awaited()
+    get_one.assert_not_awaited()
+    assert order == []
 
 
 @pytest.mark.asyncio

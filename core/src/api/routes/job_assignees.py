@@ -38,6 +38,7 @@ from src.api.deps import (
     _DEV_ADMIN_SENTINEL_ID,
     Role,
     require_role,
+    require_session_role,
     resolve_user,
 )
 from src.errors import NotFoundError
@@ -72,7 +73,10 @@ def _require_real_assigner(user: User | None) -> User:
 @router.post(
     "/jobs/{job_id}/assignees",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_role(*_ASSIGNERS))],
+    dependencies=[
+        Depends(require_role(*_ASSIGNERS)),
+        Depends(require_session_role(*_ASSIGNERS)),
+    ],
 )
 async def create_assignee(
     job_id: UUID,
@@ -108,7 +112,10 @@ async def create_assignee(
 @router.delete(
     "/jobs/{job_id}/assignees/{user_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_role(*_ASSIGNERS))],
+    dependencies=[
+        Depends(require_role(*_ASSIGNERS)),
+        Depends(require_session_role(*_ASSIGNERS)),
+    ],
 )
 async def delete_assignee(
     job_id: UUID,

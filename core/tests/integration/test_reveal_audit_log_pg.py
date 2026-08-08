@@ -115,6 +115,29 @@ def _mock_validate_ticket(username: str) -> AsyncMock:
     return AsyncMock(return_value=username)
 
 
+async def _insert_user_with_role(
+    pool: asyncpg.Pool, *, cas_username: str, role: str = "recruiter"
+) -> None:
+    """Seed a ``users`` row with an EXPLICIT role BEFORE the CAS login for
+    the SAME username, so ``provision_or_get``'s ``ON CONFLICT`` path (which
+    deliberately never touches ``role``, see ``user_service.py``) leaves it
+    in place. Needed as of `fix/session-role-on-writes` (ADR-033):
+    ``require_session_role(*_REVEALERS)`` (admin, recruiter) now 403s a real
+    session whose role is neither — these two tests need reveal to actually
+    SUCCEED so the audit-actor/ordering plumbing can be observed; neither was
+    ever testing authorization itself (see the reveal-403 tests elsewhere in
+    this file, and ``test_route_resumes_session_gate.py``)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (cas_username, display_name, email, role) "
+            "VALUES ($1, $2, $3, $4)",
+            cas_username,
+            cas_username,
+            None,
+            role,
+        )
+
+
 def _build_app(pool: asyncpg.Pool) -> FastAPI:
     app = FastAPI()
     app.include_router(auth_routes.router)
@@ -227,6 +250,7 @@ async def test_reveal_case1_human_session_writes_one_audit_log_row_and_no_reveal
     monkeypatch.setattr(
         auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
     )
+    await _insert_user_with_role(pg_pool, cas_username=username)
     app = _build_app(pg_pool)
     job_id = await _insert_job(pg_pool)
     resume_id = await _insert_resume(pg_pool, job_id, name="Jane Smith")
@@ -334,6 +358,7 @@ async def test_reveal_audit_row_survives_a_decrypt_failure_after_it_commits(
     monkeypatch.setattr(
         auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
     )
+    await _insert_user_with_role(pg_pool, cas_username=username)
     monkeypatch.setattr(
         resumes_routes.resume_service,
         "get_one",
