@@ -31,74 +31,85 @@ Four things that make the difference between a demo that lands and one that disc
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
-## A1. P0 · Authorization — the human's role is not enforced on writes
+## A1. P0 · Authorization — RESOLVED in ADR-033 (`fix/session-role-on-writes`, PR #68, open + green)
 
-**Highest-severity finding. This is the one that blocks handing accounts to HR.**
+**Highest-severity finding. This was the one that blocked handing accounts to HR.**
 
-The Flask BFF attaches a single shared **recruiter** API key to every browser request
-(`core/frontend/api_client.py:118-119`). Backend write routes authorize that *key* via `require_role`;
-`require_role_assigned` only rejects a session whose role is `None` (`core/src/api/deps.py:309-313`) — it
-never intersects the human's CAS role with the key's role. Assignment scoping (`scoped_user_id_or_403`) is
-applied on **reads only** (`jobs.py:179,230`; `resumes.py:238,268,356`; `shortlist.py:90,138,163,186`).
+**Status: FIXED.** A `require_session_role(*allowed)` dependency now gates every write route (13 total:
+jobs, resumes, shortlist, job_assignees) to admin/recruiter **sessions** only, intersecting the human's
+real CAS role with the API key role. A structural test guard (`test_write_route_session_gate.py`) walks
+the actual route table and asserts every POST/PATCH/PUT/DELETE route is gated — new write routes added
+without the gate fail at test-collection time, not in production.
 
-Every writer control renders unconditionally — the only role-conditional template in the entire tree is the
-admin nav link (`base.html:16`).
+The human decision recorded in ADR-033 §4: **reveal is recruiter/admin only**. The scoped
+hiring-manager reveal (FU-6 slice 6) is retired — un-blinding stays a two-person action (hiring manager
+requests, recruiter/admin reveals), not something a hiring manager can trigger for their own assigned
+jobs. ADR-020 §9 records the reversal with full context.
 
-**What a hiring-manager or auditor session can actually do through the normal UI today:**
+**Why step (iii) is deliberately not built:** ROADMAP A1 originally listed four steps: (i) add test axis,
+(ii) `require_session_role`, (iii) extend `scoped_user_id_or_403` to writes, (iv) CSRF on all routes.
+Once every write route's allowed set is `{admin, recruiter}`, there is no *scoped* role left that can
+reach a write route at all — `scoped_user_id_or_403` exists to confine a hiring_manager session to their
+own assigned jobs; both admin and recruiter are unscoped by design. Step (iii) would be dead code. This is
+recorded explicitly in ADR-033 §5 so a future session does not re-discover it.
 
-| Action | Effect |
-|---|---|
-| Turn blind review off (`app.py:641`) | Permanently un-blinds every candidate on a job, for every future viewer |
-| Reveal identity (`app.py:866`) | De-anonymizes a candidate. hiring_manager → assigned jobs. **auditor → UNSCOPED, company-wide** (`deps.py:347-356`) |
-| Withdraw / reinstate (`app.py:899,924`) | Removes or restores any candidate from ranking — no assignment scoping |
-| Regenerate shortlist (`app.py:715`) | Overwrites any job's ranking |
-| Create/close jobs, upload résumés, trigger reverse match | Full writer authority |
+**Full detail:** [ADR-033](adr/033-session-role-enforcement-on-writes.md). **Interim pilot control
+(enforced in code now, not a convention):** issue only recruiter/admin accounts. **CSRF (step iv):**
+remains unscoped as a separate item.
 
-**An auditor — a read-only oversight role whose reads are logged as a compensating control (ADR-020 §6) —
-can un-blind every candidate in the system.** For a blind-hiring pilot, that is precisely the control HR
-will be relying on.
-
-**Why the gates missed it:** `test_route_jobs.py:276` and `test_api_resumes_withdraw_pg.py:147` parametrize
-the **API-key** role. **No test anywhere exercises recruiter-key + hiring_manager/auditor-session — the only
-combination that occurs in production.** They read like coverage and are not.
-
-**Plan (Red first).** (i) Add the missing test axis and watch it fail. (ii) Add a `require_session_role(*allowed)`
-dependency mirroring the pattern `users.py::_require_admin_session` already uses correctly, applied to every
-writer route, intersecting session role with key role. (iii) Extend `scoped_user_id_or_403` to writes.
-(iv) Extend CSRF to all 12 state-changing Flask routes (currently 3). Template-level role gating is
-defence-in-depth, **not** the fix. **Interim pilot mitigation:** issue only recruiter/admin accounts.
-
-## A2. P0 · Skill matching does not work on real job descriptions
+## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage
 
 **Highest product-value finding — this decides whether a pilot produces meaningful output at all.**
 
-| Job | Hashed reqs | Total | Avg skill sub-score |
-|---|---|---|---|
-| 20251023 00101827 JDFN APSA 20260106 | 16 | 19 | **0.0033** |
-| Application Administrator | 15 | 20 | **0.0375** |
-| Program Director, SFU Morris J. Wosk Centre | 5 | 6 | **0.0000** |
-| Backend Data Engineer *(corpus fixture)* | 0 | 5 | 0.6425 |
-| Senior Backend Data Engineer *(corpus fixture)* | 0 | 6 | 0.5000 |
+**Reframe:** Not "the vocabulary is too small" but **"the ontology is for the wrong domain."**
 
-**Mechanism, verified.** ADR-008 hashes any skill outside the curated vocabulary. `ensure_categories`
-(`skills_graph.py:358-369`) stamps categories *only* from `categories.yaml` (~19 families) — its docstring
-says "no LLM backfill in v1" — so a hashed node has **no `categories` property**. Stage 2's family-credit
-branch requires `reqSkill.categories IS NOT NULL` (`orchestrator.py:377`). Measured across the live graph:
-`hashed_total=288, with_categories=0`. So a non-vocabulary requirement scores `1.0` on an identical
-normalised string and `0.0` otherwise — **no alias resolution, no family partial credit, nothing between.**
+Measured from **1,802 real SFU canonical JDs** (9,176 qualification statements, 1,222 distinct titles,
+449 departments):
 
-It then compounds: **every `REQUIRES` edge is written `must=True`** (`tasks.py:264`), so the
-`is_must_have=False` branch is dead code and the ×0.5 `must_have_miss_penalty` (`stages.py:185-194`) fires
-for nearly every candidate.
+| Measure | Value |
+|---|---|
+| Shipped vocabulary | 231 terms (software-engineering ontology: javascript, react, docker, kafka…) |
+| Vocabulary coverage | **15.6%** of real qualification statements |
+| **New families derived from corpus** | 13 families, 234 terms (finance, student_affairs, academic_programs, research_admin, human_resources, communications, governance_policy, leadership_management, analysis_reporting, equity_indigenous, facilities_operations, interpersonal_core, health_wellness) |
+| **Coverage with new families** | **54.8%** — a +39.2 point gain |
+| Remaining gap | 45.2% (genuine long tail: MRI/MEG methods, microfabrication, study-permit requirements, role-specific knowledge) |
 
-**Every real SFU posting is 47-84% outside the vocabulary; both corpus fixtures are 0%.** That is exactly why
-the evals gate never saw it.
+**Mechanism:** Real SFU postings are overwhelmingly administrative, academic, professional-services work.
+The shipped vocabulary is a software-engineering ontology. This is a **domain mismatch**, not a quantity
+problem: new vocabulary work (highest value per hour) lifts coverage from 15.6% to 54.8%; the remaining
+45% is a long tail that will need the Phase 3.3 projection-time classifier regardless.
 
-**Plan.** Grow `aliases.yaml`/`categories.yaml` toward the job families actually being posted (highest
-value per hour, and no scoring-math change if additive); and/or enable LLM category backfill for hashed
-nodes (`worker.skill_category_task`, deferred); and/or a scoped fuzzy path for non-vocabulary JD↔résumé
-skills. **Changes ranking → `ranking-evals` gated, and needs A3 first to be measurable.** The `must=True`
-question is an **HR policy decision**, not an engineering one.
+**Why an out-of-vocabulary skill scores 0.0 rather than something partial** — the root cause the classifier
+in Phase 3.3 has to address, so do not lose it: ADR-008 hashes any skill outside the curated vocabulary.
+`ensure_categories` (`skills_graph.py:353-369`) stamps categories *only* from `categories.yaml`, and for a
+hashed key `categories_for()` returns `[]`, so the `if cats:` guard means **no Cypher runs at all** — the
+property is never even set to `[]`, it stays absent. Stage 2's family-credit arm requires
+`reqSkill.categories IS NOT NULL` (`orchestrator.py:377`), so it is unreachable for a hashed node.
+Measured across the live graph: `hashed_total=288, with_categories=0`. A non-vocabulary requirement
+therefore scores `1.0` on an identical normalised string and `0.0` otherwise — **no alias resolution, no
+family partial credit, nothing in between.** The same dead arm applies to four *cleartext* canonicals with
+no family (`c++`, `hudson`, `julia`, `rest api design`).
+
+**The hash is one-way, which decides the classifier's design:** categories cannot be backfilled later over
+the graph, because by then only `h:<hex>` remains. Classification must happen at projection time, where the
+cleartext `raw_name` is still in hand (`tasks.py:242`/`:293`, `resume_tasks.py:1122`).
+
+It compounds: **every `REQUIRES` edge is written `must=True`** (`tasks.py:264`), so the ×0.5
+`must_have_miss_penalty` (`stages.py:185-194`) fires for nearly every candidate. Phase 3.1 addresses this by
+scoring the `NICE_TO_HAVE` edges that are already written and never read (`orchestrator.py:426`).
+
+**Unresolved product decision that gates the work:** Many of the derived terms are **competencies**
+(communication, leadership, problem-solving), not named tools. The current scorer is `years × recency ×
+ontology_weight`. A candidate's "three years of interpersonal skills, last used 2024" is not meaningful
+on this model. **Three options:**
+1. Score competencies on a different model (proficiency level, recency only, binary present/absent).
+2. Exclude competencies from must-have penalties entirely.
+3. Make that decision per-competency as new ones are curated.
+
+**Plan:** Grow `aliases.yaml`/`categories.yaml` with the derived families (additive, no scoring-math
+change). Once competency handling is decided, the Phase 3.3 projection-time classifier will handle the
+45.2% long tail. The `must=True` edge question (ADR-009 residual) is an **HR policy decision**, not an
+engineering one, and remains separate from this vocabulary work.
 
 ## A3. P0 · The evals harness cannot see what it grades
 
