@@ -27,6 +27,7 @@ from src.api.deps import (
     get_arq,
     log_auditor_read,
     require_role,
+    require_session_role,
     resolve_user,
     scoped_user_id_or_403,
 )
@@ -67,7 +68,10 @@ _MAX_BULK_JD_FILES = _MAX_ZIP_ENTRIES
 @router.post(
     "/jobs",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_role(*_JOB_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
 )
 async def create_job(
     payload: JobCreate,
@@ -88,7 +92,13 @@ async def create_job(
 
 
 # Declared BEFORE /jobs/{job_id} so "jd-extract" never matches as a job id.
-@router.post("/jobs/jd-extract", dependencies=[Depends(require_role(*_JOB_WRITERS))])
+@router.post(
+    "/jobs/jd-extract",
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
+)
 async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
     """Pull plain JD text out of an uploaded txt/json/pdf/docx so the
     recruiter can review/edit it before creating the job. Pure transform —
@@ -106,7 +116,10 @@ async def jd_extract(file: Annotated[UploadFile, File()]) -> JDExtractText:
 @router.post(
     "/jobs/bulk",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_role(*_JOB_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
 )
 async def bulk_create_jobs(
     db: Db,
@@ -240,7 +253,13 @@ async def get_job(
     return job
 
 
-@router.patch("/jobs/{job_id}", dependencies=[Depends(require_role(*_JOB_WRITERS))])
+@router.patch(
+    "/jobs/{job_id}",
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
+)
 async def update_job(
     job_id: UUID,
     payload: JobUpdate,
@@ -277,7 +296,11 @@ async def update_job(
 
 
 @router.patch(
-    "/jobs/{job_id}/status", dependencies=[Depends(require_role(*_JOB_WRITERS))]
+    "/jobs/{job_id}/status",
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
 )
 async def patch_job_status(job_id: UUID, payload: JobTransition, db: Db) -> JobOut:
     """A valid forward transition (e.g. draft -> open) applies and returns

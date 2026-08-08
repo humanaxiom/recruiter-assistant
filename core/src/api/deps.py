@@ -147,6 +147,50 @@ def require_role(*allowed: Role) -> Callable[..., Awaitable[Role]]:
     return _check
 
 
+def require_session_role(*allowed: Role) -> Callable[..., Awaitable[None]]:
+    """Build a per-route dependency that 403s a REAL session whose ``role`` is
+    outside ``allowed`` — the SESSION-role counterpart to :func:`require_role`
+    (FU-5 pilot-readiness fix, ``fix/session-role-on-writes``).
+
+    ``require_role``/``resolve_role`` judges only the presented API KEY. The
+    Flask BFF attaches ONE shared ``recruiter`` key to every browser request
+    (``core/frontend/api_client.py``), so a signed-in hiring_manager or
+    auditor performs a write indistinguishably from a recruiter as far as the
+    key alone is concerned — this dependency closes that hole by additionally
+    consulting the CAS session's own ``role``.
+
+    Each call returns a DISTINCT closure (mirrors ``require_role``): override
+    the shared :func:`resolve_user`, never a ``require_session_role(...)``
+    closure by identity, in tests.
+
+    Three cases, same contract as ``src.api.routes.users._require_admin_session``
+    and ``require_role_assigned``:
+
+    * ``user is None`` — no session at all (a bare service-key caller) —
+      PASS. This gate never judges the ABSENCE of a session, only a REAL
+      session's role; the write routes it guards are not all human-only
+      (e.g. ``PATCH /jobs/{id}`` accepts a bare service-key caller and audits
+      it as ``actor_kind='service'``), so 403ing an absent session here would
+      break that path. This is the case an over-eager implementation breaks.
+    * a real session whose ``role`` is not in ``allowed`` — 403, plain
+      ``fastapi.HTTPException`` (not ``AppError``), same mechanism as
+      ``require_role``/``require_role_assigned``/``scoped_user_id_or_403``.
+    * a real session whose ``role`` is in ``allowed`` — PASS. The CAS-disabled
+      synthetic dev-anonymous sentinel (``role="admin"``) passes naturally
+      through this same comparison, with no special-casing needed.
+    """
+    allowed_roles = frozenset(allowed)
+
+    async def _check(user: Annotated[User | None, Depends(resolve_user)]) -> None:
+        if user is not None and user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail="session role not permitted for this route",
+            )
+
+    return _check
+
+
 def get_arq(request: Request) -> ArqRedis:
     """FastAPI dependency — hand the lifespan-built arq pool to routes.
 

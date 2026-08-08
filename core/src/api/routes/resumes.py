@@ -35,6 +35,7 @@ from src.api.deps import (
     get_arq,
     log_auditor_read,
     require_role,
+    require_session_role,
     resolve_user,
     scoped_user_id_or_403,
 )
@@ -89,7 +90,10 @@ _MAX_UPLOAD_FILES = _MAX_ZIP_ENTRIES
 @router.post(
     "/jobs/{job_id}/resumes",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
 )
 async def upload_resumes(
     job_id: UUID,
@@ -287,7 +291,10 @@ _EXISTS_SCOPED_SQL = (
 )
 
 
-@router.post("/resumes/{resume_id}/reveal")
+@router.post(
+    "/resumes/{resume_id}/reveal",
+    dependencies=[Depends(require_session_role(*_REVEALERS))],
+)
 async def reveal_resume(
     resume_id: UUID,
     db: Db,
@@ -393,7 +400,10 @@ async def reveal_resume(
 
 @router.post(
     "/resumes/{resume_id}/withdraw",
-    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
 )
 async def withdraw_resume(
     resume_id: UUID,
@@ -420,7 +430,10 @@ async def withdraw_resume(
 
 @router.post(
     "/resumes/{resume_id}/reinstate",
-    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
 )
 async def reinstate_resume(
     resume_id: UUID,
@@ -461,7 +474,10 @@ async def resume_status(job_id: UUID, db: Db) -> ResumeStatusBreakdown:
 @router.post(
     "/resumes/{resume_id}/match-jobs",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_role(*_RESUME_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
 )
 async def trigger_reverse_match(
     resume_id: UUID,

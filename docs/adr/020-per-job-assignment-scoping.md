@@ -74,7 +74,7 @@ The route handler is responsible for determining whether to pass `user_id` (base
 - `GET /jobs/{id}` (L164, `core/src/api/routes/jobs.py`) — scoped reader requesting an unassigned job gets 404
 - `GET /jobs/{id}/resumes` (L199, `core/src/api/routes/resumes.py`) — scoped reader sees resumes only for assigned jobs
 - `GET /resumes/{id}` (L212–214, `core/src/api/routes/resumes.py`) — scoped reader accessing a résumé for an unassigned job gets 404
-- `POST /resumes/{id}/reveal` (L232–234, `core/src/api/routes/resumes.py`) — scoped reader can only reveal for assigned jobs
+- ~~`POST /resumes/{id}/reveal` (L232–234, `core/src/api/routes/resumes.py`) — scoped reader can only reveal for assigned jobs~~ **SUPERSEDED 2026-08-07 — see §9. Reveal is admin/recruiter only; a hiring_manager session cannot reveal at all, assigned or not.**
 - `GET /jobs/{id}/shortlist` (L94–99, `core/src/api/routes/shortlist.py`) — scoped reader lists only their assigned jobs' shortlists
 - `GET /jobs/{id}/shortlist/export` (L51–54, `core/src/api/routes/shortlist.py`) — scoped reader exports only their assigned jobs
 - `GET /shortlist/{entry_id}` (L102–105, `core/src/api/routes/shortlist.py`) — scoped reader accessing a shortlist entry from an unassigned job gets 404
@@ -163,6 +163,55 @@ logged — the frontend polls them every 3s and they carry no specific subject.
   a first CAS login lands as `recruiter`; testing/using scoped roles needs an admin to set
   `users.role` via SQL until an admin endpoint exists. FU-6's integration fixtures seed
   these roles directly.
+
+### 9. Amendment (2026-08-07, `fix/session-role-on-writes`) — reveal scoping is SUPERSEDED, not extended
+
+**§3/§5's "scoped hiring_manager can reveal an assigned job's résumé" line (the `POST
+/resumes/{id}/reveal` bullet in §3, struck through above) is wrong and must not be
+followed.** It was built in good faith in FU-6 slice 6 and had its own green tests
+(`test_reveal_scoped_hiring_manager_{assigned,unassigned}_*` in
+`core/tests/unit/test_route_reveal.py`), but it directly contradicted two things that
+predate it and were never reconciled against it:
+
+- `_REVEALERS = (Role.ADMIN, Role.RECRUITER)` (`core/src/api/routes/resumes.py`,
+  ADR-018/D2) — reveal has always been admin/recruiter ONLY at the key-role layer.
+- The HR-facing ranking-metrics explainer, which states plainly that a hiring manager
+  cannot reveal a candidate's identity and must go through a recruiter.
+
+Both statements were simultaneously true in the test suite and simultaneously false in
+production, because `core/frontend/api_client.py` sends the ONE shared `recruiter` API
+key for every browser user (ADR-019's own crux reconciliation, §8 above) — so the
+key-role gate never saw a real hiring_manager key to reject, and the scoping gate in §3
+happily let an assigned hiring_manager SESSION through underneath it. Neither test
+suite ever exercised the actual production combination (recruiter key + hiring_manager
+session) until `fix/session-role-on-writes`'s `test_route_resumes_session_gate.py`
+did, at which point the contradiction became two tests failing no matter which way it
+was resolved.
+
+**Human decision:** reveal is recruiter/admin only, full stop. A hiring_manager
+SESSION now gets 403 on `POST /resumes/{id}/reveal` unconditionally — assigned or not
+— via the new `require_session_role(*_REVEALERS)` gate (ADR-033). The blind-review
+value proposition wins: un-blinding stays a genuine two-person action (a hiring manager
+requests, a recruiter/admin reveals), not something a hiring manager can trigger
+themselves for their own assigned jobs. The two outcomes (assigned vs. unassigned) are
+now deliberately indistinguishable to the caller — both 403, no audit row, no
+decrypt — which is a strict improvement on §5's existence-oracle rationale below: a
+hiring_manager can no longer probe assignment status via this route AT ALL, not even
+through the assigned/unassigned 200-vs-404 split.
+
+**§5's 404-not-403 existence-oracle rationale is UNCHANGED for the read routes** (`GET
+/jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/resumes`, `GET /resumes/{id}`, `GET
+/jobs/{id}/shortlist*`, `GET /shortlist/{id}`) — those still scope a hiring_manager
+session via `scoped_user_id_or_403` exactly as built, and an unassigned/nonexistent
+resource there is still 404, not 403. This amendment is scoped to the one write route
+(reveal) that also changed key-role-vs-session-role gating; it does not touch §4's
+role-scoping table for reads at all.
+
+`scoped_user_id_or_403`'s call inside `reveal_resume` (`resumes.py`) is **retained**,
+not removed — see ADR-033 for why it is correct, structurally unreachable-for-
+hiring_manager defence in depth rather than dead code, and why extending it further
+(ROADMAP A1 step (iii)) is deliberately not needed once `require_session_role` gates
+every write route's allowed set down to `{admin, recruiter}`, both unscoped by design.
 
 ## Consequences
 

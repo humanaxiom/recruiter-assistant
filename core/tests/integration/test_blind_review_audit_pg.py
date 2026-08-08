@@ -114,6 +114,29 @@ def _mock_validate_ticket(username: str) -> AsyncMock:
     return AsyncMock(return_value=username)
 
 
+async def _insert_user_with_role(
+    pool: asyncpg.Pool, *, cas_username: str, role: str = "recruiter"
+) -> None:
+    """Seed a ``users`` row with an EXPLICIT role BEFORE the CAS login for
+    the SAME username, so ``provision_or_get``'s ``ON CONFLICT`` path (which
+    deliberately never touches ``role``, see ``user_service.py``) leaves it
+    in place. Needed as of `fix/session-role-on-writes` (ADR-033):
+    ``require_session_role`` now 403s a real session whose role is not
+    admin/recruiter, and this test's whole point — proving the audit actor
+    is correctly derived from a real human session — needs the flip to
+    actually succeed so the identity plumbing can be observed; it was never
+    testing authorization itself."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (cas_username, display_name, email, role) "
+            "VALUES ($1, $2, $3, $4)",
+            cas_username,
+            cas_username,
+            None,
+            role,
+        )
+
+
 def _build_app(pool: asyncpg.Pool) -> FastAPI:
     app = FastAPI()
     app.include_router(auth_routes.router)
@@ -323,6 +346,7 @@ async def test_flip_by_a_human_session_records_user_actor(
     monkeypatch.setattr(
         auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
     )
+    await _insert_user_with_role(pg_pool, cas_username=username)
     app = _build_app(pg_pool)
     job_id = await _insert_job(pg_pool, blind_review=True)
 

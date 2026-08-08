@@ -39,6 +39,16 @@ unassigned/nonexistent resume, exactly like the jobs single-get route.
 ``test_job_scoping_pg.py``'s module docstring for why this is the only way
 to get a real, cookie-backed hiring_manager session.
 
+**Reveal reversal (`fix/session-role-on-writes`, 2026-08-07; ADR-020 §9,
+ADR-033).** The three ``test_reveal_hiring_manager_session_403s_*`` tests
+below SUPERSEDE this file's original slice-6 expectation that a scoped,
+assigned hiring_manager session could reveal -- see ADR-020 §9 for the full
+account. Reveal is now recruiter/admin ONLY; a hiring_manager session 403s
+on ``POST /resumes/{id}/reveal`` unconditionally, assigned or not, with zero
+``audit_log`` rows written either way. The list/get read routes in this file
+(``GET /jobs/{id}/resumes``, ``GET /resumes/{id}``) are UNCHANGED by this
+reversal -- ADR-020 §3/§4/§5 still governs them exactly as built.
+
 **RBAC key-role note.** These Settings configure no ``api_key_*`` values, so
 ``auth_enabled`` is False and ``resolve_role`` ALWAYS resolves
 ``Role.ADMIN`` regardless of any header -- exactly like
@@ -417,9 +427,19 @@ async def test_get_resume_hiring_manager_200_for_assigned_jobs_resume(
 
 
 @pytest.mark.asyncio
-async def test_reveal_hiring_manager_assigned_writes_one_audit_row_and_unblinds(
+async def test_reveal_hiring_manager_session_403s_even_when_assigned_writes_zero_audit_rows(  # noqa: E501
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reversal (`fix/session-role-on-writes`, 2026-08-07; ADR-020 §9,
+    ADR-033) — SUPERSEDES this test's original assigned-hiring_manager-can-
+    reveal-and-unblind expectation, exactly like the mocked-conn pin in
+    ``test_route_reveal.py``'s own "Reversal" section. Reveal is now
+    recruiter/admin ONLY: a hiring_manager session 403s on reveal even for a
+    job they ARE assigned to — `require_session_role(*_REVEALERS)` fires
+    before `scoped_user_id_or_403`'s hiring_manager-scoping branch is ever
+    reached, so the real ``audit_log`` table proves what the mocked route
+    test could only assert on a mock: zero rows, no decrypt, for a blocked
+    reveal regardless of assignment."""
     settings = _settings()
     _patch_settings(monkeypatch, settings)
     app = _build_app(pg_pool)
@@ -439,9 +459,8 @@ async def test_reveal_hiring_manager_assigned_writes_one_audit_row_and_unblinds(
             f"/resumes/{resume_id}/reveal", cookies={settings.session_cookie_name: sid}
         )
 
-    assert resp.status_code == 200
-    assert resp.json()["candidate"]["name"] == "Jane Smith"
-    assert await _count_reveal_audit_rows(pg_pool, resume_id) == 1
+    assert resp.status_code == 403
+    assert await _count_reveal_audit_rows(pg_pool, resume_id) == 0
 
 
 # ── (c) hiring_manager NOT assigned to the resume's job ─────────────────
@@ -507,13 +526,18 @@ async def test_get_resume_hiring_manager_404_for_unassigned_jobs_resume(
 
 
 @pytest.mark.asyncio
-async def test_reveal_hiring_manager_404_for_unassigned_jobs_resume_writes_zero_audit_rows(  # noqa: E501
+async def test_reveal_hiring_manager_session_403s_for_unassigned_jobs_resume_writes_zero_audit_rows(  # noqa: E501
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The security-critical proof of this whole file: a BLOCKED reveal must
-    leave the real ``audit_log`` table with ZERO rows for this resume -- no
-    audit trail of an attempted de-anonymization the caller was never
-    authorized to see in the first place."""
+    """Reversal (`fix/session-role-on-writes`, 2026-08-07; ADR-020 §9,
+    ADR-033) — reveal is recruiter/admin ONLY, so an unassigned job now 403s
+    (the session-role gate) rather than 404 (the now-unreachable scoping
+    check) — see the sibling "assigned" test above: under the new policy the
+    two cases are deliberately indistinguishable, both 403. The
+    security-critical proof this file exists for is unchanged in kind: a
+    BLOCKED reveal must leave the real ``audit_log`` table with ZERO rows
+    for this resume -- no audit trail of an attempted de-anonymization the
+    caller was never authorized to see in the first place."""
     settings = _settings()
     _patch_settings(monkeypatch, settings)
     app = _build_app(pg_pool)
@@ -535,10 +559,10 @@ async def test_reveal_hiring_manager_404_for_unassigned_jobs_resume_writes_zero_
             cookies={settings.session_cookie_name: sid},
         )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 403
     assert await _count_reveal_audit_rows(pg_pool, other_resume) == 0, (
-        "a blocked reveal for an unassigned resume must leave NO audit_log "
-        "row -- proof that scoping runs before the audit write"
+        "a blocked reveal must leave NO audit_log row -- proof that the "
+        "session-role gate runs before the audit write"
     )
 
 
@@ -591,9 +615,13 @@ async def test_get_resume_hiring_manager_zero_assignments_404s(
 
 
 @pytest.mark.asyncio
-async def test_reveal_hiring_manager_zero_assignments_404s_writes_zero_audit_rows(
+async def test_reveal_hiring_manager_session_403s_with_zero_assignments_writes_zero_audit_rows(  # noqa: E501
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reversal (`fix/session-role-on-writes`, 2026-08-07; ADR-020 §9,
+    ADR-033) — same policy as the two sibling tests above: reveal 403s for
+    ANY hiring_manager session, so a zero-assignment hiring_manager gets the
+    same 403 (not 404) as an assigned one, with zero audit rows either way."""
     settings = _settings()
     _patch_settings(monkeypatch, settings)
     app = _build_app(pg_pool)
@@ -614,7 +642,7 @@ async def test_reveal_hiring_manager_zero_assignments_404s_writes_zero_audit_row
             f"/resumes/{resume_id}/reveal", cookies={settings.session_cookie_name: sid}
         )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 403
     assert await _count_reveal_audit_rows(pg_pool, resume_id) == 0
 
 

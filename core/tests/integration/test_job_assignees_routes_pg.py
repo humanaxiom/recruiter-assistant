@@ -28,6 +28,15 @@ mocked-conn route tests structurally cannot:
 Follows the exact asyncpg/testcontainers/CAS-session fixture wiring already
 used in ``tests/integration/test_blind_review_audit_pg.py`` and
 ``tests/integration/test_auth_routes_pg.py`` — no new harness.
+
+**Acting-session role seeding (`fix/session-role-on-writes`, 2026-08-07;
+ADR-033).** The four tests that log in as ``admin_username`` and then POST/
+DELETE now pre-seed that same ``cas_username`` with ``role="admin"`` via
+``_insert_user`` BEFORE logging in — ``require_session_role(*_ASSIGNERS)``
+403s a real session whose role isn't admin/recruiter, and a first CAS login
+for a non-default-admin username otherwise captures ``role IS NULL``
+(ADR-019 §10a/§2 reversal). This is setup only; none of these tests were
+ever exercising authorization itself.
 """
 
 from __future__ import annotations
@@ -228,6 +237,11 @@ async def test_post_assignee_creates_row_and_exactly_one_audit_log_row(
     )
     app = _build_app(pg_pool)
 
+    # Seed the acting session's own role BEFORE login (`fix/session-role-
+    # on-writes`, ADR-033): `require_session_role(*_ASSIGNERS)` now 403s a
+    # real session whose role isn't admin/recruiter, and `provision_or_get`'s
+    # `ON CONFLICT` path never touches an already-set role (`user_service.py`).
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
     job_id = await _insert_job(pg_pool)
     target_user_id = await _insert_user(pg_pool, role="hiring_manager")
 
@@ -280,6 +294,11 @@ async def test_delete_assignee_removes_row_and_writes_unassign_job_audit_row(
     )
     app = _build_app(pg_pool)
 
+    # Seed the acting session's own role BEFORE login (`fix/session-role-
+    # on-writes`, ADR-033): `require_session_role(*_ASSIGNERS)` now 403s a
+    # real session whose role isn't admin/recruiter, and `provision_or_get`'s
+    # `ON CONFLICT` path never touches an already-set role (`user_service.py`).
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
     job_id = await _insert_job(pg_pool)
     target_user_id = await _insert_user(pg_pool, role="hiring_manager")
 
@@ -341,6 +360,9 @@ async def test_assign_audit_write_failure_rolls_back_the_assignment_too(
     )
     app = _build_app(pg_pool)
 
+    # Seed the acting session's own role BEFORE login (`fix/session-role-
+    # on-writes`, ADR-033) — see the sibling tests above for why.
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
     job_id = await _insert_job(pg_pool)
     target_user_id = await _insert_user(pg_pool, role="hiring_manager")
 
@@ -378,6 +400,11 @@ async def test_unassign_audit_write_failure_rolls_back_the_removal_too(
     )
     app = _build_app(pg_pool)
 
+    # Seed the acting session's own role BEFORE login (`fix/session-role-
+    # on-writes`, ADR-033): `require_session_role(*_ASSIGNERS)` now 403s a
+    # real session whose role isn't admin/recruiter, and `provision_or_get`'s
+    # `ON CONFLICT` path never touches an already-set role (`user_service.py`).
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
     job_id = await _insert_job(pg_pool)
     target_user_id = await _insert_user(pg_pool, role="hiring_manager")
 
