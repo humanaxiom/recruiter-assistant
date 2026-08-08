@@ -21,8 +21,13 @@ Four things that make the difference between a demo that lands and one that disc
    wrong red badges is not.
 2. **Sign in as admin or recruiter only.** Do not hand out hiring-manager or auditor accounts during the
    demo or the early pilot — see A1.
-3. **Do not circulate `docs/process/ranking-metrics-explainer.html`.** It is marked draft/not-for-circulation
-   and contains a **false safety claim** (see A5).
+3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED 2026-08-07** — the
+   explainer was rewritten against the working tree and is now cleared for HR circulation. The false safety
+   claim is gone (the Hiring Manager reveal claim is replaced with a by-design/as-built split that states A1
+   plainly), the senior must-have exemption is disclosed, and A1–A4 are all disclosed to the reader as open
+   items with the interim controls named. A Markdown twin lives at `ranking-metrics-explainer.md`. **Every
+   change to authz, skill matching, the evals gate or the evidence verifier must update both files** — the
+   explainer is now a circulated artifact, not a draft.
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
@@ -147,10 +152,14 @@ inferring pipeline state from a display artifact.
 
 Each is a claim someone could rely on:
 
-- **`docs/process/ranking-metrics-explainer.html:401`** states in bold that a Hiring Manager **"cannot reveal
-  a candidate's identity."** A1 falsifies exactly that. Keep the file out of circulation until A1 lands.
-  The same file is *partially* updated (`:418`, `:407`, `:723-728`, `:636-637` obsolete; `:711-715` current),
-  which is worse than uniformly stale — a reader cannot tell which half to trust.
+- ~~**`docs/process/ranking-metrics-explainer.html:401`**~~ **FIXED 2026-08-07.** The bold "cannot reveal a
+  candidate's identity" claim is gone; each persona now carries an explicit *by design* / *as built* split,
+  and A1 is disclosed as pilot gap 1 with "issue only Recruiter and Admin accounts" as the interim control.
+  The four obsolete passages the review identified (`:418` no-scoping, `:407` auditor, `:723-728` register
+  items 13/14, `:636-637` unaudited un-blind) are now marked **Closed since July** rather than deleted, so a
+  reader comparing versions can see what moved. The register is rebuilt at 23 items (13 ratify / 10 gap) and
+  now carries A1–A4, retention non-enforcement, unencrypted blobs and the unsalted email hash. A Markdown
+  twin was added: `docs/process/ranking-metrics-explainer.md`.
 - **`README.md:3,14`** — "data never leaves the machine" is false for the Tailscale peer inference setup.
 - **`CLAUDE.md:10,79`** — specify "SQLAlchemy async"; there is no SQLAlchemy dependency anywhere. The harness
   contract misleads every session.

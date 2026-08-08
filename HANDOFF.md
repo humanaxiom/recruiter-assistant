@@ -20,8 +20,14 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 >    **NOT a real SFU posting** — skill scores collapse to ~0 and are then halved; the chips render a wall of
 >    red *"— missing · must-have"* for skills candidates plainly have. Say the limitation out loud.
 > 2. **Sign in as admin or recruiter only.** Do not issue hiring-manager or auditor accounts yet.
-> 3. **Do not circulate `docs/process/ranking-metrics-explainer.html`** — draft, and it contains a false
->    safety claim (below).
+> 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`**~~ — **RESOLVED 2026-08-07.** The
+>    explainer was rewritten against the working tree: the false HM-reveal claim is replaced by a *by design /
+>    as built* split that states the P0 authz gap plainly, the senior must-have exemption (0.75 at ≥1.5× years
+>    and ≥50% coverage) is disclosed, and P0s A1–A4 lead the document as "Where this stands for the pilot"
+>    with their interim controls. Register rebuilt at 23 items; the four now-closed July items are marked
+>    Closed, not deleted. **It is now a circulated HR artifact** — a Markdown twin
+>    (`ranking-metrics-explainer.md`) is kept in step, and any change to authz, skill matching, the evals gate
+>    or the evidence verifier must update both.
 > 4. **Stay within the top ~15 candidates** when opening the "Why this rank?" panel.
 >
 > ### P0 — blocks giving HR accounts
@@ -47,8 +53,9 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 >   a **global** vector query (`neo4j_bootstrap.py:105`), so a job's candidates get crowded out past ~150
 >   résumés corpus-wide — a pilot loading several hundred résumés will hit this. Raising `coarse_k` will not
 >   fix it.
-> - **Documents that state the opposite of the code:** the explainer says in bold that a Hiring Manager
->   **"cannot reveal a candidate's identity"** (`:401`) — falsified by the authz defect; `README.md:3,14`
+> - **Documents that state the opposite of the code:** ~~the explainer says in bold that a Hiring Manager
+>   **"cannot reveal a candidate's identity"** (`:401`) — falsified by the authz defect~~ (FIXED 2026-08-07,
+>   see guardrail 3 above); still open — `README.md:3,14`
 >   ("data never leaves the machine"); **`CLAUDE.md:10,79` ("SQLAlchemy async" — no SQLAlchemy exists here)**;
 >   and `compose.cas.yml:31` ships `FLASK_SECRET_KEY: dev-only-change-me`, so the *authenticated* boot signs
 >   sessions with a committed secret.
