@@ -7,9 +7,12 @@ Read automatically by Claude Code every session. This governs ALL work in this r
 ## Stack (do not deviate)
 
 - **Python 3.11+**, FastAPI (API), Flask (frontend), arq + Redis (async queue)
-- **Postgres** = transactional data (SQLAlchemy async; tables created on startup, no migration framework yet)
+- **Postgres** = transactional data (asyncpg; tables created on startup, no migration framework yet)
 - **Neo4j** = agent graph memory + vector indexes (768-dim, cosine, `nomic-embed-text`)
-- **Ollama on host metal** at `host.docker.internal:11434/v1` — NEVER add cloud API calls
+- **Ollama over the tailnet** at `${LLM_BASE_URL}` — defaults to the GPU host `aria-gb10`
+  (`.env.example` ships its tailnet IP); `host.docker.internal:11434/v1` is only the fallback for someone
+  running their own Ollama on the app box. There is NO local Ollama in the standard setup.
+  NEVER add cloud API calls.
 - Everything except Ollama runs in Docker (`docker compose up -d`)
 
 ## Non-negotiable gates — run before EVERY commit
@@ -76,7 +79,7 @@ When gates fail, read the failure output, fix ONLY what failed, re-run `make gat
 ## Code rules
 
 - Full type hints; `mypy --strict` clean; no unjustified `# type: ignore`
-- Async everywhere (SQLAlchemy async, neo4j async driver, httpx)
+- Async everywhere (asyncpg, neo4j async driver, httpx)
 - Config only via `src/settings.py` (pydantic-settings) — never `os.environ` scattered in code
 - Postgres for anything transactional/relational; Neo4j only for graph relationships and vector retrieval; Redis only as arq broker
 - All model calls go through the OpenAI-compatible client with `base_url=settings.ollama_base_url`

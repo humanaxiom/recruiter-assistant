@@ -1,6 +1,6 @@
 # recruiter-assistant
 
-> Local-first, evidence-backed resume ranking. Upload a job and a stack of resumes; get a ranked shortlist where every claim is a quote verified against the candidate's own document. Inference runs on **Ollama on the host** — no candidate data ever leaves the machine.
+> Local-first, evidence-backed resume ranking. Upload a job and a stack of resumes; get a ranked shortlist where every claim is a quote verified against the candidate's own document. Inference runs on **Ollama via Tailscale** (the GPU host `aria-gb10`, not local metal) — no cloud endpoints, candidate data never reaches the internet.
 
 Ported from the resume-ranking feature of an internal HRIS onto the offline-first agent harness. The review workflow, JD-Harmonizer, and cloud object storage were dropped; anonymization, the 4-stage ranking engine, shortlists, reverse-match, and exports were kept. See [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) for the full keep/cut boundary and the phased build.
 
@@ -11,7 +11,7 @@ Ported from the resume-ranking feature of an internal HRIS onto the offline-firs
 - **Blind by default** — candidate name / email / phone are redacted in the viewer and excluded from embeddings; reveal is opt-in and audited (decision 4).
 - **Evidence-backed** — the LLM produces per-requirement evidence, then an anti-fabrication pass fuzzy-matches every quote (≥ 0.85) against its cited resume chunk; unverifiable quotes are blanked.
 - **Hybrid ranking** — Neo4j vector recall + a structured skill/experience/education/seniority score + evidence completeness + motivation.
-- **Offline** — all model calls go through an OpenAI-compatible client pointed at Ollama on `host.docker.internal:11434`. No cloud endpoint exists anywhere in the code or compose.
+- **Offline** — all model calls go through an OpenAI-compatible client pointed at Ollama on a local or tailnet peer (default: `aria-gb10` over Tailscale, configurable via `.env`). No cloud endpoint exists anywhere in the code or compose.
 
 ---
 

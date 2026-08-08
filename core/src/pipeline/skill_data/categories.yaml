@@ -11,12 +11,15 @@
 #
 # A skill may belong to MORE THAN ONE family (list it under each); the matcher
 # credits a shared family. Keep names lower-cased and matching the canonical
-# names in aliases.yaml. Skills not listed here are categorised by a one-time
-# LLM backfill (worker.skill_category_task), constrained to the families below.
+# names in aliases.yaml. Skills not listed here are simply left uncategorised
+# today; the Phase 3.3 plan includes an LLM backfill task to categorise them
+# against the families below.
 #
-# The TOP-LEVEL KEYS of this file are the single source of truth for the family
-# VOCABULARY (ADR 0021) — `worker.skill_normalize.skill_categories_vocab()` reads
-# them, and the LLM backfill may assign only these families. Grow the taxonomy by
+# The TOP-LEVEL KEYS of this file are the family VOCABULARY. The only code that
+# reads them in THIS repo is `skills_graph._category_table()` and the
+# `match_non_matchable_families` setting — `worker.skill_normalize
+# .skill_categories_vocab()`, named in the hris original, was never ported and
+# does not exist here. Grow the taxonomy by
 # adding a family key here (no code change). `other` and `domain` are deliberate
 # catch-alls kept in the vocab but EXCLUDED from family credit by
 # `match_non_matchable_families` (they're junk/ambiguous buckets, not a
