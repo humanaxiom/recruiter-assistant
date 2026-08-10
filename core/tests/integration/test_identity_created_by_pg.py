@@ -94,6 +94,30 @@ def _unique_username(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+async def _insert_user_with_role(
+    pool: asyncpg.Pool, *, cas_username: str, role: str = "recruiter"
+) -> None:
+    """Seed a ``users`` row with an EXPLICIT role BEFORE the CAS login for
+    the SAME username, so ``provision_or_get``'s ``ON CONFLICT`` path (which
+    deliberately never touches ``role``, see ``user_service.py``) leaves it
+    in place. Needed as of `fix/session-role-on-writes` (ADR-033):
+    ``require_session_role`` now 403s a real session whose role is not
+    admin/recruiter, and this file's whole point — proving ``created_by``/
+    ``uploaded_by`` are sourced from the resolved session identity — needs
+    the write to actually succeed so the identity plumbing can be observed;
+    it was never testing authorization itself (see
+    ``test_route_{jobs,resumes}_session_gate.py`` for that)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (cas_username, display_name, email, role) "
+            "VALUES ($1, $2, $3, $4)",
+            cas_username,
+            cas_username,
+            None,
+            role,
+        )
+
+
 def _mock_validate_ticket(username: str) -> AsyncMock:
     """Stands in for the real ``httpx`` round trip to the CAS server — the
     one genuinely-external boundary these tests mock."""
@@ -157,6 +181,7 @@ async def test_create_job_with_a_real_session_sets_created_by_to_the_cas_usernam
     monkeypatch.setattr(
         auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
     )
+    await _insert_user_with_role(pg_pool, cas_username=username)
     store = BlobStore(str(tmp_path))
     app = _build_app(pg_pool, store=store)
 
@@ -260,6 +285,7 @@ async def test_upload_resume_with_a_real_session_sets_uploaded_by_to_the_cas_use
     monkeypatch.setattr(
         auth_routes.cas_service, "validate_ticket", _mock_validate_ticket(username)
     )
+    await _insert_user_with_role(pg_pool, cas_username=username)
     store = BlobStore(str(tmp_path))
     app = _build_app(pg_pool, store=store)
     job_id = await _insert_job(pg_pool)

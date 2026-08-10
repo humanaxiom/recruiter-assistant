@@ -20,6 +20,7 @@ from src.api.deps import (
     get_arq,
     log_auditor_read,
     require_role,
+    require_session_role,
     resolve_user,
     scoped_user_id_or_403,
 )
@@ -43,7 +44,10 @@ ExportFormat = Literal["csv", "evidence-csv", "json"]
 @router.post(
     "/jobs/{job_id}/shortlist",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_role(*_SHORTLIST_WRITERS))],
+    dependencies=[
+        Depends(require_role(*_SHORTLIST_WRITERS)),
+        Depends(require_session_role(*_SHORTLIST_WRITERS)),
+    ],
 )
 async def generate_shortlist(
     job_id: UUID,
