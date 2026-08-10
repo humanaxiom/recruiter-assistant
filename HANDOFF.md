@@ -4,7 +4,7 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 ### ⚠️⚠️ READ FIRST — 2026-08-07: HR DEMO + PILOT STATE UPDATE
 
-> **ROADMAP A1 (Authorization defect) — FIXED and MERGED (PR #68, squash `ab6c278`, ADR-033).**
+> **ROADMAP A1 — PARTLY fixed (PR #68 `ab6c278`, ADR-033). A SECOND, WORSE door is open: the auth boundary is OFF in the shipped config.**
 > Open, gates green, waiting merge. A `require_session_role` dependency now gates every write route to
 > admin/recruiter sessions only; a structural test guard prevents future write routes from reaching
 > production without it. The human decision recorded: reveal is recruiter/admin only; the scoped

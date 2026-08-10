@@ -19,12 +19,19 @@ Four things that make the difference between a demo that lands and one that disc
    **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
    that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
    wrong red badges is not.
-2. **Sign in as admin or recruiter only** — *reason changed 2026-08-09, guardrail still stands.* The
-   original reason (a hiring_manager/auditor session could reveal and un-blind) is **closed** by A1/ADR-033;
-   role escalation is now enforced and structurally guarded. Two reasons remain: an **auditor account cannot
-   do its job** until the audit-log viewer exists (Phase 1.4 — the read API is there, the screen is not), and
-   **CSRF still covers only 3 of 12** state-changing browser routes (Phase 1.3). Retire this guardrail when
-   both land, not before.
+2. **Issue NO accounts at all** — *escalated 2026-08-09.* Stronger than the original guardrail. The
+   session-vs-key half of A1 is closed by ADR-033, but a **retrospective `reviewer` pass found a second,
+   worse door and it is open on the shipped boot: the auth boundary is OFF.** No `API_KEY_*` is set by
+   `quickstart.ps1`, `.env.example` or the running container, so `auth_enabled` is `False`, `resolve_role`
+   returns `Role.ADMIN` for **every** request, and both `require_role_assigned` and `require_session_role`
+   pass on `user is None`. **Verified live against `:29800` with no cookie and no key:** `PATCH /jobs/{id}`
+   reaches the handler (404 on a fake id), `POST /jobs` reaches validation (422), while
+   `/auth/cas/user` reports `authenticated: false`. An auditor need not defeat the new gate — they delete
+   their cookie, flip `blind_review` unauthenticated, and read every candidate un-blinded through their
+   legitimate session; the flip audits as `actor_service='api'`, untraceable to them. **Pre-existing, not a
+   regression** — but ADR-033 claimed to close exactly this and did not. Retire this guardrail only when the
+   auth boundary is on, CSRF covers all 12 browser routes (Phase 1.3), and the audit-log viewer exists
+   (Phase 1.4).
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build
@@ -42,7 +49,7 @@ Four things that make the difference between a demo that lands and one that disc
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
-## A1. P0 · Authorization — RESOLVED and MERGED (ADR-033, PR #68, squash `ab6c278`)
+## A1. P0 · Authorization — PARTLY resolved (ADR-033/PR #68 merged); a SECOND door is open
 
 **Highest-severity finding. This was the one that blocked handing accounts to HR.**
 
@@ -64,9 +71,37 @@ reach a write route at all — `scoped_user_id_or_403` exists to confine a hirin
 own assigned jobs; both admin and recruiter are unscoped by design. Step (iii) would be dead code. This is
 recorded explicitly in ADR-033 §5 so a future session does not re-discover it.
 
-**Full detail:** [ADR-033](adr/033-session-role-enforcement-on-writes.md). **Interim pilot control
-(enforced in code now, not a convention):** issue only recruiter/admin accounts. **CSRF (step iv):**
-remains unscoped as a separate item.
+**Full detail:** [ADR-033](adr/033-session-role-enforcement-on-writes.md). **CSRF (step iv):** remains
+unscoped as a separate item (Phase 1.3).
+
+### A1b. P0 · The auth boundary is OFF in the shipped config — ADR-033's stated worst case is NOT closed
+
+Found by the retrospective `reviewer` pass on `ab6c278`, independently reproduced against the live stack.
+
+`auth_enabled` is `False` iff all four role keys are empty (`settings.py:253-263`), and no `API_KEY_*` is
+written by `quickstart.ps1`, shipped in `.env.example`, or present in the running container. `resolve_role`
+then returns `Role.ADMIN` for every request (`deps.py:102-103`), and both `require_role_assigned`
+(`deps.py:299-301`) and the new `require_session_role` pass on `user is None`. **The two gates are ANDed, and
+in this configuration both are vacuous.**
+
+Reproduced with no cookie and no key against `:29800`, the address `CAS_SERVICE_BASE_URL` advertises to the
+browser: `PATCH /jobs/{id}` → 404 (handler reached; a real id flips `blind_review`), `POST /jobs` → 422
+(validation reached), `GET /auth/cas/user` → `authenticated: false`. Only three routes fail closed —
+`reveal`, the two `assignees` routes, and the exempted `PATCH /users/{id}/role` — and all of them do so via
+their **own** `user is None` → 403 gate, not via anything ADR-033 added.
+
+**Why nothing caught it.** Config-dependent and every unit test mocks `resolve_user`, so the suite
+structurally cannot see it. `validate_startup_auth_config` (`settings.py:281`) exists precisely to *"refuse
+to boot on an auth configuration that would silently fail open"* — it checks stale legacy keys and key
+collisions, but **not CAS-enabled-with-zero-role-keys**, which is the shipped default. The invariant is in
+that docstring with nothing enforcing it: the same pattern as A7, third occurrence this session.
+
+**Fix, Red first:** (i) extend `validate_startup_auth_config` to refuse boot when CAS is on and no role key
+is configured — the assertion that would have caught it; (ii) `quickstart.ps1` + `.env.example` generate and
+write the role keys, mirroring how they already generate `PII_KEY`/`SKILL_HASH_SALT`, so the boot stays
+one-command; (iii) decide whether human-only write routes should also 403 on `user is None`, mirroring
+`reveal`/`assignees` — defence in depth, since the BFF's shared recruiter key would otherwise still permit a
+sessionless write. **(iii) needs a human decision** on whether any legitimate non-browser caller exists.
 
 ## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage
 

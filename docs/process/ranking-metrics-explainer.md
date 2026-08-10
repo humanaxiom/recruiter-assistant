@@ -290,9 +290,16 @@ academic and professional-services work, and it was not built for that vocabular
 it, and until it lands, results on an unmodified posting will understate candidates' skills. **This is the
 item that most affects whether the tool is useful to you.**
 
-**Auditor accounts are not usable yet.** The role exists and its restrictions are enforced, but the one thing
-an auditor needs — a screen for reading the access record — has not been built, so producing that record
-still means asking an engineer. Until it exists, the role cannot do its job independently.
+**The service itself is not yet locked down, so no accounts should be issued.** Role restrictions on what a
+signed-in person may *do* are now enforced. But the underlying service currently accepts instructions from
+anyone who can reach it on the network, without signing in at all — so someone on that network could change a
+job's settings, including switching blind review off, without appearing in the record as themselves. It is
+being fixed now, and it is the single thing standing between here and issuing logins. Scoring and stored data
+are unaffected; this is about who can reach the service.
+
+**Auditor accounts also need a screen that does not exist yet.** The role's restrictions are enforced, but
+the one thing an auditor needs — a view of the access record — has not been built, so producing that record
+still means asking an engineer.
 
 **Retention is recorded but not automatic.** Each job carries a retention period, but nothing deletes
 anything when it expires — removal is currently a manual process. If our retention schedule is a commitment
