@@ -19,19 +19,30 @@ Four things that make the difference between a demo that lands and one that disc
    **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
    that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
    wrong red badges is not.
-2. **Sign in as admin or recruiter only.** Do not hand out hiring-manager or auditor accounts during the
-   demo or the early pilot — see A1.
-3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED 2026-08-07** — the
-   explainer was rewritten against the working tree and is now cleared for HR circulation. The false safety
-   claim is gone (the Hiring Manager reveal claim is replaced with a by-design/as-built split that states A1
-   plainly), the senior must-have exemption is disclosed, and A1–A4 are all disclosed to the reader as open
-   items with the interim controls named. A Markdown twin lives at `ranking-metrics-explainer.md`. **Every
-   change to authz, skill matching, the evals gate or the evidence verifier must update both files** — the
-   explainer is now a circulated artifact, not a draft.
+2. **Sign in as admin or recruiter only** — *reason changed 2026-08-09, guardrail still stands.* The
+   original reason (a hiring_manager/auditor session could reveal and un-blind) is **closed** by A1/ADR-033;
+   role escalation is now enforced and structurally guarded. Two reasons remain: an **auditor account cannot
+   do its job** until the audit-log viewer exists (Phase 1.4 — the read API is there, the screen is not), and
+   **CSRF still covers only 3 of 12** state-changing browser routes (Phase 1.3). Retire this guardrail when
+   both land, not before.
+3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
+   2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
+   the reader's own verdict that it "reads like a chronicle of what is not working and technical build
+   details, none of which really helps." It is now organised as *what it does · how to use it well · what you
+   must decide*, with build detail (ADR numbers, fuzz ratios, mutation testing, corpus fixtures) removed
+   entirely and the register reframed as **15 decisions** rather than a 23-item defect ledger. The second
+   pass also added the **entire job side** — JD authoring, AI extraction of requirements, per-job settings,
+   the one-way lifecycle, and reverse match — which the first pass had omitted, starting at "recruiter
+   uploads résumés". **The load-bearing point for users:** candidates are scored against the requirements the
+   system *extracted*, not the prose that was written, so reviewing the extraction is the highest-leverage
+   habit available to them. A Markdown twin lives at `ranking-metrics-explainer.md`. **Every change to
+   authz, skill matching, the evals gate or the evidence verifier must update both files** — the explainer is
+   a circulated artifact, not a draft. Circulation is still gated on the remaining pilot-readiness phases by
+   the human's own decision, not on the document's accuracy.
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
-## A1. P0 · Authorization — RESOLVED in ADR-033 (`fix/session-role-on-writes`, PR #68, open + green)
+## A1. P0 · Authorization — RESOLVED and MERGED (ADR-033, PR #68, squash `ab6c278`)
 
 **Highest-severity finding. This was the one that blocked handing accounts to HR.**
 
