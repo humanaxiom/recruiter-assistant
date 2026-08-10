@@ -110,11 +110,13 @@ The system also runs the comparison the other way round: take one candidate and 
 fit. Useful when someone strong applies for a role that is already filled, or when you want to know where
 else a shortlisted person could go.
 
-Two things to know. It uses the same measured dimensions and the same evidence checking, but **it does not
-include the cover-letter component**, so its scores top out at 0.9 rather than 1.0. **Never put a
-reverse-match score next to a shortlist score** — they are on different scales. And this direction has had
-less testing than the shortlist direction; treat its output as a prompt to go and look, not as a ranking to
-act on.
+It uses the same measured dimensions and the same evidence checking as the shortlist. Two differences matter.
+**It does not include the cover-letter component**, so its scores top out at 0.9 rather than 1.0 — **never
+put a reverse-match score next to a shortlist score**, they are on different scales. And it does not yet have
+two of the protections the shortlist direction has: the automatic ranking-quality checks that run before
+every release do not cover this direction, and if the AI fails partway through, this direction publishes what
+it has rather than withholding the result. Both are being addressed. Until then it is sound for "who else
+should we look at", and not the place to make a final call.
 
 ---
 
