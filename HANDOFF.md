@@ -2,85 +2,41 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-07: HR DEMO + PILOT IMMINENT. Read the four demo guardrails before showing anything.
+### ⚠️⚠️ READ FIRST — 2026-08-07: HR DEMO + PILOT STATE UPDATE
 
-> **The plan of record is now [docs/ROADMAP.md](docs/ROADMAP.md) PART A — HR pilot readiness.** Every finding
-> below was verified against the working tree with file:line evidence. This supersedes the banner below it
-> (kept as history).
+> **ROADMAP A1 (Authorization defect) — FIXED in PR #68 (`fix/session-role-on-writes`, ADR-033).**
+> Open, gates green, waiting merge. A `require_session_role` dependency now gates every write route to
+> admin/recruiter sessions only; a structural test guard prevents future write routes from reaching
+> production without it. The human decision recorded: reveal is recruiter/admin only; the scoped
+> hiring-manager reveal (FU-6 slice 6) is retired. **Demo guardrail 2 ("sign in as admin or recruiter
+> only") is now ENFORCED IN CODE rather than a convention** — once #68 merges, issuing hiring-manager
+> accounts during the pilot will automatically fail on every write attempt. See
+> [ADR-033](docs/adr/033-session-role-enforcement-on-writes.md) for full detail, including why ROADMAP
+> A1 step (iii) is deliberately not built (§5).
 >
-> **An external review was dropped in `CodeX/` (left untouched, as instructed). CodeX also wrote to
-> `HANDOFF.md` and `docs/ROADMAP.md` outside its folder — that was reversed on 2026-08-07;** its two stray
-> `- Copy.md` files were moved to the session scratchpad, not deleted. The review is directionally useful but
-> **was not evidence-backed**: re-checking every finding found five verdicts wrong or imprecise (they would
-> have funded the wrong work) and **four missed defects more severe than several it accepted**. Use ROADMAP
-> Part A, not the raw review.
+> **ROADMAP A2 (Skill matching) — REFRAMED by measured corpus findings.** Not "the vocabulary is too
+> small" but "the ontology is for the wrong domain." Measured from 1,802 real SFU JDs (9,176 qualification
+> statements, 1,222 distinct titles, 449 departments):
 >
-> ### DEMO GUARDRAILS — four things, no code needed
-> 1. **Demo with a curated-vocabulary JD** (shape of `tests/evals/fixtures/jd_backend_data_engineer.json`).
->    **NOT a real SFU posting** — skill scores collapse to ~0 and are then halved; the chips render a wall of
->    red *"— missing · must-have"* for skills candidates plainly have. Say the limitation out loud.
-> 2. **Sign in as admin or recruiter only.** Do not issue hiring-manager or auditor accounts yet.
-> 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`**~~ — **RESOLVED 2026-08-07.** The
->    explainer was rewritten against the working tree: the false HM-reveal claim is replaced by a *by design /
->    as built* split that states the P0 authz gap plainly, the senior must-have exemption (0.75 at ≥1.5× years
->    and ≥50% coverage) is disclosed, and P0s A1–A4 lead the document as "Where this stands for the pilot"
->    with their interim controls. Register rebuilt at 23 items; the four now-closed July items are marked
->    Closed, not deleted. **It is now a circulated HR artifact** — a Markdown twin
->    (`ranking-metrics-explainer.md`) is kept in step, and any change to authz, skill matching, the evals gate
->    or the evidence verifier must update both.
-> 4. **Stay within the top ~15 candidates** when opening the "Why this rank?" panel.
+> - Shipped 231-term vocabulary is a **software-engineering ontology** (javascript, react, docker, kafka…)
+>   against a corpus that is overwhelmingly administrative, academic, professional-services work.
+> - Current coverage: **15.6%** of real qualification statements.
+> - 13 new families derived from the corpus (finance, student_affairs, academic_programs, research_admin,
+>   human_resources, communications, governance_policy, leadership_management, analysis_reporting,
+>   equity_indigenous, facilities_operations, interpersonal_core, health_wellness): 234 terms.
+> - Adding them lifts coverage **to 54.8%, a +39.2 point gain**.
+> - Remaining 45.2% is a genuinely long tail of role-specific knowledge (MRI/MEG methods, microfabrication,
+>   study-permit requirements).
 >
-> ### P0 — blocks giving HR accounts
-> - **Authorization: the human's role is not enforced on writes.** The BFF sends a shared **recruiter** key on
->   every browser request (`frontend/api_client.py:118-119`); `require_role_assigned` never intersects the CAS
->   role with the key role (`deps.py:309-313`); assignment scoping is applied on **reads only**. Every writer
->   control renders unconditionally. **An auditor — a read-only oversight role — can un-blind every candidate
->   in the system, unscoped** (`deps.py:347-356`), and toggle blind review off. *Why the gates missed it:* the
->   negative authz tests parametrize the **API-key** role; **no test exercises recruiter-key +
->   hiring_manager/auditor-session**, the only combination that occurs in production. Fix Red-first: add that
->   test axis, then intersect session∩key role on writers, then scope writes by assignment, then CSRF on all
->   12 routes (currently 3).
-> - **Skill matching does not work on real JDs.** Measured: real SFU postings are 47-84% outside the curated
->   vocabulary and score **0.0000-0.0375** on skill; both corpus fixtures are 0% hashed and score 0.50-0.64.
->   Hashed nodes get **no categories** (`hashed_total=288, with_categories=0`), so family credit is unreachable
->   and only exact string equality matches. Compounded by **every JD skill being written `must=True`**
->   (`tasks.py:264`), firing the ×0.5 penalty on nearly everyone.
-> - **The evals gate cannot see any of this** — `run_evals.py::_skill_rows_for` reimplements the Cypher and can
->   never produce an `h:` key; `expected_rank_band` is never asserted (and r18 violates its own band);
->   "bait below every strong fixture" is prose, not a gated key.
-> - **Two ranking defects HR would see:** stage 3 **fails open** on non-LLM exceptions
->   (`orchestrator.py:637-639`), displacing real candidates *inside* the visible top 15; and stage-1 recall is
->   a **global** vector query (`neo4j_bootstrap.py:105`), so a job's candidates get crowded out past ~150
->   résumés corpus-wide — a pilot loading several hundred résumés will hit this. Raising `coarse_k` will not
->   fix it.
-> - **Documents that state the opposite of the code:** ~~the explainer says in bold that a Hiring Manager
->   **"cannot reveal a candidate's identity"** (`:401`) — falsified by the authz defect~~ (FIXED 2026-08-07,
->   see guardrail 3 above); still open — `README.md:3,14`
->   ("data never leaves the machine"); **`CLAUDE.md:10,79` ("SQLAlchemy async" — no SQLAlchemy exists here)**;
->   and `compose.cas.yml:31` ships `FLASK_SECRET_KEY: dev-only-change-me`, so the *authenticated* boot signs
->   sessions with a committed secret.
+> **Unresolved product decision that now gates the work:** many derived terms are **competencies**
+> (communication, leadership, problem-solving), not named tools. The current scorer is `years × recency ×
+> ontology_weight` — "three years of interpersonal skills, last used 2024" is not meaningful. Whether
+> competencies are scored on that model, on a different one, or excluded from must-have penalties is
+> unresolved. See [docs/ROADMAP.md](docs/ROADMAP.md) §A2 for the measured data and the revised plan.
 >
-> ### Also shipped this session
-> - **Branch `fix/skill-display-names-and-corpus-gap` (ADR-032)** — skill chips showed `h:<hex>` because
->   `Skill.display_name` was written by the JD side but **never read anywhere in `core/src/`**. reviewer
->   APPROVE, security PASS, ranking-evals PASS; PR not yet opened. **Carry two things:** (1) **`Skill.display_name`
->   is global/last-writer-wins and must NEVER be rendered** — the obvious three-way fallback was a cross-job
->   leak (job A rendering job B's JD wording), so a stale edge deliberately shows an opaque hash; do not "fix"
->   that by re-adding the node rung. (2) Pre-existing `shortlist_entries` keep hashed labels until regenerated;
->   read-time repair was rejected as *unsound*, not merely costly.
-> - **PR #65's known hole:** for entries at structured-rank ≥ 16 the defense-pack panel renders `Evidence 0%` /
->   `Motivation 0%` **affirmatively**, because `stage4_combine` emits real `0.0` floats and `explanation.py`
->   therefore sets `scores_available=True`. ADR-031's "not recorded" guard covers an *unreadable* row, not a
->   *never-computed* one. Honest fix needs a persisted `evidence_evaluated` marker (write-path →
->   `ranking-evals` gated); **do not** infer it from `requirements == []` in the template.
-> - **ranking-evals disclosed its own blindness:** mutating the skill label to `'MUTANT-LABEL'` produced an
->   identical corpus md5 — its PASS on that branch is **non-regression, not correctness**.
->
-> ### The pattern, named
-> Nine times across the review and this session's gate work, the defect was **an invariant stated in a comment,
-> docstring, ADR, threshold file or HR document with nothing enforcing it** — each invisible to a green
-> 4,100-test suite, found only by mutating code and watching what *failed to complain*. For every P0 item the
-> deliverable is the fix **plus the assertion that would have caught it**, Red first.
+> **Pilot readiness (unchanged).** The four demo guardrails remain; A1 defect is now code-fixed (PR #68,
+> green, waiting merge); A2 plan is revised to reflect domain-match findings; A3–A6 remain active and
+> unchanged. Use [docs/ROADMAP.md](docs/ROADMAP.md) PART A for the full current state.
 
 ### (history) READ FIRST — SESSION 2026-08-04/05: "Why this rank?" defense pack, slice 1 (ADR-031) — gates green, PR pending
 
