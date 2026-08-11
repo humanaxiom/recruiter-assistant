@@ -126,17 +126,33 @@ async def test_generate_shortlist_recruiter_key_and_admin_session_passes() -> No
 
 
 @pytest.mark.asyncio
-async def test_generate_shortlist_recruiter_key_and_no_session_passes() -> None:
-    """The case most likely to be broken by an over-eager fix: ``user is
-    None`` (a bare service-key caller) must never be judged by this gate."""
+async def test_generate_shortlist_403s_for_recruiter_key_with_no_session() -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to be docstringed "the case most likely to be broken by an
+    over-eager fix" and asserted PASS for ``user is None`` (a bare
+    service-key caller with NO CAS session at all): "must never be judged
+    by this gate". That framing is now wrong — it protected exactly the
+    vulnerability this slice closes. A live audit against real Postgres
+    proved that with this deploy's real config (zero ``API_KEY_*``
+    configured, so ``resolve_role`` trivially resolves ``Role.ADMIN`` for
+    every caller) a cookie-less, key-less request could reach every write
+    route with no credential whatsoever — proved end-to-end with a bare
+    ``PATCH /jobs/{id} {"blind_review": false}`` that returned 200 and
+    really flipped the column, audited to an actor nobody could trace to a
+    person. The human decision: a valid API key is NOT sufficient on its
+    own — every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too, the same as an
+    out-of-allowed-set session role."""
     job_id = uuid4()
-    app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(_mock_conn(), arq=arq, key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
     async with await _client(app) as client:
         resp = await client.post(f"/jobs/{job_id}/shortlist")
 
-    assert resp.status_code == 202
+    assert resp.status_code == 403
+    arq.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio

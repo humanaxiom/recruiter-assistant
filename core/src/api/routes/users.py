@@ -39,11 +39,18 @@ router = APIRouter()
 async def _require_admin_session(
     user: Annotated[User | None, Depends(resolve_user)],
 ) -> User:
-    """403 unless ``user`` is a real session with ``role == "admin"`` — the
-    CAS-disabled synthetic dev-anonymous sentinel (``role="admin"``) also
-    passes, exactly like ``require_role_assigned``/``scoped_user_id_or_403``
-    treat it."""
-    if user is None or user.role != "admin":
+    """403 unless ``user`` is a real, ACTIVE session with ``role == "admin"``
+    — the CAS-disabled synthetic dev-anonymous sentinel (``role="admin"``,
+    ``active=True``) also passes, exactly like
+    ``require_role_assigned``/``scoped_user_id_or_403`` treat it.
+
+    **F5 (security finding, ``fix/auth-boundary-fails-open``).** A
+    deactivated admin session (``user.active is False``) also 403s, same
+    mechanism — deactivation must actually revoke authority, not just be
+    cosmetic while ``session_service.refresh_if_needed`` keeps sliding the
+    session's expiry forward.
+    """
+    if user is None or user.role != "admin" or not user.active:
         raise HTTPException(
             status_code=403, detail="admin session required for this route"
         )

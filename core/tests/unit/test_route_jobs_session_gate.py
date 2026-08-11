@@ -16,15 +16,26 @@ underlying mutation never ran. Today every one of these tests reaches the
 route and gets a 2xx (the route body runs), because nothing here has ever
 consulted ``resolve_user().role``.
 
-**Target fix (not implemented by this file — tests only).** A new
-``require_session_role(*allowed)`` dependency in ``src.api.deps``, mirroring
-the already-correct ``src.api.routes.users._require_admin_session`` pattern:
-a REAL session (``resolve_user()`` is not ``None``) whose ``role`` is not in
-``allowed`` -> 403 (plain ``fastapi.HTTPException``, not ``AppError``);
-``user is None`` (a bare service-key caller, no CAS session at all) -> PASS,
-this gate never judges the ABSENCE of a session (same contract as
-``require_role_assigned``); the CAS-disabled dev-anonymous sentinel
-(``role="admin"``) -> PASS.
+**Target fix (not implemented by this file — tests only; UPDATED, security
+finding fix/auth-boundary-fails-open).** ``require_session_role(*allowed)``
+in ``src.api.deps`` mirrors the already-correct
+``src.api.routes.users._require_admin_session`` pattern with ONE reversal
+from its original design: a REAL session (``resolve_user()`` is not
+``None``) whose ``role`` is not in ``allowed`` -> 403 (plain
+``fastapi.HTTPException``, not ``AppError``); ``user is None`` (a bare
+service-key caller, no CAS session at all) -> **403 too, not PASS**. The
+original design let ``user is None`` pass, on the theory that this gate
+"never judges the ABSENCE of a session" — a live audit against real
+Postgres proved that theory wrong: combined with this deploy's real config
+(zero ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+``Role.ADMIN`` for every caller), a cookie-less, key-less request could
+reach every write route on this router with no credential whatsoever,
+proved end-to-end with a bare ``PATCH /jobs/{id} {"blind_review": false}``
+that returned 200 and really flipped the column. The human decision: a
+valid API key is NOT sufficient on its own — every write route now
+requires a REAL, resolvable human CAS session. The CAS-disabled
+dev-anonymous sentinel (``role="admin"``) still -> PASS, because that path
+resolves a real (synthetic-but-non-``None``) ``User``, not an absent one.
 
 Follows each route's own ``require_role(...)``-bypass idiom
 (``app.dependency_overrides[resolve_role]``) from ``test_route_jobs.py`` /
@@ -205,12 +216,25 @@ async def test_create_job_recruiter_key_and_admin_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_create_job_recruiter_key_and_no_session_passes(
+async def test_create_job_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case most likely to be broken by an over-eager fix: this gate must
-    never judge the ABSENCE of a session (a bare service-key caller) — only a
-    REAL session's role. Same contract as ``require_role_assigned``."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to be docstringed "the case most likely to be broken by an
+    over-eager fix" and asserted PASS for a bare recruiter-key caller with
+    NO CAS session at all: "this gate must never judge the ABSENCE of a
+    session". That framing is now wrong — it protected exactly the
+    vulnerability this slice closes. A live audit against real Postgres
+    proved that with this deploy's real config (zero ``API_KEY_*``
+    configured, so ``resolve_role`` trivially resolves ``Role.ADMIN`` for
+    every caller) a cookie-less, key-less request could reach every write
+    route on this router with no credential whatsoever — proved end-to-end
+    with a bare ``PATCH /jobs/{id} {"blind_review": false}`` that returned
+    200 and really flipped the column, audited to an actor nobody could
+    trace to a person. The human decision: a valid API key is NOT
+    sufficient on its own — every write route now requires a REAL,
+    resolvable CAS session, so ``resolve_user`` -> ``None`` must 403 here
+    too, the same as an out-of-allowed-set session role."""
     create_job = AsyncMock(return_value=_job_out())
     monkeypatch.setattr(jobs_routes.job_service, "create_job", create_job)
     app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
@@ -219,7 +243,8 @@ async def test_create_job_recruiter_key_and_no_session_passes(
     async with await _client(app) as client:
         resp = await client.post("/jobs", json=_job_create_payload())
 
-    assert resp.status_code == 201
+    assert resp.status_code == 403
+    create_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -278,7 +303,21 @@ async def test_jd_extract_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_jd_extract_recruiter_key_and_no_session_passes() -> None:
+async def test_jd_extract_403s_for_recruiter_key_with_no_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to assert PASS for a bare recruiter-key caller with NO CAS session
+    at all. That was the bug this whole slice closes: a live audit against
+    real Postgres proved that with this deploy's real config (zero
+    ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+    ``Role.ADMIN`` for every caller) a cookie-less, key-less request could
+    reach every write route on this router with no credential whatsoever.
+    The human decision: a valid API key is NOT sufficient on its own —
+    every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
+    extract = MagicMock(return_value="extracted text")
+    monkeypatch.setattr(jobs_routes.jd_import_service, "extract_jd_text", extract)
     app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
@@ -288,7 +327,8 @@ async def test_jd_extract_recruiter_key_and_no_session_passes() -> None:
             files={"file": ("jd.txt", b"We are hiring an engineer.", "text/plain")},
         )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
+    extract.assert_not_called()
 
 
 # ── POST /jobs/bulk (jobs.py:106) ────────────────────────────────────────
@@ -333,9 +373,19 @@ async def test_bulk_create_jobs_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_bulk_create_jobs_recruiter_key_and_no_session_passes(
+async def test_bulk_create_jobs_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to assert PASS for a bare recruiter-key caller with NO CAS session
+    at all. That was the bug this whole slice closes: a live audit against
+    real Postgres proved that with this deploy's real config (zero
+    ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+    ``Role.ADMIN`` for every caller) a cookie-less, key-less request could
+    reach every write route on this router with no credential whatsoever.
+    The human decision: a valid API key is NOT sufficient on its own —
+    every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
     create_bulk = AsyncMock(return_value=[])
     monkeypatch.setattr(jobs_routes.job_service, "create_jobs_bulk", create_bulk)
     app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
@@ -345,7 +395,8 @@ async def test_bulk_create_jobs_recruiter_key_and_no_session_passes(
     async with await _client(app) as client:
         resp = await client.post("/jobs/bulk", files=files)
 
-    assert resp.status_code == 202
+    assert resp.status_code == 403
+    create_bulk.assert_not_awaited()
 
 
 # ── PATCH /jobs/{job_id} (jobs.py:243) ───────────────────────────────────
@@ -386,9 +437,21 @@ async def test_update_job_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_update_job_recruiter_key_and_no_session_passes(
+async def test_update_job_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to be docstringed "the case most likely to be broken by an
+    over-eager fix" and asserted PASS for a bare recruiter-key caller with
+    NO CAS session at all. That was the bug: a live audit against real
+    Postgres proved exactly this route, exploited end-to-end — a
+    cookie-less, key-less ``PATCH /jobs/{id} {"blind_review": false}``
+    returned 200 and really flipped the column, audited to an actor nobody
+    could trace to a person, because this deploy's real config carries zero
+    ``API_KEY_*`` (so ``resolve_role`` trivially resolves ``Role.ADMIN`` for
+    everyone). The human decision: a valid API key is NOT sufficient on its
+    own — every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
     job_id = uuid4()
     update_job = AsyncMock(return_value=_job_out(job_id=job_id))
     monkeypatch.setattr(jobs_routes.job_service, "update_job", update_job)
@@ -398,7 +461,8 @@ async def test_update_job_recruiter_key_and_no_session_passes(
     async with await _client(app) as client:
         resp = await client.patch(f"/jobs/{job_id}", json={"title": "New Title"})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
+    update_job.assert_not_awaited()
 
 
 # ── PATCH /jobs/{job_id}/status (jobs.py:279) ────────────────────────────
@@ -439,9 +503,20 @@ async def test_patch_job_status_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_patch_job_status_recruiter_key_and_no_session_passes(
+async def test_patch_job_status_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to be docstringed "the case most likely to be broken by an
+    over-eager fix" and asserted PASS for a bare recruiter-key caller with
+    NO CAS session at all. That was the bug: a live audit against real
+    Postgres proved that with this deploy's real config (zero ``API_KEY_*``
+    configured, so ``resolve_role`` trivially resolves ``Role.ADMIN`` for
+    every caller) a cookie-less, key-less request could reach this route
+    with no credential whatsoever. The human decision: a valid API key is
+    NOT sufficient on its own — every write route now requires a REAL,
+    resolvable CAS session, so ``resolve_user`` -> ``None`` must 403 here
+    too, the same as an out-of-allowed-set session role."""
     job_id = uuid4()
     transition = AsyncMock(return_value=_job_out(job_id=job_id))
     monkeypatch.setattr(jobs_routes.job_service, "transition_status", transition)
@@ -451,7 +526,8 @@ async def test_patch_job_status_recruiter_key_and_no_session_passes(
     async with await _client(app) as client:
         resp = await client.patch(f"/jobs/{job_id}/status", json={"to": "open"})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
+    transition.assert_not_awaited()
 
 
 __all__: list[str] = []

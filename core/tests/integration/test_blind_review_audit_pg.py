@@ -21,13 +21,17 @@ résumé/shortlist under a job. What a REAL Postgres proves that
   erase the trail — here, flip-without-audit, not audit-without-flip, is the
   failure being prevented, and only a real transaction/rollback round trip
   can prove it;
-* the three actor-derivation cases (human session / CAS-disabled
-  dev-anonymous / no-session service caller) really resolve against a real
-  ``users``/``sessions`` chain, mirroring
-  ``test_identity_created_by_pg.py``'s and ``test_reveal_audit_log_pg.py``'s
-  own real-CAS-session wiring — with the ADR-019 §1.4 twist that
-  ``blind_review`` is NOT human-only (unlike reveal), so the no-session case
-  must succeed (200, actor_service='api'), not 403.
+* the two actor-derivation cases (human session / CAS-disabled
+  dev-anonymous) really resolve against a real ``users``/``sessions`` chain,
+  mirroring ``test_identity_created_by_pg.py``'s and
+  ``test_reveal_audit_log_pg.py``'s own real-CAS-session wiring. REVERSED
+  (security finding, fix/auth-boundary-fails-open): a THIRD case — no
+  session at all, CAS enabled — used to be a legitimate "not human-only"
+  success path (200, ``actor_service='api'``). A live audit against real
+  Postgres proved that was the vulnerability this file's Case 2 now closes:
+  it must 403 and write no audit row, the same as an out-of-allowed-set
+  session role. See ``test_auth_boundary_fails_open_pg.py`` for the
+  end-to-end exploit-chain proof.
 
 Nothing new here exists yet (the audited ``update_job`` — actor kwargs,
 flip detection, the ``audit_log`` write, the wrapping transaction), so every
@@ -374,16 +378,31 @@ async def test_flip_by_a_human_session_records_user_actor(
     assert row["actor_service"] is None
 
 
-# ── Case 2: no session, CAS enabled -> service/'api' actor, NOT 403 ────────
+# ── Case 2: no session, CAS enabled -> 403, no audit row at all ────────────
+#
+# REVERSED (security finding, fix/auth-boundary-fails-open): this case used
+# to be titled "no session, CAS enabled -> service/'api' actor, NOT 403" and
+# asserted a 200 + an unattributable ``actor_kind='service'`` audit row for
+# a bare service-key caller with no session. A live audit against real
+# Postgres proved that was the vulnerability: this deploy's real config
+# ships with zero ``API_KEY_*`` configured (so ``resolve_role`` trivially
+# resolves ``Role.ADMIN`` for every caller regardless of any header), so a
+# cookie-less, key-less request could reach this route with no credential
+# at all — end-to-end proof is
+# ``tests/integration/test_auth_boundary_fails_open_pg.py``. The human
+# decision: a valid API key is NOT sufficient on its own — every write
+# route now requires a REAL, resolvable CAS session, so ``blind_review`` is
+# no longer an exception to the human-session requirement.
 
 
 @pytest.mark.asyncio
-async def test_flip_with_no_session_cas_enabled_succeeds_with_api_service_actor(
+async def test_flip_with_no_session_cas_enabled_403s_and_writes_no_audit_row(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-019 §1.4 — blind_review is NOT human-only (unlike reveal): a bare
-    service-key caller with no session must succeed (200), recording
-    ``actor_kind='service'`` / ``actor_service='api'``, never a 403."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — see the
+    section comment above. A bare service-key caller with no session must
+    now 403, the column must stay unchanged, and no audit row (not even an
+    unattributable ``actor_kind='service'`` one) may be written."""
     settings = _settings(cas_enabled=True)
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
@@ -393,15 +412,11 @@ async def test_flip_with_no_session_cas_enabled_succeeds_with_api_service_actor(
     async with await _client(app) as client:
         resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
 
-    assert resp.status_code == 200
-    assert await _job_blind_review(pg_pool, job_id) is False
+    assert resp.status_code == 403
+    assert await _job_blind_review(pg_pool, job_id) is True
 
     rows = await _toggle_audit_rows(pg_pool, job_id)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["actor_kind"] == "service"
-    assert row["actor_service"] == "api"
-    assert row["actor_user_id"] is None
+    assert rows == []
 
 
 # ── Case 3: CAS disabled -> dev-anonymous service actor ────────────────────

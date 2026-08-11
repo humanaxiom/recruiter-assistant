@@ -295,7 +295,32 @@ def validate_startup_auth_config(settings: Settings) -> None:
       byte-identical collapse two roles into one (e.g. an auditor key that
       also opens every recruiter-only route). Two EMPTY fields are not a
       collision — that is simply "not configured".
+    * **F1b (security finding, ``fix/auth-boundary-fails-open``) — CAS
+      enabled with zero role keys configured**: ``cas_enabled=True`` (a real
+      deploy, not the single-operator local-dev default) with all four role
+      keys empty means ``settings.auth_enabled`` is ``False`` —
+      ``resolve_role`` then resolves ``Role.ADMIN`` for EVERY caller,
+      regardless of any header, which combined with the per-route session
+      gate closing (``require_session_role`` now 403ing ``user is None``)
+      would only leave the API-key half of the boundary permanently open.
+      A live audit against real Postgres proved this exact configuration
+      lets a cookie-less, key-less caller reach every write route with no
+      credential at all. Refusing to boot makes this misconfiguration
+      impossible to ship by accident, on the same "refuse rather than
+      silently fail open" discipline as the two checks above. Scoped to
+      ``cas_enabled=True`` only — the all-disabled local-dev default
+      (``Settings()``) must keep booting clean.
     """
+    if settings.cas_enabled and not settings.auth_enabled:
+        raise RuntimeError(
+            "cas_enabled is True but none of the four role-key env vars are "
+            "configured (" + ", ".join(_ROLE_KEY_ENV_VARS) + ") — refusing to "
+            "start: with CAS enabled and auth disabled, resolve_role trivially "
+            "grants admin authority to every caller regardless of credential, "
+            "which silently fails the whole auth boundary open. Configure at "
+            "least one of the four role keys."
+        )
+
     if settings.api_key:
         raise RuntimeError(
             "API_KEY is set but is no longer used — FU-4 replaced the single "
