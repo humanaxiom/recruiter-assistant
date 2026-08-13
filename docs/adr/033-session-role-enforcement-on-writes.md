@@ -1,6 +1,15 @@
 # ADR-033: Session-role enforcement on write routes (`fix/session-role-on-writes`)
 
-**Status:** Accepted (closes ROADMAP.md A1 P0 — "the human's role is not enforced on writes"; depends
+> **⚠️ AMENDED 2026-08-13 by [ADR-034](034-auth-boundary-fails-open.md) — read that first.** This ADR
+> **did not close its own stated worst case**. In the shipped configuration no `API_KEY_*` existed in any
+> channel, so `auth_enabled` was `False`, `resolve_role` returned `Role.ADMIN` for every request, and both
+> this ADR's `require_session_role` and the pre-existing `require_role_assigned` passed on `user is None` —
+> two gates, ANDed, both vacuous. An unauthenticated caller could flip `blind_review` and read candidates
+> un-blinded. **§1's `user is None` → PASS contract below is REVERSED** (ADR-034 §2: a valid API key alone
+> is never sufficient for a write); §3's structural guard, §4's reveal reversal and §5's step-(iii)
+> reasoning all still stand.
+
+**Status:** Accepted, **amended by ADR-034** (closes ROADMAP.md A1 P0 — "the human's role is not enforced on writes"; depends
 on [ADR-018](018-rbac-keyed-roles.md) for the keyed-role model, [ADR-019](019-cas-identity-attributable-audit.md)
 for `resolve_user`/CAS session identity, and [ADR-020](020-per-job-assignment-scoping.md) for
 `scoped_user_id_or_403` — amends ADR-020 §3/§9 for the reveal route specifically)
@@ -57,12 +66,18 @@ Three cases, identical in shape to `require_role_assigned`/`scoped_user_id_or_40
 `_require_admin_session` — this repo now has four independent gates sharing one contract, which is
 deliberate, not duplicated accidentally (see §4):
 
-- **`user is None` (no session at all — a bare service-key caller) → PASS.** This is the case an
+- **`user is None` (no session at all — a bare service-key caller) → PASS.** ⚠️ **REVERSED by
+  [ADR-034](034-auth-boundary-fails-open.md) §2 — this bullet is the defect, not the contract.** It now
+  **403s**. The reasoning below was wrong: combined with zero `API_KEY_*` configured anywhere (so
+  `resolve_role` trivially resolved `Role.ADMIN` for anyone), "never judge the absence of a session" meant
+  a cookie-less, key-less caller reached every write route with no credential at all. The human decision
+  recorded in ADR-034: a valid API key alone is **never** sufficient for a write. *Original text, retained
+  so the reversal is legible:* "This is the case an
   over-eager implementation breaks, and it is load-bearing: not every write route this gate guards is
   human-only. `PATCH /jobs/{id}` accepts a bare service-key caller and audits it as
   `actor_kind='service'` (`actor_fields_from_user`, ADR-019 §9.2); a bare-key CI script or worker
   calling a write route with no CAS session must keep working. This dependency never judges the
-  ABSENCE of a session — only what a REAL session's role is.
+  ABSENCE of a session — only what a REAL session's role is."
 - **A real session whose `role` is not in `allowed` → 403.** The defect this ADR closes.
 - **A real session whose `role` is in `allowed` → PASS.** The CAS-disabled synthetic dev-anonymous
   sentinel (`role="admin"`, ADR-019 §10b) passes naturally through this same string comparison — no

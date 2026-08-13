@@ -2,10 +2,57 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-07: HR DEMO + PILOT STATE UPDATE
+### ⚠️⚠️ READ FIRST — 2026-08-13: THE AUTH BOUNDARY IS CLOSED; ZERO OPEN PRs
+
+> **`origin/main` == `299b529`. Working tree clean. Zero open PRs. Nothing is mid-flight.** This banner
+> supersedes the 2026-08-07 banner below (kept as history, and note it is stale in its own right — it
+> describes #68 as "waiting merge" and A1 as partly open; both statements are now false).
+>
+> **⚠️ THE STACK WILL NOT BOOT UNTIL YOU RE-RUN `./scripts/quickstart.ps1`.** That is the fix working, not
+> a break — the boot now fails loudly rather than serving the whole API to anyone who can reach the port.
+> `.env` is permission-protected, so this is a **human step**; the agent cannot do it.
+>
+> **What merged this session (both green, CI all-checks SUCCESS):**
+> - **PR #72 (`299b529`) — the auth boundary fix, [ADR-034](docs/adr/034-auth-boundary-fails-open.md).**
+>   ADR-033 did not close its own stated worst case. **No `API_KEY_*` existed in any channel** — not in
+>   `docker-compose.yml`, `compose.cas.yml`, `.env.example`, or the running container — so `auth_enabled`
+>   was `False`, `resolve_role` returned `Role.ADMIN` for every request, and both `require_role_assigned`
+>   and `require_session_role` passed on `user is None`. **Two gates, ANDed, both vacuous.** Proven live
+>   with no cookie and no key: `GET /jobs` → 200 with real data, `GET /audit/reveals-legacy` → 200,
+>   `PATCH /jobs/{id} {blind_review:false}` → 200 with the column really flipped, then the same caller read
+>   `candidate_name` un-redacted — audited as `actor_service='api'`, unattributable to anyone. **Reads were
+>   open too.** Fixed: F1b (`validate_startup_auth_config` now *raises* on CAS-enabled-with-zero-keys, and
+>   the channel to configure them was built), F1a (`require_session_role` 403s on `user is None` —
+>   **human decision: a valid API key alone is never sufficient for a write**), F5 (`users.active` enforced
+>   in all four session gates), F4 (the 403→500 Flask regression ADR-033 introduced). `./scripts/verify.sh
+>   all` green: **4296 unit @ 94.39%, 482 integration**.
+> - **PR #71 (`132f234`) — docs accuracy pass** retiring the claims #68–#70 made false.
+> - **This branch (`chore/doc-pass-auth-boundary`) — the doc pass #72 skipped.** #72 merged **code-only**:
+>   no ADR, no ROADMAP update, no explainer update, despite being an authz change (which ROADMAP A0 §3
+>   makes mandatory for the explainer). Added ADR-034, amended ADR-033 (its §1 `user is None` → PASS
+>   contract is **reversed**, so anything citing it is wrong), de-escalated demo guardrail 2 back to
+>   "admin/recruiter only", rewrote A1/A1b as closed, and corrected the circulated HR explainer, which was
+>   telling HR the service was wide open.
+>
+> **Carried, not decided (product question, deliberately not answered in code):** `require_role_assigned`
+> still passes on `user is None`, so a bare service-key reader gets unscoped **reads**. F1b closes it in
+> practice. Whether machine readers are legitimate at all needs a human. Out of scope in #72: F3 (three
+> flaky reveal tests), F7 (dead `_EXISTS_SCOPED_SQL`).
+>
+> **What still gates widening the pilot:** CSRF covers **3 of 12** browser state-changing routes (A1 step
+> (iv) / Phase 1.3), and the **audit-log viewer does not exist** (Phase 1.4), so an auditor account still
+> cannot do its job. Those two are the remaining reasons demo guardrail 2 stands. A2 (skill-matching domain
+> mismatch) remains blocked on the competency-scoring product decision.
+>
+> **The pattern to keep in mind (ROADMAP A7, now at eleven instances).** #72's root cause was an invariant
+> in a docstring with nothing enforcing it — inside `validate_startup_auth_config`, *the function whose job
+> is to prevent exactly that*. Every instance was invisible to a fully green suite. For any fix here, the
+> deliverable is the fix **plus the assertion that would have caught it**.
+
+#### (history) READ FIRST — 2026-08-07: HR DEMO + PILOT STATE UPDATE
 
 > **ROADMAP A1 — PARTLY fixed (PR #68 `ab6c278`, ADR-033). A SECOND, WORSE door is open: the auth boundary is OFF in the shipped config.**
-> Open, gates green, waiting merge. A `require_session_role` dependency now gates every write route to
+> *(Superseded — see the 2026-08-13 banner above. #68 is merged and A1 is closed.)* A `require_session_role` dependency now gates every write route to
 > admin/recruiter sessions only; a structural test guard prevents future write routes from reaching
 > production without it. The human decision recorded: reveal is recruiter/admin only; the scoped
 > hiring-manager reveal (FU-6 slice 6) is retired. **Demo guardrail 2 ("sign in as admin or recruiter

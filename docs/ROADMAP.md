@@ -19,19 +19,16 @@ Four things that make the difference between a demo that lands and one that disc
    **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
    that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
    wrong red badges is not.
-2. **Issue NO accounts at all** — *escalated 2026-08-09.* Stronger than the original guardrail. The
-   session-vs-key half of A1 is closed by ADR-033, but a **retrospective `reviewer` pass found a second,
-   worse door and it is open on the shipped boot: the auth boundary is OFF.** No `API_KEY_*` is set by
-   `quickstart.ps1`, `.env.example` or the running container, so `auth_enabled` is `False`, `resolve_role`
-   returns `Role.ADMIN` for **every** request, and both `require_role_assigned` and `require_session_role`
-   pass on `user is None`. **Verified live against `:29800` with no cookie and no key:** `PATCH /jobs/{id}`
-   reaches the handler (404 on a fake id), `POST /jobs` reaches validation (422), while
-   `/auth/cas/user` reports `authenticated: false`. An auditor need not defeat the new gate — they delete
-   their cookie, flip `blind_review` unauthenticated, and read every candidate un-blinded through their
-   legitimate session; the flip audits as `actor_service='api'`, untraceable to them. **Pre-existing, not a
-   regression** — but ADR-033 claimed to close exactly this and did not. Retire this guardrail only when the
-   auth boundary is on, CSRF covers all 12 browser routes (Phase 1.3), and the audit-log viewer exists
-   (Phase 1.4).
+2. **Sign in as admin or recruiter only** — *de-escalated 2026-08-13, back to the original guardrail.*
+   The 2026-08-09 escalation to "issue NO accounts at all" existed because the auth boundary was OFF on the
+   shipped boot; **that door is now closed — ADR-034, PR #72, squash `299b529`.** The boundary can no longer
+   be shipped off (`validate_startup_auth_config` refuses to boot CAS-enabled with zero role keys), every
+   write route requires a real CAS session, and `users.active` is enforced in all four session gates.
+   **What still stands behind this guardrail:** CSRF covers **3 of 12** browser state-changing routes
+   (A1 step (iv) / Phase 1.3), and an auditor account still cannot do its job because the audit-log viewer
+   does not exist (Phase 1.4). Retire this guardrail when both of those land. **Operationally:** the stack
+   refuses to boot until `./scripts/quickstart.ps1` is re-run to generate the keys — that is the fix
+   working, not a break.
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build
@@ -49,7 +46,7 @@ Four things that make the difference between a demo that lands and one that disc
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
-## A1. P0 · Authorization — PARTLY resolved (ADR-033/PR #68 merged); a SECOND door is open
+## A1. P0 · Authorization — RESOLVED (ADR-033/PR #68 and ADR-034/PR #72, both merged); CSRF is what's left
 
 **Highest-severity finding. This was the one that blocked handing accounts to HR.**
 
@@ -74,9 +71,34 @@ recorded explicitly in ADR-033 §5 so a future session does not re-discover it.
 **Full detail:** [ADR-033](adr/033-session-role-enforcement-on-writes.md). **CSRF (step iv):** remains
 unscoped as a separate item (Phase 1.3).
 
-### A1b. P0 · The auth boundary is OFF in the shipped config — ADR-033's stated worst case is NOT closed
+### A1b. P0 · The auth boundary was OFF in the shipped config — ✅ CLOSED (ADR-034, PR #72, `299b529`)
 
-Found by the retrospective `reviewer` pass on `ab6c278`, independently reproduced against the live stack.
+**Status: FIXED 2026-08-13.** Found by the retrospective `reviewer` pass on `ab6c278`, independently
+reproduced against the live stack, and closed by [ADR-034](adr/034-auth-boundary-fails-open.md). The
+defect as it stood is kept below because it is the clearest instance of the A7 pattern in the repo, and
+because ADR-033 had claimed to close exactly this.
+
+**What shipped.** (i) **F1b, primary** — `validate_startup_auth_config` now **raises** on CAS-enabled with
+zero role keys, and the channel it needed was built alongside it (`&app_env` forwards all four
+`API_KEY_*`, `.env.example` defines them, `quickstart.ps1` generates them beside
+`PII_KEY`/`SKILL_HASH_SALT`), so the boundary can no longer be shipped off. (ii) **F1a** —
+`require_session_role` 403s on `user is None`, reversing ADR-033 §1; **human decision: a valid API key
+alone is never sufficient for a write.** This meant rewriting 13 tests that *pinned the fail-open*, plus 7
+more the tester found, including one asserting the exploit itself succeeded. (iii) **F5** — `users.active`
+enforced in all four session gates, which none of them had consulted while `refresh_if_needed` slid
+expiry forward on every request. (iv) **F4** — the 403→500 Flask regression ADR-033 introduced, fixed on
+all six routes plus `resume_reveal`.
+
+**Carried, not decided:** `require_role_assigned` still passes on `user is None`, so a bare service-key
+reader gets unscoped reads. F1b closes it in practice; whether machine readers are legitimate at all is a
+**product question, recorded rather than silently answered**. Also deliberately out of scope: F3 (three
+flaky reveal tests), F7 (dead `_EXISTS_SCOPED_SQL`).
+
+<details>
+<summary><strong>The defect as it stood</strong> (retained — the clearest A7 instance we have)</summary>
+
+> **Tense warning:** everything below is written in the present tense and describes the code **before**
+> PR #72. None of it is true of `main` today. It is kept verbatim as the record of what was found.
 
 `auth_enabled` is `False` iff all four role keys are empty (`settings.py:253-263`), and no `API_KEY_*` is
 written by `quickstart.ps1`, shipped in `.env.example`, or present in the running container. `resolve_role`
@@ -96,12 +118,17 @@ to boot on an auth configuration that would silently fail open"* — it checks s
 collisions, but **not CAS-enabled-with-zero-role-keys**, which is the shipped default. The invariant is in
 that docstring with nothing enforcing it: the same pattern as A7, third occurrence this session.
 
-**Fix, Red first:** (i) extend `validate_startup_auth_config` to refuse boot when CAS is on and no role key
+**Fix, Red first** *(as planned — all three shipped in PR #72; see the status block above)*: (i) extend
+`validate_startup_auth_config` to refuse boot when CAS is on and no role key
 is configured — the assertion that would have caught it; (ii) `quickstart.ps1` + `.env.example` generate and
 write the role keys, mirroring how they already generate `PII_KEY`/`SKILL_HASH_SALT`, so the boot stays
 one-command; (iii) decide whether human-only write routes should also 403 on `user is None`, mirroring
 `reveal`/`assignees` — defence in depth, since the BFF's shared recruiter key would otherwise still permit a
-sessionless write. **(iii) needs a human decision** on whether any legitimate non-browser caller exists.
+sessionless write. **(iii) needed a human decision** on whether any legitimate non-browser caller exists —
+**decided: no, for writes.** A valid key alone is never sufficient (ADR-034 §2). The same question for
+*reads* (`require_role_assigned`) is the carried item above.
+
+</details>
 
 ## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage
 
@@ -239,12 +266,20 @@ Two smaller scoring defects worth folding into any A2/A4 work: `normalise_vector
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **nine times**: an
+Across the external review and this session's gate work the same defect shape appears **eleven times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
 one was invisible to a fully green 4,100-test suite and was found only by mutating the code and watching what
 *failed to complain*.
+
+**Two more, added 2026-08-13 by A1b/[ADR-034](adr/034-auth-boundary-fails-open.md)** — and the first of
+them is the purest specimen yet: (10) `validate_startup_auth_config`'s docstring promised it refuses any
+auth configuration that would *"silently fail open"*, while the shipped default — CAS on, zero role keys —
+was exactly such a configuration and went unchecked; (11) `users.active` was a column the four session
+gates all documented as meaningful and **none of them read**, while `refresh_if_needed` slid session
+expiry forward on every request. Note the escalation: A7 instance (10) sat inside the very function whose
+job was to prevent A7 instances.
 
 **Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
 have caught it** — Red first.
