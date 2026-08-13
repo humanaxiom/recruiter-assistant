@@ -286,6 +286,27 @@ def list_resumes(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def list_audit_log(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    action: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """Phase 1.4 / ADR-036 — the auditor's read of the live ``audit_log``.
+
+    The backend gates this on the CAS SESSION role (admin/auditor), not on the
+    fixed ``recruiter`` key this client presents — see ``build_client``. So the
+    forwarded session cookie is what authorizes the call, and an auditor who is
+    not signed in gets a 403 rather than someone else's view of the record.
+    """
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if action:
+        params["action"] = action
+    response = _request("GET", "/audit/log", params=params, client=client)
+    return response.json()
+
+
 def upload_resumes(
     job_id: UUID,
     files: list[tuple[str, bytes, str]],

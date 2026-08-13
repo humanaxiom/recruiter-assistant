@@ -302,6 +302,52 @@ def _require_admin_page() -> None:
     return None
 
 
+#: The roles the audit-log viewer serves, matching the backend's own
+#: ``_AUDIT_READERS`` on ``GET /audit/log``. Admin is included because an
+#: administrator investigating a report should not have to be re-roled to see
+#: the record they are being asked about.
+_AUDIT_PAGE_ROLES = ("admin", "auditor")
+
+#: One page of audit rows. Well inside the backend's ``le=500`` bound.
+_AUDIT_PAGE_SIZE = 100
+
+#: The ``action`` values ``record_audit`` writes today, offered as a filter.
+#: A value NOT in this list is still accepted and forwarded — the list is a
+#: convenience for the reader, never a whitelist that could silently hide a
+#: newly-added action from an auditor.
+_AUDIT_ACTIONS = (
+    "reveal",
+    "withdraw_resume",
+    "reinstate_resume",
+    "role_changed",
+    "assign_job",
+    "unassign_job",
+)
+
+
+def _require_audit_page() -> None:
+    """Phase 1.4 / ADR-036 — the admin+auditor gate on the audit-log page.
+
+    Mirrors :func:`_require_admin_page` exactly, one role wider. Like it, this
+    is a **compensating UX control, not the authorization boundary**: the
+    backend's ``require_session_role(ADMIN, AUDITOR)`` on ``GET /audit/log`` is
+    what actually protects the data, and it re-checks the same session this page
+    read. Gating here only means a recruiter gets a comprehensible 403 instead
+    of an empty page wrapped around a backend refusal.
+
+    ``cas_enabled=False`` (dev mode) is an unconditional passthrough, matching
+    ``_require_admin_page``: dev-anonymous IS the backend's synthetic admin
+    sentinel, so the page stays reachable with no CAS server.
+    """
+    settings = get_settings()
+    if not settings.cas_enabled:
+        return None
+    cas_status = getattr(g, "cas_user", None) or {}
+    if cas_status.get("role") not in _AUDIT_PAGE_ROLES:
+        abort(403)
+    return None
+
+
 _JOB_STATUSES = ("draft", "open", "closed", "archived")
 
 
@@ -1200,6 +1246,50 @@ def admin_users() -> Any:
         return _unavailable(exc)
     return render_template(
         "admin_users.html", users=users, roles=_ASSIGNABLE_ROLES, error=None
+    )
+
+
+@app.get("/audit")
+def audit_log() -> Any:
+    """Phase 1.4 / ADR-036 — the auditor's view of the access record.
+
+    **This page is why the auditor role existed but could not be used.** Until
+    now the application had no read path to ``audit_log`` at all — not a route,
+    not a service function — so producing the access record meant an engineer
+    running SQL against production by hand. That is what ROADMAP guardrail 2's
+    "an auditor account cannot do its job" referred to.
+
+    Read-only by construction: there is no write control on this surface and no
+    backend write route it could call. ``details`` arrives already
+    allowlist-filtered by the backend (``audit_service.redact_audit_details``) —
+    this page renders what it is given and redacts nothing itself, so the
+    boundary has exactly one implementation rather than two that can disagree.
+    """
+    _require_audit_page()
+    action = (request.args.get("action") or "").strip() or None
+    try:
+        offset = max(0, int(request.args.get("offset") or 0))
+    except ValueError:
+        offset = 0
+    try:
+        entries = api_client.list_audit_log(
+            limit=_AUDIT_PAGE_SIZE, offset=offset, action=action
+        )
+    except api_client.BadRequest:
+        # The backend re-checks the session role and 403s independently of the
+        # page gate above; surface it as a 403 rather than an unhandled 500
+        # (the F4 lesson from fix/auth-boundary-fails-open).
+        abort(403)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return render_template(
+        "audit_log.html",
+        entries=entries,
+        action=action or "",
+        offset=offset,
+        page_size=_AUDIT_PAGE_SIZE,
+        actions=_AUDIT_ACTIONS,
+        current_year=dt.date.today().year,
     )
 
 

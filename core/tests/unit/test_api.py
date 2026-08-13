@@ -152,6 +152,12 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # FU-5 slice 10 (ADR-019 §6 / §9.4) — src.api.routes.audit, the
         # read-only legacy reveal-audit viewer, admin + auditor.
         "/audit/reveals-legacy",
+        # Phase 1.4 (ADR-036) — the auditor's read of the LIVE audit_log.
+        # Its sibling above reads reveal_audit, FROZEN at FU-5 slice 8; every
+        # event since the cutover lives in audit_log, which until this route
+        # had NO read path anywhere in the application. Admin + auditor, and
+        # additionally gated on a real CAS session (ADR-036 §4).
+        "/audit/log",
         # FU-6 slice 3 (ADR-020 §2) — src.api.routes.job_assignees, the
         # assign/unassign routes, admin + recruiter only.
         "/jobs/{job_id}/assignees",
