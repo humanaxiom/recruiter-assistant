@@ -86,6 +86,22 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > functional lines, all in `except` branches — scoring math byte-unchanged by construction.**
 > `./scripts/verify.sh all` green: **4381 unit @ 94.20%, 488 integration**.
 >
+> **ROADMAP A3's recommended first move is DONE —
+> [ADR-038](docs/adr/038-gate-the-bait-below-strong-ordering.md), branch `fix/evals-gate-bait-below-strong`.**
+> `thresholds.toml`'s claim that *"the bait is BELOW EVERY STRONG FIXTURE"* was a **comment**; nothing read
+> it, so the reverted ADR-032 change violated it and still exited 0 — the A7 shape **inside the gate
+> itself**. Now enforced as an order relation over tags. **Measured arming** by sweeping `weights.evidence`
+> against the real corpus: `0.30/0.28` GREEN → **`0.25`–`0.10` only this gate fires** (bait rank 11→7 vs
+> worst strong 12→13) → `0.05/0.00` `precision@k` fires first. So there is a real band in which the bait
+> outranks strong fixtures while **every pre-existing gate stays green** — halving the evidence weight used
+> to pass the whole harness. The helper is unit-tested to FIRE, not just to pass, including a
+> refuses-to-pass-vacuously case. `./scripts/verify.sh all` green: **4387 unit @ 94.20%, 488 integration**.
+>
+> **A3 is NOT fully closed.** Still open: the **ADR-008 hashing blindness** (`_skill_rows_for` can never
+> produce an `h:` key — closing it re-bands the corpus and margins must be re-measured), `expected_rank_band`
+> still unreferenced with **r18 violating its own declared band** (`strong`, band `{1,9}`, actual rank 11),
+> and the **inert `skill_missing_must` pair** against `weights.skill = 0`.
+>
 > **What's left on the pilot track:** **A4 M2** (stage-1 recall is a **global** vector query —
 > `resume_summary_idx` is not job-partitioned, so past ~150 résumés corpus-wide a job's own candidates get
 > crowded out even when its pool is under `coarse_k`; raising `coarse_k` masks rather than fixes it. A
