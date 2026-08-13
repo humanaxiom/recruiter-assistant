@@ -98,6 +98,18 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    every weak fixture. That is arithmetic: do not
                                    "fix" it by re-tagging r09 or moving a
                                    threshold, and do not re-pin an exact rank.
+    must_rank_below_every_strong -- ROADMAP A3. The "below the strong tier"
+                                   claim above was PROSE until 2026-08-13 and
+                                   nothing read it, so a change that violated it
+                                   still exited 0 -- which is what the reverted
+                                   ADR-032 attempt did. Now enforced as an ORDER
+                                   RELATION over tags (every 'adversarial'
+                                   fixture ranks strictly below every 'strong'
+                                   one), which needs no measured constants and
+                                   so cannot drift with the corpus the way a
+                                   pinned rank does. Deliberately NOT
+                                   expected_rank_band, which goes red on r18.
+                                   See _assert_bait_ranks_below_every_strong.
   [ordering_controls]
     enforce = true              -- for every pair below, the live ranker must
     pairs = [...]                  satisfy BOTH halves: rank(higher) <
@@ -180,7 +192,7 @@ import json
 import re
 import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -423,6 +435,10 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
                 f"{rid} is flagged must_not_surface_in_topk but appears in the "
                 f"top-{k} (rank {by_id[rid].rank}, score {by_id[rid].score_final:.4f})"
             )
+
+    # ── adversarial: must_rank_below_every_strong (ROADMAP A3) ─────────────
+    if thresholds["adversarial"].get("must_rank_below_every_strong"):
+        _assert_bait_ranks_below_every_strong(ranked, tag_by_id)
 
     # ── evidence: verification_rate + min_completeness_in_topk ─────────────
     verify_fuzz = float(thresholds["evidence"]["fuzz_threshold"])
@@ -1195,6 +1211,69 @@ def _assert_gold_anchor_text_survives_the_verifier(
         "pre-FINDING-4 floor of 32 the corpus cannot detect a revert of the "
         "min_quote_chars decision"
     )
+
+
+def _assert_bait_ranks_below_every_strong(
+    ranked: Sequence[Any], tag_by_id: dict[str, str]
+) -> None:
+    """ROADMAP A3 — enforce the order relation ``[adversarial]`` only asserted
+    in PROSE.
+
+    ``thresholds.toml``'s ``[adversarial]`` block states, as its round-6
+    reconciliation, that *"the bait is BELOW EVERY STRONG FIXTURE and therefore
+    outside the k=5 window"*, with ~0.19 of measured margin either way. That
+    sentence was a comment. Nothing read it. **A change that violated it still
+    exited 0** — which is exactly what happened: the ADR-032 attempt inverted
+    the bait-below-strong ordering and had to be reverted, and no gate in this
+    repo objected.
+
+    This is the A7 defect shape occurring *inside the gate itself*, which is
+    the worst place for it: every scoring fix is only as trustworthy as the
+    harness, and the harness was asserting in English.
+
+    **Why an order relation over tags, and not ``expected_rank_band``.**
+    Enforcing the per-fixture bands wholesale goes red immediately on r18
+    (tagged ``strong``, band ``{1,9}``, actual rank 11), which is its own
+    unreconciled discrepancy and not this gate's business. The order relation
+    needs no new fixtures and no measured constants — it is a pure comparison
+    between two tag groups, so it cannot drift with the corpus the way a pinned
+    rank does. That is also why the round-6 note says "do not re-pin a rank
+    here": r09 sits in a near-tie with r04 (2.8e-04 apart) and the two swap
+    between builds. Their *relation to the strong tier* is stable; their exact
+    ranks are not.
+
+    Deliberately scoped to ``adversarial``, not to ``weak`` as well. The
+    measured claim covers the bait only; extending it to the five weak fixtures
+    is unmeasured, and a gate that goes red on arrival teaches people to
+    disable gates.
+    """
+    strong_ranks = {
+        m.resume_id: m.rank for m in ranked if tag_by_id.get(m.resume_id) == "strong"
+    }
+    bait = [m for m in ranked if tag_by_id.get(m.resume_id) == "adversarial"]
+
+    # Guard against a vacuous pass: with no bait or no strong tier this check
+    # is trivially true and would sit here proving nothing, which is the exact
+    # failure mode it exists to correct.
+    assert bait, (
+        "no 'adversarial'-tagged fixture in the corpus — this gate would pass "
+        "vacuously; re-scope it or restore the bait fixture"
+    )
+    assert strong_ranks, (
+        "no 'strong'-tagged fixtures in the corpus — this gate would pass " "vacuously"
+    )
+
+    worst_strong_rank = max(strong_ranks.values())
+    for m in bait:
+        assert m.rank > worst_strong_rank, (
+            f"{m.resume_id} is tagged 'adversarial' but ranks {m.rank}, at or "
+            f"above the worst 'strong' fixture (rank {worst_strong_rank}). The "
+            f"keyword-stuffer must sit below EVERY strong fixture — "
+            f"thresholds.toml's [adversarial] block asserts this with ~0.19 of "
+            f"measured margin, and a ranker that violates it is surfacing bare "
+            f"keyword overlap over real evidence. Strong ranks: "
+            f"{sorted(strong_ranks.values())}"
+        )
 
 
 def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:

@@ -927,6 +927,7 @@ _THRESHOLD_KEYS: list[tuple[str, str]] = [
     ("evidence", "gold_recall_min"),
     ("evidence", "min_quote_chars"),
     ("adversarial", "must_not_surface_in_topk"),
+    ("adversarial", "must_rank_below_every_strong"),
     ("ordering_controls", "enforce"),
     ("ordering_controls", "pairs"),
     ("ordering_controls", "min_score_gap"),
@@ -3598,3 +3599,82 @@ def test_ported_engine_helpers_agree_with_the_real_ones() -> None:
             f"_most_recent_title drifted on {roles!r} -- this is the string the "
             f"SENIORITY sub-score embeds, and r09's bait pins it to the JD title"
         )
+
+
+# ── ROADMAP A3: the bait-below-strong order relation is ARMED ───────────────
+#
+# The point of A3 is that this harness contained assertions which could not
+# fail. Adding another unfalsifiable one would be worse than adding nothing, so
+# `_assert_bait_ranks_below_every_strong` is exercised directly here with
+# synthetic rankings — the corpus run proves it PASSES on a good engine, and
+# these prove it FAILS on a bad one. The existing `_assert_*` helpers in
+# run_evals.py have no such coverage; this is a deliberate improvement on that
+# convention, not an inconsistency with it.
+
+
+class _FakeRanked:
+    """Minimal stand-in for a ranked match: the helper reads only these two."""
+
+    def __init__(self, resume_id: str, rank: int) -> None:
+        self.resume_id = resume_id
+        self.rank = rank
+
+
+def test_bait_below_strong_gate_passes_when_the_bait_is_last() -> None:
+    module = _import_run_evals()
+    ranked = [
+        _FakeRanked("r01", 1),
+        _FakeRanked("r02", 2),
+        _FakeRanked("r09", 3),
+    ]
+    tags = {"r01": "strong", "r02": "strong", "r09": "adversarial"}
+    module._assert_bait_ranks_below_every_strong(ranked, tags)
+
+
+def test_bait_below_strong_gate_fires_when_the_bait_outranks_one_strong() -> None:
+    """THE arming proof, and the shape of the reverted ADR-032 change.
+
+    The bait need not reach the top-k to be a failure — ``must_not_surface_in_topk``
+    already covers that. This catches the case that one slipped through: the bait
+    rising ABOVE a strong fixture while still sitting outside k=5, which the old
+    gate was blind to and which no prose could stop.
+    """
+    module = _import_run_evals()
+    ranked = [
+        _FakeRanked("r01", 1),
+        _FakeRanked("r09", 2),  # bait above r02
+        _FakeRanked("r02", 3),
+    ]
+    tags = {"r01": "strong", "r02": "strong", "r09": "adversarial"}
+    with pytest.raises(AssertionError, match="tagged 'adversarial'"):
+        module._assert_bait_ranks_below_every_strong(ranked, tags)
+
+
+def test_bait_below_strong_gate_fires_on_an_exact_tie_with_the_worst_strong() -> None:
+    """``>`` not ``>=``: sharing a rank with the worst strong fixture is not
+    'below' it. An off-by-one here would silently re-open the hole."""
+    module = _import_run_evals()
+    ranked = [_FakeRanked("r01", 1), _FakeRanked("r09", 1)]
+    tags = {"r01": "strong", "r09": "adversarial"}
+    with pytest.raises(AssertionError, match="tagged 'adversarial'"):
+        module._assert_bait_ranks_below_every_strong(ranked, tags)
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        ({"r01": "strong"}, "no 'adversarial'-tagged fixture"),
+        ({"r09": "adversarial"}, "no 'strong'-tagged fixtures"),
+    ],
+)
+def test_bait_below_strong_gate_refuses_to_pass_vacuously(
+    tags: dict[str, str], expected: str
+) -> None:
+    """A gate that passes when its inputs vanish is the failure mode this whole
+    slice exists to correct. With no bait, or no strong tier, the comparison is
+    trivially true — so the helper fails loudly instead of sitting there
+    proving nothing."""
+    module = _import_run_evals()
+    ranked = [_FakeRanked(rid, i + 1) for i, rid in enumerate(tags)]
+    with pytest.raises(AssertionError, match=expected):
+        module._assert_bait_ranks_below_every_strong(ranked, tags)
