@@ -52,9 +52,31 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > **With that, ALL FOUR original A1 steps are closed** — (i)/(ii) ADR-033, the fail-open ADR-034,
 > (iii) deliberately not built (dead code, ADR-033 §5), (iv) ADR-035.
 >
-> **What still gates widening the pilot: ONE thing.** The **audit-log viewer does not exist** (Phase 1.4),
-> so an auditor account cannot do its job — the last remaining reason demo guardrail 2 stands. A2
-> (skill-matching domain mismatch) remains blocked on the competency-scoring product decision.
+> **Phase 1.4 — the auditor's viewer — is DONE too ([ADR-036](docs/adr/036-auditor-audit-log-viewer.md),
+> branch `feat/auditor-audit-log-viewer`), and the finding was worse than the plan said.** Not "the screen
+> has not been built": `grep -rn "FROM audit_log" core/src/` returned **nothing**. `audit_log` is written
+> by **nine** call sites and **had no read path anywhere in the application** — no route, no service
+> function, no UI. The only audit route reads `reveal_audit`, FROZEN at FU-5 slice 8, so it returns
+> pre-cutover history and nothing since. Producing an access record meant an engineer running SQL against
+> production by hand. There is now `GET /audit/log` + a read-only `/audit` page (admin + auditor) with the
+> nav link an auditor needs to find it. `./scripts/verify.sh all` green: **4376 unit @ 94.20%, 488
+> integration**.
+>
+> **⭐ DEMO GUARDRAIL 2 IS RETIRED — all four account types can be issued.** Every reason it existed is
+> closed: role escalation (ADR-033), the auth boundary being off (ADR-034), CSRF at 3-of-12 (ADR-035), and
+> the auditor having nowhere to go (ADR-036).
+>
+> **Two things a human must still do before widening the pilot** (neither is an authorization gap):
+> 1. **Nobody has clicked through the live UI** for ADR-035 or ADR-036 — the stack does not boot here
+>    without the quickstart step above. Both are proven by the full suite; neither has been seen working.
+> 2. **An open product/privacy decision:** whether an auditor should be able to read résumé **withdrawal
+>    reasons**. They are operator-typed free text about a named candidate, so they are **withheld** today
+>    (recorded, not shown) behind a fail-closed allowlist. Plausibly within an auditor's remit, plausibly a
+>    PIPEDA/FIPPA problem — ADR-036 §1 records it rather than answering it by implementation.
+>
+> **What's left on the pilot track:** A2 (skill-matching domain mismatch) remains blocked on the
+> competency-scoring product decision; A3–A6 unchanged. Natural small follow-on: an **export** for the
+> access record (an auditor can read it on screen but cannot hand it to anyone).
 >
 > **Worth a human's eyes before the pilot:** ADR-035's guard is proven by the full suite including real
 > forged requests, but **nobody has clicked through the live UI** — the stack does not boot here without

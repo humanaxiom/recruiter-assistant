@@ -19,16 +19,27 @@ Four things that make the difference between a demo that lands and one that disc
    **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
    that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
    wrong red badges is not.
-2. **Sign in as admin or recruiter only** — *de-escalated 2026-08-13, back to the original guardrail.*
-   The 2026-08-09 escalation to "issue NO accounts at all" existed because the auth boundary was OFF on the
-   shipped boot; **that door is now closed — ADR-034, PR #72, squash `299b529`.** The boundary can no longer
-   be shipped off (`validate_startup_auth_config` refuses to boot CAS-enabled with zero role keys), every
-   write route requires a real CAS session, and `users.active` is enforced in all four session gates.
-   **What still stands behind this guardrail — now ONE thing, not two.** CSRF is closed as of 2026-08-13
-   (**ADR-035**: all 12 browser state-changing routes, up from 3, fail-closed by default). The remaining
-   reason is that **an auditor account still cannot do its job** — the audit-log viewer does not exist
-   (Phase 1.4). Retire this guardrail when that lands. **Operationally:** the stack refuses to boot until
-   `./scripts/quickstart.ps1` is re-run to generate the keys — that is the fix working, not a break.
+2. ~~**Sign in as admin or recruiter only.**~~ ✅ **RETIRED 2026-08-13 — all four accounts can now be
+   issued.** Every reason this guardrail existed has been closed, in order, and each is recorded rather
+   than assumed:
+   - **Role escalation on writes** — ADR-033 (#68).
+   - **The auth boundary shipped OFF**, so anyone reachable on the network had the whole API including the
+     audit log — ADR-034 (#72, `299b529`). It can no longer be shipped off:
+     `validate_startup_auth_config` refuses to boot CAS-enabled with zero role keys, every write requires a
+     real CAS session, and `users.active` is enforced in all four session gates.
+   - **CSRF covered 3 of 12 browser state-changing routes** — ADR-035 (#74, `b12ec84`). Now all 12,
+     fail-closed, so route 13 is protected by default.
+   - **An auditor account could not do its job** — **ADR-036**. This was worse than "the screen is
+     missing": `audit_log` had **no read path anywhere in the application**, so producing an access record
+     meant an engineer running SQL against production by hand. There is now a viewer, at `/audit`.
+
+   **Operationally:** the stack refuses to boot until `./scripts/quickstart.ps1` is re-run to generate the
+   keys — that is the fix working, not a break.
+
+   **Before widening, two honest caveats** (neither is an authorization gap): nobody has clicked through
+   the live UI for ADR-035/036, because the stack does not boot in the agent's environment; and whether an
+   auditor should see résumé **withdrawal reasons** is an open product/privacy decision — they are withheld
+   today (ADR-036 §1).
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build

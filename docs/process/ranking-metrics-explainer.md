@@ -299,21 +299,29 @@ refuses to start at all in a configuration that would leave the door open, and d
 now takes effect immediately rather than whenever their session happened to expire. Scoring and stored data
 were never affected by this; it was about who could reach the service.
 
-One thing still argues for keeping accounts to recruiters and administrators for now: an auditor still has
-nothing to look at (below). The protection against a malicious link — a page that tries to make your
-browser perform an action on this service while you are signed in — now covers all twelve of our
-state-changing screens, up from three.
+All four kinds of account — administrator, recruiter, hiring manager and auditor — can now be issued. The
+protection against a malicious link (a page that tries to make your browser act on this service while you
+are signed in) now covers all twelve of our state-changing screens, up from three, and an auditor finally
+has a screen of their own (below).
 
-**Auditor accounts also need a screen that does not exist yet.** The role's restrictions are enforced, but
-the one thing an auditor needs — a view of the access record — has not been built, so producing that record
-still means asking an engineer.
+**Auditors now have a screen — and the underlying record was less reachable than we said.** An auditor can
+open **Access record** and read what has happened: who revealed which candidate, who changed someone's
+role, who withdrew or reinstated a file, and when. Correcting an earlier version of this page: the problem
+was not only that the screen was missing. The service had **no way to read its own access record at all**,
+so producing one meant an engineer querying the database by hand. That is now a page.
+
+**One thing is deliberately not shown there.** When a candidate's file is withdrawn, whoever did it can
+record a free-text reason, and that text can name the candidate or describe their circumstances. Those
+reasons are recorded but **withheld** on the screen — the auditor sees that a reason exists, not what it
+says. Whether an auditor should be able to read them is a decision for you, not for us; ask an
+administrator if a specific one is needed for a review.
 
 **Retention is recorded but not automatic.** Each job carries a retention period, but nothing deletes
 anything when it expires — removal is currently a manual process. If our retention schedule is a commitment
 to candidates, it needs to be met by hand for now.
 
-**A few smaller things.** There is no screen yet for reading the access record, so producing one means asking
-an engineer. Uploaded files themselves are access-restricted but not encrypted, though the personal details
+**A few smaller things.** The access record can now be read on screen, but not yet exported — handing it to
+someone else still means asking an engineer. Uploaded files themselves are access-restricted but not encrypted, though the personal details
 inside the database are. And where a candidate ranks below the top 15, the explanation panel currently shows
 their evidence as zero rather than as not assessed — accurate arithmetic, misleading presentation, and it is
 being changed.
