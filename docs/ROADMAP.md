@@ -212,13 +212,28 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   producing no hashed key at all. Doing it properly needs the non-vocab skill in `required_skills`, which
   forces a must-have miss for every honest fixture and re-bands the corpus — margins must be **re-measured**.
 - **Assertions that do not run.** `expected_rank_band` is never referenced by `run_evals.py` — and r18
-  currently violates its own declared band (tagged `strong`, band `{1,9}`, actual rank 11). *"The bait is
-  BELOW EVERY STRONG FIXTURE"* is prose in `thresholds.toml:217`, not a gated key: a change that violated it
-  still exited 0. The `skill_missing_must` ordering pair is inert against `weights.skill = 0`.
-- **Recommended first move** — needs no new fixtures and no measured constants, passes today, and would have
-  caught the reverted change: add `[adversarial] must_rank_below_every_strong = true`, enforced as an order
-  relation over tags. **Do not** enforce `expected_rank_band` wholesale; it goes red immediately on r18,
-  which needs its own reconciliation.
+  currently violates its own declared band (tagged `strong`, band `{1,9}`, actual rank 11). The
+  `skill_missing_must` ordering pair is inert against `weights.skill = 0`.
+  ~~*"The bait is BELOW EVERY STRONG FIXTURE"* is prose, not a gated key.~~ ✅ **CLOSED 2026-08-13 —
+  [ADR-038](adr/038-gate-the-bait-below-strong-ordering.md).**
+- ~~**Recommended first move**~~ ✅ **DONE.** `[adversarial] must_rank_below_every_strong = true`, enforced
+  as an order relation over tags. **Measured arming** (sweeping `weights.evidence` against the real corpus,
+  recording which assertion fires first):
+
+  | `weights.evidence` | What fires |
+  |---|---|
+  | 0.30 (default), 0.28 | GREEN |
+  | **0.25 → 0.10** | **only this gate** — bait rank 11→7 vs worst strong 12→13 |
+  | 0.05, 0.00 | `precision@k` (the bait reaches the top-5) |
+
+  A real detection band of ~0.25–0.10 in which the bait outranks strong fixtures while **every pre-existing
+  gate stays green** — halving the evidence weight used to pass the whole harness. `precision@k` and
+  `must_not_surface_in_topk` only notice the bait once it reaches the top-5. **`expected_rank_band` is
+  still deliberately NOT enforced wholesale** — it goes red immediately on r18, which needs its own
+  reconciliation.
+
+**Still open in A3:** the ADR-008 hashing blindness (first bullet), `expected_rank_band` / the r18 band
+discrepancy, and the inert `skill_missing_must` pair against `weights.skill = 0`.
 
 ## A4. P0 · Two ranking defects that affect what HR will see — M1 FIXED, M2 open
 
