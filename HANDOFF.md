@@ -4,7 +4,12 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 ### ⚠️⚠️ READ FIRST — 2026-08-13: PILOT BLOCKERS A1 AND A4 ARE CLOSED; GUARDRAILS 2 AND 4 RETIRED
 
-> **`origin/main` == `f9be22b`. Working tree clean. Zero open PRs. Nothing is mid-flight.**
+> **Last FEATURE merge: `f9be22b` (PR #80). Working tree clean. Zero open PRs. Nothing is mid-flight.**
+> Docs-only commits sit on top of that — including this banner's own wrap (#81) — so `origin/main` is at or
+> after `f9be22b` rather than equal to it. Stated that way deliberately: a banner cannot name the sha of the
+> commit that introduces it, and every previous banner here pinned an `==` that was false the moment it
+> merged. **Always `git fetch` and check `gh pr list` before trusting any of this.**
+>
 > Supersedes the 2026-08-07 banner below (kept as history, and itself stale — it describes #68 as
 > "waiting merge" and A1 as partly open; both are false).
 >
