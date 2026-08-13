@@ -111,6 +111,12 @@ async def persist_shortlist(conn: DbConn, result: ShortlistResult) -> int:
         breakdown = entry.breakdown.model_dump()
         breakdown["score_structured"] = entry.score_structured
         breakdown["score_evidence"] = entry.score_evidence
+        # ROADMAP A4 (evidence cliff): folded for the same reason and by the
+        # same mechanism as the two sub-scores above — the table has no column
+        # for it either. A row written before this slice simply has no key,
+        # which unfolds to None ("we do not know whether stage 3 ran"), which
+        # is exactly the third state the panel needs.
+        breakdown["evidence_evaluated"] = entry.evidence_evaluated
         # evidence JSONB NOT NULL: None -> the empty-object literal, never NULL.
         evidence_json = (
             json.dumps(entry.evidence.model_dump())
@@ -534,7 +540,35 @@ def _folded_subscore(value: Any, *, key: str, entry_id: Any) -> float | None:
         return None
 
 
-def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float | None, float | None]:
+def _folded_evidence_evaluated(value: Any, *, entry_id: Any) -> bool | None:
+    """The folded ``evidence_evaluated`` marker, or ``None`` for "unknown".
+
+    STRICT about the type, unlike a bare ``bool(value)``. ``"yes"``, ``1.5``
+    and ``[]``-vs-``[0]`` are all truthy or falsy in Python without being a
+    recorded boolean, and reporting a corrupted value as an affirmative
+    "assessed" is precisely the invented fact this marker exists to prevent.
+    Only a real ``bool`` counts; anything else degrades to "we do not know".
+
+    Never raises, for the same reason as :func:`_folded_subscore`: this runs on
+    bytes already committed to a NOT NULL column that nothing can rewrite, so a
+    raise would 500 the whole shortlist permanently.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    logger.warning(
+        "shortlist entry %s: score_breakdown.evidence_evaluated is not a "
+        "boolean (%s); reporting it as not recorded",
+        entry_id,
+        type(value).__name__,
+    )
+    return None
+
+
+def _parse_entry_jsonb(
+    raw: dict[str, Any],
+) -> tuple[float | None, float | None, bool | None]:
     """In-place: coerce the jsonb score_breakdown/evidence columns into their
     pydantic models. RETURNS the two UNFOLDED sub-scores
     ``(score_structured, score_evidence)`` for the caller to put on the DTO.
@@ -562,6 +596,9 @@ def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float | None, float | None]
     sb = dict(sb)
     folded_structured = sb.pop("score_structured", None)
     folded_evidence = sb.pop("score_evidence", None)
+    # Popped for the same hard reason as the two above: ScoreBreakdown is
+    # extra="forbid", so a folded key left in place raises on EVERY row.
+    folded_evaluated = sb.pop("evidence_evaluated", None)
     raw["score_breakdown"] = ScoreBreakdown.model_validate(sb)
     ev = raw["evidence"]
     if isinstance(ev, str):
@@ -570,6 +607,7 @@ def _parse_entry_jsonb(raw: dict[str, Any]) -> tuple[float | None, float | None]
     return (
         _folded_subscore(folded_structured, key="score_structured", entry_id=entry_id),
         _folded_subscore(folded_evidence, key="score_evidence", entry_id=entry_id),
+        _folded_evidence_evaluated(folded_evaluated, entry_id=entry_id),
     )
 
 
@@ -622,7 +660,11 @@ def _parse_pipeline_meta(raw_meta: Any, *, entry_id: Any = None) -> PipelineMeta
 
 def _row_to_entry(row: Any) -> ShortlistEntry:
     raw = dict(row)
-    raw["score_structured"], raw["score_evidence"] = _parse_entry_jsonb(raw)
+    (
+        raw["score_structured"],
+        raw["score_evidence"],
+        raw["evidence_evaluated"],
+    ) = _parse_entry_jsonb(raw)
     raw["pipeline_meta"] = _parse_pipeline_meta(
         raw.get("pipeline_meta"), entry_id=raw.get("id")
     )
@@ -778,7 +820,11 @@ def _row_to_blind_entry(row: Any) -> ShortlistEntry:
     parsed_raw = raw.pop("_c_parsed", None)
     labels = labels_from_parsed(parsed_raw)
     location = location_from_parsed(parsed_raw)
-    raw["score_structured"], raw["score_evidence"] = _parse_entry_jsonb(raw)
+    (
+        raw["score_structured"],
+        raw["score_evidence"],
+        raw["evidence_evaluated"],
+    ) = _parse_entry_jsonb(raw)
     raw["pipeline_meta"] = _parse_pipeline_meta(
         raw.get("pipeline_meta"), entry_id=raw.get("id")
     )

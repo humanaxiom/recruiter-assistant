@@ -547,6 +547,24 @@ class ShortlistEntry(BaseModel):
     # panel must surface as "weights unavailable" rather than substituting
     # defaults.
     pipeline_meta: PipelineMeta | None = None
+    # ROADMAP A4 (evidence cliff). THREE states, and the third is the point:
+    #
+    #   True  — stage 3 ran for this candidate. A ``score_evidence`` of 0.0 is
+    #           then a real measurement and must render as 0.
+    #   False — past the ``evidence_k`` cliff. Never evaluated, so the stored
+    #           0.0 came from COMPUTE PLACEMENT, not merit, and the panel must
+    #           say "not assessed" rather than state a measured zero.
+    #   None  — the row predates this marker (or its folded value was
+    #           unreadable). We do not know which of the above applies, so the
+    #           panel asserts neither.
+    #
+    # Deliberately NOT inferred from ``evidence.requirements == []``: that is
+    # reading pipeline state off a display artifact, and a candidate evaluated
+    # against a JD with no requirements has an empty list too. It is folded
+    # into the ``score_breakdown`` jsonb by ``persist_shortlist`` and unfolded
+    # by ``_parse_entry_jsonb``, exactly like the two sub-scores above, because
+    # ``shortlist_entries`` has no column for it either.
+    evidence_evaluated: bool | None = None
     generated_at: dt.datetime
     blinded: bool = False
     display_label: str | None = None

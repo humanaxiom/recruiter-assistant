@@ -119,8 +119,24 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > string vanished, breaking **four fail-closed tests two files away**; it is now keyed on `vec_score`, the
 > column stage 1 must return. Stubs keyed on implementation details fail loudly only if you are lucky.
 >
-> **What's left on the pilot track:** **A4's evidence cliff** (a past-the-cliff
-> candidate renders an affirmative `Evidence · 0%`; needs a persisted `evidence_evaluated` marker).
+> **A4 IS NOW FULLY CLOSED — the evidence cliff is disclosed
+> ([ADR-040](docs/adr/040-evidence-cliff-disclosure.md), branch `fix/evidence-cliff-not-assessed`).**
+> `evidence_k=15` bounds stage 3 but ALL of `candidates_s2` reaches `stage4_combine`, so a rank-16
+> candidate got `0.0` evidence AND motivation — 40% of `score_final` — from **compute placement, not
+> merit**, and the panel rendered it as an affirmative `Evidence · 30% · 0% · 0.00`, indistinguishable from
+> a candidate examined and found lacking. Rank order was provably unaffected, so this was a **disclosure**
+> defect, and ADR-031's "not recorded" guard did not cover it (that protects an *unreadable* row; this is a
+> *never-computed* one, which parses fine as `0.0`). Now a persisted `evidence_evaluated` marker, set from
+> `top_k` membership, folded into `score_breakdown` (no DDL), rendered in **three** states: assessed → `0%`
+> stands · past-the-cliff → **"not assessed"** · legacy → no claim. `./scripts/verify.sh all` green:
+> **4401 unit @ 94.00%, 493 integration**.
+>
+> **⚠️ The cliff itself is NOT removed** — those candidates still lose 40% of the composite for reasons
+> unrelated to merit. This makes it *visible*, not *gone*. Removing it means evaluating every retained
+> candidate (an LLM call each) or splitting structured screening from evidence-enriched ranking — a product
+> decision, ROADMAP item 2's territory. **Reverse match still carries the identical fabricated zero**
+> (`match_reverse_evidence_k = 10`), untouched per ADR-031's forward-only boundary and now a named
+> follow-up.
 > **A3** (the evals harness is blind in three ways) is worth doing before further scoring work, and its
 > recommended first move is cheap: add `[adversarial] must_rank_below_every_strong`, which passes today and
 > would have caught the reverted ADR-032 change. A2 remains blocked on the competency-scoring product

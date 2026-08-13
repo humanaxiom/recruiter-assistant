@@ -122,6 +122,15 @@ class ShortlistExplanation(BaseModel):
     # not have to re-derive "is this number available", or the two copies of
     # that rule drift.
     scores_available: bool = False
+    # ROADMAP A4 (evidence cliff). Did stage 3 actually run for this candidate?
+    # ``None`` = the row never recorded it (legacy), so we assert neither.
+    #
+    # A DIFFERENT QUESTION from ``scores_available``, and collapsing the two is
+    # the obvious shortcut that silently re-opens the defect: a past-the-cliff
+    # row stores a perfectly readable ``0.0``, so ``scores_available`` is True
+    # while this is False. One asks "did the row store a number", the other
+    # asks "does that number mean anything".
+    evidence_assessed: bool | None = None
 
 
 def _row(score: float | None, weight: float | None) -> ContributionRow:
@@ -180,6 +189,10 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
         scores_available=(
             entry.score_structured is not None and entry.score_evidence is not None
         ),
+        # Copied faithfully off the stored row, never re-derived — the same
+        # rule ADR-031 §4 applies to the anti-fabrication verdicts. The write
+        # path is the only place that knows whether stage 3 saw this candidate.
+        evidence_assessed=entry.evidence_evaluated,
     )
 
 

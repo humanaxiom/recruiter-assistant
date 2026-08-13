@@ -1580,3 +1580,77 @@ def test_entry_detail_malformed_payload_is_logged_not_swallowed_silently(
     # the four ``ShortlistEntry`` display fields), but this is belt-and-braces
     # on the one uncovered path.
     assert _REAL_NAME not in resp.get_data(as_text=True)
+
+
+# ── ROADMAP A4: the evidence cliff is disclosed, not silently rendered as 0% ──
+
+
+def test_entry_detail_says_not_assessed_for_a_past_the_cliff_candidate(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin, at the surface where the false claim was actually made.
+
+    A candidate below the ``evidence_k`` cut-off was never submitted to
+    evidence extraction. Their stored evidence and motivation scores are real
+    ``0.0`` floats, so before this the panel rendered an affirmative ``0%`` —
+    indistinguishable from a candidate whose evidence WAS examined and
+    supported nothing.
+    """
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["evidence_evaluated"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+
+    assert "not assessed" in _norm(body), (
+        "a candidate past the evidence cliff is still being shown a measured "
+        "evidence score"
+    )
+    assert "not comparable" in _norm(body), (
+        "the panel must say the headline score is not comparable across the "
+        "cut-off — that is the fact a recruiter needs, not just a blank cell"
+    )
+
+
+def test_entry_detail_keeps_a_genuine_zero_for_an_assessed_candidate(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The mirror-image mutant ADR-031 records: the fix must not start hiding
+    REAL zeros.
+
+    Motivation is ``0.0`` for every candidate with no cover letter, so a real
+    zero on an assessed candidate is the common case, not an edge case. It must
+    keep rendering as a number.
+    """
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["evidence_evaluated"] = True
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+
+    assert "not assessed" not in _norm(body), (
+        "an ASSESSED candidate is being labelled 'not assessed' — the fix for "
+        "the fabricated zero has started hiding genuine measurements"
+    )
+
+
+def test_entry_detail_makes_no_claim_for_a_legacy_row(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A row written before the marker existed does not know whether stage 3
+    ran. Asserting "not assessed" would invent a fact just as surely as
+    asserting a measured 0% does, so the panel says neither."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry.pop("evidence_evaluated", None)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    resp = client.get(f"/shortlist/{entry_id}")
+
+    assert resp.status_code == 200
+    assert "not assessed" not in _norm(resp.get_data(as_text=True))

@@ -54,8 +54,12 @@ Four things that make the difference between a demo that lands and one that disc
    authz, skill matching, the evals gate or the evidence verifier must update both files** — the explainer is
    a circulated artifact, not a draft. Circulation is still gated on the remaining pilot-readiness phases by
    the human's own decision, not on the document's accuracy.
-4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
-   `Evidence 0%` it never actually measured — see A4.
+4. ~~**Stay in the top ~15 candidates when opening the "Why this rank?" panel.**~~ **RESOLVED 2026-08-13 —
+   [ADR-040](adr/040-evidence-cliff-disclosure.md).** The panel no longer renders an `Evidence 0%` it never
+   measured: a candidate below the cut-off shows **"not assessed"** and the page states that their headline
+   score is not comparable with those above it. **The cliff itself still exists** — they really do lose 40%
+   of the composite by where the work stops — so still read a below-cut-off score as *unassessed*, not as
+   *weak*. That is now what the screen says, rather than something the demo-runner had to say for it.
 
 ## A1. P0 · Authorization — ✅ FULLY RESOLVED (ADR-033/#68, ADR-034/#72, ADR-035 — CSRF, step (iv))
 
@@ -235,7 +239,7 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
 **Still open in A3:** the ADR-008 hashing blindness (first bullet), `expected_rank_band` / the r18 band
 discrepancy, and the inert `skill_missing_must` pair against `weights.skill = 0`.
 
-## A4. P0 · Two ranking defects that affect what HR will see — ✅ M1 and M2 both FIXED; the evidence cliff remains
+## A4. P0 · Two ranking defects that affect what HR will see — ✅ FULLY CLOSED (M1 ADR-037 · M2 ADR-039 · evidence cliff ADR-040)
 
 ~~**M1 — stage 3 fails OPEN on a non-LLM exception.**~~ ✅ **FIXED 2026-08-13 —
 [ADR-037](adr/037-stage3-fails-closed-on-non-llm-error.md).** `orchestrator.py` caught bare `Exception`
@@ -288,6 +292,21 @@ indistinguishable from a candidate evaluated and found lacking. **ADR-031's "not
 *unreadable* row, not a *never-computed* one.** The honest fix needs a persisted `evidence_evaluated` marker
 (write-path → `ranking-evals` gated). **Do not** infer it from `requirements == []` in the template — that is
 inferring pipeline state from a display artifact.
+
+> ✅ **DISCLOSED 2026-08-13 — [ADR-040](adr/040-evidence-cliff-disclosure.md). With this, A4 is fully
+> closed.** An `evidence_evaluated` marker is now set from `top_k` membership on the write path (not
+> re-derived from `rank` or `requirements == []`), folded into the `score_breakdown` jsonb like its two
+> sibling sub-scores so no DDL was needed, and rendered in **three** states: assessed → `0%` stands,
+> past-the-cliff → **"not assessed"**, legacy row → no claim either way. Both the evidence *and* motivation
+> rows are marked, since motivation derives from the same stage-3 object, and the panel now states the
+> consequence outright: the headline score is **not comparable** across the cut-off.
+>
+> **What this does NOT do — the cliff itself is still there.** Candidates past `evidence_k` still lose 40%
+> of the composite for reasons unrelated to merit; upward mobility is still suppressed. This makes it
+> *visible*, not *gone*. Removing it means evaluating every retained candidate (an LLM call each) or
+> splitting structured screening from evidence-enriched ranking with distinct labels — ROADMAP item 2's
+> territory and a product decision. **Reverse match still has the identical fabricated zero**
+> (`match_reverse_evidence_k = 10`), untouched here per ADR-031's forward-only boundary.
 
 ## A5. P0 · Documents that currently state the opposite of the code
 

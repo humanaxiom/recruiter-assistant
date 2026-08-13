@@ -133,10 +133,13 @@ requirements. "Strong communicator with attention to detail" gives it nothing to
 administering student records systems" does. The clearer and more concrete the posting, the better the
 extraction — and therefore the shortlist.
 
-**Treat rank 16 and below as "not yet assessed", not "weak".** Evidence gathering runs for the top 15 only,
-and evidence is a large share of the final number. A candidate sitting at 16 has not been examined in the
-same depth as one at 15 — they have not been judged and found wanting. If your pool is large and the cut
-matters, shortlist in batches rather than assuming the tail is sorted.
+**Treat rank 16 and below as "not yet assessed", not "weak" — and the screen now says so.** Evidence
+gathering runs for the top 15 only, and evidence is a large share of the final number. A candidate sitting
+at 16 has not been examined in the same depth as one at 15 — they have not been judged and found wanting.
+As of 13 August the explanation panel states this itself: it shows **"not assessed"** for those candidates
+instead of a zero, and warns that their overall score is not comparable with the scores above the cut-off.
+The cut-off has not moved — it is now disclosed rather than left for you to remember. If your pool is large
+and the cut matters, shortlist in batches rather than assuming the tail is sorted.
 
 **Never compare scores across two different job postings.** One of the five dimensions is scored *relative to
 the other candidates in that batch*, so the strongest résumé in any pool scores full marks on it regardless
@@ -322,9 +325,9 @@ to candidates, it needs to be met by hand for now.
 
 **A few smaller things.** The access record can now be read on screen, but not yet exported — handing it to
 someone else still means asking an engineer. Uploaded files themselves are access-restricted but not encrypted, though the personal details
-inside the database are. And where a candidate ranks below the top 15, the explanation panel currently shows
-their evidence as zero rather than as not assessed — accurate arithmetic, misleading presentation, and it is
-being changed.
+inside the database are. The explanation panel used to show a below-cut-off candidate's evidence as a flat
+zero; it now says "not assessed" instead, and flags that their overall score is not comparable with those
+above the cut-off.
 
 ---
 
