@@ -299,24 +299,61 @@ async def load_job_view(db: asyncpg.Connection, job_id: UUID) -> JobView | None:
 async def stage1_coarse(
     neo4j: AsyncDriver, job_id: UUID, *, k: int = _COARSE_K
 ) -> list[Stage1Candidate]:
-    # Per-job scoping: the WHERE clause keeps the shortlist to resumes uploaded
-    # for THIS job. We oversample 3x and filter, then bound the result to k.
+    # ROADMAP A4 M2 — job-scoped recall, computed over THIS JOB'S POOL.
+    #
+    # This used to call `db.index.vector.queryNodes('resume_summary_idx', k*3,
+    # ...)` and then apply `WHERE r.job_id = $jid`. `resume_summary_idx` is a
+    # GLOBAL vector index over every :Resume in the database — it is not
+    # partitioned by job, and cannot be: `queryNodes` takes no pre-filter. So
+    # the job filter ran AFTER the crowd-out had already happened.
+    #
+    # Once the corpus held more than the oversample (~150), a job's own
+    # candidates competed for those slots against every résumé of every other
+    # job — and lost, because similarity to a job description is not
+    # job-specific. MEASURED against a real Neo4j (see
+    # tests/integration/test_stage1_recall_job_scoped_neo4j.py): a job with 5
+    # applicants, a pool a tenth of `coarse_k`, recalled ZERO of them once 300
+    # résumés belonging to another job existed. Not a degraded shortlist — an
+    # empty one.
+    #
+    # Raising `coarse_k` does NOT fix this and would mask it: the oversample
+    # was `k*3`, so a bigger k buys a bigger GLOBAL window that the next few
+    # hundred résumés fill again. The pool being searched was the whole
+    # database; the fix is to search the right pool.
+    #
+    # `vector.similarity.cosine` returns the SAME [0,1] normalisation the index
+    # reported — `(1 + cos) / 2`, so identical vectors score 1.0 and orthogonal
+    # ones 0.5. That is verified against a real server rather than taken from
+    # the docs, because a raw cosine here would silently rescale every
+    # `vec_score` and `normalise_vector_scores` would carry it into
+    # `score_final` with nothing failing.
+    #
+    # `r.job_id` is indexed (`resume_job_id_idx`, neo4j_bootstrap.py), so this
+    # is an indexed lookup over one job's résumés followed by an exact cosine —
+    # no ANN approximation, and no dependence on what else is in the database.
+    # A single requisition's applicant pool is bounded by how many people
+    # applied, so exact scoring over it is the appropriate tool.
+    #
+    # The `summary_embedding IS NOT NULL` guard replaces one the index gave for
+    # free: only embedded nodes were ever IN the index, whereas this MATCH sees
+    # every résumé of the job — including ones whose graph projection has not
+    # run yet.
     async with neo4j.session() as session:
         result = await session.run(
             """
             MATCH (j:Job {id: $jid})
-            CALL db.index.vector.queryNodes(
-                'resume_summary_idx', $oversample, j.summary_embedding
-            )
-            YIELD node AS r, score AS vec_score
-            WHERE r.id IS NOT NULL AND r.job_id = $jid
-            RETURN r.id AS resume_id, vec_score
+            WHERE j.summary_embedding IS NOT NULL
+            MATCH (r:Resume {job_id: $jid})
+            WHERE r.id IS NOT NULL AND r.summary_embedding IS NOT NULL
+            RETURN r.id AS resume_id,
+                   vector.similarity.cosine(
+                       r.summary_embedding, j.summary_embedding
+                   ) AS vec_score
             ORDER BY vec_score DESC
             LIMIT $k
             """,
             jid=str(job_id),
             k=k,
-            oversample=k * 3,
         )
         rows = [dict(r) async for r in result]
     return [
