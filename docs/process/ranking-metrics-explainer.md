@@ -290,12 +290,18 @@ academic and professional-services work, and it was not built for that vocabular
 it, and until it lands, results on an unmodified posting will understate candidates' skills. **This is the
 item that most affects whether the tool is useful to you.**
 
-**The service itself is not yet locked down, so no accounts should be issued.** Role restrictions on what a
-signed-in person may *do* are now enforced. But the underlying service currently accepts instructions from
-anyone who can reach it on the network, without signing in at all — so someone on that network could change a
-job's settings, including switching blind review off, without appearing in the record as themselves. It is
-being fixed now, and it is the single thing standing between here and issuing logins. Scoring and stored data
-are unaffected; this is about who can reach the service.
+**Signing in is now required, and accounts can be issued to recruiters and administrators.** This corrects
+what an earlier version of this page told you. Until 13 August the underlying service accepted instructions
+from anyone who could reach it on the network without signing in at all — someone on that network could have
+changed a job's settings, including switching blind review off, without appearing in the record as
+themselves. **That is now closed:** every action that changes anything requires a real sign-in, the service
+refuses to start at all in a configuration that would leave the door open, and deactivating someone's account
+now takes effect immediately rather than whenever their session happened to expire. Scoring and stored data
+were never affected by this; it was about who could reach the service.
+
+Two things still argue for keeping accounts to recruiters and administrators for now: one class of
+protection against a malicious link is fitted to 3 of our 12 browser actions rather than all of them, and an
+auditor still has nothing to look at (below).
 
 **Auditor accounts also need a screen that does not exist yet.** The role's restrictions are enforced, but
 the one thing an auditor needs — a view of the access record — has not been built, so producing that record
