@@ -59,6 +59,7 @@
   <div class="blind-banner">
     <span>Identity hidden for blind review — employers/schools shown as generic
       labels.</span>
+    {% if is_writer %}
     <form method="post"
           action="{{ url_for('resume_reveal', resume_id=resume.id) }}"
           style="display:inline">
@@ -69,6 +70,7 @@
       <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
         (audited)</button>
     </form>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -87,14 +89,16 @@
     {% if resume.withdrawal_reason %}
     <p class="muted">Reason: {{ resume.withdrawal_reason }}</p>
     {% endif %}
+    {% if is_writer %}
     <form method="post"
           action="{{ url_for('resume_reinstate', resume_id=resume.id) }}"
           style="display:inline">
       <input type="hidden" name="csrf_token" value="{{ withdraw_csrf_token }}">
       <button type="submit" class="btn btn-secondary btn-sm">Reinstate</button>
     </form>
+    {% endif %}
   </div>
-  {% else %}
+  {% elif is_writer %}
   <div class="withdraw-block">
     <form method="post"
           action="{{ url_for('resume_withdraw', resume_id=resume.id) }}"
@@ -118,6 +122,7 @@
      container below. A plain GET link to VIEW already-computed results is kept
      alongside (a read is a safe GET). #}
   <p class="match-actions">
+    {% if is_writer %}
     <form method="post"
           action="{{ url_for('resume_match_jobs', resume_id=resume.id) }}"
           hx-post="{{ url_for('resume_match_jobs', resume_id=resume.id) }}"
@@ -126,6 +131,7 @@
           style="display:inline">
       <button type="submit" class="btn btn-primary btn-sm">Find matching jobs</button>
     </form>
+    {% endif %}
     <a class="btn btn-secondary btn-sm"
        href="{{ url_for('resume_match_results', resume_id=resume.id) }}">View match
        results</a>

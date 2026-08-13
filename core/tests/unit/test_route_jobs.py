@@ -925,23 +925,27 @@ async def test_create_job_created_by_is_the_resolved_users_cas_username() -> Non
 
 
 @pytest.mark.asyncio
-async def test_create_job_created_by_is_null_when_no_user_resolves() -> None:
-    """ADR-019 §9.2: a bare service-key caller (``resolve_user`` resolves to
-    ``None``, e.g. CAS enabled with no session) writes ``created_by = NULL``
-    — never a placeholder string. Every OTHER optional field on this payload
-    is non-None (see ``_fully_populated_job_payload``), so the single
-    ``None`` in the raw insert args can only be ``created_by``."""
+async def test_create_job_403s_when_no_user_resolves() -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to pin ``created_by = NULL`` on a 201 for a bare service-key caller
+    with NO CAS session at all. A live audit against real Postgres proved
+    this exact combination — zero ``API_KEY_*`` configured (so
+    ``resolve_role`` trivially resolves ``Role.ADMIN`` for anyone) plus a
+    cookie-less caller (``resolve_user`` -> ``None``) — let ANY caller with
+    no credential whatsoever flip ``PATCH /jobs/{id}
+    {"blind_review": false}`` and get away with an unattributable
+    ``actor_kind='service'`` audit row. The human decision: a valid API key
+    (or no key at all, when auth is disabled) is NEVER sufficient on its
+    own — every write route now requires a REAL human CAS session, so
+    ``resolve_user`` -> ``None`` must 403 BEFORE the insert ever runs, not
+    fall through to a null-``created_by`` success."""
     conn = _mock_conn(fetchrow=_job_row(created_by=None))
     app = _build_app(conn)
     app.dependency_overrides[resolve_user] = lambda: None
     async with await _client(app) as client:
         resp = await client.post("/jobs", json=_fully_populated_job_payload())
-    assert resp.status_code == 201
-    call_args = conn.fetchrow.await_args.args
-    assert call_args.count(None) == 1, (
-        "expected exactly one None (created_by) in the insert args when no "
-        f"user resolves; got {call_args!r}"
-    )
+    assert resp.status_code == 403
+    conn.fetchrow.assert_not_awaited()
 
 
 # ── FU-5 slice 9 (ADR-019 §1.4/§6): PATCH /jobs/{id} blind_review flip audit
@@ -1083,13 +1087,22 @@ async def test_patch_job_actor_case2_dev_anonymous_writes_service_actor_audit(
 
 
 @pytest.mark.asyncio
-async def test_patch_job_actor_case3_no_session_writes_api_service_actor_audit(
+async def test_patch_job_actor_case3_no_session_403s_and_never_flips_blind_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """blind_review is NOT human-only (unlike reveal) — a bare service-key
-    caller (``resolve_user`` -> ``None``) may flip it, and the audit row
-    records ``actor_kind='service'`` / ``actor_service='api'``. Reveal 403s
-    in this exact situation; this route must return 200 instead."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to pin a 200 plus an unattributable ``actor_kind='service'`` /
+    ``actor_service='api'`` audit row for a bare service-key caller (no CAS
+    session at all) flipping ``blind_review``. A live audit against real
+    Postgres proved this exact gap: with no ``API_KEY_*`` configured at all
+    (``resolve_role`` trivially resolves ``Role.ADMIN`` for anyone) a
+    cookie-less, key-less caller could ``PATCH /jobs/{id}
+    {"blind_review": false}`` and permanently un-blind every résumé/
+    shortlist under the job, audited to an actor nobody could trace to a
+    person. ``blind_review`` is no longer an exception to the human-session
+    requirement — EVERY write route now needs a real, resolvable CAS
+    session; a bare service-key caller (``resolve_user`` -> ``None``) must
+    403 before ``job_service.update_job``/the audit write ever run."""
     job_id = uuid4()
     conn = _mock_conn(
         fetchrow=_job_row(job_id=job_id, blind_review=False), fetchval=True
@@ -1102,11 +1115,8 @@ async def test_patch_job_actor_case3_no_session_writes_api_service_actor_audit(
     async with await _client(app) as client:
         resp = await client.patch(f"/jobs/{job_id}", json={"blind_review": False})
 
-    assert resp.status_code == 200
-    kwargs = audit.await_args.kwargs
-    assert kwargs["actor_kind"] == "service"
-    assert kwargs["actor_service"] == "api"
-    assert kwargs.get("actor_user_id") is None
+    assert resp.status_code == 403
+    audit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

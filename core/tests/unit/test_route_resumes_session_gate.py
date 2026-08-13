@@ -189,14 +189,30 @@ async def test_upload_resumes_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_upload_resumes_recruiter_key_and_no_session_passes(
+async def test_upload_resumes_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case most likely to be broken by an over-eager fix: ``user is
-    None`` (a bare service-key caller) must never be judged by this gate."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to be docstringed "the case most likely to be broken by an
+    over-eager fix" and asserted PASS for ``user is None`` (a bare
+    service-key caller with NO CAS session at all): "must never be judged
+    by this gate". That framing is now wrong — it protected exactly the
+    vulnerability this slice closes. A live audit against real Postgres
+    proved that with this deploy's real config (zero ``API_KEY_*``
+    configured, so ``resolve_role`` trivially resolves ``Role.ADMIN`` for
+    every caller) a cookie-less, key-less request could reach every write
+    route on this router with no credential whatsoever — proved end-to-end
+    with a bare ``PATCH /jobs/{id} {"blind_review": false}`` that returned
+    200 and really flipped the column, audited to an actor nobody could
+    trace to a person. The human decision: a valid API key is NOT
+    sufficient on its own — every write route now requires a REAL,
+    resolvable CAS session, so ``resolve_user`` -> ``None`` must 403 here
+    too, the same as an out-of-allowed-set session role."""
     upload = AsyncMock(return_value=[])
     monkeypatch.setattr(resumes_routes.resume_service, "upload_resumes", upload)
-    app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(_mock_conn(), arq=arq, store=store, key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
     async with await _client(app) as client:
@@ -206,7 +222,10 @@ async def test_upload_resumes_recruiter_key_and_no_session_passes(
             data={"consent_acknowledged": "true"},
         )
 
-    assert resp.status_code == 202
+    assert resp.status_code == 403
+    upload.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
+    store.put.assert_not_called()
 
 
 # ── POST /resumes/{resume_id}/reveal (resumes.py:290) ────────────────────
@@ -333,25 +352,35 @@ async def test_withdraw_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_recruiter_key_and_no_session_passes(
+async def test_withdraw_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to assert PASS for a bare recruiter-key caller with NO CAS session
+    at all. That was the bug this whole slice closes: a live audit against
+    real Postgres proved that with this deploy's real config (zero
+    ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+    ``Role.ADMIN`` for every caller) a cookie-less, key-less request could
+    reach every write route on this router with no credential whatsoever.
+    The human decision: a valid API key is NOT sufficient on its own —
+    every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
     resume_id = uuid4()
-    monkeypatch.setattr(
-        resumes_routes.resume_service, "withdraw_resume", AsyncMock(return_value=None)
+    withdraw = AsyncMock(return_value=None)
+    get_one = AsyncMock(
+        return_value=_resume_out(resume_id=resume_id, withdrawn_at=_NOW)
     )
-    monkeypatch.setattr(
-        resumes_routes.resume_service,
-        "get_one",
-        AsyncMock(return_value=_resume_out(resume_id=resume_id, withdrawn_at=_NOW)),
-    )
+    monkeypatch.setattr(resumes_routes.resume_service, "withdraw_resume", withdraw)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
     app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
     async with await _client(app) as client:
         resp = await client.post(f"/resumes/{resume_id}/withdraw", json={})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
+    withdraw.assert_not_awaited()
+    get_one.assert_not_awaited()
 
 
 # ── POST /resumes/{resume_id}/reinstate (resumes.py:421) ─────────────────
@@ -401,25 +430,33 @@ async def test_reinstate_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_reinstate_recruiter_key_and_no_session_passes(
+async def test_reinstate_403s_for_recruiter_key_with_no_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to assert PASS for a bare recruiter-key caller with NO CAS session
+    at all. That was the bug this whole slice closes: a live audit against
+    real Postgres proved that with this deploy's real config (zero
+    ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+    ``Role.ADMIN`` for every caller) a cookie-less, key-less request could
+    reach every write route on this router with no credential whatsoever.
+    The human decision: a valid API key is NOT sufficient on its own —
+    every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
     resume_id = uuid4()
-    monkeypatch.setattr(
-        resumes_routes.resume_service, "reinstate_resume", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        resumes_routes.resume_service,
-        "get_one",
-        AsyncMock(return_value=_resume_out(resume_id=resume_id)),
-    )
+    reinstate = AsyncMock(return_value=None)
+    get_one = AsyncMock(return_value=_resume_out(resume_id=resume_id))
+    monkeypatch.setattr(resumes_routes.resume_service, "reinstate_resume", reinstate)
+    monkeypatch.setattr(resumes_routes.resume_service, "get_one", get_one)
     app = _build_app(_mock_conn(), key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
     async with await _client(app) as client:
         resp = await client.post(f"/resumes/{resume_id}/reinstate")
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
+    reinstate.assert_not_awaited()
+    get_one.assert_not_awaited()
 
 
 # ── POST /resumes/{resume_id}/match-jobs (resumes.py:461) ────────────────
@@ -457,15 +494,27 @@ async def test_trigger_reverse_match_recruiter_key_and_recruiter_session_passes(
 
 
 @pytest.mark.asyncio
-async def test_trigger_reverse_match_recruiter_key_and_no_session_passes() -> None:
+async def test_trigger_reverse_match_403s_for_recruiter_key_with_no_session() -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to assert PASS for a bare recruiter-key caller with NO CAS session
+    at all. That was the bug this whole slice closes: a live audit against
+    real Postgres proved that with this deploy's real config (zero
+    ``API_KEY_*`` configured, so ``resolve_role`` trivially resolves
+    ``Role.ADMIN`` for every caller) a cookie-less, key-less request could
+    reach every write route on this router with no credential whatsoever.
+    The human decision: a valid API key is NOT sufficient on its own —
+    every write route now requires a REAL, resolvable CAS session, so
+    ``resolve_user`` -> ``None`` must 403 here too."""
     resume_id = uuid4()
-    app = _build_app(_mock_conn(exists=True), key_role=Role.RECRUITER)
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(_mock_conn(exists=True), arq=arq, key_role=Role.RECRUITER)
     app.dependency_overrides[resolve_user] = lambda: None
 
     async with await _client(app) as client:
         resp = await client.post(f"/resumes/{resume_id}/match-jobs")
 
-    assert resp.status_code == 202
+    assert resp.status_code == 403
+    arq.enqueue_job.assert_not_awaited()
 
 
 __all__: list[str] = []

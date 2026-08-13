@@ -23,6 +23,7 @@
   <h3>Parsed requirements</h3>
   {% include "parse_status.html" %}
 
+  {% if is_writer %}
   <h3>Status</h3>
   <div class="filter-row">
     {% for to in next_states %}
@@ -52,12 +53,13 @@
       {{ 'Turn off blind review' if job.blind_review else 'Turn on blind review' }}
     </button>
   </form>
+  {% endif %}
 </div>
 
 <div class="card">
   <p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a></p>
 
-  {% if job.status == 'open' %}
+  {% if job.status == 'open' and is_writer %}
   <h3>Upload résumés</h3>
   <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
         enctype="multipart/form-data" hx-encoding="multipart/form-data">

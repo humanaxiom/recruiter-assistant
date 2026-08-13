@@ -159,6 +159,9 @@ def _cas_auth_gate() -> Any:
     return redirect(login_url)
 
 
+_WRITER_ROLES = ("admin", "recruiter")
+
+
 @app.context_processor
 def inject_current_user() -> dict[str, Any]:
     """Injects the header auth widget's context into every template render.
@@ -168,11 +171,24 @@ def inject_current_user() -> dict[str, Any]:
     disabled (dev mode, no gate call at all). ``logout_url``/``login_url`` are
     built from a FRESH :func:`get_settings` call, mirroring the gate's own
     settings-reload discipline.
+
+    ``is_writer`` (security finding fix/auth-boundary-fails-open, F4,
+    defence in depth): every backend write route now 403s a CAS session
+    whose role is not ``admin``/``recruiter`` (ADR-033 + this fix's
+    ``require_session_role`` reversal) — this mirrors that same allowed set
+    so templates can hide a write control for a session that could only ever
+    see a 403 anyway. ``current_user is None`` (CAS disabled — the
+    dev-anonymous sentinel is admin-equivalent) is a writer. This is NOT the
+    actual authorization boundary (the backend gate is); it is a compensating
+    UX control only.
     """
     settings = get_settings()
     base = settings.cas_service_base_url.rstrip("/")
+    current_user = getattr(g, "cas_user", None)
+    is_writer = current_user is None or current_user.get("role") in _WRITER_ROLES
     return {
-        "current_user": getattr(g, "cas_user", None),
+        "current_user": current_user,
+        "is_writer": is_writer,
         "logout_url": f"{base}/auth/cas/logout",
         "login_url": f"{base}/auth/cas/login?next=/",
     }
@@ -635,6 +651,13 @@ def transition_status(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # Security finding fix/auth-boundary-fails-open (F4): ADR-033 made
+        # every write route 403 a non-writer CAS session (`require_session_role`),
+        # which this view's caller never used to see. Left uncaught, this
+        # propagated as an unhandled 500 for a hiring_manager/auditor clicking
+        # the control. Render the actual backend status (usually 403) instead.
+        abort(exc.status_code)
     return redirect(url_for("job_detail", job_id=job_id))
 
 
@@ -652,6 +675,9 @@ def blind_review(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the identical F4 comment on transition_status above.
+        abort(exc.status_code)
     return redirect(url_for("job_detail", job_id=job_id))
 
 
@@ -724,6 +750,9 @@ def generate_shortlist(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the F4 comment on transition_status above.
+        abort(exc.status_code)
     return _render_shortlist_cards(job_id)
 
 
@@ -888,6 +917,12 @@ def resume_reveal(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # Security finding fix/auth-boundary-fails-open — the identical F4 gap
+        # exists here too (a hiring_manager session now 403s on every reveal,
+        # ADR-033 §4), out of the tester's original scope but fixed in the
+        # same pass. See the F4 comment on transition_status above.
+        abort(exc.status_code)
     return render_template(
         "resume_detail.html",
         resume=resume,
@@ -918,6 +953,9 @@ def resume_withdraw(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the F4 comment on transition_status above.
+        abort(exc.status_code)
     return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
@@ -939,6 +977,9 @@ def resume_reinstate(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the F4 comment on transition_status above.
+        abort(exc.status_code)
     return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
@@ -993,6 +1034,9 @@ def resume_match_jobs(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the F4 comment on transition_status above.
+        abort(exc.status_code)
     return _render_match_cards(resume_id)
 
 

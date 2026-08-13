@@ -152,7 +152,15 @@ $envLines = @(Get-Content '.env')
 $changed = $false
 
 # Secrets: generate if missing OR blank (compose hard-fails on `${PII_KEY:?...}`).
-foreach ($key in @('PII_KEY', 'SKILL_HASH_SALT')) {
+# The four role keys are included here too (security finding
+# fix/auth-boundary-fails-open, F1b): CAS is on by default, and
+# validate_startup_auth_config now REFUSES to boot with CAS enabled and all
+# four empty, so a fresh quickstart boot needs at least one — generate all
+# four so every role is independently keyed. API_KEY_RECRUITER is also the
+# one key the Flask BFF presents on the browser's behalf
+# (frontend/api_client.py::build_client) — without it the UI 401s once auth
+# is on.
+foreach ($key in @('PII_KEY', 'SKILL_HASH_SALT', 'API_KEY_ADMIN', 'API_KEY_RECRUITER', 'API_KEY_HIRING_MANAGER', 'API_KEY_AUDITOR')) {
     $line = $envLines | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -First 1
     $value = if ($line) { ($line -replace "^\s*$key\s*=", '').Trim() } else { $null }
     if ([string]::IsNullOrWhiteSpace($value)) {

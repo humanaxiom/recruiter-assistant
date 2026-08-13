@@ -61,6 +61,7 @@
         <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
            >{{ entry.display_label }}</a>
       </h3>
+      {% if is_writer %}
       {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
          deliberate, logged act); it records who/what/when and opens the résumé
          un-blinded. `context=shortlist` so the audit shows where it came from. #}
@@ -89,6 +90,7 @@
                value="{{ (withdraw_csrf_tokens or {}).get(entry.resume_id|string, '') }}">
         <button type="submit" class="btn btn-danger btn-sm">Withdraw candidate</button>
       </form>
+      {% endif %}
       <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
     </div>
 

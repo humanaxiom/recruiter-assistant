@@ -76,6 +76,15 @@ services:
       SKILL_HASH_SALT: ${SKILL_HASH_SALT:?SKILL_HASH_SALT must be set — 32 random bytes, base64}
       BLIND_REVIEW_DEFAULT: "true"
       COVERAGE_THRESHOLD: "80"
+      # ── API auth (FU-4: keyed roles) — security finding fix/auth-boundary-
+      # fails-open (F1b). Auth is DISABLED (fail-open, local-dev only) iff ALL
+      # FOUR are empty/unset — see src.settings.Settings.auth_enabled and
+      # validate_startup_auth_config, which now REFUSES to boot when
+      # CAS_ENABLED=true with all four empty. Set in .env (see .env.example).
+      API_KEY_ADMIN: ${API_KEY_ADMIN:-}
+      API_KEY_RECRUITER: ${API_KEY_RECRUITER:-}
+      API_KEY_HIRING_MANAGER: ${API_KEY_HIRING_MANAGER:-}
+      API_KEY_AUDITOR: ${API_KEY_AUDITOR:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Linux: reach Ollama on metal
     volumes:
@@ -111,6 +120,11 @@ services:
     environment:
       API_BASE_URL: http://api:8000
       FLASK_SECRET_KEY: dev-only-change-me
+      # The Flask BFF presents ONE fixed role key (recruiter) for every
+      # browser it serves (frontend/api_client.py::build_client) — without
+      # this, enabling auth (any API_KEY_* configured above) 401s every
+      # backend call the frontend makes on a browser's behalf.
+      API_KEY_RECRUITER: ${API_KEY_RECRUITER:-}
     volumes: ["./core:/app"]
     depends_on: [api]
 

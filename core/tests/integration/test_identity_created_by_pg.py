@@ -203,13 +203,21 @@ async def test_create_job_with_a_real_session_sets_created_by_to_the_cas_usernam
 
 
 @pytest.mark.asyncio
-async def test_create_job_with_no_session_sets_created_by_null(
+async def test_create_job_with_no_session_403s_and_creates_no_row(
     pg_pool: asyncpg.Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-019 §9.2: CAS enabled, no cookie presented at all — a bare
-    service-key caller. ``resolve_user`` resolves to ``None``, and the real
-    row's ``created_by`` column is a REAL SQL NULL, not the string ``"None"``
-    or a placeholder — a mocked connection cannot distinguish those."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to pin ``created_by = NULL`` on a 201 for CAS enabled with no
+    cookie presented at all (a bare service-key caller, ``resolve_user`` ->
+    ``None``). A live audit against real Postgres proved that combination
+    (this deploy's real config ships with zero ``API_KEY_*``, so
+    ``resolve_role`` trivially resolves ``Role.ADMIN`` for every caller) let
+    a cookie-less, key-less request reach every write route with no
+    credential whatsoever — end-to-end proof is
+    ``tests/integration/test_auth_boundary_fails_open_pg.py``. The human
+    decision: a valid API key is NOT sufficient on its own — every write
+    route now requires a REAL, resolvable CAS session, so this must 403 and
+    create NO row at all, not a NULL-``created_by`` row."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
@@ -222,23 +230,25 @@ async def test_create_job_with_no_session_sets_created_by_null(
             json={"title": "Staff Engineer", "description_raw": _JD},
         )
 
-    assert create_resp.status_code == 201
-    job_id = create_resp.json()["id"]
+    assert create_resp.status_code == 403
     async with pg_pool.acquire() as conn:
-        created_by = await conn.fetchval(
-            "SELECT created_by FROM jobs WHERE id = $1", uuid.UUID(job_id)
+        count = await conn.fetchval(
+            "SELECT count(*) FROM jobs WHERE title = $1", "Staff Engineer"
         )
-    assert created_by is None
+    assert count == 0
 
 
 @pytest.mark.asyncio
-async def test_create_job_with_no_session_ignores_an_x_actor_name_header(
+async def test_create_job_with_no_session_403s_even_with_an_x_actor_name_header(
     pg_pool: asyncpg.Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Belt-and-suspenders at the integration layer, mirroring the unit
-    coverage: a leftover ``X-Actor-Name`` header must never populate
-    ``created_by`` — the row stays NULL exactly as it would with no header
-    at all."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to prove a leftover ``X-Actor-Name`` header could not populate
+    ``created_by`` on an otherwise-succeeding no-session create. That create
+    no longer succeeds at all (see the sibling test above), so this now
+    proves the stronger property: the header cannot be used to sneak past
+    the new session gate either — still 403, still no row, regardless of
+    what the header claims."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
@@ -252,13 +262,12 @@ async def test_create_job_with_no_session_ignores_an_x_actor_name_header(
             headers={"X-Actor-Name": "totally-ignored@example.test"},
         )
 
-    assert create_resp.status_code == 201
-    job_id = create_resp.json()["id"]
+    assert create_resp.status_code == 403
     async with pg_pool.acquire() as conn:
-        created_by = await conn.fetchval(
-            "SELECT created_by FROM jobs WHERE id = $1", uuid.UUID(job_id)
+        count = await conn.fetchval(
+            "SELECT count(*) FROM jobs WHERE title = $1", "Product Manager"
         )
-    assert created_by is None
+    assert count == 0
 
 
 # ── resumes.uploaded_by ─────────────────────────────────────────────────
@@ -309,11 +318,21 @@ async def test_upload_resume_with_a_real_session_sets_uploaded_by_to_the_cas_use
 
 
 @pytest.mark.asyncio
-async def test_upload_resume_with_no_session_sets_uploaded_by_null(
+async def test_upload_resume_with_no_session_403s_and_creates_no_row(
     pg_pool: asyncpg.Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-019 §9.2: CAS enabled, no session cookie — a real NULL
-    ``uploaded_by`` row, symmetric with the jobs test above."""
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to pin ``uploaded_by = NULL`` on a 202 for CAS enabled with no
+    session cookie (a bare service-key caller, ``resolve_user`` -> ``None``).
+    A live audit against real Postgres proved that combination (this
+    deploy's real config ships with zero ``API_KEY_*``, so ``resolve_role``
+    trivially resolves ``Role.ADMIN`` for every caller) let a cookie-less,
+    key-less request reach every write route with no credential whatsoever
+    — end-to-end proof is
+    ``tests/integration/test_auth_boundary_fails_open_pg.py``. The human
+    decision: a valid API key is NOT sufficient on its own — every write
+    route now requires a REAL, resolvable CAS session, so this must 403 and
+    create NO résumé row at all, not a NULL-``uploaded_by`` row."""
     settings = _settings()
     monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
@@ -328,10 +347,9 @@ async def test_upload_resume_with_no_session_sets_uploaded_by_null(
             data={"consent_acknowledged": "true"},
         )
 
-    assert upload_resp.status_code == 202
-    resume_id = upload_resp.json()[0]["resume_id"]
+    assert upload_resp.status_code == 403
     async with pg_pool.acquire() as conn:
-        uploaded_by = await conn.fetchval(
-            "SELECT uploaded_by FROM resumes WHERE id = $1", uuid.UUID(resume_id)
+        count = await conn.fetchval(
+            "SELECT count(*) FROM resumes WHERE job_id = $1", job_id
         )
-    assert uploaded_by is None
+    assert count == 0

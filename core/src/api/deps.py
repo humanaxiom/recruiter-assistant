@@ -166,23 +166,46 @@ def require_session_role(*allowed: Role) -> Callable[..., Awaitable[None]]:
     Three cases, same contract as ``src.api.routes.users._require_admin_session``
     and ``require_role_assigned``:
 
-    * ``user is None`` — no session at all (a bare service-key caller) —
-      PASS. This gate never judges the ABSENCE of a session, only a REAL
-      session's role; the write routes it guards are not all human-only
-      (e.g. ``PATCH /jobs/{id}`` accepts a bare service-key caller and audits
-      it as ``actor_kind='service'``), so 403ing an absent session here would
-      break that path. This is the case an over-eager implementation breaks.
+    * ``user is None`` — no session at all (a bare service-key caller or a
+      cookie-less/key-less caller with CAS enabled) — **403** (security
+      finding, ``fix/auth-boundary-fails-open``, F1a). REVERSED from this
+      gate's original design, which let ``user is None`` PASS on the theory
+      that it "never judges the ABSENCE of a session" — a live audit against
+      real Postgres proved that theory wrong: combined with zero
+      ``API_KEY_*`` configured (so ``resolve_role`` trivially resolves
+      ``Role.ADMIN`` for anyone), a cookie-less, key-less caller could reach
+      every write route with no credential at all. The human decision: a
+      valid API key (or no key at all, when auth is disabled) is NEVER
+      sufficient on its own — every write route now requires a REAL,
+      resolvable CAS session.
     * a real session whose ``role`` is not in ``allowed`` — 403, plain
       ``fastapi.HTTPException`` (not ``AppError``), same mechanism as
       ``require_role``/``require_role_assigned``/``scoped_user_id_or_403``.
-    * a real session whose ``role`` is in ``allowed`` — PASS. The CAS-disabled
-      synthetic dev-anonymous sentinel (``role="admin"``) passes naturally
-      through this same comparison, with no special-casing needed.
+    * a real session whose ``role`` is in ``allowed`` AND ``active`` — PASS.
+      The CAS-disabled synthetic dev-anonymous sentinel (``role="admin"``,
+      ``active=True``) passes naturally through this same comparison, with
+      no special-casing needed.
+
+    **F5 (security finding, ``fix/auth-boundary-fails-open``).** A resolved
+    session whose ``user.active is False`` also 403s, same mechanism,
+    regardless of ``role`` — a deactivated account must not keep acting just
+    because ``session_service.refresh_if_needed`` keeps sliding its expiry
+    forward on every request.
     """
     allowed_roles = frozenset(allowed)
 
     async def _check(user: Annotated[User | None, Depends(resolve_user)]) -> None:
-        if user is not None and user.role not in allowed_roles:
+        if user is None:
+            raise HTTPException(
+                status_code=403,
+                detail="a verified CAS session is required for this route",
+            )
+        if not user.active:
+            raise HTTPException(
+                status_code=403,
+                detail="this account has been deactivated",
+            )
+        if user.role not in allowed_roles:
             raise HTTPException(
                 status_code=403,
                 detail="session role not permitted for this route",
@@ -348,12 +371,23 @@ async def require_role_assigned(
       plain ``fastapi.HTTPException(status_code=403, ...)`` mechanism as
       ``require_role``/the reveal-route 403, not a bespoke ``AppError``.
     * any other resolved user (a real assigned role, or the CAS-disabled
-      synthetic dev-anonymous admin whose ``role='admin'``) — PASS.
+      synthetic dev-anonymous admin whose ``role='admin'``) — PASS, provided
+      ``user.active`` is true.
+
+    **F5 (security finding, ``fix/auth-boundary-fails-open``).** A resolved
+    session whose ``user.active is False`` also 403s, same mechanism — a
+    deactivated account's still-live session must not keep passing this
+    gate just because its role was assigned before deactivation.
     """
     if user is not None and user.role is None:
         raise HTTPException(
             status_code=403,
             detail="no role assigned to this account — contact an administrator",
+        )
+    if user is not None and not user.active:
+        raise HTTPException(
+            status_code=403,
+            detail="this account has been deactivated",
         )
 
 
@@ -387,8 +421,20 @@ async def scoped_user_id_or_403(user: User | None, key_role: Role) -> UUID | Non
           silently serve company-wide data to a caller who should see one
           requisition. Uses the same ``fastapi.HTTPException(status_code=
           403, ...)`` mechanism as ``require_role`` and the reveal-route 403.
+
+    **F5 (security finding, ``fix/auth-boundary-fails-open``).** A
+    deactivated hiring_manager session (``user.active is False``) also
+    raises ``HTTPException(403)``, regardless of ``key_role`` — it must
+    NEVER silently fall through to the ``None`` (unscoped, company-wide)
+    branch below, which would be a WORSE outcome than the status quo: a
+    deactivated account seeing every row instead of none.
     """
     if user is not None and user.role == "hiring_manager":
+        if not user.active:
+            raise HTTPException(
+                status_code=403,
+                detail="this account has been deactivated",
+            )
         return user.id
 
     if key_role == Role.HIRING_MANAGER:

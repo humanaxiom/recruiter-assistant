@@ -1023,17 +1023,18 @@ async def test_upload_resumes_uploaded_by_is_the_resolved_users_cas_username() -
 
 
 @pytest.mark.asyncio
-async def test_upload_resumes_uploaded_by_is_null_when_no_user_resolves() -> None:
-    """ADR-019 §9.2: a bare service-key caller (``resolve_user`` resolves to
-    ``None``, e.g. CAS enabled with no session) writes ``uploaded_by = NULL``
-    — never a placeholder string. Uses the SAME asyncpg positional order as
-    ``resume_service.upload_resumes``'s ``_INSERT_UPLOADED_SQL`` call
-    (``resume_id, job_id, blob_key, filename, mime, size, sha256,
-    consent_acknowledged, uploaded_by, encrypted_cover, cover_blob_key``) —
-    ``uploaded_by`` is the ONLY one of those positions expected to be
-    ``None`` for a plain single-file upload with no cover letter and
-    ``consent_acknowledged=True``, so index 9 (0-based, after the SQL text at
-    index 0) is asserted directly."""
+async def test_upload_resumes_403s_when_no_user_resolves() -> None:
+    """REVERSED (security finding, fix/auth-boundary-fails-open) — this test
+    used to pin ``uploaded_by = NULL`` on a 202 for a bare service-key
+    caller with NO CAS session at all. A live audit against real Postgres
+    proved that this exact combination — zero ``API_KEY_*`` configured (so
+    ``resolve_role`` trivially resolves ``Role.ADMIN`` for anyone) plus a
+    cookie-less caller (``resolve_user`` -> ``None``) — leaves every write
+    route reachable by literally anyone with no credential at all. The
+    human decision: a valid API key (or no key at all, when auth is
+    disabled) is NEVER sufficient on its own — every write route now
+    requires a REAL human CAS session, so ``resolve_user`` -> ``None`` must
+    403 before the upload/insert ever runs."""
     conn = _mock_conn()
     app = _build_app(conn)
     app.dependency_overrides[resolve_user] = lambda: None
@@ -1043,12 +1044,8 @@ async def test_upload_resumes_uploaded_by_is_null_when_no_user_resolves() -> Non
             files=[("files", ("a.pdf", _PDF_MAGIC, "application/pdf"))],
             data={"consent_acknowledged": "true"},
         )
-    assert resp.status_code == 202
-    call_args = conn.execute.await_args.args
-    assert call_args[9] is None, (
-        "expected uploaded_by (index 9) to be None when no user resolves; "
-        f"got {call_args!r}"
-    )
+    assert resp.status_code == 403
+    conn.execute.assert_not_awaited()
 
 
 # ── FU-6 slice 6 (ADR-020 §3/§5) — row-scoping WIRING for
