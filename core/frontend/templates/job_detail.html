@@ -29,6 +29,7 @@
     {% for to in next_states %}
     <form action="{{ url_for('transition_status', job_id=job.id) }}"
           method="post" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
       <input type="hidden" name="to" value="{{ to }}">
       <button class="btn btn-secondary btn-sm" type="submit"
         {%- if to == 'open' and job.parsed_at is none %} disabled
@@ -47,6 +48,7 @@
   <p class="muted">Currently
     <strong>{{ 'on' if job.blind_review else 'off' }}</strong>.</p>
   <form action="{{ url_for('blind_review', job_id=job.id) }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
     <input type="hidden" name="blind_review"
            value="{{ 'false' if job.blind_review else 'true' }}">
     <button class="btn btn-secondary btn-sm" type="submit">
@@ -63,6 +65,7 @@
   <h3>Upload résumés</h3>
   <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
         enctype="multipart/form-data" hx-encoding="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
     <div class="form-group">
       <label class="label" for="resume-files">Résumé file(s) — PDF/DOCX, or a
         .zip of many</label>

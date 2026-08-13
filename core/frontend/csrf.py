@@ -39,8 +39,24 @@ import flask
 #: Flask-session key holding the ``hashed resume_id -> token`` mapping.
 SESSION_KEY = "_csrf_token"
 
+#: Flask-session key holding the session-wide PAGE token (Phase 1.3). Distinct
+#: from :data:`SESSION_KEY` so the two mechanisms can never be confused for one
+#: another: a page token must never open a reveal, and a reveal's one-shot
+#: token must never satisfy an ordinary form post.
+PAGE_SESSION_KEY = "_csrf_page_token"
+
 #: Form field name rendered as a hidden input and read from ``request.form``.
+#: Shared by both mechanisms — a given route reads only one of them, so the
+#: field name carries no ambiguity at any single call site.
 FORM_FIELD = "csrf_token"
+
+#: Request header carrying the page token for htmx-driven posts. Several write
+#: controls are bare ``hx-post`` buttons with no surrounding ``<form>`` to hold
+#: a hidden input, so a form-field-only reader would leave exactly those either
+#: unprotected or broken. Set once as ``hx-headers`` on ``<body>`` and inherited
+#: by every htmx request on the page, including ones inside swapped-in
+#: partials (htmx resolves inherited attributes by walking up the live DOM).
+HEADER_FIELD = "X-CSRF-Token"
 
 #: Upper bound on how many per-résumé tokens one session may hold at once.
 #: A shortlist render mints one token per card and is structurally capped at
@@ -171,6 +187,70 @@ def verify_and_consume(
     return False
 
 
+def issue_page_token() -> str:
+    """Return this session's page token, minting one on first use (Phase 1.3).
+
+    **Idempotent, and deliberately NOT one-shot** — the opposite of
+    :func:`issue_token`/:func:`verify_and_consume` above, and the difference is
+    load-bearing. This is the classic synchronizer-token pattern: one value per
+    session, rendered into every form and every htmx request, valid for as long
+    as the session is. A page token that burned on use would break the back
+    button, a second tab, and every "fix the validation error and resubmit"
+    flow — all of which post the same rendered form twice.
+
+    The stronger one-shot, per-résumé, per-action tokens stay exactly where
+    FU-4/D4 put them (reveal/withdraw/reinstate), where replay actually matters
+    and where each control is rendered fresh per resource. Those routes are
+    exempt from the request hook that consumes THIS token; see
+    ``frontend.app._CSRF_HOOK_EXEMPT_ENDPOINTS``.
+
+    Uses the same entropy as the one-shot tokens (:data:`_TOKEN_BYTES`, 128
+    bits) and lives in the same Flask signed session, so it cannot be forged or
+    read cross-origin. It is a single ~22-char string, so unlike the per-résumé
+    mapping it poses no cookie-size question. Must be called inside an active
+    Flask request context.
+    """
+    stored = flask.session.get(PAGE_SESSION_KEY)
+    if isinstance(stored, str) and stored:
+        return stored
+    token = secrets.token_urlsafe(_TOKEN_BYTES)
+    flask.session[PAGE_SESSION_KEY] = token
+    return token
+
+
+def verify_page_token(submitted: str | None) -> bool:
+    """Return ``True`` iff ``submitted`` matches this session's page token.
+
+    **Never consumes it** — see :func:`issue_page_token` for why. Returns
+    ``False`` when no page token has been issued for this session at all: a
+    request arriving before any page was rendered cannot have come from one of
+    our forms, which is precisely the forged-request case.
+
+    Never raises: a missing, empty or non-ASCII submission is simply ``False``
+    (``compare_digest`` raises on non-ASCII ``str`` input, and ``submitted`` is
+    attacker-controlled, so the comparison is made on UTF-8 bytes — the same
+    care :func:`verify_and_consume` takes).
+    """
+    stored = flask.session.get(PAGE_SESSION_KEY)
+    if not isinstance(stored, str) or not stored or not submitted:
+        return False
+    return secrets.compare_digest(stored.encode("utf-8"), submitted.encode("utf-8"))
+
+
+def token_from_request(req: Any) -> str | None:
+    """Read the submitted page token from a form field or the htmx header.
+
+    Form field first (an ordinary ``<form>`` post is the common case), then
+    :data:`HEADER_FIELD`. Both are accepted on every guarded route rather than
+    per-route, so a control that changes between a plain form and an htmx post
+    does not silently lose its protection in the process.
+    """
+    submitted = req.form.get(FORM_FIELD) or req.headers.get(HEADER_FIELD)
+    # `req` is deliberately `Any` (a Flask request in production, a stub in
+    # tests), so narrow explicitly rather than trusting the attribute's type.
+    return submitted if isinstance(submitted, str) else None
+
+
 def _origin_of(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
@@ -194,9 +274,14 @@ def same_origin(req: Any) -> bool:
 
 __all__ = [
     "SESSION_KEY",
+    "PAGE_SESSION_KEY",
     "FORM_FIELD",
+    "HEADER_FIELD",
     "MAX_TOKENS_PER_SESSION",
     "issue_token",
     "verify_and_consume",
+    "issue_page_token",
+    "verify_page_token",
+    "token_from_request",
     "same_origin",
 ]

@@ -129,6 +129,7 @@
           hx-target="#match-results-cards"
           hx-swap="outerHTML"
           style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
       <button type="submit" class="btn btn-primary btn-sm">Find matching jobs</button>
     </form>
     {% endif %}

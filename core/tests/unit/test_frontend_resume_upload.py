@@ -36,7 +36,7 @@ import httpx
 import pytest
 
 from frontend import api_client
-from frontend.app import _format_error, app
+from frontend.app import _format_error
 
 _REAL_NAME = "Zzyzxqrst Wibblesworth"
 _REAL_EMAIL = "zzyzxqrst.wibblesworth@example.test"
@@ -44,9 +44,14 @@ _REAL_PHONE = "604-555-0192"
 
 
 @pytest.fixture
-def client() -> Any:
-    app.config.update(TESTING=True)
-    return app.test_client()
+def client(csrf_client: Any) -> Any:
+    """The shared CSRF-carrying browser client (Phase 1.3).
+
+    These tests exercise the route's BUSINESS logic and predate the
+    anti-forgery guard; they now present a page token the way a real browser
+    does, rather than the guard being relaxed for them. See
+    ``tests/unit/conftest.py`` for why this is not autouse."""
+    return csrf_client
 
 
 def _client_with(

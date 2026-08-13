@@ -24,11 +24,11 @@ Four things that make the difference between a demo that lands and one that disc
    shipped boot; **that door is now closed — ADR-034, PR #72, squash `299b529`.** The boundary can no longer
    be shipped off (`validate_startup_auth_config` refuses to boot CAS-enabled with zero role keys), every
    write route requires a real CAS session, and `users.active` is enforced in all four session gates.
-   **What still stands behind this guardrail:** CSRF covers **3 of 12** browser state-changing routes
-   (A1 step (iv) / Phase 1.3), and an auditor account still cannot do its job because the audit-log viewer
-   does not exist (Phase 1.4). Retire this guardrail when both of those land. **Operationally:** the stack
-   refuses to boot until `./scripts/quickstart.ps1` is re-run to generate the keys — that is the fix
-   working, not a break.
+   **What still stands behind this guardrail — now ONE thing, not two.** CSRF is closed as of 2026-08-13
+   (**ADR-035**: all 12 browser state-changing routes, up from 3, fail-closed by default). The remaining
+   reason is that **an auditor account still cannot do its job** — the audit-log viewer does not exist
+   (Phase 1.4). Retire this guardrail when that lands. **Operationally:** the stack refuses to boot until
+   `./scripts/quickstart.ps1` is re-run to generate the keys — that is the fix working, not a break.
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build
@@ -46,7 +46,13 @@ Four things that make the difference between a demo that lands and one that disc
 4. **Stay in the top ~15 candidates when opening the "Why this rank?" panel.** Below that it renders an
    `Evidence 0%` it never actually measured — see A4.
 
-## A1. P0 · Authorization — RESOLVED (ADR-033/PR #68 and ADR-034/PR #72, both merged); CSRF is what's left
+## A1. P0 · Authorization — ✅ FULLY RESOLVED (ADR-033/#68, ADR-034/#72, ADR-035 — CSRF, step (iv))
+
+> **All four original A1 steps are now closed.** (i) the test axis and (ii) `require_session_role` landed
+> in ADR-033/#68; the fail-open that ADR-033 did not close landed in ADR-034/#72; (iii) is deliberately not
+> built (dead code under the current role model — ADR-033 §5); and **(iv) CSRF is closed by
+> [ADR-035](adr/035-csrf-on-every-browser-write-route.md)** — all 12 browser state-changing routes, up
+> from 3, enforced by a fail-closed `before_request` hook so route 13 is protected by default.
 
 **Highest-severity finding. This was the one that blocked handing accounts to HR.**
 
@@ -280,6 +286,15 @@ was exactly such a configuration and went unchecked; (11) `users.active` was a c
 gates all documented as meaningful and **none of them read**, while `refresh_if_needed` slid session
 expiry forward on every request. Note the escalation: A7 instance (10) sat inside the very function whose
 job was to prevent A7 instances.
+
+**A twelfth, added the same day by [ADR-035](adr/035-csrf-on-every-browser-write-route.md)** — and this
+one is the mirror image of the others, worth recording as its own variant: `frontend/csrf.py`'s module
+docstring reads as *the* CSRF story for the application, describing the threat and the fix in full. The
+fix was real and correct. It was wired to **3 of 12** state-changing routes. **Nothing was false; the
+documentation simply described a control more general than the wiring.** The lesson generalises: an
+invariant needs enforcement, and a *mechanism* needs a check that it is actually applied everywhere it
+claims to be. ADR-035's structural test is behavioural for exactly this reason — an inert hook would pass
+any introspective check.
 
 **Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
 have caught it** — Red first.

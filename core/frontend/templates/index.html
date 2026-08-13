@@ -14,6 +14,7 @@
 <details class="newjob card" {% if show_form %}open{% endif %}>
   <summary>+ New job</summary>
   <form action="/jobs" method="post" style="margin-top:16px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
     <div class="form-group">
       <label class="label" for="title">Title</label>
       <input class="input" id="title" name="title" type="text"
@@ -68,6 +69,7 @@
   <summary>+ Bulk upload job descriptions</summary>
   <form action="/jobs/bulk" method="post" enctype="multipart/form-data"
         style="margin-top:16px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
     <div class="form-group">
       <label class="label" for="bulk-files">JD files (or a .zip)</label>
       <input class="input" id="bulk-files" name="files" type="file" multiple
