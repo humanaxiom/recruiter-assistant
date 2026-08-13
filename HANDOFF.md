@@ -2,155 +2,115 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-13: THE AUTH BOUNDARY IS CLOSED; ZERO OPEN PRs
+### ⚠️⚠️ READ FIRST — 2026-08-13: PILOT BLOCKERS A1 AND A4 ARE CLOSED; GUARDRAILS 2 AND 4 RETIRED
 
-> **`origin/main` == `299b529`. Working tree clean. Zero open PRs. Nothing is mid-flight.** This banner
-> supersedes the 2026-08-07 banner below (kept as history, and note it is stale in its own right — it
-> describes #68 as "waiting merge" and A1 as partly open; both statements are now false).
+> **`origin/main` == `f9be22b`. Working tree clean. Zero open PRs. Nothing is mid-flight.**
+> Supersedes the 2026-08-07 banner below (kept as history, and itself stale — it describes #68 as
+> "waiting merge" and A1 as partly open; both are false).
 >
-> **⚠️ THE STACK WILL NOT BOOT UNTIL YOU RE-RUN `./scripts/quickstart.ps1`.** That is the fix working, not
-> a break — the boot now fails loudly rather than serving the whole API to anyone who can reach the port.
-> `.env` is permission-protected, so this is a **human step**; the agent cannot do it.
->
-> **What merged this session (both green, CI all-checks SUCCESS):**
-> - **PR #72 (`299b529`) — the auth boundary fix, [ADR-034](docs/adr/034-auth-boundary-fails-open.md).**
->   ADR-033 did not close its own stated worst case. **No `API_KEY_*` existed in any channel** — not in
->   `docker-compose.yml`, `compose.cas.yml`, `.env.example`, or the running container — so `auth_enabled`
->   was `False`, `resolve_role` returned `Role.ADMIN` for every request, and both `require_role_assigned`
->   and `require_session_role` passed on `user is None`. **Two gates, ANDed, both vacuous.** Proven live
->   with no cookie and no key: `GET /jobs` → 200 with real data, `GET /audit/reveals-legacy` → 200,
->   `PATCH /jobs/{id} {blind_review:false}` → 200 with the column really flipped, then the same caller read
->   `candidate_name` un-redacted — audited as `actor_service='api'`, unattributable to anyone. **Reads were
->   open too.** Fixed: F1b (`validate_startup_auth_config` now *raises* on CAS-enabled-with-zero-keys, and
->   the channel to configure them was built), F1a (`require_session_role` 403s on `user is None` —
->   **human decision: a valid API key alone is never sufficient for a write**), F5 (`users.active` enforced
->   in all four session gates), F4 (the 403→500 Flask regression ADR-033 introduced). `./scripts/verify.sh
->   all` green: **4296 unit @ 94.39%, 482 integration**.
-> - **PR #71 (`132f234`) — docs accuracy pass** retiring the claims #68–#70 made false.
-> - **This branch (`chore/doc-pass-auth-boundary`) — the doc pass #72 skipped.** #72 merged **code-only**:
->   no ADR, no ROADMAP update, no explainer update, despite being an authz change (which ROADMAP A0 §3
->   makes mandatory for the explainer). Added ADR-034, amended ADR-033 (its §1 `user is None` → PASS
->   contract is **reversed**, so anything citing it is wrong), de-escalated demo guardrail 2 back to
->   "admin/recruiter only", rewrote A1/A1b as closed, and corrected the circulated HR explainer, which was
->   telling HR the service was wide open.
->
-> **Carried, not decided (product question, deliberately not answered in code):** `require_role_assigned`
-> still passes on `user is None`, so a bare service-key reader gets unscoped **reads**. F1b closes it in
-> practice. Whether machine readers are legitimate at all needs a human. Out of scope in #72: F3 (three
-> flaky reveal tests), F7 (dead `_EXISTS_SCOPED_SQL`).
->
-> **CSRF — A1 step (iv) — is now CLOSED too ([ADR-035](docs/adr/035-csrf-on-every-browser-write-route.md),
-> branch `fix/csrf-all-browser-write-routes`).** FU-4/D4's anti-forgery control was wired to **3 of the
-> viewer's 12** POST routes. The nine unguarded ones included `POST /admin/users/<id>/role` (**privilege
-> escalation** — measured: a forged request returned **302**, i.e. it completed) and
-> `POST /jobs/<id>/blind-review` (**the same un-blinding flip the ADR-034 exploit used**, reached through a
-> real recruiter's session instead of through no session at all). Now a single fail-closed
-> `before_request` hook guards **all 12**, so route 13 is protected by default; the three FU-4/D4 routes
-> keep their strictly-stronger one-shot tokens as a **tested** exemption. `./scripts/verify.sh all` green:
-> **4338 unit @ 94.25%, 482 integration**.
->
-> **With that, ALL FOUR original A1 steps are closed** — (i)/(ii) ADR-033, the fail-open ADR-034,
-> (iii) deliberately not built (dead code, ADR-033 §5), (iv) ADR-035.
->
-> **Phase 1.4 — the auditor's viewer — is DONE too ([ADR-036](docs/adr/036-auditor-audit-log-viewer.md),
-> branch `feat/auditor-audit-log-viewer`), and the finding was worse than the plan said.** Not "the screen
-> has not been built": `grep -rn "FROM audit_log" core/src/` returned **nothing**. `audit_log` is written
-> by **nine** call sites and **had no read path anywhere in the application** — no route, no service
-> function, no UI. The only audit route reads `reveal_audit`, FROZEN at FU-5 slice 8, so it returns
-> pre-cutover history and nothing since. Producing an access record meant an engineer running SQL against
-> production by hand. There is now `GET /audit/log` + a read-only `/audit` page (admin + auditor) with the
-> nav link an auditor needs to find it. `./scripts/verify.sh all` green: **4376 unit @ 94.20%, 488
-> integration**.
->
-> **⭐ DEMO GUARDRAIL 2 IS RETIRED — all four account types can be issued.** Every reason it existed is
-> closed: role escalation (ADR-033), the auth boundary being off (ADR-034), CSRF at 3-of-12 (ADR-035), and
-> the auditor having nowhere to go (ADR-036).
->
-> **Two things a human must still do before widening the pilot** (neither is an authorization gap):
-> 1. **Nobody has clicked through the live UI** for ADR-035 or ADR-036 — the stack does not boot here
->    without the quickstart step above. Both are proven by the full suite; neither has been seen working.
-> 2. **An open product/privacy decision:** whether an auditor should be able to read résumé **withdrawal
->    reasons**. They are operator-typed free text about a named candidate, so they are **withheld** today
->    (recorded, not shown) behind a fail-closed allowlist. Plausibly within an auditor's remit, plausibly a
->    PIPEDA/FIPPA problem — ADR-036 §1 records it rather than answering it by implementation.
->
-> **ROADMAP A4 M1 is FIXED too — [ADR-037](docs/adr/037-stage3-fails-closed-on-non-llm-error.md), branch
-> `fix/stage3-fail-open-non-llm`.** `stage3_evidence` caught bare `Exception` per candidate and set
-> `results[id] = None`; `_evidence_completeness` maps `None` to `0.0`, so that candidate **silently lost
-> 40% of `score_final`** (evidence 0.30 + motivation 0.10) and the row was **persisted unmarked**. Unlike
-> the systematic evidence cliff — which provably cannot reorder the list — this hit **one candidate at
-> random inside the top 15**, displacing real people in the ranks a recruiter reads, only when a transient
-> Neo4j/Postgres hiccup landed on them. Unreproducible afterwards; on screen identical to a candidate
-> evaluated and found lacking. Now fails closed into the existing `RankingUnavailableError` → withhold →
-> visible state → bounded `arq.Retry` path, which is what a transient cause wants anyway. **Four
-> functional lines, all in `except` branches — scoring math byte-unchanged by construction.**
-> `./scripts/verify.sh all` green: **4381 unit @ 94.20%, 488 integration**.
->
-> **ROADMAP A3's recommended first move is DONE —
-> [ADR-038](docs/adr/038-gate-the-bait-below-strong-ordering.md), branch `fix/evals-gate-bait-below-strong`.**
-> `thresholds.toml`'s claim that *"the bait is BELOW EVERY STRONG FIXTURE"* was a **comment**; nothing read
-> it, so the reverted ADR-032 change violated it and still exited 0 — the A7 shape **inside the gate
-> itself**. Now enforced as an order relation over tags. **Measured arming** by sweeping `weights.evidence`
-> against the real corpus: `0.30/0.28` GREEN → **`0.25`–`0.10` only this gate fires** (bait rank 11→7 vs
-> worst strong 12→13) → `0.05/0.00` `precision@k` fires first. So there is a real band in which the bait
-> outranks strong fixtures while **every pre-existing gate stays green** — halving the evidence weight used
-> to pass the whole harness. The helper is unit-tested to FIRE, not just to pass, including a
-> refuses-to-pass-vacuously case. `./scripts/verify.sh all` green: **4387 unit @ 94.20%, 488 integration**.
->
-> **A3 is NOT fully closed.** Still open: the **ADR-008 hashing blindness** (`_skill_rows_for` can never
-> produce an `h:` key — closing it re-bands the corpus and margins must be re-measured), `expected_rank_band`
-> still unreferenced with **r18 violating its own declared band** (`strong`, band `{1,9}`, actual rank 11),
-> and the **inert `skill_missing_must` pair** against `weights.skill = 0`.
->
-> **A4 M2 is FIXED too — [ADR-039](docs/adr/039-stage1-recall-is-job-scoped.md), branch
-> `fix/stage1-recall-job-scoped`. With it, BOTH of A4's named ranking defects are closed.** Stage-1 recall
-> was a **global** vector query: `resume_summary_idx` is not job-partitioned and *cannot* be
-> (`db.index.vector.queryNodes` takes no pre-filter), so `WHERE r.job_id` ran **after** the global top-150
-> had been chosen from the whole corpus. **Measured against a real Neo4j and worse than the roadmap
-> predicted: a job with 5 applicants — a pool one tenth of `coarse_k` — recalled ZERO of them once 300
-> résumés belonging to another job existed.** Not crowding; total starvation, i.e. an empty shortlist. Now
-> scores the job's own pool directly (exact cosine over an indexed `MATCH (r:Resume {job_id})`), so a
-> shortlist no longer depends on what other requisitions are loaded. `./scripts/verify.sh all` green:
-> **4387 unit @ 94.20%, 493 integration**.
->
-> **Two things that generalise from it.** (1) The `[0,1]` score normalisation had to be verified against a
-> real server — a raw cosine would have rescaled every `vec_score` into `score_final` with **nothing
-> failing**. (2) A test stub keyed on `"queryNodes" in query` silently returned no candidates when that
-> string vanished, breaking **four fail-closed tests two files away**; it is now keyed on `vec_score`, the
-> column stage 1 must return. Stubs keyed on implementation details fail loudly only if you are lucky.
->
-> **A4 IS NOW FULLY CLOSED — the evidence cliff is disclosed
-> ([ADR-040](docs/adr/040-evidence-cliff-disclosure.md), branch `fix/evidence-cliff-not-assessed`).**
-> `evidence_k=15` bounds stage 3 but ALL of `candidates_s2` reaches `stage4_combine`, so a rank-16
-> candidate got `0.0` evidence AND motivation — 40% of `score_final` — from **compute placement, not
-> merit**, and the panel rendered it as an affirmative `Evidence · 30% · 0% · 0.00`, indistinguishable from
-> a candidate examined and found lacking. Rank order was provably unaffected, so this was a **disclosure**
-> defect, and ADR-031's "not recorded" guard did not cover it (that protects an *unreadable* row; this is a
-> *never-computed* one, which parses fine as `0.0`). Now a persisted `evidence_evaluated` marker, set from
-> `top_k` membership, folded into `score_breakdown` (no DDL), rendered in **three** states: assessed → `0%`
-> stands · past-the-cliff → **"not assessed"** · legacy → no claim. `./scripts/verify.sh all` green:
-> **4401 unit @ 94.00%, 493 integration**.
->
-> **⚠️ The cliff itself is NOT removed** — those candidates still lose 40% of the composite for reasons
-> unrelated to merit. This makes it *visible*, not *gone*. Removing it means evaluating every retained
-> candidate (an LLM call each) or splitting structured screening from evidence-enriched ranking — a product
-> decision, ROADMAP item 2's territory. **Reverse match still carries the identical fabricated zero**
-> (`match_reverse_evidence_k = 10`), untouched per ADR-031's forward-only boundary and now a named
-> follow-up.
-> **A3** (the evals harness is blind in three ways) is worth doing before further scoring work, and its
-> recommended first move is cheap: add `[adversarial] must_rank_below_every_strong`, which passes today and
-> would have caught the reverted ADR-032 change. A2 remains blocked on the competency-scoring product
-> decision; A5–A6 unchanged. Small follow-on: an **export** for the access record.
->
-> **Worth a human's eyes before the pilot:** ADR-035's guard is proven by the full suite including real
-> forged requests, but **nobody has clicked through the live UI** — the stack does not boot here without
-> the quickstart step above. The htmx-driven controls inherit their token from an `hx-headers` attribute on
-> `<body>`, which tests exercise through the header path rather than a real htmx runtime.
->
-> **The pattern to keep in mind (ROADMAP A7, now at eleven instances).** #72's root cause was an invariant
-> in a docstring with nothing enforcing it — inside `validate_startup_auth_config`, *the function whose job
-> is to prevent exactly that*. Every instance was invisible to a fully green suite. For any fix here, the
-> deliverable is the fix **plus the assertion that would have caught it**.
+> This banner is a **state document**, not a changelog. The ten PRs that landed this session are
+> summarised once, in the table, rather than narrated in sequence.
+
+#### 🔴 Four things a human must do — none of them are agent-doable
+
+1. **Re-run `./scripts/quickstart.ps1`** (with `pwsh`, see below) before the stack will boot. The API now
+   refuses to start without the four `API_KEY_*` values. **That is the fix working, not a break** —
+   `.env` is permission-protected, so only you can do it.
+2. **Click through the live UI.** ADR-035 (CSRF), ADR-036 (audit viewer) and ADR-040 (evidence-cliff
+   panel) are proven by the full suite and, for the auth boundary, by live probes — but **nobody has seen
+   the UI work**. The stack does not boot in the agent's environment without step 1. Particularly worth
+   checking: the htmx controls (their CSRF token is inherited from an `hx-headers` attribute on `<body>`,
+   exercised in tests through the header path rather than a real htmx runtime), the **Access record** nav
+   link, and a below-cut-off candidate's "Why this rank?" panel.
+3. **Decide: should an auditor be able to read résumé withdrawal reasons?** They are operator-typed free
+   text about a named candidate, so they are **withheld** today behind a fail-closed allowlist (ADR-036
+   §1). Plausibly within an auditor's remit; plausibly a PIPEDA/FIPPA problem. Recorded rather than
+   answered by implementation.
+4. **Decide: should a bare service key get unscoped READS?** `require_role_assigned` still passes on
+   `user is None`, so it does today — **verified live**: with an admin key and no session,
+   `GET /jobs` and `GET /audit/reveals-legacy` both return 200. ADR-034 §"carried" left this open
+   deliberately. It is now observable rather than theoretical.
+
+#### What shipped this session — ten PRs, all CI-green before merge
+
+| # | What | ADR |
+|---|---|---|
+| 71 | Docs accuracy pass, retiring what #68–#70 made false | — |
+| 72 | **The auth boundary was OFF in the shipped config** | [034](docs/adr/034-auth-boundary-fails-open.md) |
+| 73 | The ADR + doc pass #72 shipped without | — |
+| 74 | **CSRF on all 12 browser write routes** (was 3) — A1 step (iv) | [035](docs/adr/035-csrf-on-every-browser-write-route.md) |
+| 75 | **The auditor's access-record viewer** — Phase 1.4 | [036](docs/adr/036-auditor-audit-log-viewer.md) |
+| 76 | `quickstart.ps1` could not be parsed by the PowerShell it claims to support | — |
+| 77 | **Stage 3 fails closed on a non-LLM error** — A4 M1 | [037](docs/adr/037-stage3-fails-closed-on-non-llm-error.md) |
+| 78 | **Gate the bait-below-strong ordering** the corpus only asserted in prose — A3's first move | [038](docs/adr/038-gate-the-bait-below-strong-ordering.md) |
+| 79 | **Stage-1 recall searches the job's pool, not the whole DB** — A4 M2 | [039](docs/adr/039-stage1-recall-is-job-scoped.md) |
+| 80 | **Disclose the evidence cliff** instead of a fabricated 0% — closes A4 | [040](docs/adr/040-evidence-cliff-disclosure.md) |
+
+**Suite: 4401 unit @ 94.00% · 493 integration.** Every merge ran `./scripts/verify.sh all` with the exit
+code captured directly rather than piped.
+
+#### The four findings worth remembering
+
+- **The auth boundary was open to unauthenticated callers.** No `API_KEY_*` existed in *any* channel, so
+  `auth_enabled` was `False`, `resolve_role` returned `ADMIN` for every request, and both session gates
+  passed on `user is None` — two gates ANDed, both vacuous. Proven live: `PATCH /jobs/{id}
+  {blind_review:false}` → 200 with the column really flipped, then candidate PII read un-redacted, audited
+  as `actor_service='api'` — unattributable. **Re-probed after the fix: every one now refuses.**
+- **`audit_log` had no read path at all.** Nine call sites write it; `grep -rn "FROM audit_log" core/src/`
+  returned nothing. Producing an access record meant an engineer running SQL against production — itself
+  an unaudited read of the audit log.
+- **Stage-1 recall was searching the whole database.** A job with **5 applicants** — a pool one tenth of
+  `coarse_k` — recalled **zero** of them once 300 résumés belonging to another job existed. Not crowding;
+  an empty shortlist.
+- **Two ranking defects were invisible because a real `0.0` looks like a measurement.** A transient DB
+  blip silently cost a top-15 candidate 40% of their score (A4 M1), and every below-cut-off candidate was
+  shown an `Evidence 0%` nobody ever computed (the cliff).
+
+#### Guardrails: 2 and 4 retired, 1 and 3 stand
+
+- ~~**2. Sign in as admin/recruiter only.**~~ **Retired** — all four account types can be issued. Role
+  escalation (ADR-033), the auth boundary (034), CSRF (035) and the missing auditor viewer (036) are all
+  closed.
+- ~~**4. Stay in the top ~15 when opening the panel.**~~ **Retired** — the panel no longer claims a
+  measured `0%` for candidates it never assessed (040).
+- **1. Use a curated-vocabulary JD — still stands.** A2 is untouched; real SFU postings still collapse
+  skill scores. Unchanged.
+- **3. The explainer is cleared for circulation — still true**, and it was updated four times this
+  session. Every authz/scoring change must keep updating both `.md` and `.html`.
+
+#### What is left, in the order I would take it
+
+1. **A2 — skill matching (P0, BLOCKED ON YOU).** Not a vocabulary shortage: the shipped 231-term ontology
+   is a software-engineering one against an overwhelmingly administrative/academic corpus, covering
+   **15.6%** of real qualification statements. 13 corpus-derived families would lift it to **54.8%**. The
+   blocker is a product decision: many derived terms are **competencies** (communication, leadership), and
+   `years × recency × ontology_weight` is meaningless for "three years of interpersonal skills". Whether
+   competencies are scored differently, or excluded from must-have penalties, is unresolved.
+2. **A3's three remaining blindnesses.** The gate still cannot see: the **ADR-008 hashing** gap
+   (`_skill_rows_for` can never produce an `h:` key — closing it re-bands the corpus, so margins must be
+   **re-measured**); `expected_rank_band`, still unreferenced, with **r18 violating its own declared band**
+   (`strong`, band `{1,9}`, actual rank 11); and the **inert `skill_missing_must` pair** against
+   `weights.skill = 0`. Worth doing before further scoring work — the gate is what makes scoring changes
+   trustworthy.
+3. **A5/A6** — retention stored but never enforced, unsalted email hash while the skill hash refuses to
+   boot unsalted, audit immutability by convention only, shallow `/health`. Plus two smaller scoring
+   defects: `normalise_vector_scores` returns `1.0` for **everyone** on a degenerate pool, and
+   `seniority = 0.0` on an unparseable title (a candidate loses the full 15% sub-weight to a *parsing*
+   failure).
+4. **Named follow-ups from this session:** an **export** for the access record (an auditor can read it on
+   screen but cannot hand it to anyone); **reverse match carries the identical fabricated evidence zero**
+   (`match_reverse_evidence_k = 10`, untouched per ADR-031's forward-only boundary); `asyncio.gather` does
+   not cancel siblings, so a fail-closed stage 3 leaves orphaned LLM calls running.
+
+#### Environment notes
+
+- **Use `pwsh` (PowerShell 7), not `powershell` (5.1), for `scripts/quickstart.ps1`.** It was unparseable
+  under 5.1 until #76 — and `powershell.exe` **still exits 0** on a parse failure, so the breakage looks
+  like a successful boot. Fixed with a UTF-8 BOM plus a guard test; keep the BOM.
+- **Two branch-name gate catches this session** from starting work on `main`. The gate did its job both
+  times; branch first.
+- Standing orders unviolated: unique 29xxx ports · CAS on by default · inference offline-only on
+  `aria-gb10` over Tailscale, no cloud call added.
 
 #### (history) READ FIRST — 2026-08-07: HR DEMO + PILOT STATE UPDATE
 
