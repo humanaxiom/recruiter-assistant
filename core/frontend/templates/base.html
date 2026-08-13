@@ -20,6 +20,12 @@
         {% if current_user and current_user.role == "admin" %}
         <a href="{{ url_for('admin_users') }}">Users</a>
         {% endif %}
+        {# Phase 1.4: the auditor's only destination. Shown to admin too, so an
+           administrator investigating a report need not be re-roled to see the
+           record. `current_user is None` is dev mode (admin-equivalent). #}
+        {% if current_user is none or current_user.role in ("admin", "auditor") %}
+        <a href="{{ url_for('audit_log') }}">Access record</a>
+        {% endif %}
         {% if current_user and current_user.authenticated %}
         <span class="nav-user">{{ current_user.username }}{% if current_user.role %} ({{ current_user.role }}){% endif %}</span>
         <a class="nav-logout" href="{{ logout_url }}">Logout</a>
