@@ -235,7 +235,7 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
 **Still open in A3:** the ADR-008 hashing blindness (first bullet), `expected_rank_band` / the r18 band
 discrepancy, and the inert `skill_missing_must` pair against `weights.skill = 0`.
 
-## A4. P0 · Two ranking defects that affect what HR will see — M1 FIXED, M2 open
+## A4. P0 · Two ranking defects that affect what HR will see — ✅ M1 and M2 both FIXED; the evidence cliff remains
 
 ~~**M1 — stage 3 fails OPEN on a non-LLM exception.**~~ ✅ **FIXED 2026-08-13 —
 [ADR-037](adr/037-stage3-fails-closed-on-non-llm-error.md).** `orchestrator.py` caught bare `Exception`
@@ -259,6 +259,21 @@ job-partitioned; `orchestrator.py:303-320` applies `WHERE r.job_id` *after* the 
 ~150. Past ~150 résumés corpus-wide, a job's own candidates get crowded out **even when that job's pool is
 well under `coarse_k`**. A pilot that loads several hundred résumés will hit this. **Raising `coarse_k` does
 not fix it** and would mask it. **`ranking-evals` gated.**
+
+> ✅ **FIXED 2026-08-13 — [ADR-039](adr/039-stage1-recall-is-job-scoped.md).** The index is not
+> job-partitioned and *cannot* be — `db.index.vector.queryNodes` takes no pre-filter — so `WHERE r.job_id`
+> ran **after** the global top-150 had already been chosen from the whole corpus.
+>
+> **Measured against a real Neo4j, and worse than this entry predicted:** a job with **5 applicants** — a
+> pool one tenth of `coarse_k` — recalled **zero** of them once 300 résumés belonging to another job
+> existed. Not crowding; total starvation.
+>
+> Now scores the job's own pool directly (`vector.similarity.cosine` over `MATCH (r:Resume {job_id})`,
+> indexed by the existing `resume_job_id_idx`) — **exact** rather than approximate, and independent of what
+> else is in the database. The `[0,1]` normalisation was verified against a real server to match what the
+> index reported, since a raw cosine would have silently rescaled every `vec_score` into `score_final` with
+> nothing failing. Eval-corpus ranking is structurally unaffected: `run_evals.py` never calls
+> `stage1_coarse`.
 
 **The evidence cliff and the defense pack (ADR-031).** `evidence_k=15`, but all of `candidates_s2` goes to
 `stage4_combine`, so candidates past 15 get `0.0` evidence *and* motivation — 40% of the score — from compute

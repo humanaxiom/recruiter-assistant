@@ -144,11 +144,22 @@ def _fake_neo4j(resume_id: UUID) -> MagicMock:
     """Stage-1's vector query yields exactly ``resume_id``; stage-2's
     skill-rows query yields no ``REQUIRES`` edges (no graph seeded) — neither
     matters for THIS slice, whose failure is driven entirely by ``ctx.llm``
-    during stage 3."""
+    during stage 3.
+
+    The stage-1 query is recognised by the ``vec_score`` column it RETURNS,
+    not by the Cypher it uses to get there. It was previously matched on
+    ``"queryNodes" in query``: when ROADMAP A4 M2 replaced the global vector
+    index with a job-scoped cosine, that discriminator stopped matching and
+    this stub silently returned NO candidates — so stage 3 never ran, the LLM
+    never failed, and four fail-closed tests reported ``shortlist_state
+    ='empty'`` instead of ``'awaiting_llm'``. A stub keyed on an
+    implementation detail fails loudly only if you are lucky; keying it on the
+    column stage 1 must produce ties it to the contract instead.
+    """
     session = MagicMock(name="session")
 
     async def _run(query: str, **_kwargs: Any) -> _AsyncRows:
-        if "queryNodes" in query:
+        if "vec_score" in query:
             return _AsyncRows([{"resume_id": str(resume_id), "vec_score": 0.9}])
         return _AsyncRows([])
 

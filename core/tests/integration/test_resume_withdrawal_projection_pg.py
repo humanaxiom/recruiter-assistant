@@ -251,9 +251,16 @@ async def _resume_summary_embedding(
 async def _direct_vector_query_hits(
     driver: AsyncDriver, *, query_vec: list[float], resume_id: uuid.UUID
 ) -> bool:
-    """A raw ``resume_summary_idx`` query bypassing ``stage1_coarse``'s
-    job-scoping WHERE — proves the node is (or isn't) in the vector index at
-    all, independent of the orchestrator's own filtering."""
+    """A raw ``resume_summary_idx`` query — proves the node is (or isn't) in
+    the vector index at all, independent of how the orchestrator retrieves.
+
+    Still a meaningful ADR-026 assertion after ROADMAP A4 M2, but for a
+    narrower reason than when it was written: ``stage1_coarse`` no longer reads
+    this index at all (it now scores a job-scoped MATCH directly), so this is
+    no longer "the same query with the WHERE removed". It is now an independent
+    check that un-projection really removed the NODE — if it had merely been
+    detached from the job, ``stage1_coarse`` would stop returning it while the
+    résumé's embedding sat in the index indefinitely."""
     async with driver.session() as session:
         result = await session.run(
             """
