@@ -7,19 +7,24 @@ Pins the propagation contract at three levels of
    logs, and returns ``None`` (silently zeroing that candidate's evidence).
    Must instead RE-RAISE. ``LLMUnavailableError`` is already uncaught here
    and must keep propagating.
-2. ``stage3_evidence._one`` — currently isolates ANY exception to ``None``
-   per candidate. Must catch ``(LLMOutputInvalidError, LLMUnavailableError)``
-   FIRST and re-raise (fail closed — one such failure withholds the WHOLE
-   shortlist), while a genuinely unexpected ``Exception`` for one candidate
-   still isolates to ``None`` (existing behaviour preserved).
+2. ``stage3_evidence._one`` — every exception fails CLOSED. Mode A/B LLM
+   signals re-raise (FU-7 §2), and **as of ROADMAP A4 M1 so does a generic
+   ``Exception``**. This file originally pinned the opposite for the generic
+   case ("one candidate must not sink all"); that isolation silently zeroed
+   40% of a top-15 candidate's ``score_final`` and persisted it unmarked, so
+   it was the defect rather than the contract — see
+   ``test_stage3_evidence_fails_closed_on_a_generic_exception`` for the
+   reversal and why.
 3. ``generate_shortlist`` — wraps BOTH the stage-2 per-candidate loop (the
    embedder call for the seniority cosine can raise ``LLMUnavailableError``)
-   and the ``stage3_evidence`` call: any Mode A/B failure anywhere in that
-   path becomes a single typed ``RankingUnavailableError`` — the new
-   exception ``src.pipeline.matching.orchestrator.RankingUnavailableError``
-   does not exist yet, so importing it is itself part of the RED signal. A
-   GENERIC per-candidate exception (already isolated inside stage3_evidence)
-   must still produce a normal, non-raising shortlist.
+   and the ``stage3_evidence`` call: any failure anywhere in that path becomes
+   a single typed ``RankingUnavailableError``, which ``shortlist_job`` already
+   turns into a withheld shortlist, a visible state, and a bounded retry.
+
+``None`` survives as a meaningful value throughout, and that is the point of
+the A4 M1 change rather than a side effect: after it, ``None`` means only
+"nothing to evaluate" (no chunks, or a job with no ``required_skills``) or
+"past the ``evidence_k`` cliff" — never "we tried and it broke".
 
 Every test here white-box patches orchestrator module-level functions
 (``load_job_view`` / ``stage1_coarse`` / ``_stage2_per_candidate`` /
@@ -173,10 +178,35 @@ async def test_stage3_evidence_reraises_llm_unavailable_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage3_evidence_isolates_a_generic_exception_to_none() -> None:
-    """A GENERIC (non-LLM) per-candidate exception must still be isolated —
-    the existing "one candidate must not sink all" behaviour is preserved
-    for anything that is NOT a fail-closed Mode A/B signal."""
+async def test_stage3_evidence_fails_closed_on_a_generic_exception() -> None:
+    """A GENERIC (non-LLM) per-candidate exception fails CLOSED — ROADMAP A4
+    M1.
+
+    **REVERSED from this test's original assertion**, which was
+    ``assert results[bad_id] is None`` under the heading "one candidate must
+    not sink all". That behaviour was the defect, not the contract, and the
+    reversal is explained here rather than in a commit nobody will read.
+
+    What the old behaviour actually did: ``stage3_evidence`` caught bare
+    ``Exception`` and set ``results[id] = None``; ``_evidence_completeness``
+    maps ``None`` to ``0.0``; so the candidate silently lost the whole
+    ``evidence`` (0.30) and ``motivation`` (0.10) share — **40% of
+    ``score_final``** — and the row was persisted UNMARKED. For a top-15
+    candidate that is not a cosmetic degradation: it **displaces real people
+    inside the ranks a recruiter actually looks at**, and only when a
+    transient Neo4j/Postgres hiccup happens to land on them, so it is
+    unreproducible by the time anyone notices.
+
+    It was also invisible by construction. A ``None`` from a *failure* was
+    indistinguishable from a ``None`` from being *past the evidence cliff*
+    (``evidence_k=15``) — both render as an affirmative ``0%``. After this
+    change ``None`` means only "nothing to evaluate" (no chunks, or a job with
+    no required skills — see ``_stage3_per_candidate``'s early return), never
+    "we tried and it broke".
+
+    This restores the posture ADR-029/ADR-021 §2 already claim: a shortlist is
+    withheld rather than silently degraded, and the caller retries.
+    """
     job = _job()
     good_id = uuid4()
     bad_id = uuid4()
@@ -199,10 +229,35 @@ async def test_stage3_evidence_isolates_a_generic_exception_to_none() -> None:
         new_callable=AsyncMock,
         side_effect=_fake_stage3,
     ):
-        results = await stage3_evidence(ctx, job, [good_candidate, bad_candidate])
+        with pytest.raises(RuntimeError, match="totally unexpected"):
+            await stage3_evidence(ctx, job, [good_candidate, bad_candidate])
 
-    assert results[bad_id] is None
-    assert results[good_id] is good_evidence
+
+@pytest.mark.asyncio
+async def test_stage3_evidence_still_returns_none_when_there_is_nothing_to_evaluate() -> (  # noqa: E501
+    None
+):
+    """The counterpart to the test above, and the reason it is safe.
+
+    ``None`` must keep meaning "nothing to evaluate" — ``_stage3_per_candidate``
+    returns it for a candidate with no chunks, or for a job with no
+    ``required_skills``. Failing closed must not turn that legitimate outcome
+    into an error, or every job without required skills would withhold its
+    shortlist forever.
+    """
+    job = _job()
+    resume_id = uuid4()
+    ctx = _ctx()
+    ctx.db.fetchrow = AsyncMock(return_value={"parsed": {"chunks": []}})
+
+    with patch(
+        "src.pipeline.matching.orchestrator._stage3_per_candidate",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        results = await stage3_evidence(ctx, job, [_stage2_candidate(resume_id)])
+
+    assert results[resume_id] is None
 
 
 # ── 3. generate_shortlist wraps Mode A/B failures into RankingUnavailableError
@@ -362,11 +417,23 @@ async def test_generate_shortlist_raises_ranking_unavailable_when_stage3_llm_una
 async def test_generate_shortlist_still_produces_a_normal_shortlist_on_a_generic_per_candidate_error() -> (  # noqa: E501
     None
 ):
-    """A generic per-candidate exception is ALREADY isolated to ``None``
-    inside ``stage3_evidence`` (see the dedicated test above) — that
-    isolation must not be defeated by the new fail-closed wrapping.
-    ``generate_shortlist`` must complete normally (no raise) and produce a
-    non-empty shortlist when ``stage3_evidence`` itself returns normally."""
+    """A ``None`` evidence value that ``stage3_evidence`` RETURNS normally must
+    still produce a shortlist.
+
+    **Re-documented, not reversed** (ROADMAP A4 M1). The original docstring
+    justified this by "a generic per-candidate exception is ALREADY isolated to
+    ``None``" — that isolation is the defect and is gone. The test itself stays
+    valid, because ``None`` still legitimately arrives here two ways: a
+    candidate with nothing to evaluate (``_stage3_per_candidate``'s early
+    return), and a candidate past the ``evidence_k`` cliff whose id is simply
+    absent from the dict (``evidence_by_id.get`` → ``None``).
+
+    Those must keep producing a shortlist. What must NOT is a candidate whose
+    evidence stage raised — that now never reaches this point at all.
+
+    The evidence cliff itself (a past-the-cliff candidate scoring an
+    affirmative ``0%``) is ROADMAP A4's third item and is deliberately NOT
+    addressed here — it needs a persisted ``evidence_evaluated`` marker."""
     job_id = uuid4()
     job = _job()
     resume_id = uuid4()
@@ -399,3 +466,107 @@ async def test_generate_shortlist_still_produces_a_normal_shortlist_on_a_generic
 
     assert len(result.entries) == 1
     assert result.entries[0].resume_id == resume_id
+
+
+@pytest.mark.asyncio
+async def test_generate_shortlist_withholds_the_whole_shortlist_on_a_generic_stage3_error() -> (  # noqa: E501
+    None
+):
+    """ROADMAP A4 M1, end to end: a non-LLM stage-3 failure must withhold the
+    shortlist, not persist a silently-degraded one.
+
+    The wrapping into ``RankingUnavailableError`` is what makes the existing
+    machinery do the right thing for free: ``shortlist_job`` catches exactly
+    that type, records the visible fail-closed state with ``reason=str(exc)``,
+    and re-runs under ``arq.Retry`` up to ``shortlist_max_tries``. A transient
+    Neo4j/Postgres hiccup — the realistic cause — is precisely what a retry
+    fixes, so failing closed here costs a deferred re-run rather than a wrong
+    ranking that nobody can reproduce later.
+    """
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+
+    job_id = uuid4()
+    job = _job()
+    resume_id = uuid4()
+
+    with (
+        patch(
+            "src.pipeline.matching.orchestrator.load_job_view",
+            new_callable=AsyncMock,
+            return_value=job,
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator.stage1_coarse",
+            new_callable=AsyncMock,
+            return_value=[Stage1Candidate(resume_id=resume_id, vec_score=0.9)],
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator._stage2_per_candidate",
+            new_callable=AsyncMock,
+            return_value=_stage2_candidate(resume_id),
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator.stage3_evidence",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("neo4j went away mid-run"),
+        ),
+    ):
+        ctx = _ctx()
+        with pytest.raises(RankingUnavailableError) as caught:
+            await generate_shortlist(job_id, ctx)
+
+    # The reason is surfaced verbatim into `jobs.shortlist_state_reason`, so it
+    # has to name the real cause rather than a generic "ranking failed" — an
+    # operator reading that column is the only person who will ever see it.
+    assert "neo4j went away mid-run" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_a_generic_stage3_error_is_not_mislabelled_as_an_llm_failure() -> None:
+    """Failing closed through the LLM path's machinery must not make the cause
+    *look* like an LLM outage.
+
+    ``shortlist_state`` has a CHECK constraint allowing only ``awaiting_llm``,
+    so the state label is shared — but ``shortlist_state_reason`` is free text
+    and is the only diagnostic an operator gets. It must distinguish "the model
+    was down" from "the database blinked", because those have different fixes.
+    """
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+
+    job_id = uuid4()
+    job = _job()
+    resume_id = uuid4()
+
+    with (
+        patch(
+            "src.pipeline.matching.orchestrator.load_job_view",
+            new_callable=AsyncMock,
+            return_value=job,
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator.stage1_coarse",
+            new_callable=AsyncMock,
+            return_value=[Stage1Candidate(resume_id=resume_id, vec_score=0.9)],
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator._stage2_per_candidate",
+            new_callable=AsyncMock,
+            return_value=_stage2_candidate(resume_id),
+        ),
+        patch(
+            "src.pipeline.matching.orchestrator.stage3_evidence",
+            new_callable=AsyncMock,
+            side_effect=ValueError("a coding error, not an outage"),
+        ),
+    ):
+        ctx = _ctx()
+        with pytest.raises(RankingUnavailableError) as caught:
+            await generate_shortlist(job_id, ctx)
+
+    reason = str(caught.value)
+    assert "ValueError" in reason, (
+        "the exception TYPE must reach the reason string — without it an "
+        "operator cannot tell a transient outage from a bug that will retry "
+        "to the ceiling and never succeed"
+    )
+    assert "a coding error, not an outage" in reason
