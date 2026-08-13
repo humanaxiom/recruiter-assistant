@@ -7,6 +7,26 @@
 
 ---
 
+## Status at a glance — updated 2026-08-13 (`origin/main` == `f9be22b`)
+
+| Item | State |
+|---|---|
+| **A0** Demo guardrails | **2 of 4 retired.** Guardrail 2 (accounts) and 4 (top-15 panel) are closed. 1 (curated JD) and 3 (explainer circulation) stand. |
+| **A1** Authorization | ✅ **FULLY CLOSED** — ADR-033 · **034** · **035**. All four original steps accounted for. |
+| **A2** Skill matching | 🔴 **P0, BLOCKED ON A HUMAN.** Needs the competency-scoring decision before any code. **The single biggest gap between this tool and being useful on real SFU postings.** |
+| **A3** The evals harness is blind | 🟡 **First move done** (ADR-038). Three blindnesses remain — do these before further scoring work. |
+| **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
+| **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
+| **A6** Before the pilot widens | 🔴 Untouched. Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health`, plus two smaller scoring defects. |
+| **A7** The pattern worth naming | **Twelve instances.** Two added this session, one of them *inside the gate itself*. |
+
+**Read this before picking anything up:** A2 is the highest-value item and cannot start without a human
+decision. A3 is the highest-value item that **can** start — the gate is what makes every other scoring
+change trustworthy, and this session found one instance of it asserting in prose while a violating change
+exited 0.
+
+---
+
 # PART A — HR demo and pilot readiness
 
 ## A0. Demo guardrails — today, no code required
@@ -342,7 +362,7 @@ Two smaller scoring defects worth folding into any A2/A4 work: `normalise_vector
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **eleven times**: an
+Across the external review and this session's gate work the same defect shape appears **twelve times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
