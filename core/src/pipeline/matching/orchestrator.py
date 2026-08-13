@@ -634,9 +634,33 @@ async def stage3_evidence(
                 # shortlist (asyncio.gather propagates it and cancels the
                 # siblings). ADR-021 §2 explicitly rejects partial shortlists.
                 raise
-            except Exception:  # noqa: BLE001 — one candidate must not sink all
+            except Exception:
+                # ROADMAP A4 M1 — a NON-LLM failure now fails closed too.
+                #
+                # This used to `results[candidate.resume_id] = None` under
+                # "one candidate must not sink all". The intent was kindness;
+                # the effect was a wrong ranking. `_evidence_completeness`
+                # maps None to 0.0, so the candidate silently lost the whole
+                # evidence (0.30) + motivation (0.10) share — 40% of
+                # `score_final` — and the row was PERSISTED UNMARKED. For a
+                # top-15 candidate that displaces real people inside the ranks
+                # a recruiter actually reads, and only when a transient
+                # Neo4j/Postgres hiccup happens to land on them: unreproducible
+                # by the time anyone notices, and indistinguishable from a
+                # candidate genuinely found lacking.
+                #
+                # It also destroyed the meaning of None. A None from a FAILURE
+                # looked exactly like a None from being past the `evidence_k`
+                # cliff. Failing closed here is what lets None mean only
+                # "nothing to evaluate" everywhere else.
+                #
+                # ADR-021 §2 already rejects partial shortlists; this makes the
+                # non-LLM path honour the posture ADR-029 claims for the whole
+                # stage. The realistic cause is transient, and the caller
+                # retries (`shortlist_job` -> arq.Retry), so the cost is a
+                # deferred re-run rather than a silently corrupted ranking.
                 log.exception("stage3.failed resume_id=%s", str(candidate.resume_id))
-                results[candidate.resume_id] = None
+                raise
 
     await asyncio.gather(*(_one(c) for c in top_k))
     return results
@@ -710,12 +734,29 @@ async def generate_shortlist(
     # Stage 3 — top-K evidence. Fails CLOSED for the same reason (see above):
     # a Mode A/B LLM failure re-raised out of ``stage3_evidence`` becomes a
     # ``RankingUnavailableError`` rather than a silently-degraded shortlist.
+    #
+    # ROADMAP A4 M1: so does a NON-LLM failure. Both arms produce the same
+    # typed error because ``shortlist_job`` already does the right thing with
+    # it — withhold, record a visible state, retry to a ceiling — and a
+    # transient Neo4j/Postgres blip is exactly what a retry fixes.
+    #
+    # The two arms differ only in the REASON string, and deliberately so:
+    # ``jobs.shortlist_state`` is CHECK-constrained to the single value
+    # ``awaiting_llm``, so the state label cannot distinguish these, and
+    # ``shortlist_state_reason`` is the only diagnostic an operator ever sees.
+    # A non-LLM cause is prefixed with its exception TYPE so "the model was
+    # down" is not confused with "the database blinked" or "this is a bug that
+    # will retry to the ceiling and never succeed" — three different fixes.
     t = dt.datetime.now(dt.UTC)
     top_k = candidates_s2[:evidence_k]
     try:
         evidence_by_id = await stage3_evidence(ctx, job, top_k, weights=weights)
     except (LLMOutputInvalidError, LLMUnavailableError) as exc:
         raise RankingUnavailableError(str(exc)) from exc
+    except Exception as exc:
+        raise RankingUnavailableError(
+            f"stage 3 evidence failed ({type(exc).__name__}): {exc}"
+        ) from exc
     timings["stage3_ms"] = _ms_since(t)
 
     # Stage 4 — combine + rank

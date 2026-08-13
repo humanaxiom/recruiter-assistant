@@ -220,14 +220,24 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   relation over tags. **Do not** enforce `expected_rank_band` wholesale; it goes red immediately on r18,
   which needs its own reconciliation.
 
-## A4. P0 · Two ranking defects that affect what HR will see
+## A4. P0 · Two ranking defects that affect what HR will see — M1 FIXED, M2 open
 
-**M1 — stage 3 fails OPEN on a non-LLM exception.** `orchestrator.py:637-639` catches bare `Exception`
-per candidate and sets `results[id] = None`. For a **top-15** candidate that silently zeroes 40% of
-`score_final` and persists it, unmarked. The systematic evidence cliff provably *cannot* reorder the
-displayed list; **this one displaces real candidates inside the visible top ranks**, only when a transient
-Neo4j/Postgres hiccup happens to hit them. It contradicts the fail-closed posture ADR-029 claims.
-**`ranking-evals` gated.**
+~~**M1 — stage 3 fails OPEN on a non-LLM exception.**~~ ✅ **FIXED 2026-08-13 —
+[ADR-037](adr/037-stage3-fails-closed-on-non-llm-error.md).** `orchestrator.py` caught bare `Exception`
+per candidate and set `results[id] = None`. For a **top-15** candidate that silently zeroed 40% of
+`score_final` and persisted it, unmarked. The systematic evidence cliff provably *cannot* reorder the
+displayed list; **this one displaced real candidates inside the visible top ranks**, only when a transient
+Neo4j/Postgres hiccup happened to hit them — unreproducible afterwards, and on screen indistinguishable
+from a candidate evaluated and found lacking.
+
+Now fails closed into the existing `RankingUnavailableError` path (withhold → visible state → bounded
+`arq.Retry`), which is what a transient cause needs anyway. Four functional lines, all in `except`
+branches, so **scoring math is byte-unchanged by construction** — a successful run enters none of them.
+The exception type is carried into `shortlist_state_reason` because `shortlist_state` is CHECK-constrained
+to `awaiting_llm` and cannot distinguish an outage from a database blip from a bug.
+
+**Side effect worth knowing:** `None` in `evidence_by_id` now has exactly one meaning — "nothing to
+evaluate" or "past the cliff" — never "we tried and it broke". The two were previously indistinguishable.
 
 **M2 — stage-1 recall is a global vector query.** `resume_summary_idx` (`neo4j_bootstrap.py:105`) is not
 job-partitioned; `orchestrator.py:303-320` applies `WHERE r.job_id` *after* the global index returns its top
