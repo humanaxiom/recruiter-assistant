@@ -299,9 +299,10 @@ refuses to start at all in a configuration that would leave the door open, and d
 now takes effect immediately rather than whenever their session happened to expire. Scoring and stored data
 were never affected by this; it was about who could reach the service.
 
-Two things still argue for keeping accounts to recruiters and administrators for now: one class of
-protection against a malicious link is fitted to 3 of our 12 browser actions rather than all of them, and an
-auditor still has nothing to look at (below).
+One thing still argues for keeping accounts to recruiters and administrators for now: an auditor still has
+nothing to look at (below). The protection against a malicious link — a page that tries to make your
+browser perform an action on this service while you are signed in — now covers all twelve of our
+state-changing screens, up from three.
 
 **Auditor accounts also need a screen that does not exist yet.** The role's restrictions are enforced, but
 the one thing an auditor needs — a view of the access record — has not been built, so producing that record

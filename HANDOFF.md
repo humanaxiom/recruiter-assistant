@@ -39,10 +39,27 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > practice. Whether machine readers are legitimate at all needs a human. Out of scope in #72: F3 (three
 > flaky reveal tests), F7 (dead `_EXISTS_SCOPED_SQL`).
 >
-> **What still gates widening the pilot:** CSRF covers **3 of 12** browser state-changing routes (A1 step
-> (iv) / Phase 1.3), and the **audit-log viewer does not exist** (Phase 1.4), so an auditor account still
-> cannot do its job. Those two are the remaining reasons demo guardrail 2 stands. A2 (skill-matching domain
-> mismatch) remains blocked on the competency-scoring product decision.
+> **CSRF — A1 step (iv) — is now CLOSED too ([ADR-035](docs/adr/035-csrf-on-every-browser-write-route.md),
+> branch `fix/csrf-all-browser-write-routes`).** FU-4/D4's anti-forgery control was wired to **3 of the
+> viewer's 12** POST routes. The nine unguarded ones included `POST /admin/users/<id>/role` (**privilege
+> escalation** — measured: a forged request returned **302**, i.e. it completed) and
+> `POST /jobs/<id>/blind-review` (**the same un-blinding flip the ADR-034 exploit used**, reached through a
+> real recruiter's session instead of through no session at all). Now a single fail-closed
+> `before_request` hook guards **all 12**, so route 13 is protected by default; the three FU-4/D4 routes
+> keep their strictly-stronger one-shot tokens as a **tested** exemption. `./scripts/verify.sh all` green:
+> **4338 unit @ 94.25%, 482 integration**.
+>
+> **With that, ALL FOUR original A1 steps are closed** — (i)/(ii) ADR-033, the fail-open ADR-034,
+> (iii) deliberately not built (dead code, ADR-033 §5), (iv) ADR-035.
+>
+> **What still gates widening the pilot: ONE thing.** The **audit-log viewer does not exist** (Phase 1.4),
+> so an auditor account cannot do its job — the last remaining reason demo guardrail 2 stands. A2
+> (skill-matching domain mismatch) remains blocked on the competency-scoring product decision.
+>
+> **Worth a human's eyes before the pilot:** ADR-035's guard is proven by the full suite including real
+> forged requests, but **nobody has clicked through the live UI** — the stack does not boot here without
+> the quickstart step above. The htmx-driven controls inherit their token from an `hx-headers` attribute on
+> `<body>`, which tests exercise through the header path rather than a real htmx runtime.
 >
 > **The pattern to keep in mind (ROADMAP A7, now at eleven instances).** #72's root cause was an invariant
 > in a docstring with nothing enforcing it — inside `validate_startup_auth_config`, *the function whose job
