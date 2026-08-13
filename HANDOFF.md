@@ -74,9 +74,27 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 >    (recorded, not shown) behind a fail-closed allowlist. Plausibly within an auditor's remit, plausibly a
 >    PIPEDA/FIPPA problem — ADR-036 §1 records it rather than answering it by implementation.
 >
-> **What's left on the pilot track:** A2 (skill-matching domain mismatch) remains blocked on the
-> competency-scoring product decision; A3–A6 unchanged. Natural small follow-on: an **export** for the
-> access record (an auditor can read it on screen but cannot hand it to anyone).
+> **ROADMAP A4 M1 is FIXED too — [ADR-037](docs/adr/037-stage3-fails-closed-on-non-llm-error.md), branch
+> `fix/stage3-fail-open-non-llm`.** `stage3_evidence` caught bare `Exception` per candidate and set
+> `results[id] = None`; `_evidence_completeness` maps `None` to `0.0`, so that candidate **silently lost
+> 40% of `score_final`** (evidence 0.30 + motivation 0.10) and the row was **persisted unmarked**. Unlike
+> the systematic evidence cliff — which provably cannot reorder the list — this hit **one candidate at
+> random inside the top 15**, displacing real people in the ranks a recruiter reads, only when a transient
+> Neo4j/Postgres hiccup landed on them. Unreproducible afterwards; on screen identical to a candidate
+> evaluated and found lacking. Now fails closed into the existing `RankingUnavailableError` → withhold →
+> visible state → bounded `arq.Retry` path, which is what a transient cause wants anyway. **Four
+> functional lines, all in `except` branches — scoring math byte-unchanged by construction.**
+> `./scripts/verify.sh all` green: **4381 unit @ 94.20%, 488 integration**.
+>
+> **What's left on the pilot track:** **A4 M2** (stage-1 recall is a **global** vector query —
+> `resume_summary_idx` is not job-partitioned, so past ~150 résumés corpus-wide a job's own candidates get
+> crowded out even when its pool is under `coarse_k`; raising `coarse_k` masks rather than fixes it. A
+> pilot loading several hundred résumés WILL hit this) and **A4's evidence cliff** (a past-the-cliff
+> candidate renders an affirmative `Evidence · 0%`; needs a persisted `evidence_evaluated` marker).
+> **A3** (the evals harness is blind in three ways) is worth doing before further scoring work, and its
+> recommended first move is cheap: add `[adversarial] must_rank_below_every_strong`, which passes today and
+> would have caught the reverted ADR-032 change. A2 remains blocked on the competency-scoring product
+> decision; A5–A6 unchanged. Small follow-on: an **export** for the access record.
 >
 > **Worth a human's eyes before the pilot:** ADR-035's guard is proven by the full suite including real
 > forged requests, but **nobody has clicked through the live UI** — the stack does not boot here without
