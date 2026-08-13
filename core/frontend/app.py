@@ -159,6 +159,70 @@ def _cas_auth_gate() -> Any:
     return redirect(login_url)
 
 
+#: Endpoints the CSRF hook below does NOT guard, because each already carries a
+#: STRICTLY STRONGER control of its own: FU-4/D4's per-résumé, per-action
+#: ONE-SHOT token (``csrf.verify_and_consume``), checked inside the view before
+#: any backend call. They are exempt rather than double-guarded — stacking the
+#: session-wide page token on top would mean rendering two tokens into one form
+#: for no security gain, and would weaken nothing but clarity.
+#:
+#: This mirrors ADR-033's exemption discipline (``PATCH /users/{id}/role`` is
+#: exempt from ``require_session_role`` because ``_require_admin_session`` is
+#: already narrower). Like that one, the set is ASSERTED by a test
+#: (``test_frontend_csrf_write_route_enforcement.py``), because an exemption
+#: list is the natural place for a control like this to rot: adding an endpoint
+#: here is a one-line change that silently disables the guard for it.
+#:
+#: An exemption is not a downgrade: the same test file proves a page token does
+#: NOT open a reveal, so these routes accept only their own one-shot tokens.
+_CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
+    {"resume_reveal", "resume_withdraw", "resume_reinstate"}
+)
+
+_STATE_CHANGING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+
+
+@app.before_request
+def _csrf_gate() -> Any:
+    """Phase 1.3 (ROADMAP A1 step (iv)) — anti-forgery on EVERY state-changing
+    browser route, enforced centrally and fail-closed.
+
+    **Why a hook and not a per-route decorator.** FU-4/D4 built a sound
+    anti-forgery control and wired it to three routes; the other nine POST
+    routes were never guarded, including ``admin_set_user_role`` (privilege
+    escalation: a forged auto-submit from an admin's browser promotes an
+    attacker's account) and ``blind_review`` (the same un-blinding flip the
+    ADR-034 exploit used, reached here through a real recruiter's session
+    instead of through no session at all). Opt-in protection is the ROADMAP A7
+    defect shape — an invariant with nothing enforcing it — so this is opt-OUT:
+    a new POST route is protected the moment it is added, and removing that
+    protection requires an explicit, tested entry in
+    :data:`_CSRF_HOOK_EXEMPT_ENDPOINTS`.
+
+    **ADR-034 made this more important, not less.** Every backend write now
+    demands a real CAS session, so the session cookie the browser attaches to a
+    forged cross-site request is exactly what makes the forgery succeed. Flask
+    still cannot tell a forged auto-submit from a genuine click on its own: the
+    browser sends no credential of its own to the Flask hop, and Flask attaches
+    its OWN server-held API key on the outbound leg (``api_client
+    .build_client``).
+
+    Rejects with 403 BEFORE the view runs, so a forgery can never reach the
+    backend and cause the effect it intends. Runs after ``_cas_auth_gate``
+    (registration order), so an unauthenticated browser is still redirected to
+    login rather than shown a bare 403.
+    """
+    if request.method not in _STATE_CHANGING_METHODS:
+        return None
+    if request.endpoint in _CSRF_HOOK_EXEMPT_ENDPOINTS:
+        return None
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_page_token(csrf.token_from_request(request)):
+        abort(403)
+    return None
+
+
 _WRITER_ROLES = ("admin", "recruiter")
 
 
@@ -191,6 +255,11 @@ def inject_current_user() -> dict[str, Any]:
         "is_writer": is_writer,
         "logout_url": f"{base}/auth/cas/logout",
         "login_url": f"{base}/auth/cas/login?next=/",
+        # Phase 1.3: minted here rather than per-route so EVERY render carries
+        # it — a template that grows a new form cannot forget to ask for one,
+        # and `issue_page_token` is idempotent, so this costs one session read
+        # on all but the first render of a session.
+        "csrf_page_token": csrf.issue_page_token(),
     }
 
 

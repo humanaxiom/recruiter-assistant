@@ -69,16 +69,20 @@ import pytest
 
 from frontend import api_client
 from frontend import app as frontend_app_module
-from frontend.app import app
 from src.settings import Settings
 
 _NOW = "2026-07-01T00:00:00Z"
 
 
 @pytest.fixture
-def client() -> Any:
-    app.config.update(TESTING=True)
-    return app.test_client()
+def client(csrf_client: Any) -> Any:
+    """The shared CSRF-carrying browser client (Phase 1.3).
+
+    These tests exercise the route's BUSINESS logic and predate the
+    anti-forgery guard; they now present a page token the way a real browser
+    does, rather than the guard being relaxed for them. See
+    ``tests/unit/conftest.py`` for why this is not autouse."""
+    return csrf_client
 
 
 def _user(

@@ -25,6 +25,7 @@
       <td>
         <form action="{{ url_for('admin_set_user_role', user_id=user.id) }}"
               method="post" style="display:flex; gap:8px; align-items:center">
+          <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
           <select class="input" name="role">
             {% for role in roles %}
             <option value="{{ role }}" {% if role == user.role %}selected{% endif %}>{{ role }}</option>
