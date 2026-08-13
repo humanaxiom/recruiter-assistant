@@ -75,22 +75,56 @@
     score of zero are different claims, and only the first one is true here.
     No contribution is shown for a sub-score that was never recorded.</p>
   {% endif %}
+  {# ROADMAP A4 (evidence cliff). Evidence extraction runs on the top
+     `evidence_k` candidates by structured score; anyone below that was never
+     submitted to it. Their stored evidence and motivation scores are real 0.0
+     floats, so without this they render as an affirmative 0% —
+     indistinguishable from a candidate whose evidence WAS examined and
+     supported nothing. On a page whose purpose is defending a ranking
+     decision, that is a positive false claim about a person. #}
+  {% set evidence_not_assessed = explanation.evidence_assessed is sameas false %}
+  {% if evidence_not_assessed %}
+  <p class="muted"><strong>Evidence was not assessed for this candidate.</strong>
+    Evidence extraction runs on the highest-scoring candidates by the structured
+    score; this candidate ranked below that cut-off, so no evidence was examined
+    for them either way. The evidence and motivation rows below therefore show
+    "not assessed" rather than 0% — nothing was measured and found lacking.
+    Their headline score is correspondingly lower than it would be had they been
+    assessed, so it is <strong>not comparable</strong> with the scores of
+    candidates above the cut-off.</p>
+  {% endif %}
 
   <table class="table contribution-table">
     <thead>
       <tr><th>Component</th><th>Weight</th><th>Score</th><th>Contribution</th></tr>
     </thead>
     <tbody>
-      {% for label, row in [
-          ('Structured', explanation.structured),
-          ('Evidence', explanation.evidence),
-          ('Motivation', explanation.motivation),
+      {# `from_stage3` marks the two rows produced by evidence extraction. A
+         candidate below the cut-off has neither measured; one above it may
+         genuinely score 0 on either (motivation is 0.0 for every candidate
+         with no cover letter), and that real zero must keep rendering as 0. #}
+      {% for label, row, from_stage3 in [
+          ('Structured', explanation.structured, false),
+          ('Evidence', explanation.evidence, true),
+          ('Motivation', explanation.motivation, true),
       ] %}
       <tr>
         <td>{{ label }}</td>
         <td>{{ pct(row.weight) }}</td>
-        <td>{{ score_cell(row.score) }}</td>
-        <td>{{ pct(row.contribution) }}</td>
+        <td>
+          {%- if from_stage3 and evidence_not_assessed -%}
+          not assessed
+          {%- else -%}
+          {{ score_cell(row.score) }}
+          {%- endif -%}
+        </td>
+        <td>
+          {%- if from_stage3 and evidence_not_assessed -%}
+          —
+          {%- else -%}
+          {{ pct(row.contribution) }}
+          {%- endif -%}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

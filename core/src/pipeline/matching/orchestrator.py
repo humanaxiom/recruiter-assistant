@@ -202,6 +202,19 @@ class ShortlistResultEntry:
     # prevented it. ``verify_evidence`` and ``stage4_combine`` are generic, so
     # ingest-ness survives the pipeline and this costs no cast.
     evidence: EvidenceObjectIngest | None
+    # ROADMAP A4 (evidence cliff): did stage 3 actually run for this candidate?
+    # ``False`` means "past the ``evidence_k`` cliff — never evaluated", which
+    # the panel must show as "not assessed" rather than as a measured 0%.
+    #
+    # It answers ONLY "was this candidate submitted to stage 3". A candidate
+    # stage 3 ran on and found nothing for is ``True`` with a score of 0.0 — a
+    # real, defensible measurement — and must keep rendering as 0. Conflating
+    # the two is the mirror-image mutant ADR-031 records, where the fix for
+    # "don't show a fabricated 0" started hiding genuine zeros.
+    #
+    # Defaulted so existing construction sites stay valid;
+    # ``generate_shortlist`` sets it explicitly from ``top_k`` membership.
+    evidence_evaluated: bool = False
 
 
 @dataclass(frozen=True)
@@ -810,6 +823,25 @@ async def generate_shortlist(
     combined = stage4_combine(combine_in, weights)
     timings["stage4_ms"] = _ms_since(t)
 
+    # ROADMAP A4 (evidence cliff) — record WHICH candidates stage 3 actually
+    # saw, at the one point in the system where that fact is known.
+    #
+    # `evidence_k` bounds stage 3, but ALL of `candidates_s2` goes to
+    # `stage4_combine`, so a candidate ranked past the cliff gets 0.0 evidence
+    # and 0.0 motivation — 40% of `score_final` — from COMPUTE PLACEMENT rather
+    # than merit. Rank order is provably unaffected (0.6*s_i + (>=0) >=
+    # 0.6*s_j), so this is a disclosure defect, not a ranking one: the harm is
+    # that `stage4_combine` emits a real 0.0 float, which the "Why this rank?"
+    # panel then renders as an affirmative `Evidence 0%` — indistinguishable
+    # from a candidate whose evidence WAS evaluated and supported nothing.
+    #
+    # Taken from `top_k` membership rather than re-derived downstream from
+    # `rank` or from `requirements == []`. Both of those infer pipeline state
+    # from a display artifact, which ROADMAP A4 names as the wrong fix: a
+    # candidate evaluated against a JD with no requirements also has an empty
+    # list, and `rank` is post-combine so it does not identify the pre-combine
+    # slice stage 3 was handed.
+    evaluated_ids = {c.resume_id for c in top_k}
     entries = [
         ShortlistResultEntry(
             resume_id=e.resume_id,
@@ -819,6 +851,7 @@ async def generate_shortlist(
             score_evidence=e.score_evidence,
             breakdown=e.breakdown,
             evidence=e.evidence,
+            evidence_evaluated=e.resume_id in evaluated_ids,
         )
         for e in combined
     ]
