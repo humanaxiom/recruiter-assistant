@@ -1,4 +1,14 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
+
+# ⚠ THIS FILE MUST KEEP ITS UTF-8 BOM. It contains non-ASCII characters (em
+# dashes, ▶, ✔, box rules). Windows PowerShell 5.1 — which the #Requires above
+# declares support for — reads a BOM-less .ps1 as the legacy ANSI codepage, so
+# without the BOM every em dash decodes to mojibake and this script dies in a
+# cascade of ParserError BEFORE RUNNING A SINGLE LINE. Worse, powershell.exe
+# still exits 0, so the failure looks like a successful boot.
+# If your editor offers to save as "UTF-8" vs "UTF-8 with BOM", choose WITH.
+# Enforced by core/tests/unit/test_powershell_scripts_are_encoding_safe.py.
+
 <#
 .SYNOPSIS
     One-command quickstart: boot the whole recruiter-assistant stack in Docker,
