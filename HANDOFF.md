@@ -102,10 +102,24 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > still unreferenced with **r18 violating its own declared band** (`strong`, band `{1,9}`, actual rank 11),
 > and the **inert `skill_missing_must` pair** against `weights.skill = 0`.
 >
-> **What's left on the pilot track:** **A4 M2** (stage-1 recall is a **global** vector query —
-> `resume_summary_idx` is not job-partitioned, so past ~150 résumés corpus-wide a job's own candidates get
-> crowded out even when its pool is under `coarse_k`; raising `coarse_k` masks rather than fixes it. A
-> pilot loading several hundred résumés WILL hit this) and **A4's evidence cliff** (a past-the-cliff
+> **A4 M2 is FIXED too — [ADR-039](docs/adr/039-stage1-recall-is-job-scoped.md), branch
+> `fix/stage1-recall-job-scoped`. With it, BOTH of A4's named ranking defects are closed.** Stage-1 recall
+> was a **global** vector query: `resume_summary_idx` is not job-partitioned and *cannot* be
+> (`db.index.vector.queryNodes` takes no pre-filter), so `WHERE r.job_id` ran **after** the global top-150
+> had been chosen from the whole corpus. **Measured against a real Neo4j and worse than the roadmap
+> predicted: a job with 5 applicants — a pool one tenth of `coarse_k` — recalled ZERO of them once 300
+> résumés belonging to another job existed.** Not crowding; total starvation, i.e. an empty shortlist. Now
+> scores the job's own pool directly (exact cosine over an indexed `MATCH (r:Resume {job_id})`), so a
+> shortlist no longer depends on what other requisitions are loaded. `./scripts/verify.sh all` green:
+> **4387 unit @ 94.20%, 493 integration**.
+>
+> **Two things that generalise from it.** (1) The `[0,1]` score normalisation had to be verified against a
+> real server — a raw cosine would have rescaled every `vec_score` into `score_final` with **nothing
+> failing**. (2) A test stub keyed on `"queryNodes" in query` silently returned no candidates when that
+> string vanished, breaking **four fail-closed tests two files away**; it is now keyed on `vec_score`, the
+> column stage 1 must return. Stubs keyed on implementation details fail loudly only if you are lucky.
+>
+> **What's left on the pilot track:** **A4's evidence cliff** (a past-the-cliff
 > candidate renders an affirmative `Evidence · 0%`; needs a persisted `evidence_evaluated` marker).
 > **A3** (the evals harness is blind in three ways) is worth doing before further scoring work, and its
 > recommended first move is cheap: add `[adversarial] must_rank_below_every_strong`, which passes today and
