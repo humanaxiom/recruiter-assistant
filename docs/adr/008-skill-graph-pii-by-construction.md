@@ -220,8 +220,14 @@ ships. It is recorded here plainly, not softened.
 
 11. An empty salt is fail-loud in three places, but a **weak** salt is accepted silently — no
     entropy check.
-12. Categories are curated-only: a hashed non-vocab skill gets `categories = []` and contributes
-    **nothing** to stage-2 ontology partial credit, by construction.
+12. Categories are curated-only: a hashed non-vocab skill contributes **nothing** to stage-2 ontology
+    partial credit, by construction — and contributes nothing for a slightly different reason than this
+    residual originally said. `categories_for()` returns `[]` for it, but `ensure_categories`'s `if cats:`
+    guard means **no Cypher runs at all** when the list is empty — the node's `categories` property is
+    never *set* to `[]`, it stays absent entirely (corrected 2026-08-14, ROADMAP A2/ADR-042). The
+    consequence for stage 2 is identical either way (`reqSkill.categories IS NOT NULL` is false for an
+    absent property exactly as it would be for `[]`), so nothing scoring-relevant was wrong before this
+    correction — only the property's stored state was misdescribed.
 13. A candidate whose name collides with a vocabulary term (`julia`, `hudson`, `kafka`, `django`,
     `cassandra`) gets a **cleartext** `canonical_key`. No `display_name` and no embedding are
     written from the résumé side, so the disclosure is ambiguous (the node is shared with everyone

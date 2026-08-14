@@ -7,14 +7,14 @@
 
 ---
 
-## Status at a glance — updated 2026-08-13 (last feature merge `7257c20`, PR #83)
+## Status at a glance — updated 2026-08-14 (last feature merge `7257c20`, PR #83; A2 below is on `feat/a2-vocabulary-families`, not yet merged)
 
 | Item | State |
 |---|---|
-| **A0** Demo guardrails | **2 of 4 retired.** Guardrail 2 (accounts) and 4 (top-15 panel) are closed. 1 (curated JD) and 3 (explainer circulation) stand. |
+| **A0** Demo guardrails | **2 of 4 retired.** Guardrail 2 (accounts) and 4 (top-15 panel) are closed. 1 (curated JD) is **substantially weakened, not retired** — see A0 item 1. 3 (explainer circulation) stands. |
 | **A1** Authorization | ✅ **FULLY CLOSED** — ADR-033 · **034** · **035**. All four original steps accounted for. |
-| **A2** Skill matching | 🟢 **P0, UNBLOCKED 2026-08-14 — take this first.** The vocabulary growth (15.6% → 54.8% coverage) is additive and does **not** need the competency-scoring decision, which is deferred. **The single biggest gap between this tool and being useful on real SFU postings.** |
-| **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **One blindness left** — the ADR-008 hashing gap, which re-bands the corpus. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
+| **A2** Skill matching | ✅ **Vocabulary merge SHIPPED — [ADR-042](adr/042-skill-vocabulary-domain-families.md).** 234 derived terms / 13 families merged into both vocabulary files; coverage of real SFU qualification statements 15.6% → 54.8%. **Competency-scoring model remains DEFERRED** (owner: corpus owner + HR, with pilot data) — deferring it did not block this merge; see ADR-042 §2. |
+| **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **Structurally blind to the A2 vocabulary merge** — the corpus's 19 skill canonicals intersect the 225 newly-categorised ones at ∅; a green run on this branch is byte-identical to `main` and carries no information about A2's correctness. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
@@ -34,8 +34,10 @@ against 26 `feat`/`fix`** — and twelve ADRs, on a product **nobody has yet use
 
 **Priority order now:**
 
-1. **A2 vocabulary — UNBLOCKED, take it first.** The competency-scoring model is deferred, deliberately,
-   with the reasoning recorded in A2 below.
+1. **A2 vocabulary merge shipped 2026-08-14 ([ADR-042](adr/042-skill-vocabulary-domain-families.md)).** The
+   competency-scoring model stays deferred, deliberately, with the reasoning recorded in A2 below. The A3
+   evals corpus cannot see this merge at all (its own entry below) — that is the next dependency, not more
+   vocabulary work.
 2. **Anything that makes the pilot actually run.** The four human-only actions still gate this and no agent
    can do them.
 3. Everything else, and **only if it changes what the product can do**. Hardening a feature nobody has run
@@ -53,12 +55,15 @@ now measured — but it is a gate on work, not work that ships value, and it sho
 
 Four things that make the difference between a demo that lands and one that discredits the product:
 
-1. **Use a curated-vocabulary job description** (the shape of `core/tests/evals/fixtures/jd_backend_data_engineer.json`).
-   **Do not demo against a real SFU posting.** See A2 — skill scores collapse toward zero and are then halved,
-   and the chips render a wall of red *"— missing · must-have"* for skills the candidates plainly have.
-   **Say the constraint out loud:** *"this JD is written in the system's current skill vocabulary; extending
-   that vocabulary to real postings is open work."* That is a credible engineering statement. A screen of
-   wrong red badges is not.
+1. ~~**Use a curated-vocabulary job description... do not demo against a real SFU posting.**~~ **WEAKENED,
+   NOT RETIRED, 2026-08-14 — [ADR-042](adr/042-skill-vocabulary-domain-families.md).** Vocabulary coverage of
+   real SFU qualification statements went 15.6% → 54.8%, so a real posting is far more viable than it was:
+   roughly half of what a real posting asks for is now recognised, not one statement in six. **A real posting
+   is still not a safe unscripted demo.** 45.2% remains a genuine long tail (the Phase 3.3 classifier's job,
+   not yet built), so an unscripted real posting can still surface a wall of red *"— missing · must-have"*
+   chips for skills the candidate plainly has. If demoing against a real posting, pre-check its extracted
+   requirements against the shipped vocabulary first, or say the constraint out loud: *"about half of a real
+   posting's requirements are recognised today; the rest needs the classifier that's still open work."*
 2. ~~**Sign in as admin or recruiter only.**~~ ✅ **RETIRED 2026-08-13 — all four accounts can now be
    issued.** Every reason this guardrail existed has been closed, in order, and each is recorded rather
    than assumed:
@@ -191,73 +196,42 @@ sessionless write. **(iii) needed a human decision** on whether any legitimate n
 
 </details>
 
-## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage
+## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage — ✅ VOCABULARY MERGE SHIPPED (ADR-042)
 
-**Highest product-value finding — this decides whether a pilot produces meaningful output at all.**
+**Reframe, confirmed by measurement:** not "the vocabulary is too small" but **"the ontology was for the
+wrong domain."** Measured from **1,802 real SFU canonical JDs** (9,176 qualification statements, 1,222
+distinct titles, 449 departments): the shipped 72-canonical, software-engineering vocabulary recognised
+**15.6%** of real qualification statements. `docs/process/skill-vocabulary/derived-families.yaml` (13
+families, 234 corpus-derived terms — finance, student_affairs, academic_programs, research_admin,
+human_resources, communications, governance_policy, leadership_management, analysis_reporting,
+equity_indigenous, facilities_operations, interpersonal_core, health_wellness) had existed unmerged since
+PR #69. **Merged 2026-08-14 — [ADR-042](adr/042-skill-vocabulary-domain-families.md).**
+`categories.yaml` 19 → 32 families, `aliases.yaml` 72 → 306 canonicals, coverage **15.6% → 54.8%** (+39.2
+points). Remaining gap: **45.2%**, a genuine long tail (MRI/MEG methods, microfabrication, study-permit
+requirements, other role-specific knowledge) that needs the Phase 3.3 projection-time classifier, not more
+curation. Full mechanism (why an out-of-vocabulary skill scores `0.0`, the cap regression the merge
+triggered, why `rest api design` must never get a family) is in ADR-042 — not repeated here.
 
-**Reframe:** Not "the vocabulary is too small" but **"the ontology is for the wrong domain."**
+**Three corrections to anchors this section previously cited, found while writing ADR-042 (a fourth,
+ADR-008's own residual #12, is corrected in that ADR directly):**
+- Stage 2's family-credit arm (`reqSkill.categories IS NOT NULL`) is at **`orchestrator.py:428`**, not
+  `:377`.
+- The NICE_TO_HAVE-written-never-read fact (blocker #5) is documented at **`orchestrator.py:28-29`**, not
+  `:426`.
+- `hashed_total=288` (measured pre-merge) is now **`hashed_total=318`** against the current graph state —
+  re-measure again before citing either number as current.
 
-Measured from **1,802 real SFU canonical JDs** (9,176 qualification statements, 1,222 distinct titles,
-449 departments):
+**Product decision — still DEFERRED, owner: corpus owner + HR, with pilot data.** Many of the merged terms
+are **competencies** (communication, leadership, problem-solving), not named tools, and the scorer's
+`years × recency × ontology_weight` model remains semantically odd for "three years of interpersonal
+skills, last used 2024." This was not answered by the merge — it turned out not to need to be, because
+adding a term is strictly better than the pre-merge status quo under every option on the table (score
+competencies on a different model; exclude them from must-have penalties; decide per-competency as
+curated) — see ADR-042 §2 for the full reasoning. **Still needs a real decision before the model is trusted
+on postings that lean heavily on competencies, which at SFU is most of them.**
 
-| Measure | Value |
-|---|---|
-| Shipped vocabulary | 231 terms (software-engineering ontology: javascript, react, docker, kafka…) |
-| Vocabulary coverage | **15.6%** of real qualification statements |
-| **New families derived from corpus** | 13 families, 234 terms (finance, student_affairs, academic_programs, research_admin, human_resources, communications, governance_policy, leadership_management, analysis_reporting, equity_indigenous, facilities_operations, interpersonal_core, health_wellness) |
-| **Coverage with new families** | **54.8%** — a +39.2 point gain |
-| Remaining gap | 45.2% (genuine long tail: MRI/MEG methods, microfabrication, study-permit requirements, role-specific knowledge) |
-
-**Mechanism:** Real SFU postings are overwhelmingly administrative, academic, professional-services work.
-The shipped vocabulary is a software-engineering ontology. This is a **domain mismatch**, not a quantity
-problem: new vocabulary work (highest value per hour) lifts coverage from 15.6% to 54.8%; the remaining
-45% is a long tail that will need the Phase 3.3 projection-time classifier regardless.
-
-**Why an out-of-vocabulary skill scores 0.0 rather than something partial** — the root cause the classifier
-in Phase 3.3 has to address, so do not lose it: ADR-008 hashes any skill outside the curated vocabulary.
-`ensure_categories` (`skills_graph.py:353-369`) stamps categories *only* from `categories.yaml`, and for a
-hashed key `categories_for()` returns `[]`, so the `if cats:` guard means **no Cypher runs at all** — the
-property is never even set to `[]`, it stays absent. Stage 2's family-credit arm requires
-`reqSkill.categories IS NOT NULL` (`orchestrator.py:377`), so it is unreachable for a hashed node.
-Measured across the live graph: `hashed_total=288, with_categories=0`. A non-vocabulary requirement
-therefore scores `1.0` on an identical normalised string and `0.0` otherwise — **no alias resolution, no
-family partial credit, nothing in between.** The same dead arm applies to four *cleartext* canonicals with
-no family (`c++`, `hudson`, `julia`, `rest api design`).
-
-**The hash is one-way, which decides the classifier's design:** categories cannot be backfilled later over
-the graph, because by then only `h:<hex>` remains. Classification must happen at projection time, where the
-cleartext `raw_name` is still in hand (`tasks.py:242`/`:293`, `resume_tasks.py:1122`).
-
-It compounds: **every `REQUIRES` edge is written `must=True`** (`tasks.py:264`), so the ×0.5
-`must_have_miss_penalty` (`stages.py:185-194`) fires for nearly every candidate. Phase 3.1 addresses this by
-scoring the `NICE_TO_HAVE` edges that are already written and never read (`orchestrator.py:426`).
-
-**Product decision — DEFERRED 2026-08-14, and it no longer gates the vocabulary work.** Many of the
-derived terms are **competencies** (communication, leadership, problem-solving), not named tools. The
-current scorer is `years × recency × ontology_weight`, and "three years of interpersonal skills, last used
-2024" is not meaningful on that model. **Three options:**
-1. Score competencies on a different model (proficiency level, recency only, binary present/absent).
-2. Exclude competencies from must-have penalties entirely.
-3. Make that decision per-competency as new ones are curated.
-
-> **Why this stopped being a blocker.** For a week this was treated as gating all of A2. It does not. The
-> vocabulary growth is **additive and scoring-math-neutral** — this section's own Plan says so. And adding
-> a competency term is **strictly better than the status quo under every option above**: today an
-> out-of-vocabulary competency is hashed by ADR-008, gets no alias resolution and no family partial credit,
-> scores `0.0` unless the résumé happens to contain a byte-identical normalised string, **and** trips the
-> ×0.5 `must_have_miss_penalty` because every `REQUIRES` edge is written `must=True`. After the addition,
-> candidates who genuinely have the competency match and stop being penalised. There is no configuration in
-> which the current behaviour is preferable.
->
-> Scoring "three years of communication" on `years × recency` remains semantically odd, and option 1 or 2
-> should still be chosen — but as a **refinement, with real pilot data behind it**, rather than as a
-> precondition that freezes the highest-value P0. Decision taken 2026-08-14: ship the vocabulary, defer the
-> model.
-
-**Plan:** Grow `aliases.yaml`/`categories.yaml` with the derived families (additive, no scoring-math
-change). Once competency handling is decided, the Phase 3.3 projection-time classifier will handle the
-45.2% long tail. The `must=True` edge question (ADR-009 residual) is an **HR policy decision**, not an
-engineering one, and remains separate from this vocabulary work.
+**Not addressed by this merge, unchanged:** the `must=True` edge question (ADR-009 residual) is an HR
+policy decision, not engineering, and stays separate from the vocabulary work.
 
 ## A3. P0 · The evals harness cannot see what it grades
 
@@ -318,6 +292,14 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   still deliberately NOT enforced wholesale** — it goes red immediately on r18, which needs its own
   reconciliation.
 
+  🆕 **Measured drift in the threshold's own comment, 2026-08-14.** `thresholds.toml`'s prose for
+  `must_rank_below_every_strong` states "~0.19 of margin either way." That figure is real but is a
+  **different quantity**: it measures r09's margin to the k=5 5th-place score cutoff. The margin the
+  gate actually enforces — r09 (the bait) vs r18 (the worst-scoring `strong`-tagged fixture, per the r18
+  band violation noted above) — is **0.0237** (r09 `0.592398` vs r18 `0.616104`). Recorded here, not
+  edited into `thresholds.toml`, since that file's number is not wrong for what it is measuring, only
+  mislabelled relative to what a reader would assume it means next to this gate's name.
+
 - ✅ **CLOSED 2026-08-13 — the shipped `must_have_miss_penalty` was ungated.** Not on A3's original list;
   found by mutating the corpus while investigating the above. Setting
   `DEFAULT_WEIGHTS.must_have_miss_penalty = 1.0` — switching the penalty **off**, so a candidate missing a
@@ -345,9 +327,23 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   A6 branch: new fixtures would have broken the byte-identity comparison that branch's non-regression proof
   rested on. Corpus owner's pickup.
 
+- 🆕 **Measured 2026-08-14 — the corpus is structurally blind to the entire A2 vocabulary merge
+  ([ADR-042](adr/042-skill-vocabulary-domain-families.md)).** The eval corpus's fixtures name 19 distinct
+  skill canonicals, all software/tech, all pre-existing. The 225 canonicals A2 newly categorised (234
+  derived terms minus the 9 that already shipped) intersect the corpus's 19 at **∅**. Family credit
+  additionally requires intersecting the JD fixture's fixed skill-family set (`{backend, data, databases,
+  devops}`), which gained zero members from the merge. Consequence, stated in the gate's own words: running
+  `./scripts/verify.sh all`/`ranking-evals` against this branch produces a metric dump **byte-identical to
+  `main`**, and that green **carries no information about A2's correctness** — it proves the merge did not
+  break the pre-existing 19-canonical surface, nothing about whether the new 225 score sensibly. The fix is
+  a corpus addition, not a code change: a JD fixture variant naming at least one derived-family skill, and a
+  candidate fixture whose credit comes only through a derived family (not an exact match). **Corpus owner's
+  call** — new fixtures re-band the corpus, same caution as every other corpus-owner item above.
+
 **Still open in A3:** the ADR-008 hashing blindness (first bullet, and the largest — it re-bands the corpus
 so every margin must be re-measured); **`expected_rank_band` enforcement, now blocked on the three-way
-contract decision above rather than on r18 alone**; and the seniority/vector control gap immediately above.
+contract decision above rather than on r18 alone**; the seniority/vector control gap; and the **new A2
+vocabulary blindness immediately above** — four separate blind spots now, not one.
 
 ## A4. P0 · Two ranking defects that affect what HR will see — ✅ FULLY CLOSED (M1 ADR-037 · M2 ADR-039 · evidence cliff ADR-040)
 
