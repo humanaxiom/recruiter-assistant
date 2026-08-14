@@ -76,6 +76,56 @@ contract in `.claude/agents/*.md` over re-describing it each time.
 
 When gates fail, read the failure output, fix ONLY what failed, re-run `make gates`. Max 5 self-iterations; if still red, STOP and present the failure report to the human with your analysis — never silently weaken a test or lower the coverage bar to get green.
 
+## Economy — the rules that stop this repo gold-plating itself
+
+This repo's rigour is real and worth keeping. Its failure mode is the opposite of
+sloppiness: **85 commits after the v1 scope was complete, 35 of them `docs`/`chore`
+against 26 `feat`/`fix`, twelve ADRs, and the highest-value P0 sat blocked for a
+week while adjacent work was polished.** These four rules exist to prevent that.
+
+### 1. Finding disposition — not every finding is a fix
+
+When a gate or review returns findings, dispose of them by severity. Do not fix
+everything because everything is fixable:
+
+| Severity | Action |
+|---|---|
+| critical / major | **Fix on this branch.** Non-negotiable. |
+| minor | Fix **only if** cheap *and* on the branch's existing theme. Otherwise record. |
+| nit | **Record, do not fix** — unless it is factually wrong in a document a human will act on. |
+
+Recording means one line in `docs/ROADMAP.md` under the owning item, with a
+file:line anchor. A recorded finding is a *result*, not a failure to finish.
+
+### 2. Mutation probing is bounded to one pass
+
+Probing the invariants your own branch introduces is required (see the A7 pattern
+in `docs/ROADMAP.md`) and it is cheap: mutate each new invariant, run the unit
+suite per mutant, revert. Then re-run survivors with **your own new tests
+deselected** — that step is what distinguishes "I added tests" from "I closed a
+gap". **One pass.** Do not probe the guards you just added to close the last
+probe's findings; that recursion has no natural exit and every fix creates new
+invariants. Findings outside the branch's scope get recorded, never fixed inline.
+
+### 3. "Blocked on a human" is not a terminal state
+
+If the highest-value item is blocked on a decision, **the block is the work**.
+Before setting it down:
+
+- **Check the blocker actually gates the whole item.** It usually gates one part.
+  A2 sat blocked for a week on a competency-*scoring* decision while the
+  vocabulary work it gated was additive, corpus-neutral, and strictly better than
+  the status quo. Nobody checked; every session re-noted the block and moved on.
+- **Produce a decision memo**: the options, a **recommended default**, and what
+  changes if the human picks otherwise. A P0 must never be handed to the next
+  session as a bare "blocked" — that costs a week per hop.
+
+### 4. Prefer product capability when both are available
+
+If an item that changes what the product can *do* and an item that hardens
+something already correct are both unblocked, take the capability item. Hardening
+work on a feature nobody has run yet is speculative by definition.
+
 ## Code rules
 
 - Full type hints; `mypy --strict` clean; no unjustified `# type: ignore`
