@@ -311,9 +311,14 @@ def vector_pool_is_degenerate(scores: list[float]) -> bool:
     ``normalise_vector_scores`` collapses to ``1.0`` for everyone below. This
     predicate lets the write path MARK that no genuine comparison happened,
     without changing ``normalise_vector_scores``'s own return value at all.
+
+    An EMPTY pool (F4, remediation) has no spread at all either, so it reads
+    as degenerate too -- ``False`` here would be the affirmative "a real
+    comparison happened" claim ADR-041 argues against, for a pool with
+    nothing in it to compare.
     """
     if not scores:
-        return False
+        return True
     lo, hi = min(scores), max(scores)
     return (hi - lo) < _DEGENERATE_POOL_EPS
 
@@ -323,12 +328,20 @@ def normalise_vector_scores(scores: list[float]) -> list[float]:
 
     With a degenerate pool (all identical), returns 1.0 for every entry rather
     than dividing by zero.
+
+    F3 (remediation): delegates the degeneracy check to
+    ``vector_pool_is_degenerate`` so exactly one ``<`` comparison against
+    ``_DEGENERATE_POOL_EPS`` exists in the codebase -- two independently
+    written comparisons is the drift risk the shared constant was meant to
+    remove. The empty-pool short-circuit stays first so this function's
+    return type (``[]``, not ``[1.0] * 0`` -- observably identical, but kept
+    explicit) and behaviour are unchanged.
     """
     if not scores:
         return []
-    lo, hi = min(scores), max(scores)
-    if hi - lo < _DEGENERATE_POOL_EPS:
+    if vector_pool_is_degenerate(scores):
         return [1.0] * len(scores)
+    lo, hi = min(scores), max(scores)
     return [(s - lo) / (hi - lo) for s in scores]
 
 

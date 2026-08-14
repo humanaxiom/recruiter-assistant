@@ -466,7 +466,7 @@ async def _stage2_per_candidate(
     # the WHOLE pool (`vector_pool_is_degenerate` on the pool's raw
     # vec_scores, computed once outside this function), threaded through
     # unchanged onto the breakdown, never re-derived from `vec_normalised`
-    # here. Both real call sites (forward `shortlist_job`, reverse
+    # here. Both real call sites (forward `generate_shortlist`, reverse
     # `match_resume_to_jobs`) always pass it explicitly.
     #
     # The default is `None`, NOT `True`, and that is load-bearing: a caller
@@ -603,7 +603,15 @@ def _most_recent_title(parsed: dict[str, Any]) -> str | None:
     ordered = current + [r for r in roles if r not in current]
     for role in ordered:
         title = role.get("title")
-        if title:
+        # ROADMAP A6 remediation (F5): "readable" means non-blank after
+        # stripping whitespace, not merely truthy -- a whitespace-only title
+        # (`"   "`, `"\t\n"`) is truthy in Python but carries no content, so
+        # a bare `if title:` treated it as readable and blocked the
+        # fallback. The returned value itself stays UNSTRIPPED (`str(title)`,
+        # not `str(title).strip()`) for every title that is already
+        # non-blank -- only the readability check strips, so the string fed
+        # to the embedder is unchanged for every ordinary candidate.
+        if title and str(title).strip():
             return str(title)
     return None
 
