@@ -2,7 +2,118 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-13: PILOT BLOCKERS A1 AND A4 ARE CLOSED; GUARDRAILS 2 AND 4 RETIRED
+### ⚠️⚠️ READ FIRST — 2026-08-14: A6's TWO SCORING DEFECTS ARE DISCLOSED; A7 IS NOW SIXTEEN
+
+> **Last feature merge: PR #85, squash `14ba59f`, ADR-041.** Docs-only commits (including this banner's
+> own) sit on top, so `origin/main` is at or *after* `14ba59f` rather than equal to it — stated that way
+> deliberately, since a banner cannot name the sha of the commit that introduces it (the mistake #82 fixed).
+> **Always `git fetch` and check `gh pr list` before trusting any of this.**
+>
+> Supersedes the 2026-08-13 banner below (kept as history). **The four human-only actions in that banner
+> are ALL still outstanding** — re-run `quickstart.ps1` with `pwsh`, click through the live UI, and the two
+> recorded decisions (auditor access to withdrawal reasons; whether a bare service key gets unscoped reads).
+> Nothing this session touched any of them.
+
+#### What shipped: PR #85 — ROADMAP A6's two smaller scoring defects
+
+Two ranking sub-scores fell back to a number byte-identical to a real measurement — [ADR-040](docs/adr/040-evidence-cliff-disclosure.md)'s
+evidence cliff one layer down:
+
+- `normalise_vector_scores` returned `1.0` for **everyone** on a degenerate pool — every single-candidate
+  pool included, which **reverse match hits routinely**. The panel showed `vector | 10% | 100% | 10%`: a
+  perfect semantic match, when no comparison was possible at all.
+- `seniority = 0.0` whenever no readable job title was found — indistinguishable from a genuinely poor
+  title match, on 15% of the score.
+
+Fixed the way ADR-040 fixed the cliff: **marked on the write path, disclosed on the read path, arithmetic
+left alone.** Both directions — reverse match shares `_stage2_per_candidate`, and ADR-031's forward-only
+boundary is about the display panel, not scoring.
+
+**The defects are visible, not gone.** A candidate with no readable title still loses the full 15%. The eval
+corpus provably cannot exercise either branch, so a value change would have been unverifiable by the gate —
+the failure mode that got ADR-032 reverted. Renormalising unmeasurable dimensions is the deeper fix and is
+an owner-assigned residual. One sanctioned value change: `_most_recent_title` now falls back to the first
+*titled* role and treats a whitespace-only title as unreadable; corpus-neutral, verified fixture-by-fixture
+three ways.
+
+**Gates: reviewer APPROVE (2 rounds, 27 mutants) · security PASS (0 crit/high/med) · ranking-evals PASS with
+the metric dump byte-identical to `main` (sha256 `f883529a…`).** `./scripts/verify.sh all` green, exit code
+captured directly: **4466 unit @ 94.41%, 499 integration.**
+
+#### 🔴 The finding worth carrying forward: A7 is now SIXTEEN, and three came from this one branch
+
+All three sat **inside code written to prevent A7**, and they escalate:
+
+| # | The unenforced invariant | How it survived |
+|---|---|---|
+| 14 | "marker set from the branch taken, never re-derived from the score" | Every test paired `measured=True` with a `1.0` score and `measured=False` with `0.0`, so the two were never separable |
+| 15 | a parameter default that could not express "unknown" | No test called the function without the kwarg |
+| **16** | **"both real call sites always pass it explicitly"** | Only the **reverse** site was pinned — the direction with *no rendering surface at all*. The visible one was wide open. |
+
+**Instance 16 is the one to internalise.** 14 and 15 were found by a self-run mutation probe. 16 was found
+by the merge-blocking reviewer *afterwards*, because the author had probed the invariants **he had thought
+to write down**. A green suite plus an author actively hunting this exact defect class was still not
+sufficient. **Keep the adversarial reviewer merge-blocking; a clean self-probe is not equivalent.**
+
+The technique is cheap and worth repeating every branch: after green and before review, mutate each
+invariant the branch itself introduces, run the full unit suite per mutant, revert. Then re-run the
+survivors with **your own new tests deselected** — that last step is what separates "I added tests" from
+"I closed a real gap".
+
+#### 🆕 Two new measured findings, recorded not fixed
+
+1. **A3: there is no ordering control for `seniority` or `vector` at all, and a knockout of either passes.**
+   Measured against the real corpus: `_most_recent_title → always None` moves **8 of 20** fixtures and the
+   gate exits 0; flattening vector to `1.0` moves **6 of 20** and exits 0; `_DEGENERATE_POOL_EPS 1e-9 → 1e9`
+   exits 0. Two causes — the corpus pool has spread `0.4547` so the degenerate branch is never entered, and
+   nothing gates either dimension even when wiped. Needs a seniority matched pair plus a degenerate-pool
+   control. **Deliberately not added on #85**: new fixtures would have broken the byte-identity proof that
+   branch's non-regression argument rested on. Corpus owner's pickup.
+2. **Three sibling defects of the same family**, found by grepping the same two files:
+   `score_education`'s `if not ranked: return 0.0` — **the strongest**, since an unparsed education section
+   scores *worse* than being below the bar, which at least earns partial credit; `score_experience`'s
+   `if not jd_min_years: return 1.0` (full marks for everyone on 25% of the score); and `score_education`'s
+   `if not jd_min_level: return 1.0` (the same, on 10%). Marking all three is mechanically identical to
+   ADR-041 and reuses the same pattern — a small, well-understood follow-up.
+
+#### Disclosure reaches the entry-detail panel only
+
+The shortlist **card tiles** and the **CSV export** still render the bare `0` / `100`. Recorded in ADR-041's
+residuals, and the explainer's register decisions 10 and 11 were narrowed from "the screen" to the "Why this
+rank?" page for exactly that reason — that document is circulated to non-engineers, so an overclaim there is
+worse than one in an ADR.
+
+#### What is left, in the order I would take it
+
+1. **A2 — skill matching (P0, BLOCKED ON A HUMAN).** 231-term software-engineering ontology against an
+   administrative/academic corpus: 15.6% coverage, 54.8% achievable. Blocked on a product decision, because
+   many derived terms are **competencies** and `years × recency × ontology_weight` is meaningless for
+   "three years of interpersonal skills".
+2. **🔴 A3 band enforcement — BLOCKED ON A CORPUS-OWNER DECISION.** Three contracts cannot all hold; both
+   offenders are twins with a designed 0.144 gap. Pick one contract to change.
+3. **🆕 A3's seniority/vector control gap** (above) — smaller than the hashing gap, and now quantified.
+4. **A3's ADR-008 hashing gap** — still the largest; re-bands the corpus, every margin re-measured.
+5. **The three A6 siblings** (above), then the rest of A5/A6: retention unenforced, unsalted email hash,
+   audit immutability by convention, shallow `/health`.
+6. **Named follow-ups:** access-record export; reverse match's identical fabricated evidence zero; a
+   fail-closed stage 3 leaves orphaned LLM calls (`asyncio.gather` does not cancel siblings); and ADR-040's
+   own `evidence_evaluated: bool = False`, which still cannot express "unknown" — the same shape as A7
+   instance 15, and now the obvious companion fix.
+
+#### Environment notes
+
+- **Use `pwsh` (PowerShell 7), not `powershell` (5.1), for `scripts/quickstart.ps1`.** 5.1 cannot parse it,
+  and `powershell.exe` still exits 0 on a parse failure, so breakage looks like a successful boot.
+- **🆕 There is no `jq` on this host.** `gh pr checks --json … | jq` fails silently inside a polling loop and
+  looks like "no output" rather than an error. Use plain `gh pr checks` and grep.
+- `./scripts/verify.sh` already handles the stale-bytecode hazard (`PYTHONDONTWRITEBYTECODE=1` plus a
+  `__pycache__` purge). Hand-rolled mutation probes must do the same and use `python -B`.
+- Run mutation-testing gates **sequentially** — the reviewer mutates the shared tree, so a concurrent gate
+  reads a mutated tree and reports nonsense.
+- Standing orders unviolated: unique 29xxx ports · CAS on by default · inference offline-only on
+  `aria-gb10` over Tailscale, no cloud call added.
+
+#### (history) READ FIRST — 2026-08-13: PILOT BLOCKERS A1 AND A4 ARE CLOSED; GUARDRAILS 2 AND 4 RETIRED
 
 > **Last FEATURE merge: `7257c20` (PR #83). Working tree clean. Zero open PRs. Nothing is mid-flight.**
 > Docs-only commits sit on top of that — including this banner's own refresh — so `origin/main` is at or
