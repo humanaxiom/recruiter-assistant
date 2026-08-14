@@ -11,9 +11,13 @@ role first, then document order — the fallback only widens WHICH role's
 title is read, never re-orders the roles themselves.
 
 This is deliberately the ONLY value change on the branch (see the spec's
-scope decisions): it can only ever RAISE a candidate's seniority sub-score,
-never lower it, and all 20 corpus fixtures have a titled current role, so the
-corpus is provably unaffected.
+scope decisions). It raises a candidate's own seniority sub-score in the
+fallback case — though NOT monotonically once the whitespace gate below is
+included, which deliberately LOWERS one case: a sole role titled ``"   "``
+used to embed literal whitespace and score a garbage non-zero, and now
+scores 0.0 marked unmeasured. An earlier draft of this docstring claimed
+"never lower it"; that was wrong, and the reviewer caught it. All 20 corpus
+fixtures have a titled current role and are provably unaffected either way.
 
 REMEDIATION ROUND (reviewer CHANGES-REQUIRED, F5): the shipped gate is
 ``if title:`` — truthy, not "readable". A whitespace-only title

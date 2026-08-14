@@ -400,10 +400,12 @@ still loses the full 15%. The eval corpus cannot exercise either branch — all 
 distinct summaries and a titled current role — so a value change here would be unverifiable by the
 gate, which is how ADR-032 earned its revert. One exception: `_most_recent_title` now falls back to
 the first *titled* role (whitespace-only titles count as unreadable) instead of returning `None` when
-the current role's title is blank. That can only ever raise **that candidate's own seniority
-sub-score** — narrowly stated, because a raised structured score can displace a *different* candidate
-below the stage-3 evidence cut-off and lower *their* final score. Provably corpus-neutral: all 20
-fixtures yield an identical title before and after.
+the current role's title is blank. That raises **that candidate's own seniority sub-score** — not the
+run, since a raised structured score can displace a *different* candidate below the stage-3 evidence
+cut-off and lower *their* final score — and it is not even monotonic for that candidate: a title of
+`"   "` previously embedded as literal whitespace and scored a garbage non-zero, and now scores `0.0`
+marked unmeasured. That is the intent, not a regression. Provably corpus-neutral: all 20 fixtures
+yield an identical title on `main`, before the remediation, and after.
 
 **Disclosure reaches the entry-detail panel only.** The shortlist card tiles and the CSV export still
 render the bare `0` / `100`. Recorded in ADR-041's residuals, and the explainer's register decisions 10
