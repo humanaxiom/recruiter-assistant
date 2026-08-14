@@ -4,16 +4,16 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 ### ⚠️⚠️ READ FIRST — 2026-08-13: PILOT BLOCKERS A1 AND A4 ARE CLOSED; GUARDRAILS 2 AND 4 RETIRED
 
-> **Last FEATURE merge: `f9be22b` (PR #80). Working tree clean. Zero open PRs. Nothing is mid-flight.**
-> Docs-only commits sit on top of that — including this banner's own wrap (#81) — so `origin/main` is at or
-> after `f9be22b` rather than equal to it. Stated that way deliberately: a banner cannot name the sha of the
+> **Last FEATURE merge: `7257c20` (PR #83). Working tree clean. Zero open PRs. Nothing is mid-flight.**
+> Docs-only commits sit on top of that — including this banner's own refresh — so `origin/main` is at or
+> after `7257c20` rather than equal to it. Stated that way deliberately: a banner cannot name the sha of the
 > commit that introduces it, and every previous banner here pinned an `==` that was false the moment it
 > merged. **Always `git fetch` and check `gh pr list` before trusting any of this.**
 >
 > Supersedes the 2026-08-07 banner below (kept as history, and itself stale — it describes #68 as
 > "waiting merge" and A1 as partly open; both are false).
 >
-> This banner is a **state document**, not a changelog. The ten PRs that landed this session are
+> This banner is a **state document**, not a changelog. The thirteen PRs that landed this session are
 > summarised once, in the table, rather than narrated in sequence.
 
 #### 🔴 Four things a human must do — none of them are agent-doable
@@ -53,6 +53,9 @@ blocker, so it sits in the work queue at item 2 of "What is left" rather than he
 | 78 | **Gate the bait-below-strong ordering** the corpus only asserted in prose — A3's first move | [038](docs/adr/038-gate-the-bait-below-strong-ordering.md) |
 | 79 | **Stage-1 recall searches the job's pool, not the whole DB** — A4 M2 | [039](docs/adr/039-stage1-recall-is-job-scoped.md) |
 | 80 | **Disclose the evidence cliff** instead of a fabricated 0% — closes A4 | [040](docs/adr/040-evidence-cliff-disclosure.md) |
+| 81 | Session wrap — this banner, plus the ROADMAP status table | — |
+| 82 | Stop this banner pinning a sha it cannot know | — |
+| 83 | **Gate the shipped `must_have_miss_penalty`** (it could be switched off with the corpus green); record the band-enforcement blocker | — |
 
 **Suite: 4401 unit @ 94.00% · 493 integration.** Every merge ran `./scripts/verify.sh all` with the exit
 code captured directly rather than piped.

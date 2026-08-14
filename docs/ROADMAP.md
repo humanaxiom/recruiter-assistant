@@ -7,18 +7,18 @@
 
 ---
 
-## Status at a glance — updated 2026-08-13 (`origin/main` == `f9be22b`)
+## Status at a glance — updated 2026-08-13 (last feature merge `7257c20`, PR #83)
 
 | Item | State |
 |---|---|
 | **A0** Demo guardrails | **2 of 4 retired.** Guardrail 2 (accounts) and 4 (top-15 panel) are closed. 1 (curated JD) and 3 (explainer circulation) stand. |
 | **A1** Authorization | ✅ **FULLY CLOSED** — ADR-033 · **034** · **035**. All four original steps accounted for. |
 | **A2** Skill matching | 🔴 **P0, BLOCKED ON A HUMAN.** Needs the competency-scoring decision before any code. **The single biggest gap between this tool and being useful on real SFU postings.** |
-| **A3** The evals harness is blind | 🟡 **First move done** (ADR-038). Three blindnesses remain — do these before further scoring work. |
+| **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **One blindness left** — the ADR-008 hashing gap, which re-bands the corpus. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🔴 Untouched. Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health`, plus two smaller scoring defects. |
-| **A7** The pattern worth naming | **Twelve instances.** Two added this session, one of them *inside the gate itself*. |
+| **A7** The pattern worth naming | **Thirteen instances.** Three added this session, and **two of those were inside the gate itself** — the thing whose job is catching the other ten. |
 
 **Read this before picking anything up:** A2 is the highest-value item and cannot start without a human
 decision. A3 is the highest-value item that **can** start — the gate is what makes every other scoring
@@ -400,7 +400,7 @@ Two smaller scoring defects worth folding into any A2/A4 work: `normalise_vector
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **twelve times**: an
+Across the external review and this session's gate work the same defect shape appears **thirteen times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -423,6 +423,20 @@ documentation simply described a control more general than the wiring.** The les
 invariant needs enforcement, and a *mechanism* needs a check that it is actually applied everywhere it
 claims to be. ADR-035's structural test is behavioural for exactly this reason — an inert hook would pass
 any introspective check.
+
+**A thirteenth, found 2026-08-13 while investigating A3 — and it is the same variant as the twelfth,
+which is the point.** `_assert_must_have_penalty_fires_on_r18` describes itself as the review obligation
+covering the must-have-miss penalty. It compares `score_final` at penalty `0.5` versus `1.0` using
+`MatchWeights` **it constructs itself** — so it proved the mechanism was wired while the *shipped*
+`DEFAULT_WEIGHTS.must_have_miss_penalty` could be set to `1.0`, switching the penalty off entirely, with
+the whole corpus staying green. Real control, correct implementation, checked somewhere that could not see
+whether it was in force.
+
+**Two of this session's three new instances were inside the gate itself** — instance (10) in the function
+whose job is refusing unsafe configurations, and this one in the harness whose job is catching unsafe
+scoring. That is worth stating plainly: *the assertions are subject to the pattern they exist to detect*,
+and neither was found by reading the code. Both were found by mutating a value and watching what failed to
+complain.
 
 **Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
 have caught it** — Red first.
