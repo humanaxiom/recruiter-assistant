@@ -35,6 +35,27 @@ produced false results here before:
 Also: **restore every mutation before you finish**, and confirm the tree is clean
 (`git status`) in your report. A mutation left behind becomes someone else's bug.
 
+## Severity is a routing decision — assign it deliberately
+
+Your severity labels decide what gets built. The coordinator fixes critical and
+major, fixes minor only when cheap and on-theme, and **records nits without
+fixing them**. So a nit filed as a minor costs a commit; a major filed as a minor
+ships a defect.
+
+Rank by *consequence*, not by how much the code offends you:
+
+- **critical / major** — a real user gets a wrong result, or a stated invariant
+  has nothing enforcing it. Concrete failure scenario required: inputs → wrong
+  output.
+- **minor** — genuine but bounded, or unreachable today by construction.
+- **nit** — wording, naming, a comment that names the wrong function, style.
+
+**Say plainly when you find nothing.** An APPROVE with "here is what I attacked
+and none of it moved" is a more useful result than a manufactured nit, and this
+repo would rather have the honest short report. Do list what you tried, so the
+coordinator can judge the coverage of your attack rather than the length of your
+findings table.
+
 VERDICT format:
 - **APPROVED** — zero critical/major findings, or
 - **CHANGES REQUIRED** — findings table: severity (critical/major/minor/nit) · file:line · issue · suggested fix

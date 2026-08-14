@@ -13,17 +13,37 @@
 |---|---|
 | **A0** Demo guardrails | **2 of 4 retired.** Guardrail 2 (accounts) and 4 (top-15 panel) are closed. 1 (curated JD) and 3 (explainer circulation) stand. |
 | **A1** Authorization | ✅ **FULLY CLOSED** — ADR-033 · **034** · **035**. All four original steps accounted for. |
-| **A2** Skill matching | 🔴 **P0, BLOCKED ON A HUMAN.** Needs the competency-scoring decision before any code. **The single biggest gap between this tool and being useful on real SFU postings.** |
+| **A2** Skill matching | 🟢 **P0, UNBLOCKED 2026-08-14 — take this first.** The vocabulary growth (15.6% → 54.8% coverage) is additive and does **not** need the competency-scoring decision, which is deferred. **The single biggest gap between this tool and being useful on real SFU postings.** |
 | **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **One blindness left** — the ADR-008 hashing gap, which re-bands the corpus. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
 | **A7** The pattern worth naming | **Sixteen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. |
 
-**Read this before picking anything up:** A2 is the highest-value item and cannot start without a human
-decision. A3 is the highest-value item that **can** start — the gate is what makes every other scoring
-change trustworthy, and this session found one instance of it asserting in prose while a violating change
-exited 0.
+**Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
+
+The previous version of this paragraph said *"A2 is the highest-value item and cannot start without a human
+decision"*, and routed three consecutive sessions into adjacent hardening work. **It was wrong.** A2's
+blocker is a competency-*scoring* question; the vocabulary work it was thought to gate is **additive,
+scoring-math-neutral, and strictly better than the status quo** — an out-of-vocabulary competency today
+scores `0.0` *and* trips the ×0.5 must-have penalty, so matching it can only improve matters. Nobody
+checked whether the blocker gated the whole item. It cost a week on the highest-value P0.
+
+**The measured cost of that trajectory:** since the v1 scope completed, 85 commits — **35 `docs`/`chore`
+against 26 `feat`/`fix`** — and twelve ADRs, on a product **nobody has yet used end to end**.
+
+**Priority order now:**
+
+1. **A2 vocabulary — UNBLOCKED, take it first.** The competency-scoring model is deferred, deliberately,
+   with the reasoning recorded in A2 below.
+2. **Anything that makes the pilot actually run.** The four human-only actions still gate this and no agent
+   can do them.
+3. Everything else, and **only if it changes what the product can do**. Hardening a feature nobody has run
+   is speculative. See CLAUDE.md's "Economy" section for the finding-disposition and stopping rules that
+   now govern this — in particular: nits get **recorded, not fixed**, and mutation probing is **one pass**.
+
+A3 remains the item that makes every scoring change trustworthy, and its seniority/vector control gap is
+now measured — but it is a gate on work, not work that ships value, and it should not outrank A2 again.
 
 ---
 
@@ -212,13 +232,27 @@ It compounds: **every `REQUIRES` edge is written `must=True`** (`tasks.py:264`),
 `must_have_miss_penalty` (`stages.py:185-194`) fires for nearly every candidate. Phase 3.1 addresses this by
 scoring the `NICE_TO_HAVE` edges that are already written and never read (`orchestrator.py:426`).
 
-**Unresolved product decision that gates the work:** Many of the derived terms are **competencies**
-(communication, leadership, problem-solving), not named tools. The current scorer is `years × recency ×
-ontology_weight`. A candidate's "three years of interpersonal skills, last used 2024" is not meaningful
-on this model. **Three options:**
+**Product decision — DEFERRED 2026-08-14, and it no longer gates the vocabulary work.** Many of the
+derived terms are **competencies** (communication, leadership, problem-solving), not named tools. The
+current scorer is `years × recency × ontology_weight`, and "three years of interpersonal skills, last used
+2024" is not meaningful on that model. **Three options:**
 1. Score competencies on a different model (proficiency level, recency only, binary present/absent).
 2. Exclude competencies from must-have penalties entirely.
 3. Make that decision per-competency as new ones are curated.
+
+> **Why this stopped being a blocker.** For a week this was treated as gating all of A2. It does not. The
+> vocabulary growth is **additive and scoring-math-neutral** — this section's own Plan says so. And adding
+> a competency term is **strictly better than the status quo under every option above**: today an
+> out-of-vocabulary competency is hashed by ADR-008, gets no alias resolution and no family partial credit,
+> scores `0.0` unless the résumé happens to contain a byte-identical normalised string, **and** trips the
+> ×0.5 `must_have_miss_penalty` because every `REQUIRES` edge is written `must=True`. After the addition,
+> candidates who genuinely have the competency match and stop being penalised. There is no configuration in
+> which the current behaviour is preferable.
+>
+> Scoring "three years of communication" on `years × recency` remains semantically odd, and option 1 or 2
+> should still be chosen — but as a **refinement, with real pilot data behind it**, rather than as a
+> precondition that freezes the highest-value P0. Decision taken 2026-08-14: ship the vocabulary, defer the
+> model.
 
 **Plan:** Grow `aliases.yaml`/`categories.yaml` with the derived families (additive, no scoring-math
 change). Once competency handling is decided, the Phase 3.3 projection-time classifier will handle the
