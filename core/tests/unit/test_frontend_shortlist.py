@@ -61,6 +61,9 @@ import httpx
 import pytest
 
 from frontend import api_client
+from frontend import app as frontend_app_module
+from src.schemas.matching import ShortlistEntry
+from src.services import explanation as explanation_module
 
 _REAL_NAME = "Zzyzxqrst Wibblesworth"
 _REAL_EMAIL = "zzyzxqrst.wibblesworth@example.test"
@@ -1654,3 +1657,212 @@ def test_entry_detail_makes_no_claim_for_a_legacy_row(
 
     assert resp.status_code == 200
     assert "not assessed" not in _norm(resp.get_data(as_text=True))
+
+
+# ── ROADMAP A6: two sub-scores render as measurements when nothing was
+# ── measured -- disclosed, not silently rendered, at the surface where the
+# ── false claim is actually made ────────────────────────────────────────────
+
+
+def _row_for(
+    rows: list[tuple[str, str, str, str]], label: str
+) -> tuple[str, str, str, str]:
+    matches = [r for r in rows if r[0].strip().lower() == label]
+    assert len(matches) == 1, f"expected exactly one {label!r} row, got {matches!r}"
+    return matches[0]
+
+
+def test_entry_detail_says_seniority_not_assessed_when_no_title_was_readable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for D2. No readable title was found for this candidate, so the
+    stored seniority score came from a policy fallback, not a comparison —
+    the panel must not present it as a measured poor title match."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["seniority_measured"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "seniority")
+
+    assert _norm(score) == "not assessed", (
+        f"seniority_measured=False must render 'not assessed' in the score "
+        f"cell, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}, (
+        f"no honest contribution can be stated for an unmeasured sub-score, "
+        f"got {contribution!r}"
+    )
+    assert "no readable job title" in _norm(body), (
+        "the prose above the table must say WHY -- no readable job title "
+        "was found, so nothing was compared"
+    )
+
+
+def test_entry_detail_keeps_the_real_seniority_score_when_a_title_was_readable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Mirror-image mutant guard: the fix must not start hiding genuine
+    measurements."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["seniority_measured"] = True
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, _contribution = _row_for(rows, "seniority")
+
+    assert _norm(score) != "not assessed", (
+        f"a MEASURED seniority score must not be labelled not assessed, "
+        f"got {score!r}"
+    )
+    assert "no readable job title" not in _norm(body)
+
+
+def test_entry_detail_says_vector_not_comparable_for_a_degenerate_pool(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for D1. Every candidate in a degenerate pool scores the same
+    100% semantic match -- that reflects the pool, not this candidate."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["vector_discriminating"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "vector")
+
+    assert _norm(score) == "not assessed", (
+        f"vector_discriminating=False must render 'not assessed' in the "
+        f"score cell, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}
+    assert "scored identically" in _norm(body), (
+        "the prose above the table must say WHY -- every candidate in this "
+        "pool scored identically, so the number reflects the pool, not the "
+        "match"
+    )
+
+
+def test_entry_detail_keeps_the_real_vector_score_for_a_pool_with_spread(
+    monkeypatch: Any, client: Any
+) -> None:
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["vector_discriminating"] = True
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, _contribution = _row_for(rows, "vector")
+
+    assert _norm(score) != "not assessed"
+    assert "scored identically" not in _norm(body)
+
+
+def test_entry_detail_makes_no_claim_for_a_legacy_row_with_neither_marker(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A row written before this slice's markers existed has NEITHER key on
+    ``score_breakdown`` -- both validate to None, and the panel must render
+    EXACTLY as it does today. The negative half of the pair above: a
+    present-only assertion would let 'the string is always rendered' survive."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    assert "seniority_measured" not in entry["score_breakdown"]
+    assert "vector_discriminating" not in entry["score_breakdown"]
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    normalized = _norm(body)
+
+    assert "not assessed" not in normalized, (
+        "a legacy row (neither marker recorded) must not claim ANY "
+        "sub-score was 'not assessed' -- that invents a fact the row does "
+        "not support"
+    )
+    assert "no readable job title" not in normalized
+    assert "scored identically" not in normalized
+    # The row must render byte-identically to before this slice: the
+    # seniority contribution (weight 0.10 x score 0.50 = 0.05) still shows
+    # as a real number.
+    _assert_number_rendered(
+        body, 0.05, label="seniority contribution (legacy row unaffected)"
+    )
+
+
+@pytest.mark.parametrize("junk_value", [0, 0.0, "", "no", "off"])
+def test_seniority_disclosure_requires_literal_false_not_merely_falsy_junk(
+    monkeypatch: Any, client: Any, junk_value: Any
+) -> None:
+    """Identity, not truthiness (spec item 7). ``0``, ``0.0``, ``""``,
+    ``"no"``, ``"off"`` are all Python/Jinja-falsy but NONE of them
+    ``is False`` — a template written as ``{% if not
+    explanation.seniority_assessed %}`` (truthiness) or ``{% if
+    explanation.seniority_assessed == false %}`` (equality: ``0 == False``
+    is True in Python) would show the disclosure for these too. Only a real,
+    identical ``False`` may trigger it.
+
+    Bypasses ``ScoreBreakdown``'s own bool coercion (which would just turn
+    ``0``/``0.0`` back into a real ``False`` before this ever reaches the
+    template) via ``model_copy`` — the same technique
+    ``schemas/matching.py``'s own docstring already documents as bypassing
+    validation — to put the exact junk value in front of the template."""
+    entry_id = uuid4()
+    entry_payload = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry_payload)
+    )
+    real_entry = ShortlistEntry.model_validate(entry_payload)
+    base_explanation = explanation_module.shortlist_entry_explanation(real_entry)
+    junk_explanation = base_explanation.model_copy(
+        update={"seniority_assessed": junk_value}
+    )
+    monkeypatch.setattr(
+        frontend_app_module,
+        "shortlist_entry_explanation",
+        MagicMock(return_value=junk_explanation),
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+
+    assert "no readable job title" not in _norm(body), (
+        f"seniority_assessed={junk_value!r} is falsy but not `is False` -- "
+        "the disclosure must require identity, not truthiness"
+    )
+
+
+@pytest.mark.parametrize("junk_value", [0, 0.0, "", "no", "off"])
+def test_vector_disclosure_requires_literal_false_not_merely_falsy_junk(
+    monkeypatch: Any, client: Any, junk_value: Any
+) -> None:
+    """Sibling of the seniority identity guard above, for the vector row."""
+    entry_id = uuid4()
+    entry_payload = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry_payload)
+    )
+    real_entry = ShortlistEntry.model_validate(entry_payload)
+    base_explanation = explanation_module.shortlist_entry_explanation(real_entry)
+    junk_explanation = base_explanation.model_copy(
+        update={"vector_comparable": junk_value}
+    )
+    monkeypatch.setattr(
+        frontend_app_module,
+        "shortlist_entry_explanation",
+        MagicMock(return_value=junk_explanation),
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+
+    assert "scored identically" not in _norm(body), (
+        f"vector_comparable={junk_value!r} is falsy but not `is False` -- "
+        "the disclosure must require identity, not truthiness"
+    )

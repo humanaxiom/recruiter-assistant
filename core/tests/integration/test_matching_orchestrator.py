@@ -706,6 +706,101 @@ async def test_generate_shortlist_end_to_end_orders_candidates_and_shapes_breakd
     assert result.pipeline_meta.model_emb == "test-emb"
 
 
+# ── ROADMAP A6: fabricated sub-scores are marked, not silently rendered ────
+#
+# D1/D2, REVERSE direction. Reverse match calls the identical
+# `_stage2_per_candidate` (`orchestrator.py:964-966`) and its own
+# `normalise_vector_scores` (`orchestrator.py:956`), so both defects are
+# present here too — this pins the CALL SITE wiring (that
+# `match_resume_to_jobs` actually threads its own computed
+# `vec_discriminating` through), against a REAL Neo4j stage-1 query rather
+# than a mock: reverse match's `stage1_coarse_jobs` uses
+# `db.index.vector.queryNodes` on `job_summary_idx`, a code path this repo
+# has no other real-driver coverage for (docs/ROADMAP.md's own open
+# residual). The forward direction's unit-level equivalent lives in
+# `tests/unit/test_a6_sub_score_markers_write_path.py`.
+
+
+@pytest.mark.asyncio
+async def test_reverse_match_marks_both_false_for_a_single_job_pool_no_title(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """A résumé with exactly one candidate job is a single-element stage-1
+    pool — degenerate by definition, regardless of the real similarity value
+    — and this résumé also carries no experience at all, so no title
+    comparison is possible either. Both must be marked unmeasured."""
+    job_id = await _insert_job(pg_pool, title="Backend Engineer")
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        parsed={"total_years_experience": 3, "education": [], "experience": []},
+    )
+    shared_emb = _vec(1)
+    await _seed_job_node(neo4j_driver, job_id, summary_emb=shared_emb)
+    await _seed_resume_node(neo4j_driver, resume_id, job_id, summary_emb=shared_emb)
+
+    async with pg_pool.acquire() as conn:
+        ctx = _ctx(conn, neo4j_driver)
+        with patch(
+            "src.pipeline.matching.orchestrator.load_prompt",
+            return_value=_STUBBED_PROMPT,
+        ):
+            result = await match_resume_to_jobs(resume_id, ctx)
+
+    assert result.entries, "expected exactly one ranked job"
+    breakdown = result.entries[0].breakdown
+    assert breakdown.vector_discriminating is False, (
+        "a single-candidate-job pool is degenerate by definition — "
+        "normalise_vector_scores returns 1.0 for it with no comparison "
+        "possible, and the write path must mark it, not just compute it"
+    )
+    assert breakdown.seniority_measured is False, (
+        "this résumé carries no experience at all, so no title comparison "
+        "was possible — the fallback 0.0 must be marked, not measured"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reverse_match_marks_both_true_for_a_pool_with_spread_and_title(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    job1 = await _insert_job(pg_pool, title="Backend Engineer")
+    job2 = await _insert_job(pg_pool, title="Data Engineer")
+    resume_id = await _insert_resume(
+        pg_pool,
+        job1,
+        parsed={
+            "total_years_experience": 5,
+            "education": [],
+            "experience": [{"title": "Backend Engineer", "is_current": True}],
+        },
+    )
+    await _seed_job_node(neo4j_driver, job1, summary_emb=_vec(11))
+    await _seed_job_node(neo4j_driver, job2, summary_emb=_vec(22))
+    await _seed_resume_node(neo4j_driver, resume_id, job1, summary_emb=_vec(33))
+
+    async with pg_pool.acquire() as conn:
+        ctx = _ctx(conn, neo4j_driver)
+        with patch(
+            "src.pipeline.matching.orchestrator.load_prompt",
+            return_value=_STUBBED_PROMPT,
+        ):
+            result = await match_resume_to_jobs(resume_id, ctx)
+
+    assert len(result.entries) == 2, "expected both candidate jobs to be scored"
+    for entry in result.entries:
+        assert entry.breakdown.vector_discriminating is True, (
+            "a two-job pool with distinct embeddings has real spread — it "
+            "must not be marked degenerate"
+        )
+    matched = [e for e in result.entries if e.job_id == job1]
+    assert matched, "expected the résumé's own job to be among the ranked jobs"
+    assert matched[0].breakdown.seniority_measured is True, (
+        "this résumé's current role has a readable title — the comparison "
+        "genuinely ran and must be marked measured"
+    )
+
+
 # ── ADR-028: load_job_view populates JobView.education_fields ───────────────
 #
 # DB-bound (``JobView`` is only ever built by ``load_job_view`` reading a real

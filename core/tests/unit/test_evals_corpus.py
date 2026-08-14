@@ -640,15 +640,20 @@ def _score_experience(total_years: float | None, jd_min_years: int | None) -> fl
 
 def _most_recent_title(parsed: dict[str, Any]) -> str | None:
     """orchestrator.py::_most_recent_title, ported verbatim -- `is_current`
-    first, else the first role. This is the string the engine feeds to the
-    embedder for the SENIORITY sub-score."""
+    first, else the first role, THEN (ROADMAP A6 #4) falling back to the
+    first TITLED role in that same current-first-then-document-order
+    precedence when the initial pick's own title is blank. This is the
+    string the engine feeds to the embedder for the SENIORITY sub-score."""
     roles = parsed.get("experience") or []
     if not roles:
         return None
     current = [r for r in roles if r.get("is_current")]
-    role = current[0] if current else roles[0]
-    title = role.get("title")
-    return str(title) if title else None
+    ordered = list(current) + [r for r in roles if r not in current]
+    for role in ordered:
+        title = role.get("title")
+        if title:
+            return str(title)
+    return None
 
 
 def _education_sub_score(resume_id: str, jd: JDExtracted) -> float:
@@ -3550,6 +3555,12 @@ _TITLE_PROBES: tuple[list[dict[str, Any]], ...] = (
     [{"title": "Backend Engineer", "is_current": False}, {"title": "Data Engineer"}],
     [{"is_current": True}],
     [{"title": None}],
+    # ROADMAP A6 (4) -- the fallback probes. A blank/missing CURRENT title
+    # must fall back to a titled previous role rather than return None.
+    [{"title": "", "is_current": True}, {"title": "Senior Backend Engineer"}],
+    [{"is_current": True}, {"title": "Staff Engineer"}],
+    [{"title": "", "is_current": True}, {"title": ""}],
+    [{"title": ""}, {"title": "Backend Engineer"}, {"title": "Staff Engineer"}],
 )
 
 
@@ -3599,6 +3610,119 @@ def test_ported_engine_helpers_agree_with_the_real_ones() -> None:
             f"_most_recent_title drifted on {roles!r} -- this is the string the "
             f"SENIORITY sub-score embeds, and r09's bait pins it to the JD title"
         )
+
+
+# ── ROADMAP A6 (F7): the harness's no-title seniority arm cannot silently ──
+# ── diverge from the real orchestrator's ────────────────────────────────────
+#
+# `run_evals.py`'s `_breakdown_for` (:732-737) hand-duplicates the
+# orchestrator's `else 0.0` seniority arm rather than calling
+# `_stage2_per_candidate` itself -- only `_most_recent_title` is shared
+# between the two. Round-5/6/7 found and closed several of these
+# "independently-typed, silently-drifting" pairs (F1, F2, M-2 above); this is
+# the one for ROADMAP A6's own no-title fallback, and today there is no guard
+# for it at all.
+
+
+class _A6FakeNeo4jResult:
+    """Zero-row async iterator -- every fixture below seeds a job with no
+    required skills, so an empty row set is always the correct response."""
+
+    def __aiter__(self) -> Any:
+        return self._empty()
+
+    async def _empty(self) -> Any:
+        return
+        yield  # pragma: no cover -- makes this an async generator with 0 items
+
+
+class _A6FakeNeo4jSession:
+    async def run(self, *_a: Any, **_k: Any) -> _A6FakeNeo4jResult:
+        return _A6FakeNeo4jResult()
+
+    async def __aenter__(self) -> _A6FakeNeo4jSession:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+
+class _A6FakeNeo4jDriver:
+    def session(self) -> _A6FakeNeo4jSession:
+        return _A6FakeNeo4jSession()
+
+
+@pytest.mark.asyncio
+async def test_harness_and_orchestrator_agree_on_seniority_for_no_title_case() -> None:
+    """F7 -- there is no drift guard for this today. If the real orchestrator's
+    no-title fallback value ever changes (ROADMAP A6 records the deeper D2 fix
+    -- renormalising the remaining sub-weights when a dimension is
+    unmeasurable -- as an open residual for a future branch), the harness
+    would keep silently scoring the OLD value and nothing here would notice."""
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from src.pipeline.matching.orchestrator import (
+        JobView,
+        MatchingContext,
+        Stage1Candidate,
+        _stage2_per_candidate,
+    )
+
+    module = _import_run_evals()
+
+    parsed = {"total_years_experience": 5, "education": [], "experience": []}
+    jd = {
+        "title": "Senior Backend Engineer",
+        "min_years": None,
+        "edu_min_level": None,
+        "edu_fields": (),
+        "required": [],
+    }
+
+    _structured, harness_breakdown = module._breakdown_for(
+        parsed, jd, vec_normalised=1.0, weights=DEFAULT_WEIGHTS
+    )
+    assert harness_breakdown.seniority == 0.0, (
+        "sanity: this fixture has no experience at all, so the harness's own "
+        "hand-duplicated `else 0.0` arm must be the one that ran"
+    )
+
+    job = JobView(
+        id=uuid4(),
+        title=jd["title"],
+        min_years=None,
+        education_min_level=None,
+        education_fields=(),
+        required_skills=(),
+        nice_to_have_skills=(),
+    )
+    db = MagicMock(fetchrow=AsyncMock(return_value={"parsed": json.dumps(parsed)}))
+    embedder = MagicMock(name="embedder-must-not-be-called")
+    ctx = MatchingContext(
+        db=db,
+        neo4j=_A6FakeNeo4jDriver(),
+        llm=MagicMock(name="llm"),
+        embedder=embedder,
+        model_gen="test-gen",
+        model_emb="test-emb",
+    )
+    real = await _stage2_per_candidate(
+        ctx,
+        job,
+        Stage1Candidate(resume_id=uuid4(), vec_score=1.0),
+        vec_normalised=1.0,
+        vec_discriminating=True,
+        weights=DEFAULT_WEIGHTS,
+    )
+
+    assert real.breakdown.seniority == harness_breakdown.seniority == 0.0, (
+        "the harness's hand-duplicated `else 0.0` seniority arm has diverged "
+        "from the real orchestrator's -- update run_evals.py's `_breakdown_for` "
+        "(and re-derive every corpus claim that depends on it) rather than "
+        "relaxing this comparison"
+    )
+    embedder.embed.assert_not_called()
 
 
 # ── ROADMAP A3: the bait-below-strong order relation is ARMED ───────────────
