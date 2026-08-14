@@ -293,9 +293,27 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   was in force. **The ADR-035 shape, one layer in.** Now reads the shipped weights. Armed against both the
   blunt mutation (`1.0` → fails) and the subtle one (`0.95` → fails); both were green before.
 
+- 🆕 **Measured 2026-08-14 (A6/ADR-041): there is no ordering control for `seniority` or `vector` at all,
+  and a total knockout of either passes the gate.** `[ordering_controls]` has matched pairs for education,
+  overqual, motivation, `skill_missing_must` and recency — **none for the other two sub-scores**. Measured
+  by mutation against the real corpus:
+
+  | mutation | fixtures moved | max rank Δ | max score Δ | gate |
+  |---|---|---|---|---|
+  | `_most_recent_title` → always `None` (seniority wiped) | **8 of 20** | 3 | 0.09 | **exit 0** |
+  | `vector_pool_is_degenerate` → always `True` (vector flattened to 1.0) | **6 of 20** | 1 | 0.06 | **exit 0** |
+  | `_DEGENERATE_POOL_EPS` `1e-9` → `1e9` | — | — | — | **exit 0** |
+
+  Two independent causes: the corpus pool has spread `0.4547`, so the degenerate branch is **never entered**
+  (a permanently-disarmed predicate is *exactly* `0.0` corpus-neutral), and no threshold gates either
+  dimension even when it is wiped entirely. **Closing it needs a seniority matched pair** (twins differing
+  only in current-role title readability) **and a degenerate-pool control.** Deliberately not added on the
+  A6 branch: new fixtures would have broken the byte-identity comparison that branch's non-regression proof
+  rested on. Corpus owner's pickup.
+
 **Still open in A3:** the ADR-008 hashing blindness (first bullet, and the largest — it re-bands the corpus
-so every margin must be re-measured), and **`expected_rank_band` enforcement, now blocked on the three-way
-contract decision above rather than on r18 alone.**
+so every margin must be re-measured); **`expected_rank_band` enforcement, now blocked on the three-way
+contract decision above rather than on r18 alone**; and the seniority/vector control gap immediately above.
 
 ## A4. P0 · Two ranking defects that affect what HR will see — ✅ FULLY CLOSED (M1 ADR-037 · M2 ADR-039 · evidence cliff ADR-040)
 
