@@ -362,9 +362,9 @@ flowchart LR
 
 <div class="metric">
   <div class="metric-head"><span class="metric-name">Seniority</span><span class="metric-weight">0.15</span></div>
-  <p>Compares the candidate's most recent job title against the job's title. A résumé whose most recent title
-  could not be read scores zero here — a formatting problem, not a judgement about the person. See
-  decision 11.</p>
+  <p>Compares the candidate's most recent job title against the job's title. When no readable title is found,
+  the score falls back to zero, and the panel discloses this as <strong>"not assessed"</strong> — no
+  comparison happened, so the score is a default, not a judgement. See decision 11.</p>
 </div>
 
 <div class="metric">
@@ -456,8 +456,8 @@ project.</p>
     <tr><td class="num">7</td><td>A skill with no stated duration counts as fully meeting the years requirement.</td><td>A generous default, and it fires often — résumés rarely state years per skill.</td></tr>
     <tr><td class="num">8</td><td>Candidates with more than twice the required experience are scored down, though never below 0.8.</td><td>Deliberate down-weighting of over-qualification. Carries obvious age-proxy risk and should be a conscious, defended choice.</td></tr>
     <tr><td class="num">9</td><td>Skills used within two years score full marks; within five, less; older, less again.</td><td>Penalises career breaks, parental leave and caring responsibilities. The clearest human-rights exposure on this page.</td></tr>
-    <tr><td class="num">10</td><td>Overall similarity is scored relative to the batch, not absolutely.</td><td>The best of a weak field scores full marks on that dimension. It is why scores cannot travel between requisitions.</td></tr>
-    <tr><td class="num">11</td><td>Seniority compares job titles; an unreadable recent title scores zero.</td><td>A formatting failure costs the candidate the entire seniority weighting, indistinguishably from a genuine mismatch.</td></tr>
+    <tr><td class="num">10</td><td>Overall similarity is scored relative to the batch, not absolutely. When every candidate ties — most often a batch of one — the screen now says <strong>"not assessed"</strong> instead of showing everyone full marks.</td><td>The best of a weak field still scores full marks on that dimension, and that part is not disclosed. It is why scores cannot travel between requisitions.</td></tr>
+    <tr><td class="num">11</td><td>Seniority compares job titles; when no readable title is found the score falls back to zero, disclosed on screen as <strong>"not assessed"</strong>.</td><td>The score is indistinguishable from a genuine mismatch unless you know what to look for — now the panel tells you.</td></tr>
     <tr><td class="num">12</td><td>A cover letter is worth 10%; candidates without one score zero there.</td><td>A structural penalty for not submitting a document that may have been optional in the posting.</td></tr>
     <tr><td class="num">13</td><td>If the AI is unavailable, the shortlist is withheld and shown as waiting rather than published with candidates silently scored zero. It retries, then stops and waits for a person.</td><td>The safe behaviour is already chosen. What is yours is the patience: how long we wait before a human is asked to step in.</td></tr>
     <tr><td class="num">14</td><td>Consent is one confirmation per upload batch, with no record of wording or its own timestamp.</td><td>May not satisfy per-candidate consent evidence obligations. Worth checking against our retention and subject-access commitments.</td></tr>

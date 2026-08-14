@@ -189,9 +189,9 @@ that one has fairness implications.
 Substantially exceeding it scores slightly *lower* — deliberate handling of over-qualification, with a floor
 so it never costs much. See decision 8.
 
-**Seniority — 0.15.** Compares the candidate's most recent job title against the job's title. A résumé whose
-most recent title could not be read scores zero here — a formatting problem, not a judgement about the
-person. See decision 11.
+**Seniority — 0.15.** Compares the candidate's most recent job title against the job's title. When no
+readable title is found, the score falls back to zero, and the panel discloses this as **"not assessed"** —
+no comparison happened, so the score is a default, not a judgement. See decision 11.
 
 **Education — 0.10.** Reads the level, from secondary school through doctorate. Meeting or exceeding the
 required level scores full marks; below it earns partial credit; no qualification scores zero. Where the job
@@ -273,8 +273,8 @@ adjustable without a code change or a release, so a different answer costs a con
 | 7 | A skill with no stated duration counts as fully meeting the years requirement. | A generous default, and it fires often — résumés rarely state years per skill. |
 | 8 | Candidates with more than twice the required experience are scored down, though never below 0.8. | Deliberate down-weighting of over-qualification. Carries obvious age-proxy risk and should be a conscious, defended choice. |
 | 9 | Skills used within two years score full marks; within five, less; older, less again. | Penalises career breaks, parental leave and caring responsibilities. The clearest human-rights exposure on this page. |
-| 10 | Overall similarity is scored relative to the batch, not absolutely. | The best of a weak field scores full marks on that dimension. It is why scores cannot travel between requisitions. |
-| 11 | Seniority compares job titles; an unreadable recent title scores zero. | A formatting failure costs the candidate the entire seniority weighting, indistinguishably from a genuine mismatch. |
+| 10 | Overall similarity is scored relative to the batch, not absolutely. When every candidate ties — most often a batch of one — the screen now says **"not assessed"** instead of showing everyone full marks. | The best of a weak field still scores full marks on that dimension, and that part is not disclosed. It is why scores cannot travel between requisitions. |
+| 11 | Seniority compares job titles; when no readable title is found the score falls back to zero, disclosed on screen as **"not assessed"**. | The score is indistinguishable from a genuine mismatch unless you know what to look for — now the panel tells you. |
 | 12 | A cover letter is worth 10%; candidates without one score zero there. | A structural penalty for not submitting a document that may have been optional in the posting. |
 | 13 | If the AI is unavailable, the shortlist is withheld and shown as waiting rather than published with candidates silently scored zero. It retries, then stops and waits for a person. | The safe behaviour is already chosen. What is yours is the patience: how long we wait before a human is asked to step in. |
 | 14 | Consent is one confirmation per upload batch, with no record of wording or its own timestamp. | May not satisfy per-candidate consent evidence obligations. Worth checking against our retention and subject-access commitments. |

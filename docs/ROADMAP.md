@@ -17,8 +17,8 @@
 | **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **One blindness left** — the ADR-008 hashing gap, which re-bands the corpus. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
-| **A6** Before the pilot widens | 🔴 Untouched. Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health`, plus two smaller scoring defects. |
-| **A7** The pattern worth naming | **Thirteen instances.** Three added this session, and **two of those were inside the gate itself** — the thing whose job is catching the other ten. |
+| **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
+| **A7** The pattern worth naming | **Fifteen instances.** Three added A1b/A3, **two more added A6** — same escalation: (14) and (15) sat inside code whose purpose was to prevent them. |
 
 **Read this before picking anything up:** A2 is the highest-value item and cannot start without a human
 decision. A3 is the highest-value item that **can** start — the gate is what makes every other scoring
@@ -386,21 +386,56 @@ Each is a claim someone could rely on:
 
 ## A6. P1 · Before the pilot widens
 
-Retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a **recorded deferral**
-(ADR-026 §4) needing an HR decision, not a rediscovery; reverse match fails *open* at stage 3 and is
-**unwrapped at stage 2** (`orchestrator.py:847-854`), so a stage-3-only fix leaves half the problem; blobs
-are permission-gated but unencrypted (`blob_store.py:116-121`); the email hash is unsalted (`pii.py:101`)
-while the skill hash *refuses to boot* unsalted (`skills_graph.py:276-282`) — the codebase disagrees with
-itself; audit immutability is convention only (`ddl.py:317-338`); `/health` is shallow with no readiness,
-metrics, tracing or correlation IDs.
+~~**Two smaller scoring defects.**~~ ✅ **DISCLOSED 2026-08-13 —
+[ADR-041](adr/041-sub-score-measurement-markers.md).** `normalise_vector_scores` returns `1.0` for
+**everyone** on a degenerate pool (`stages.py:300-311`) — every single-candidate pool included, which
+reverse match hits routinely — and `seniority = 0.0` whenever `_most_recent_title` comes back falsy
+(`orchestrator.py:503-512`). Both are fallbacks byte-identical to a real measurement, and neither was
+disclosed on screen. Now marked on the write path and disclosed on the read path, the same strategy
+ADR-040 used for the evidence cliff, in **both** directions — there is no forward-only boundary here,
+since reverse match calls the identical `_stage2_per_candidate`.
 
-Two smaller scoring defects worth folding into any A2/A4 work: `normalise_vector_scores` returns `1.0` for
-**everyone** on a degenerate pool (`stages.py:300-311`), and `seniority = 0.0` on an unparseable title
-(`orchestrator.py:454-462`) — a candidate loses the full 15% sub-weight for a *parsing* failure.
+**Arithmetic unchanged: the defects are visible, not removed.** A candidate with no readable title
+still loses the full 15%. The eval corpus cannot exercise either branch — all 20 fixtures have
+distinct summaries and a titled current role — so a value change here would be unverifiable by the
+gate, which is how ADR-032 earned its revert. One exception: `_most_recent_title` now falls back to
+the first *titled* role instead of returning `None` when the current role's title is blank, which can
+only ever raise a score and is provably corpus-neutral.
+
+**Still open, and owner-assigned:** renormalising the remaining sub-weights when a dimension is
+unmeasurable. Needs new fixtures, corpus re-banding, and a product decision — should "no work history
+at all" be neutral-weighted, or does it genuinely mean no seniority? Owner: corpus owner + HR.
+Related and untouched: the reverse-match vector scale is unverified (`stage1_coarse_jobs` uses
+`job_summary_idx` with no analogue of the forward path's index-normalisation integration test).
+
+**🆕 Three more of the same shape, found while fixing these two and NOT fixed (ADR-041 §siblings).**
+Grepping the same two files for the same pattern found three further fallbacks that render as
+measurements — evidence the family is systematic rather than a pair of one-offs:
+1. **`score_education`'s `if not ranked: return 0.0` (`stages.py:277`)** — D2 one dimension over, and
+   the strongest of the three. A résumé whose education section did not parse scores `0.0`, which is
+   *worse* than being below the bar (that earns partial credit via `education_partial`). A parsing
+   failure is indistinguishable from "no qualifications at all", on 10% of the score.
+2. **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:211`)** — D1 one dimension
+   over. A JD stating no minimum gives *every* candidate full marks on 25% of the score.
+3. **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:271`)** — the same, on 10%.
+
+The two `1.0` cases are defensible as policy (no bar, everyone clears it) but are undisclosed — they
+are the explainer's register decision 10 applied to two more dimensions. Marking all three is
+mechanically identical to ADR-041 and reuses `ScoreBreakdown`'s marker pattern directly, so this is a
+small, well-understood follow-up rather than a new design problem.
+
+Remaining open in A6: retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a
+**recorded deferral** (ADR-026 §4) needing an HR decision; reverse match fails *open* at stage 3 and
+is **unwrapped at stage 2** (reverse match starts at `orchestrator.py:883`, its stage-2 loop at
+`:955-970`), so a stage-3-only fix leaves half the problem; blobs are permission-gated but unencrypted
+(`blob_store.py:116-121`); the email hash is unsalted (`pii.py:101`) while the skill hash *refuses to
+boot* unsalted (`skills_graph.py:276-282`) — the codebase disagrees with itself; audit immutability is
+convention only (`ddl.py:317-338`); `/health` is shallow with no readiness, metrics, tracing or
+correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **thirteen times**: an
+Across the external review and this session's gate work the same defect shape appears **fifteen times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -437,6 +472,18 @@ whose job is refusing unsafe configurations, and this one in the harness whose j
 scoring. That is worth stating plainly: *the assertions are subject to the pattern they exist to detect*,
 and neither was found by reading the code. Both were found by mutating a value and watching what failed to
 complain.
+
+**Two more, added 2026-08-13 by A6/[ADR-041](adr/041-sub-score-measurement-markers.md)** — the same
+escalation. (14) The `seniority_measured` marker was computed from the branch taken, never re-derived from
+the score; the re-derivation mutant (`seniority_measured = seniority != 0.0`) survived **4457 unit tests**
+because every pre-existing test paired measured=True with 1.0 and measured=False with 0.0. Only a title that
+*was* read and *honestly* scored 0.0 (orthogonal embeddings, clamped by rescale) separates them — the rarest
+case in practice. Killed by `test_seniority_measured_is_not_re_derived_from_a_zero_score`. (15) The
+`vec_discriminating` parameter defaulted to `None` ("unknown"), never `True` ("yes, this pool discriminated"),
+because an unsupplied opinion should not manufacture an affirmative claim; the affirmative-default mutant
+survived **4457 tests** because no call site omitted the kwarg. Killed by
+`test_an_unsupplied_pool_opinion_is_unknown_never_an_affirmative_claim`. **Again, both sat inside code whose
+explicit purpose was to prevent this pattern.**
 
 **Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
 have caught it** — Red first.
