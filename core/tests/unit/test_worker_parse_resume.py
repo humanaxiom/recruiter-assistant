@@ -18,7 +18,9 @@ Covers:
   5 does not), unrelated skills untouched.
 * ``_extract_skills_merged``: deterministic-scan-floor MERGED with a
   non-fatal best-effort LLM call, first-non-null-wins on canonical
-  collision, capped at 80.
+  collision, capped at 400 (LLM half ordered first so it's never the half
+  truncated), and trailing-technical-skills survive an administrative-heavy
+  overflow.
 * ``_parse_cover_letter``: absent (no I/O), blob branch (mime from
   extension), text branch (``set_pii_key`` before ``decrypt``), and a
   non-fatal LLM failure on the cover letter (must not fail the résumé
@@ -1176,8 +1178,14 @@ async def test_extract_skills_merged_first_non_null_years_wins_on_collision() ->
 
 
 @pytest.mark.asyncio
-async def test_extract_skills_merged_is_capped_at_80() -> None:
-    scan_names = [f"skill_{i:03d}" for i in range(100)]
+async def test_extract_skills_merged_is_capped_at_400() -> None:
+    # 500 deterministic-scan hits: one REAL skill sits well inside the new
+    # 400 cap (index 10) and must survive; another sits past it (index 450)
+    # and must still be truncated -- pins that the cap is enforced, not
+    # merely raised to "unbounded".
+    scan_names = [f"skill_{i:03d}" for i in range(500)]
+    scan_names[10] = "python"
+    scan_names[450] = "kubernetes"
     llm = MagicMock(chat_json=AsyncMock(return_value=ResumeSkillDetails(skills=[])))
     chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="lots of skills")]
 
@@ -1197,7 +1205,81 @@ async def test_extract_skills_merged_is_capped_at_80() -> None:
     ):
         merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
-    assert len(merged) == 80
+    names = {s.name for s in merged}
+    assert len(merged) == 400
+    assert "python" in names
+    assert "kubernetes" not in names
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_trailing_technical_skills_survive_admin_overflow() -> (  # noqa: E501
+    None
+):
+    """Reproduces the merge-blocking finding: an administrative-prose-heavy
+    résumé whose deterministic scan alone exceeds the OLD 80-skill cap, with
+    the real technical skills (the ones a must-have skill match depends on)
+    appearing LAST -- the common layout where ``TECHNICAL SKILLS`` is the
+    final section. Under the pre-fix code (``det`` ordered before the LLM
+    half, capped at 80) every one of these technical names was truncated
+    away and never reached ``ResumeParsed.skills``. Both halves of the fix
+    are required: reordering alone doesn't save ``airflow``/``docker``/
+    ``kubernetes``/``rest_api_design`` (the LLM never saw them either --
+    they're scanner-only), so the cap must also rise above the 106-entry
+    merge produced here.
+    """
+    admin_filler = [f"admin_skill_{i:03d}" for i in range(100)]
+    trailing_technical = [
+        "python",
+        "postgresql",
+        "airflow",
+        "docker",
+        "kubernetes",
+        "rest_api_design",
+    ]
+    scan_names = admin_filler + trailing_technical  # det: 106 total
+
+    # The LLM half independently found the two most prominent technologies,
+    # WITH years -- this is the richer half and must never be the one that
+    # gets truncated.
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python", years=5, last_used_year=2025),
+                    ResumeSkillDetail(name="postgresql", years=3, last_used_year=2024),
+                ]
+            )
+        )
+    )
+    chunks = [
+        ResumeChunk(id="c_001", section="skills", page=0, text="administrative resume")
+    ]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text",
+            MagicMock(return_value=scan_names),
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    names = {s.name for s in merged}
+    for tech in trailing_technical:
+        assert tech in names, f"{tech} truncated away by the merge cap"
+
+    by_name = {s.name: s for s in merged}
+    assert by_name["python"].years == 5
+    assert by_name["python"].last_used_year == 2025
+    assert by_name["postgresql"].years == 3
+    assert by_name["postgresql"].last_used_year == 2024
 
 
 # ── ADR-008: `_extract_skills_merged` is shape-only junk filtering now ────

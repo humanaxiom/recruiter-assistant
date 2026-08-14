@@ -90,9 +90,18 @@ log = logging.getLogger(__name__)
 # tunable like resume_parse_max_tries.
 _RETRY_DEFER_SECONDS = 15.0
 
-# ResumeParsed.skills is capped at 80; cap the merge at the same number so the
-# model_validate below never has to silently truncate.
-_MAX_SKILLS = 80
+# ResumeParsed.skills is capped at 400; cap the merge at the same number so
+# the model_validate below never has to silently truncate. The deterministic
+# scan (`det`) is bounded by the curated vocabulary itself (306 canonicals as
+# of A2's family expansion), so a cap below the vocabulary size silently
+# truncates a TRUSTED source (the scan can only ever emit a term actually
+# found verbatim in the résumé) as the vocabulary grows -- exactly the
+# regression a merge-blocking review caught: an administrative-prose-heavy
+# résumé's deterministic scan alone filled all 80 slots before reaching a
+# trailing "TECHNICAL SKILLS" section, silently dropping a must-have skill
+# (e.g. Python) the résumé plainly listed. 400 leaves headroom above 306
+# without being unbounded.
+_MAX_SKILLS = 400
 
 # Embed in batches instead of one giant POST. A 200-chunk résumé in a single
 # request is a multi-MB body that Ollama has to hold whole, and one slow/failed
@@ -233,8 +242,15 @@ async def _extract_skills_merged(
     # docstring), and it must not outsource it: a duplicate canonical name
     # survives into ``ResumeParsed.skills`` and becomes two HAS_SKILL edges for
     # the same skill when Phase 4 projects the résumé. Cap AFTER the dedupe, so
-    # the limit counts 80 DISTINCT skills rather than 80 rows.
-    canonical = canonicalize_skill_names([*det, *[d.name for d in llm_details]])
+    # the limit counts _MAX_SKILLS DISTINCT skills rather than _MAX_SKILLS rows.
+    #
+    # LLM-extracted names go FIRST, deterministic scan second. The LLM half
+    # carries ``years``/``last_used_year`` (recency scoring input the scan
+    # can never recover, since it only matches a bare vocabulary term) — it
+    # is strictly the richer half, so it must never be the half a cap
+    # truncates. This alone does not save a scanner-only technical skill the
+    # LLM missed; that is what raising ``_MAX_SKILLS`` above is for.
+    canonical = canonicalize_skill_names([*[d.name for d in llm_details], *det])
     ordered = list(dict.fromkeys(canonical))[:_MAX_SKILLS]
     skills = [detail_by_canonical.get(c, ResumeSkill(name=c)) for c in ordered]
     return _drop_smeared_years(skills, resume_id_str), degradation_reason
