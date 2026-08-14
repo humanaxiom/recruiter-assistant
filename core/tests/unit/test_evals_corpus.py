@@ -643,7 +643,14 @@ def _most_recent_title(parsed: dict[str, Any]) -> str | None:
     first, else the first role, THEN (ROADMAP A6 #4) falling back to the
     first TITLED role in that same current-first-then-document-order
     precedence when the initial pick's own title is blank. This is the
-    string the engine feeds to the embedder for the SENIORITY sub-score."""
+    string the engine feeds to the embedder for the SENIORITY sub-score.
+
+    ROADMAP A6 remediation (F5): "readable" means non-blank AFTER stripping
+    whitespace, not merely truthy -- `"   "`/`"\t\n"` are truthy in Python
+    but carry no content, so the ORIGINAL `if title:` gate treated them as a
+    genuine title and blocked the fallback. The return value itself stays
+    UNSTRIPPED (`str(title)`, not `str(title).strip()`) for every title that
+    is already non-blank -- only the readability CHECK strips."""
     roles = parsed.get("experience") or []
     if not roles:
         return None
@@ -651,7 +658,7 @@ def _most_recent_title(parsed: dict[str, Any]) -> str | None:
     ordered = list(current) + [r for r in roles if r not in current]
     for role in ordered:
         title = role.get("title")
-        if title:
+        if title and str(title).strip():
             return str(title)
     return None
 
@@ -3561,6 +3568,11 @@ _TITLE_PROBES: tuple[list[dict[str, Any]], ...] = (
     [{"is_current": True}, {"title": "Staff Engineer"}],
     [{"title": "", "is_current": True}, {"title": ""}],
     [{"title": ""}, {"title": "Backend Engineer"}, {"title": "Staff Engineer"}],
+    # ROADMAP A6 remediation (F5) -- whitespace-only is unreadable too, not
+    # merely truthy.
+    [{"title": "   ", "is_current": True}, {"title": "Senior Backend Engineer"}],
+    [{"title": "\t\n", "is_current": True}, {"title": "Staff Engineer"}],
+    [{"title": "   ", "is_current": True}, {"title": "\t"}],
 )
 
 

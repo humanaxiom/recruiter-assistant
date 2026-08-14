@@ -30,6 +30,24 @@ This file pins the SCHEMA layer only:
     raise, not silently become an affirmative measurement, and pydantic's
     own lax bool aliases (``0``/``1``/``0.0``/``1.0``) still coerce to a
     REAL, identity-comparable ``True``/``False`` singleton.
+
+REMEDIATION ROUND (reviewer CHANGES-REQUIRED on `fix/a6-fabricated-sub-scores`):
+  * F3 — the existing boundary probes above (``just_inside``/``just_outside``)
+    sit strictly either side of ``_DEGENERATE_POOL_EPS`` and cannot see a
+    mutant that flips the shared comparison's `<` to `<=`: both operators
+    agree at every point strictly inside or outside the boundary, and only
+    disagree AT the boundary itself. The remediation also makes
+    ``normalise_vector_scores`` delegate to ``vector_pool_is_degenerate`` so
+    exactly one comparison exists in the codebase (F3's structural fix) — the
+    tests below pin the OBSERVABLE behaviour of that one comparison at the
+    exact boundary value, not its internal structure, so they hold regardless
+    of which function textually owns the comparison.
+  * F4 — ``vector_pool_is_degenerate([])`` currently returns ``False``, the
+    AFFIRMATIVE direction ("a real comparison happened") for a pool that by
+    definition has no spread at all. Unreachable in production today (an
+    empty stage-1 pool short-circuits before any breakdown is built) but
+    still the wrong default for the same reason ADR-041 exists, and nothing
+    pinned the branch — pinned below.
 """
 
 from __future__ import annotations
@@ -196,3 +214,55 @@ def test_vector_pool_is_degenerate_shares_normalise_vector_scores_epsilon() -> N
         "normalise_vector_scores still collapsed it to [1.0, 1.0] -- the two "
         "are reading different thresholds"
     )
+
+
+# ── F3 (remediation) — the boundary itself, not just either side of it ─────
+#
+# `just_inside`/`just_outside` above sit strictly either side of the
+# boundary and cannot distinguish `<` from `<=`: both operators agree
+# everywhere except AT `_DEGENERATE_POOL_EPS` exactly. `0.0` is used as the
+# pool's low value (rather than e.g. `3.0`) so `hi - lo` is an EXACT float
+# subtraction with no rounding error — `_DEGENERATE_POOL_EPS - 0.0 ==
+# _DEGENERATE_POOL_EPS` bit-for-bit, so this pins the true boundary rather
+# than a value merely close to it.
+
+
+def test_vector_pool_is_degenerate_false_exactly_at_the_epsilon_boundary() -> None:
+    """A spread of EXACTLY ``_DEGENERATE_POOL_EPS`` is NOT degenerate — the
+    comparison is a strict ``<``. A mutant that flips it to ``<=`` marks this
+    pool degenerate and this assertion catches it; the two probes further up
+    this file (strictly inside/outside) cannot."""
+    at_boundary = [0.0, _DEGENERATE_POOL_EPS]
+    assert at_boundary[1] - at_boundary[0] == _DEGENERATE_POOL_EPS, (
+        "test setup bug: this must be an EXACT float subtraction with no "
+        "rounding, or the boundary pin is not actually pinning the boundary"
+    )
+    assert vector_pool_is_degenerate(at_boundary) is False
+
+
+def test_normalise_vector_scores_does_not_collapse_at_the_epsilon_boundary() -> None:
+    """Sibling of the pin directly above, through ``normalise_vector_scores``
+    itself — after F3's structural fix (``normalise_vector_scores`` delegates
+    to ``vector_pool_is_degenerate``) there is exactly one comparison in the
+    codebase, so this and the test above must never disagree."""
+    at_boundary = [0.0, _DEGENERATE_POOL_EPS]
+    assert normalise_vector_scores(at_boundary) == [0.0, 1.0], (
+        "a spread of exactly _DEGENERATE_POOL_EPS is real spread, not a "
+        "degenerate pool -- it must be min-max scaled, not collapsed to "
+        "[1.0, 1.0]"
+    )
+
+
+# ── F4 (remediation) — the empty pool must read as "no spread", not "real" ──
+
+
+def test_vector_pool_is_degenerate_true_for_an_empty_pool() -> None:
+    """An empty pool has no spread at all -- the AFFIRMATIVE "a real
+    comparison happened" reading (``False``, the pre-remediation return
+    value) is the wrong default for exactly the reason this whole marker
+    exists: it would let a caller with nothing to compare persist
+    ``vector_discriminating=True``. Unreachable in production today (an
+    empty stage-1 pool short-circuits `generate_shortlist` / `match_resume_to_jobs`
+    before any `ScoreBreakdown` is ever built) but the branch must still read
+    the honest direction."""
+    assert vector_pool_is_degenerate([]) is True

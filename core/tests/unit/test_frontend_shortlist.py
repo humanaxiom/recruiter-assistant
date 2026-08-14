@@ -1700,6 +1700,28 @@ def test_entry_detail_says_seniority_not_assessed_when_no_title_was_readable(
         "the prose above the table must say WHY -- no readable job title "
         "was found, so nothing was compared"
     )
+    # F2 (remediation): the OTHER three sub-score rows are untouched by this
+    # marker and must keep rendering their REAL numbers -- a mutant that
+    # suppresses `skill` (or `experience`/`education`) under
+    # `seniority_not_assessed` instead of `seniority` passes every assertion
+    # above unchanged.
+    other_rows = (
+        ("skill", 0.80),
+        ("experience", 0.60),
+        ("education", 0.40),
+    )
+    for other_label, other_value in other_rows:
+        _o_component, _o_weight, other_score, _o_contribution = _row_for(
+            rows, other_label
+        )
+        assert _norm(other_score) != "not assessed", (
+            f"the {other_label!r} row was suppressed by seniority's marker -- "
+            f"got {other_score!r}"
+        )
+        assert _norm(other_score) == str(int(round(other_value * 100))), (
+            f"expected the real {other_label!r} score ({other_value}) to "
+            f"still render, got {other_score!r}"
+        )
 
 
 def test_entry_detail_keeps_the_real_seniority_score_when_a_title_was_readable(
@@ -1749,6 +1771,28 @@ def test_entry_detail_says_vector_not_comparable_for_a_degenerate_pool(
         "pool scored identically, so the number reflects the pool, not the "
         "match"
     )
+    # F2 (remediation): the OTHER three sub-score rows are untouched by this
+    # marker and must keep rendering their REAL numbers -- a mutant that
+    # suppresses `education` (or `skill`/`experience`) under
+    # `vector_not_comparable` instead of `vector` passes every assertion
+    # above unchanged.
+    other_rows = (
+        ("skill", 0.80),
+        ("experience", 0.60),
+        ("education", 0.40),
+    )
+    for other_label, other_value in other_rows:
+        _o_component, _o_weight, other_score, _o_contribution = _row_for(
+            rows, other_label
+        )
+        assert _norm(other_score) != "not assessed", (
+            f"the {other_label!r} row was suppressed by vector's marker -- "
+            f"got {other_score!r}"
+        )
+        assert _norm(other_score) == str(int(round(other_value * 100))), (
+            f"expected the real {other_label!r} score ({other_value}) to "
+            f"still render, got {other_score!r}"
+        )
 
 
 def test_entry_detail_keeps_the_real_vector_score_for_a_pool_with_spread(

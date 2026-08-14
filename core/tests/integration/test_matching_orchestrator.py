@@ -801,6 +801,108 @@ async def test_reverse_match_marks_both_true_for_a_pool_with_spread_and_title(
     )
 
 
+# ── ROADMAP A6 remediation F1: the FORWARD marker wiring is unenforced ─────
+#
+# The reverse-direction pair immediately above pins `match_resume_to_jobs`'s
+# own computed `vec_discriminating`, threaded through `_stage2_per_candidate`.
+# The FORWARD call site (`generate_shortlist`, `orchestrator.py:816`) has the
+# IDENTICAL shape --
+#
+#     vec_discriminating = not vector_pool_is_degenerate(raw_vec_scores)
+#
+# -- but nothing drives it end to end: per the reviewer's own count, dropping
+# the `not` there survives all 4459 unit tests AND all 56 integration tests
+# that existed before this pin. A one-résumé job -- the ROUTINE case ADR-041
+# names, not an edge case -- is a single-candidate stage-1 pool by
+# definition, and this is the direction with the real rendering surface (the
+# entry-detail panel via `generate_shortlist` -> `shortlist_entries`),
+# unlike the reverse direction the two tests above cover. Driven against
+# REAL Postgres + REAL Neo4j, exactly like the reverse pair, because
+# `stage1_coarse`'s job-scoped Cypher (`orchestrator.py:355-372`) is itself
+# untested by a mock.
+
+
+@pytest.mark.asyncio
+async def test_generate_shortlist_marks_vector_discriminating_false_single_pool(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """One résumé applied to this job -- stage 1's pool has exactly one
+    element, degenerate by definition regardless of the real similarity
+    value. `generate_shortlist` must persist `vector_discriminating=False`
+    for it, not the affirmative default a dropped `not` at the forward call
+    site would silently produce."""
+    job_id = await _insert_job(pg_pool, title="Backend Engineer")
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        parsed={
+            "total_years_experience": 3,
+            "education": [],
+            "experience": [],
+            "chunks": [],
+            "cover_letter_chunks": [],
+        },
+    )
+    await _seed_job_node(neo4j_driver, job_id, summary_emb=_vec(500))
+    await _seed_resume_node(neo4j_driver, resume_id, job_id, summary_emb=_vec(501))
+
+    async with pg_pool.acquire() as conn:
+        ctx = _ctx(conn, neo4j_driver)
+        with patch(
+            "src.pipeline.matching.orchestrator.load_prompt",
+            return_value=_STUBBED_PROMPT,
+        ):
+            result = await generate_shortlist(job_id, ctx)
+
+    assert len(result.entries) == 1, "expected exactly one ranked candidate"
+    assert result.entries[0].breakdown.vector_discriminating is False, (
+        "a single-candidate stage-1 pool is degenerate by definition -- the "
+        "FORWARD call site (generate_shortlist) must mark it, not persist "
+        "the affirmative default a dropped `not` would produce. This is the "
+        "gap the reverse-direction tests above cannot see."
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_shortlist_marks_vector_discriminating_true_pool_spread(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver
+) -> None:
+    """Two résumés with genuinely distinct summary embeddings -- real spread
+    in the stage-1 `vec_score` pool -- must persist
+    `vector_discriminating=True` for BOTH candidates via the forward call
+    site."""
+    job_id = await _insert_job(pg_pool, title="Backend Engineer")
+    job_emb = _vec(600)
+    resume_kwargs = {
+        "total_years_experience": 3,
+        "education": [],
+        "experience": [],
+        "chunks": [],
+        "cover_letter_chunks": [],
+    }
+    close_id = await _insert_resume(pg_pool, job_id, parsed=dict(resume_kwargs))
+    far_id = await _insert_resume(pg_pool, job_id, parsed=dict(resume_kwargs))
+    await _seed_job_node(neo4j_driver, job_id, summary_emb=job_emb)
+    await _seed_resume_node(neo4j_driver, close_id, job_id, summary_emb=job_emb)
+    await _seed_resume_node(neo4j_driver, far_id, job_id, summary_emb=_vec(601))
+
+    async with pg_pool.acquire() as conn:
+        ctx = _ctx(conn, neo4j_driver)
+        with patch(
+            "src.pipeline.matching.orchestrator.load_prompt",
+            return_value=_STUBBED_PROMPT,
+        ):
+            result = await generate_shortlist(job_id, ctx)
+
+    assert len(result.entries) == 2, "expected both candidates to be scored"
+    for entry in result.entries:
+        assert entry.breakdown.vector_discriminating is True, (
+            "a two-candidate pool with genuinely distinct embeddings has "
+            "real spread -- the forward call site must not mark it "
+            "degenerate"
+        )
+
+
 # ── ADR-028: load_job_view populates JobView.education_fields ───────────────
 #
 # DB-bound (``JobView`` is only ever built by ``load_job_view`` reading a real
