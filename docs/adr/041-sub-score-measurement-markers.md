@@ -42,7 +42,9 @@ The default is `None`, not `True`, and that is load-bearing rather than incident
 
 **Seniority branch.** Set `seniority_measured=True` when a title was actually read and compared; `False` when **no role on the résumé carried a readable title at all** — whether because there is no experience section or because every entry's title is blank. Note this is deliberately mechanical: it answers "did a comparison happen", not "does the number mean anything". A candidate with no work history gets `False` too, because no comparison happened, even though scoring them low is a defensible policy.
 
-The one value change: **`_most_recent_title` now falls back to the most recent role that actually has a title**, instead of returning `None` when the top pick's own title is blank. It previously took `current[0]` unconditionally, so a résumé whose current role had a blank title scored `0.0` even when the previous role read "Senior Backend Engineer" — a real candidate losing the full 15% to a title that was readable elsewhere on the page. Precedence (current-first, then document order) is unchanged; the fallback only widens which role's title is read. It can only ever raise a score, and all 20 corpus fixtures have a titled current role, so the corpus is provably unaffected.
+The one value change: **`_most_recent_title` now falls back to the most recent role that actually has a title**, instead of returning `None` when the top pick's own title is blank. It previously took `current[0]` unconditionally, so a résumé whose current role had a blank title scored `0.0` even when the previous role read "Senior Backend Engineer" — a real candidate losing the full 15% to a title that was readable elsewhere on the page. A whitespace-only title (`"   "`, `"\t\n"`) counts as unreadable and falls through too, but a title that is already non-blank is returned **unstripped** — stripping would change the string handed to the embedder, and leaving it alone is what keeps the corpus-neutrality argument airtight.
+
+Precedence (current-first, then document order) is unchanged; the fallback only widens which role's title is read. It can only ever raise **that candidate's own seniority sub-score** — stated narrowly on purpose, because it is not true of the run as a whole: a raised structured score can displace a *different* candidate below the stage-3 evidence cut-off and so lower *their* final score. All 20 corpus fixtures have a titled current role and produce an identical title before and after (verified fixture by fixture, `r01`–`r20`), so the corpus is provably unaffected.
 
 **Do NOT call `ctx.embedder` on the no-title path.** An integration test (`test_shortlist_fail_closed_pg.py`) seeds a résumé with no experience and a bare `MagicMock` embedder — `await MagicMock()` raises `TypeError`, which is outside the LLM exception guard and would escape stage 2 uncaught.
 
@@ -75,6 +77,8 @@ For each marker:
 - **The cliffs themselves remain.** A candidate with no readable title still scores `0.0` for seniority; a degenerate pool still scores `1.0` for everyone. Visible, not gone. Removing them means renormalising the remaining sub-weights when a dimension is unmeasurable, which re-bands the corpus and every margin must be re-measured — a product decision that belongs with the corpus owner.
 - **The reverse-match vector scale is unverified.** `stage1_coarse_jobs` uses `job_summary_idx` via `db.index.vector.queryNodes` and there is no analogue of `test_stage1_recall_job_scoped_neo4j.py::test_scores_match_the_vector_index_normalisation` for it. The forward path's `(1 + cos)/2` scale is integration-verified; the reverse path's is assumed. Named follow-up.
 - **Reverse-match panel still does not exist**, so reverse-match rows carry the markers but nothing renders them (ADR-031's forward-only display boundary, unchanged).
+- **Two other live forward surfaces still render these numbers undisclosed.** The shortlist card tiles (`shortlist_cards.html:98-106`) show `SENIORITY / 0` and `VECTOR / 100` as bare integers, and the CSV export (`shortlist_service.py:1187-1188,1239-1240`) emits the raw `seniority`/`vector` columns. The disclosure is on the entry-detail panel only. ADR-040 recorded the equivalent limitation ("the list view is unchanged") and this ADR must too — the explainer's register decisions 10 and 11 were narrowed to say "Why this rank?" page rather than "the screen" for exactly this reason.
+- **The two markers disagree with their own sibling about failure policy.** `evidence_evaluated`'s reader (`shortlist_service.py:543-566`) deliberately degrades a corrupt stored value to `None` and never raises, because "a raise would 500 the whole shortlist permanently". These two markers instead raise on junk, and pydantic's lax bool aliases coerce `1`/`"yes"` into an affirmative `True`. There is no live exploit — the write path only ever writes `bool` or `None`, and a hand-corrupted row is the only way in — but the asymmetry is real and a future reader should pick one policy rather than inherit both.
 
 ## Mutation testing evidence
 
@@ -101,6 +105,43 @@ After implementation was green, a mutation probe was run against the branch's ow
 **Evidence:** 4457 unit tests passed with M6 live, 2 deselected. With M6 killed: 4459 passed.
 
 **Note:** M6 is the same defect shape as ADR-040's own `ShortlistResultEntry.evidence_evaluated: bool = False`, which still cannot express "unknown" and is a live residual there. Both should be addressed together in a follow-up that lifts defaults to `None` across the marker landscape.
+
+### A7 instance 16 — found by the merge-blocking reviewer, and the sharpest of the three
+
+The reviewer ran **17** mutants against this branch. Ten died; seven survived, and one of the survivors was
+a genuine major defect rather than a missing edge-case test.
+
+**The mutant:** drop the `not` from the **forward** call site's
+`vec_discriminating = not vector_pool_is_degenerate(raw_vec_scores)`. It passed **4459 unit and 56
+integration tests**.
+
+**The consequence:** a job with one parsed résumé — the routine degenerate pool this ADR is largely
+about — would persist `vector_discriminating=True` and the panel would render `vector | 10% | 100% | 10%`
+as a measured semantic match. The exact fabrication this ADR exists to close, reintroduced by deleting
+three characters, with nothing complaining.
+
+**Why it is worth recording rather than quietly fixing.** The branch *did* pin the marker wiring — for
+**reverse match**, which by this ADR's own residual has no rendering surface at all. It pinned the
+invisible direction and left the visible one open. The comment at `orchestrator.py:469` asserted that
+"both real call sites always pass it explicitly" as though that settled it; only one was enforced. So
+"both call sites are wired" was itself an unenforced invariant — the A7 pattern one level up from the
+markers, inside the branch whose entire subject is the A7 pattern.
+
+Closed by two integration tests driving the real forward `generate_shortlist` path against Postgres and
+Neo4j, verified by kill-and-restore: `2 passed` unmutated, `2 failed` with the `not` removed, `2 passed`
+after restoring.
+
+Three of the reviewer's other survivors were also closed, because each was the fabrication direction:
+`vector_pool_is_degenerate([])` returned `False` (an affirmative claim about an empty pool — now `True`);
+the "not assessed" suppression could be wired to the wrong row entirely and nothing noticed (the two
+panel tests now assert the other three rows keep their real numbers); and the shared-epsilon test pinned
+the *constant* while two independently-written `<` comparisons remained, so `normalise_vector_scores` now
+**calls** `vector_pool_is_degenerate` and exactly one comparison exists — drift made impossible rather
+than merely tested against.
+
+The remaining survivor, `r not in current` in `_most_recent_title`, was proven behaviourally inert
+(removing the filter leaves all tests green; dict equality forces equal `is_current`, so no role that
+should be considered can be dropped) and is deliberately left as-is.
 
 ## Alternatives considered
 
@@ -129,8 +170,9 @@ and would reuse `ScoreBreakdown`'s marker pattern directly.
 
 ## Gate state
 
-`./scripts/verify.sh all` green, exit code captured directly rather than piped: **4459 unit tests @
-94.40% coverage, 497 integration tests**.
+`./scripts/verify.sh all` green, exit code captured directly rather than piped: **4466 unit tests @
+94.41% coverage, 499 integration tests** (after the reviewer remediation round; it was 4459 @ 94.40% /
+497 when the reviewer first ran).
 
 RED was measured first and is recorded honestly: the initial failing state was a *collection* error
 (`ImportError: cannot import name '_DEGENERATE_POOL_EPS'`) plus, once collection was made to proceed,

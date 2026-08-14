@@ -18,7 +18,7 @@
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
-| **A7** The pattern worth naming | **Fifteen instances.** Three added A1b/A3, **two more added A6** — same escalation: (14) and (15) sat inside code whose purpose was to prevent them. |
+| **A7** The pattern worth naming | **Sixteen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. |
 
 **Read this before picking anything up:** A2 is the highest-value item and cannot start without a human
 decision. A3 is the highest-value item that **can** start — the gate is what makes every other scoring
@@ -399,8 +399,15 @@ since reverse match calls the identical `_stage2_per_candidate`.
 still loses the full 15%. The eval corpus cannot exercise either branch — all 20 fixtures have
 distinct summaries and a titled current role — so a value change here would be unverifiable by the
 gate, which is how ADR-032 earned its revert. One exception: `_most_recent_title` now falls back to
-the first *titled* role instead of returning `None` when the current role's title is blank, which can
-only ever raise a score and is provably corpus-neutral.
+the first *titled* role (whitespace-only titles count as unreadable) instead of returning `None` when
+the current role's title is blank. That can only ever raise **that candidate's own seniority
+sub-score** — narrowly stated, because a raised structured score can displace a *different* candidate
+below the stage-3 evidence cut-off and lower *their* final score. Provably corpus-neutral: all 20
+fixtures yield an identical title before and after.
+
+**Disclosure reaches the entry-detail panel only.** The shortlist card tiles and the CSV export still
+render the bare `0` / `100`. Recorded in ADR-041's residuals, and the explainer's register decisions 10
+and 11 were narrowed to say "Why this rank?" page rather than "the screen" for exactly that reason.
 
 **Still open, and owner-assigned:** renormalising the remaining sub-weights when a dimension is
 unmeasurable. Needs new fixtures, corpus re-banding, and a product decision — should "no work history
@@ -435,7 +442,7 @@ correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **fifteen times**: an
+Across the external review and this session's gate work the same defect shape appears **sixteen times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -484,6 +491,22 @@ because an unsupplied opinion should not manufacture an affirmative claim; the a
 survived **4457 tests** because no call site omitted the kwarg. Killed by
 `test_an_unsupplied_pool_opinion_is_unknown_never_an_affirmative_claim`. **Again, both sat inside code whose
 explicit purpose was to prevent this pattern.**
+
+**A sixteenth, and the sharpest — found by the merge-blocking reviewer *after* (14) and (15) were closed.**
+Dropping the `not` from the **forward** call site's
+`vec_discriminating = not vector_pool_is_degenerate(raw_vec_scores)` passed **4459 unit and 56 integration
+tests**. A job with one parsed résumé would then have rendered `vector | 10% | 100% | 10%` as a measured
+semantic match — the exact fabrication ADR-041 exists to close, reintroduced by deleting three characters.
+The branch *had* pinned the marker wiring: for **reverse** match, which by ADR-041's own residual has no
+rendering surface at all. **It pinned the invisible direction and left the visible one open**, while a comment
+asserted that "both real call sites always pass it explicitly" as though that settled it. So *"both call sites
+are wired"* was itself an unenforced invariant — the pattern one level above the markers, inside the branch
+whose whole subject is the pattern. Closed by two forward-path integration tests, verified by kill-and-restore.
+
+**The lesson that generalises past this instance:** two of the three were found only because someone
+adversarially mutated code that was already green *and already reviewed for this exact defect class*. A
+green suite plus an author who is actively hunting the pattern is still not enough; the reviewer found
+what the author's own probe missed, because the author probed the invariants he had thought to write down.
 
 **Planning consequence:** for each item above, the deliverable is the fix **plus the assertion that would
 have caught it** — Red first.
