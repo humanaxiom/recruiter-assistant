@@ -296,6 +296,27 @@ def score_education(
 
 # ---------------- vector normalisation ----------------
 
+# ROADMAP A6 (D1). The min-max collapse threshold below, shared by
+# ``normalise_vector_scores`` and ``vector_pool_is_degenerate`` so the two
+# callers cannot drift on the boundary -- a second independently-written
+# ``1e-9`` literal is precisely the A7 defect shape (a duplicated threshold
+# constant) this branch's own spec warns against.
+_DEGENERATE_POOL_EPS = 1e-9
+
+
+def vector_pool_is_degenerate(scores: list[float]) -> bool:
+    """True iff ``scores`` has no real spread (``hi - lo < _DEGENERATE_POOL_EPS``).
+
+    A degenerate pool -- every single-candidate pool included -- is the case
+    ``normalise_vector_scores`` collapses to ``1.0`` for everyone below. This
+    predicate lets the write path MARK that no genuine comparison happened,
+    without changing ``normalise_vector_scores``'s own return value at all.
+    """
+    if not scores:
+        return False
+    lo, hi = min(scores), max(scores)
+    return (hi - lo) < _DEGENERATE_POOL_EPS
+
 
 def normalise_vector_scores(scores: list[float]) -> list[float]:
     """Min-max scale a stage-1 vec_score pool to [0, 1].
@@ -306,7 +327,7 @@ def normalise_vector_scores(scores: list[float]) -> list[float]:
     if not scores:
         return []
     lo, hi = min(scores), max(scores)
-    if hi - lo < 1e-9:
+    if hi - lo < _DEGENERATE_POOL_EPS:
         return [1.0] * len(scores)
     return [(s - lo) / (hi - lo) for s in scores]
 

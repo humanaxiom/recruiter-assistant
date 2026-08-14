@@ -131,23 +131,57 @@
   </table>
 
   <h4>Structured sub-scores</h4>
+  {# ROADMAP A6. Two of the five sub-scores below can be computed from a
+     policy FALLBACK rather than a real comparison, and the fallback value is
+     byte-identical to a genuine measurement -- so it is disclosed here, the
+     same way the evidence cliff is disclosed above. `is sameas false` is
+     Jinja IDENTITY, not truthiness: `None` (legacy row, unknown either way)
+     and `0`/`0.0` must not match, only a real, explicit `False`. #}
+  {% set seniority_not_assessed = explanation.seniority_assessed is sameas false %}
+  {% set vector_not_comparable  = explanation.vector_comparable  is sameas false %}
+  {% if seniority_not_assessed %}
+  <p class="muted"><strong>Seniority was not assessed for this candidate.</strong>
+    No readable job title was found anywhere on their résumé, so no comparison
+    against this job's title was possible. The seniority row below therefore
+    shows "not assessed" rather than a score — the stored value is a policy
+    fallback, not a judgement about this candidate's seniority.</p>
+  {% endif %}
+  {% if vector_not_comparable %}
+  <p class="muted"><strong>Semantic similarity was not comparable for this
+    candidate.</strong> Every candidate in this pool scored identically on
+    semantic similarity (often because the pool has only one candidate), so
+    the vector row below shows "not assessed" rather than a score — the
+    percentage would reflect the pool, not this candidate's match.</p>
+  {% endif %}
   <table class="table contribution-table">
     <thead>
       <tr><th>Component</th><th>Weight</th><th>Score</th><th>Contribution</th></tr>
     </thead>
     <tbody>
-      {% for label, row in [
-          ('skill', explanation.skill),
-          ('experience', explanation.experience),
-          ('education', explanation.education),
-          ('seniority', explanation.seniority),
-          ('vector', explanation.vector),
+      {% for label, row, not_assessed in [
+          ('skill', explanation.skill, false),
+          ('experience', explanation.experience, false),
+          ('education', explanation.education, false),
+          ('seniority', explanation.seniority, seniority_not_assessed),
+          ('vector', explanation.vector, vector_not_comparable),
       ] %}
       <tr>
         <td>{{ label }}</td>
         <td>{{ pct(row.weight) }}</td>
-        <td>{{ score_cell(row.score) }}</td>
-        <td>{{ pct(row.contribution) }}</td>
+        <td>
+          {%- if not_assessed -%}
+          not assessed
+          {%- else -%}
+          {{ score_cell(row.score) }}
+          {%- endif -%}
+        </td>
+        <td>
+          {%- if not_assessed -%}
+          —
+          {%- else -%}
+          {{ pct(row.contribution) }}
+          {%- endif -%}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

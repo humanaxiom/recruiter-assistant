@@ -131,6 +131,14 @@ class ShortlistExplanation(BaseModel):
     # while this is False. One asks "did the row store a number", the other
     # asks "does that number mean anything".
     evidence_assessed: bool | None = None
+    # ROADMAP A6 (D1/D2). Two more different-question markers, same pattern
+    # as ``evidence_assessed`` immediately above: a past-the-fallback row
+    # stores a perfectly readable ``0.0``/``1.0``, so ``scores_available`` can
+    # be True while these are False. Copied FAITHFULLY off
+    # ``score_breakdown``'s own markers below -- never re-derived from the
+    # score value itself.
+    seniority_assessed: bool | None = None
+    vector_comparable: bool | None = None
 
 
 def _row(score: float | None, weight: float | None) -> ContributionRow:
@@ -193,6 +201,11 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
         # rule ADR-031 §4 applies to the anti-fabrication verdicts. The write
         # path is the only place that knows whether stage 3 saw this candidate.
         evidence_assessed=entry.evidence_evaluated,
+        # Copied faithfully off ``score_breakdown``'s own markers (ADR-040 §5
+        # discipline extended to the two ROADMAP A6 markers) — the write path
+        # is the only place that knows whether either comparison actually ran.
+        seniority_assessed=breakdown.seniority_measured,
+        vector_comparable=breakdown.vector_discriminating,
     )
 
 

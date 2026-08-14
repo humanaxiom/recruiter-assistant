@@ -67,6 +67,7 @@ from src.pipeline.matching.stages import (
     score_experience,
     score_skill_breakdown,
     stage4_combine,
+    vector_pool_is_degenerate,
     verify_evidence,
 )
 from src.prompts import load_prompt
@@ -460,6 +461,24 @@ async def _stage2_per_candidate(
     candidate: Stage1Candidate,
     vec_normalised: float,
     weights: MatchWeights,
+    *,
+    # ROADMAP A6 (D1). Keyword-only, three-state: a caller-supplied fact about
+    # the WHOLE pool (`vector_pool_is_degenerate` on the pool's raw
+    # vec_scores, computed once outside this function), threaded through
+    # unchanged onto the breakdown, never re-derived from `vec_normalised`
+    # here. Both real call sites (forward `shortlist_job`, reverse
+    # `match_resume_to_jobs`) always pass it explicitly.
+    #
+    # The default is `None`, NOT `True`, and that is load-bearing: a caller
+    # with no pool to speak of has no opinion, and "unknown" is the honest
+    # record of that. A `bool` default would make this parameter structurally
+    # unable to express "unknown", so any future call site that forgot the
+    # kwarg would silently persist an affirmative "a real comparison happened"
+    # claim about a named candidate — the invented fact this whole marker
+    # exists to prevent, pointed the other way. ADR-040's
+    # `ShortlistResultEntry.evidence_evaluated: bool = False` has exactly that
+    # shape and is noted as a residual there.
+    vec_discriminating: bool | None = None,
 ) -> Stage2Candidate:
     # Pull resume.parsed first — experience + education + seniority AND the
     # implied-experience seniority gate (ADR 0027) all read off it.
@@ -501,6 +520,10 @@ async def _stage2_per_candidate(
     )
 
     # Seniority: cosine between job title + most-recent role title via embedder.
+    # ROADMAP A6 (D2): `seniority_measured` marks whether that comparison
+    # actually ran -- set from the branch actually taken, never re-derived
+    # from the resulting score (a `0.0` measurement and a `0.0` fallback must
+    # stay distinguishable).
     recent_title = _most_recent_title(parsed)
     if recent_title:
         embs = await ctx.embedder.embed([job.title, recent_title])
@@ -508,8 +531,10 @@ async def _stage2_per_candidate(
         # Normalise [seniority_floor, 1.0] → [0, 1].
         floor = weights.seniority_floor
         seniority = max(0.0, min(1.0, (seniority - floor) / (1.0 - floor)))
+        seniority_measured = True
     else:
         seniority = 0.0
+        seniority_measured = False
 
     breakdown = ScoreBreakdown(
         skill=skill_overall,
@@ -528,6 +553,12 @@ async def _stage2_per_candidate(
             c.reason == "implied-experience" for c in skill_contribs
         ),
         skill_contributions=skill_contribs,
+        seniority_measured=seniority_measured,
+        # A caller-supplied fact about the WHOLE pool, computed once outside
+        # this function (`vector_pool_is_degenerate` on the pool's raw
+        # vec_scores) -- threaded through unchanged, never re-derived from
+        # `vec_normalised == 1.0` here.
+        vector_discriminating=vec_discriminating,
     )
     return Stage2Candidate(
         resume_id=candidate.resume_id,
@@ -557,14 +588,24 @@ def _level_from_degree(degree: str | None) -> str | None:
 
 
 def _most_recent_title(parsed: dict[str, Any]) -> str | None:
+    """ROADMAP A6 (4). Precedence is current-role-first, then document order,
+    unchanged from before -- but if the top pick's own title is blank, fall
+    back to the first TITLED role in that same precedence order, instead of
+    returning ``None`` outright and costing a real candidate the full 15%
+    seniority weight for a title that was, in fact, readable elsewhere on the
+    résumé. The fallback only widens WHICH role's title is read; it never
+    re-orders the roles themselves."""
     roles = parsed.get("experience") or []
     if not roles:
         return None
-    # Trust "is_current" first; otherwise the first item.
+    # Trust "is_current" first; otherwise document order.
     current = [r for r in roles if r.get("is_current")]
-    role = current[0] if current else roles[0]
-    title = role.get("title")
-    return str(title) if title else None
+    ordered = current + [r for r in roles if r not in current]
+    for role in ordered:
+        title = role.get("title")
+        if title:
+            return str(title)
+    return None
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -770,11 +811,15 @@ async def generate_shortlist(
     # ``LLMUnavailableError`` escaping here would NOT trigger an arq retry —
     # ADR-027). Stage 1 is a Neo4j vector query (no LLM) and is not wrapped.
     t = dt.datetime.now(dt.UTC)
-    vec_normalised = normalise_vector_scores([c.vec_score for c in candidates_s1])
+    raw_vec_scores = [c.vec_score for c in candidates_s1]
+    vec_normalised = normalise_vector_scores(raw_vec_scores)
+    vec_discriminating = not vector_pool_is_degenerate(raw_vec_scores)
     candidates_s2: list[Stage2Candidate] = []
     try:
         for c, vn in zip(candidates_s1, vec_normalised, strict=True):
-            s2 = await _stage2_per_candidate(ctx, job, c, vn, weights)
+            s2 = await _stage2_per_candidate(
+                ctx, job, c, vn, weights, vec_discriminating=vec_discriminating
+            )
             candidates_s2.append(s2)
     except (LLMOutputInvalidError, LLMUnavailableError) as exc:
         raise RankingUnavailableError(str(exc)) from exc
@@ -953,14 +998,21 @@ async def match_resume_to_jobs(
 
     # Stage 2 — structured score per candidate job.
     t = dt.datetime.now(dt.UTC)
-    vec_normalised = normalise_vector_scores([vs for _, vs in candidates])
+    raw_vec_scores = [vs for _, vs in candidates]
+    vec_normalised = normalise_vector_scores(raw_vec_scores)
+    vec_discriminating = not vector_pool_is_degenerate(raw_vec_scores)
     scored: list[tuple[JobView, Stage2Candidate]] = []
     for (jid, vs), vn in zip(candidates, vec_normalised, strict=True):
         job = await load_job_view(ctx.db, jid)
         if job is None:
             continue
         s2 = await _stage2_per_candidate(
-            ctx, job, Stage1Candidate(resume_id=resume_id, vec_score=vs), vn, weights
+            ctx,
+            job,
+            Stage1Candidate(resume_id=resume_id, vec_score=vs),
+            vn,
+            weights,
+            vec_discriminating=vec_discriminating,
         )
         scored.append((job, s2))
     scored.sort(key=lambda pair: pair[1].structured, reverse=True)
