@@ -301,6 +301,21 @@ class ScoreBreakdown(BaseModel):
     motivation: float = Field(default=0.0, ge=0, le=1)
     implied_experience: bool = False
     skill_contributions: list[SkillContribution] = Field(default_factory=list)
+    # ROADMAP A6 (D1/D2). THREE states each, mirroring ``evidence_evaluated``
+    # above:
+    #
+    #   True  — the comparison ran. The stored value is a real measurement.
+    #   False — no comparison was possible; the stored value came from a
+    #           fallback default, not from merit.
+    #   None  — the row predates these markers. Assert neither.
+    #
+    # Answers "did the computation happen", never "what does the number
+    # mean" — never inferred from the score itself (that is the exact mutant
+    # this pair of markers exists to prevent). Unlike ``evidence_evaluated``,
+    # these live INSIDE ``ScoreBreakdown`` (which is persisted verbatim), so
+    # no fold/pop path is needed for them to round-trip.
+    seniority_measured: bool | None = None
+    vector_discriminating: bool | None = None
 
 
 class RequirementEvidence(BaseModel):

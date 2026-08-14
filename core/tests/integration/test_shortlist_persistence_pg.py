@@ -536,3 +536,119 @@ async def test_persist_then_get_one_round_trips_structured_evidence_and_weights(
         DEFAULT_WEIGHTS.structured
     )
     assert entry.pipeline_meta.weights.skill != pytest.approx(DEFAULT_WEIGHTS.skill)
+
+
+# ── ROADMAP A6: the two new ScoreBreakdown markers round-trip through a
+#    REAL Postgres jsonb column — no fold/pop path, unlike evidence_evaluated
+#    (spec item 6; CLAUDE.md's "`offline` is not always enough" applies to
+#    anything touching `models/`/`services/`) ───────────────────────────────
+
+
+def _breakdown_with_markers(
+    *, seniority_measured: bool | None, vector_discriminating: bool | None
+) -> ScoreBreakdown:
+    return ScoreBreakdown(
+        skill=0.8,
+        experience=0.6,
+        education=0.4,
+        seniority=0.5,
+        vector=0.3,
+        structured=0.55,
+        seniority_measured=seniority_measured,
+        vector_discriminating=vector_discriminating,
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_then_get_one_round_trips_both_new_markers(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """ADR-040's own round-trip test hand-builds a dict and calls
+    ``_parse_entry_jsonb`` directly, because ``score_structured``/
+    ``score_evidence``/``evidence_evaluated`` are folded into the jsonb BY
+    HAND. These two markers need no such workaround — they live INSIDE
+    ``ScoreBreakdown``, which ``persist_shortlist`` already stores verbatim
+    as the ``score_breakdown`` jsonb — so a REAL asyncpg jsonb round trip
+    through ``persist_shortlist`` / ``get_one`` is the whole test."""
+    from src.services.shortlist_service import get_one, persist_shortlist
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume(pg_pool, job_id)
+
+    entry = ShortlistResultEntry(
+        resume_id=resume_id,
+        rank=1,
+        score_final=0.9,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown_with_markers(
+            seniority_measured=False, vector_discriminating=True
+        ),
+        evidence=None,
+    )
+
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn,
+            ShortlistResult(job_id=job_id, entries=[entry], pipeline_meta=_meta()),
+        )
+
+    async with pg_pool.acquire() as conn:
+        entry_id = await conn.fetchval(
+            "SELECT id FROM shortlist_entries WHERE job_id = $1", job_id
+        )
+        read_back = await get_one(conn, entry_id)
+
+    # Both markers must survive a REAL Postgres jsonb round trip byte-for-
+    # byte -- a candidate whose seniority came from the no-title fallback
+    # must not read back looking measured.
+    assert read_back.score_breakdown.seniority_measured is False
+    assert read_back.score_breakdown.vector_discriminating is True
+
+
+@pytest.mark.asyncio
+async def test_persist_then_get_one_a_legacy_row_with_neither_key_reads_back_unknown(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """A row written by CODE THAT PREDATES THIS SLICE never wrote either key
+    into the jsonb at all. Simulated here with a direct INSERT (bypassing
+    ``ScoreBreakdown``'s own serialisation, which would now always include
+    both keys) — proving the READ side treats a genuinely absent key as
+    unknown, never inventing True/False."""
+    from src.services.shortlist_service import get_one
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume(pg_pool, job_id)
+    legacy_breakdown = {
+        "skill": 0.8,
+        "experience": 0.6,
+        "education": 0.4,
+        "seniority": 0.5,
+        "vector": 0.3,
+        "structured": 0.55,
+        "motivation": 0.0,
+        "implied_experience": False,
+        "skill_contributions": [],
+        # NOTE: no seniority_measured / vector_discriminating key at all —
+        # this is what every ROW WRITTEN BEFORE THIS SLICE looks like.
+    }
+
+    async with pg_pool.acquire() as conn:
+        entry_id = await conn.fetchval(
+            """
+            INSERT INTO shortlist_entries (
+                job_id, resume_id, rank, score_final, score_breakdown,
+                evidence, pipeline_meta
+            ) VALUES ($1, $2, 1, 0.9, $3::jsonb, '{}'::jsonb, $4::jsonb)
+            RETURNING id
+            """,
+            job_id,
+            resume_id,
+            json.dumps(legacy_breakdown),
+            _meta().model_dump_json(),
+        )
+        read_back = await get_one(conn, entry_id)
+
+    # A genuinely absent key must read back None, never a guessed True/False.
+    assert read_back.score_breakdown.seniority_measured is None
+    assert read_back.score_breakdown.vector_discriminating is None
