@@ -18,6 +18,9 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 #### 🔴 Four things a human must do — none of them are agent-doable
 
+*(A fifth decision — a corpus-design contract conflict — blocks A3's band enforcement. It is not a pilot
+blocker, so it sits in the work queue at item 2 of "What is left" rather than here.)*
+
 1. **Re-run `./scripts/quickstart.ps1`** (with `pwsh`, see below) before the stack will boot. The API now
    refuses to start without the four `API_KEY_*` values. **That is the fix working, not a break** —
    `.env` is permission-protected, so only you can do it.
@@ -91,18 +94,30 @@ code captured directly rather than piped.
    blocker is a product decision: many derived terms are **competencies** (communication, leadership), and
    `years × recency × ontology_weight` is meaningless for "three years of interpersonal skills". Whether
    competencies are scored differently, or excluded from must-have penalties, is unresolved.
-2. **A3's three remaining blindnesses.** The gate still cannot see: the **ADR-008 hashing** gap
-   (`_skill_rows_for` can never produce an `h:` key — closing it re-bands the corpus, so margins must be
-   **re-measured**); `expected_rank_band`, still unreferenced, with **r18 violating its own declared band**
-   (`strong`, band `{1,9}`, actual rank 11); and the **inert `skill_missing_must` pair** against
-   `weights.skill = 0`. Worth doing before further scoring work — the gate is what makes scoring changes
-   trustworthy.
-3. **A5/A6** — retention stored but never enforced, unsalted email hash while the skill hash refuses to
+2. **🔴 A CORPUS-OWNER DECISION now blocks A3's band enforcement.** Measuring the bands (2026-08-13) found
+   **two** violations, not the one A3 documented — r18 at rank 11 vs `{1,9}`, and **r19 at rank 9 vs
+   `{10,15}`, undocumented**. But enforcing them is blocked by three existing contracts that cannot all
+   hold: (1) `band == canonical band for the TAG`, (2) matched-pair members must share a tag, (3) each
+   fixture must rank inside its band. Both offenders are twins with a **designed 0.144 gap**, large enough
+   to cross a tier boundary by construction — so (1)+(2) forbid what (3) requires. Retagging was tried and
+   breaks (2). Relaxing (2) for twins is probably smallest, but it touches the mechanism every ordering
+   control rests on. **Pick a contract to change.** See ROADMAP A3's second bullet.
+   *Also corrected there:* `weights.skill = 0` **does** fail the corpus (via the recency pair) — only the
+   `skill_missing_must` pair is individually inert, not the corpus.
+   *Also closed there:* the shipped `must_have_miss_penalty` was ungated — it could be switched off with
+   the whole corpus staying green. Now armed.
+3. **A3's largest remaining blindness — the ADR-008 hashing gap.** `_skill_rows_for` reimplements the
+   stage-2 Cypher in Python and can never produce an `h:` key, so the corpus is blind to hashed skills by
+   construction. Closing it needs a non-vocab skill in `required_skills`, which forces a must-have miss for
+   every honest fixture and **re-bands the corpus — every margin must be re-measured**. A previous attempt
+   (ADR-032) was reverted. This is the one A3 item that is genuinely large; the two smaller ones are done
+   or blocked (see 2 above).
+4. **A5/A6** — retention stored but never enforced, unsalted email hash while the skill hash refuses to
    boot unsalted, audit immutability by convention only, shallow `/health`. Plus two smaller scoring
    defects: `normalise_vector_scores` returns `1.0` for **everyone** on a degenerate pool, and
    `seniority = 0.0` on an unparseable title (a candidate loses the full 15% sub-weight to a *parsing*
    failure).
-4. **Named follow-ups from this session:** an **export** for the access record (an auditor can read it on
+5. **Named follow-ups from this session:** an **export** for the access record (an auditor can read it on
    screen but cannot hand it to anyone); **reverse match carries the identical fabricated evidence zero**
    (`match_reverse_evidence_k = 10`, untouched per ADR-031's forward-only boundary); `asyncio.gather` does
    not cancel siblings, so a fail-closed stage 3 leaves orphaned LLM calls running.
