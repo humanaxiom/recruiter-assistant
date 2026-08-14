@@ -238,6 +238,34 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
 - **Assertions that do not run.** `expected_rank_band` is never referenced by `run_evals.py` — and r18
   currently violates its own declared band (tagged `strong`, band `{1,9}`, actual rank 11). The
   `skill_missing_must` ordering pair is inert against `weights.skill = 0`.
+
+  > **Measured 2026-08-13, and two of these three claims need correcting.**
+  >
+  > **(a) There are TWO band violations, not one.** `r18` at rank 11 vs `{1,9}` (known), and
+  > **`r19_jamie_okafor_recency_twin` at rank 9 vs `{10,15}` — undocumented.** Both invisible for the same
+  > reason: nothing reads the key.
+  >
+  > **(b) 🔴 Enforcing bands is BLOCKED by a three-way contract conflict — a corpus-owner decision.**
+  > A3 assumed reconciling r18 would unblock enforcement. It does not, because three existing contracts
+  > cannot all hold:
+  > 1. `test_evals_corpus` asserts `band == canonical band for the fixture's TAG` (bands are derived, not
+  >    per-fixture data);
+  > 2. `test_ordering_control_pair_members_share_the_same_tag` requires both halves of a matched pair to
+  >    carry the **same** tag;
+  > 3. the enforcement A3 wants requires each fixture to rank **inside** its band.
+  >
+  > Both offenders are matched-pair twins built with a **designed 0.144 gap** — large enough to cross a
+  > tier boundary by construction. (1)+(2) forbid the twins from differing in tag or band; (3) requires
+  > them to sit in different tiers. **Pick one contract to change.** Retagging (r18→borderline,
+  > r19→strong) satisfies (1) and (3) and was tried — it breaks (2). Relaxing (2) for twins is probably
+  > the smallest change, since a pair can isolate one dimension while still crossing a tier, but it
+  > touches the mechanism every ordering control rests on. Not decided here.
+  >
+  > **(c) `weights.skill = 0` DOES fail the corpus** — via the *recency* pair (r19/r10), which is airtight
+  > by byte-identical embeddings. The `skill_missing_must` pair is individually inert against it (the N-1
+  > vector residual), but the corpus as a whole is not blind to it. The original wording implied otherwise.
+  >
+  > **(d) ✅ A different inert gate was found and CLOSED** — see the `must_have_miss_penalty` note below.
   ~~*"The bait is BELOW EVERY STRONG FIXTURE"* is prose, not a gated key.~~ ✅ **CLOSED 2026-08-13 —
   [ADR-038](adr/038-gate-the-bait-below-strong-ordering.md).**
 - ~~**Recommended first move**~~ ✅ **DONE.** `[adversarial] must_rank_below_every_strong = true`, enforced
@@ -256,8 +284,18 @@ Every scoring fix above is only as trustworthy as the gate, and the gate is blin
   still deliberately NOT enforced wholesale** — it goes red immediately on r18, which needs its own
   reconciliation.
 
-**Still open in A3:** the ADR-008 hashing blindness (first bullet), `expected_rank_band` / the r18 band
-discrepancy, and the inert `skill_missing_must` pair against `weights.skill = 0`.
+- ✅ **CLOSED 2026-08-13 — the shipped `must_have_miss_penalty` was ungated.** Not on A3's original list;
+  found by mutating the corpus while investigating the above. Setting
+  `DEFAULT_WEIGHTS.must_have_miss_penalty = 1.0` — switching the penalty **off**, so a candidate missing a
+  required skill scores the same as one who has it — left the **entire corpus green**.
+  `_assert_must_have_penalty_fires_on_r18` was meant to be the guard, but it builds its *own*
+  `MatchWeights(0.5 / 1.0)` and never reads the shipped value: it proved the mechanism existed, not that it
+  was in force. **The ADR-035 shape, one layer in.** Now reads the shipped weights. Armed against both the
+  blunt mutation (`1.0` → fails) and the subtle one (`0.95` → fails); both were green before.
+
+**Still open in A3:** the ADR-008 hashing blindness (first bullet, and the largest — it re-bands the corpus
+so every margin must be re-measured), and **`expected_rank_band` enforcement, now blocked on the three-way
+contract decision above rather than on r18 alone.**
 
 ## A4. P0 · Two ranking defects that affect what HR will see — ✅ FULLY CLOSED (M1 ADR-037 · M2 ADR-039 · evidence cliff ADR-040)
 

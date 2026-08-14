@@ -503,7 +503,7 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
             )
 
     # ── must_have_miss_penalty is WIRED (review obligation on r18 alone) ───
-    _assert_must_have_penalty_fires_on_r18(corpus)
+    _assert_must_have_penalty_fires_on_r18(corpus, weights)
 
     # ── ADR-028 education field-of-study relevance (single-fixture guard) ──
     _assert_education_field_relevance(corpus, weights)
@@ -1276,7 +1276,7 @@ def _assert_bait_ranks_below_every_strong(
         )
 
 
-def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:
+def _assert_must_have_penalty_fires_on_r18(corpus: Corpus, weights: Any) -> None:
     """Single-candidate review obligation (README_4c_twins.md §4): r18's
     score_final at must_have_miss_penalty=0.5 must be measurably lower than at
     =1.0 — the mutation the pairwise ordering mechanism provably CANNOT gate."""
@@ -1315,6 +1315,33 @@ def _assert_must_have_penalty_fires_on_r18(corpus: Corpus) -> None:
     assert lo < hi - 0.02, (
         f"must_have_miss_penalty is not wired: score_final(0.5)={lo:.4f} is not "
         f"measurably below score_final(1.0)={hi:.4f}"
+    )
+
+    # ── ROADMAP A3: the same check against the SHIPPED value ────────────────
+    #
+    # Everything above proves the MECHANISM exists. It proved nothing about the
+    # value production actually uses, because it builds its own MatchWeights
+    # with hardcoded 0.5 and 1.0 and never reads the shipped one. MEASURED:
+    # setting `DEFAULT_WEIGHTS.must_have_miss_penalty = 1.0` — switching the
+    # must-have penalty OFF entirely — left the whole corpus GREEN, this
+    # assertion included.
+    #
+    # That is the same shape as ADR-035's finding: a control that is real and
+    # correct, checked in a way that cannot see whether it is in force. An
+    # invariant needs enforcement; a mechanism needs a check that it is
+    # actually applied where it counts.
+    shipped = weights.must_have_miss_penalty
+    assert shipped < 1.0, (
+        f"the SHIPPED must_have_miss_penalty is {shipped}, which is no penalty "
+        "at all — a candidate missing a required skill scores the same as one "
+        "who has it. The mechanism check above still passes, because it builds "
+        "its own weights; this line reads the value production uses."
+    )
+    shipped_final = _final(shipped)
+    assert shipped_final < hi - 0.02, (
+        f"at the shipped must_have_miss_penalty={shipped}, r18's "
+        f"score_final={shipped_final:.4f} is not measurably below the "
+        f"no-penalty score {hi:.4f} — the penalty is configured but inert"
     )
 
 
