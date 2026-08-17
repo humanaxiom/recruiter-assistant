@@ -21,7 +21,7 @@ suite cannot drift from what the merge actually needs to do.
 
 Genuinely-RED tests today (the merge has not happened yet):
   - test_derived_family_exists_in_shipped_categories
-  - test_derived_term_is_a_member_of_its_shipped_family
+  - test_shipped_family_matches_its_derived_family_exactly
   - test_derived_term_resolves_through_the_alias_table
   - test_already_shipping_term_accumulates_its_new_family_without_losing_the_old
 
@@ -136,14 +136,29 @@ def test_derived_family_exists_in_shipped_categories(family: str) -> None:
     )
 
 
-@pytest.mark.parametrize("family,term", _DERIVED_FAMILY_TERM_PAIRS)
-def test_derived_term_is_a_member_of_its_shipped_family(family: str, term: str) -> None:
+@pytest.mark.parametrize("family", sorted(_DERIVED_FAMILIES))
+def test_shipped_family_matches_its_derived_family_exactly(family: str) -> None:
+    """Bidirectional merge contract. The forward half (every derived term is
+    a member of its shipped family) is necessary but not sufficient: a
+    forward-only check does not notice an INVENTED term added to a shipped
+    family, or an EXISTING term silently re-scoped into a second family it
+    was never meant to have -- both survive a subset check untouched. A
+    categories-only extra is not inert: ``skills_graph.py:294`` makes it a
+    cleartext canonical key and ``categories_for()`` grants it family
+    credit, so an extra here is a real leak/scoring-integrity surface, not
+    housekeeping. Set equality against derived-families.yaml (the source of
+    truth for these 13 families) catches both directions at once.
+    """
     shipped = _load_shipped_categories()
-    members = set(shipped.get(family, []))
-    assert term in members, (
-        f"{term!r} is not a member of categories.yaml[{family!r}] -- "
-        "derived-families.yaml is the source of truth for this merge and this "
-        "term was not carried across"
+    derived_terms = set(_DERIVED_FAMILIES[family])
+    shipped_terms = set(shipped.get(family, []))
+    assert shipped_terms == derived_terms, (
+        f"categories.yaml[{family!r}] does not exactly match "
+        f"derived-families.yaml[{family!r}] -- extra (not in the source): "
+        f"{sorted(shipped_terms - derived_terms)!r}, missing: "
+        f"{sorted(derived_terms - shipped_terms)!r}. An extra term is not "
+        "inert -- skills_graph.py:294 makes it a cleartext canonical key "
+        "and categories_for() grants it family credit."
     )
 
 

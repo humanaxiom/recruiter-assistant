@@ -112,9 +112,28 @@ sufficient:
 
 Reordering alone would not have been enough — the LLM does not see every scanner-only technical term, so a
 résumé whose only mention of `airflow` is a bare word in a skills list still needs the raised cap to survive.
-Raising the cap alone would not have been enough either — with the old ordering, a résumé with more than 400
-administrative scan hits (rare, but the old 80-hit failure was itself once thought implausible) would still
-truncate the richer, years-bearing LLM half first.
+
+**On why the reorder is still part of the fix — stated correctly, because an earlier draft of this ADR got it
+wrong.** That draft claimed a résumé with more than 400 administrative scan hits would truncate the LLM half
+under the old ordering. That is **impossible by construction**, and this ADR disproves it two paragraphs
+above: `match_skills_in_text` returns deduplicated canonicals drawn from the alias table, so the scan can
+name at most **306** distinct skills at today's vocabulary — it cannot produce 400 hits at all. The contrast
+with the original defect is exactly arithmetic: 306 > 80 made that failure *reachable*, whereas 306 < 400
+makes this one *unreachable*. Pleading rarity does not rescue an impossibility.
+
+The reorder earns its place for two other reasons. It is the **correct precedence** — the years-bearing half
+is strictly richer and should never be the half a cap sacrifices, independent of whether a cap currently
+bites. And it is the **guard for future vocabulary growth**: `aliases.yaml`'s header already plans a further
+spelling-recall pass, and the cap-versus-vocabulary coupling is now test-enforced precisely because the next
+few hundred canonicals would otherwise re-arm the original defect against a green suite.
+
+**One second-order effect of the reorder, worth knowing.** `_build_summary_text` embeds `parsed.skills[:30]`
+(`resume_tasks.py:962`), so merge order decides *which* 30 skills enter the résumé vector that feeds stage-1
+coarse recall. Net this is an improvement — the vocabulary merge alone would have flooded those 30 slots with
+administrative filler and evicted `python` — but a scanner-only skill the LLM did not name can now fall out
+of the embedded text where previously it could not, if the LLM returns 30 or more names. Bounded, because
+stage-2 skill scoring reads `HAS_SKILL` edges, which are complete regardless of the embedding slice. The eval
+corpus is blind to it: the worst merged skill count across all 20 fixtures is **9**, against a 30-slot slice.
 
 **The existing pre-branch test for this cap, `test_extract_skills_merged_is_capped_at_400`'s predecessor,
 mocked the scanner and asserted only that truncation happened at 80 — never that a real, specific skill
