@@ -41,8 +41,9 @@ fields of study, plus location and responsibilities.
 >
 > This matters more than usual right now, because of two things. Every skill the system pulls out of a
 > posting is currently treated as *mandatory* — the "desirable" distinction is extracted but not yet used in
-> scoring (decision 4). And the vocabulary problem in "what is not finished" below means requirements written
-> in ordinary administrative language are often not recognised at all.
+> scoring (decision 4). And the vocabulary problem in "what is not finished" below means a real posting's
+> requirements are only partly recognised — roughly half, as of the latest vocabulary update, up from about
+> one statement in six before it. Check the extraction; do not assume it caught everything.
 
 ### The settings you choose per job
 
@@ -286,12 +287,16 @@ adjustable without a code change or a release, so a different answer costs a con
 
 *Stated plainly, because you should not learn it from a surprise.*
 
-**Skill matching does not yet work well on our real postings.** The system recognises skills from a curated
-list that was built for software roles. Measured against our own archive of SFU job descriptions, it
-recognises the language of only about one statement in six — our postings are mostly administrative,
-academic and professional-services work, and it was not built for that vocabulary. Work is under way to fix
-it, and until it lands, results on an unmodified posting will understate candidates' skills. **This is the
-item that most affects whether the tool is useful to you.**
+**Skill matching is substantially better on our real postings, but the gap is not closed.** The system
+recognises skills from a curated vocabulary that was originally built for software roles and, as of an
+update landed 14 August 2026, has been extended with terms drawn from our own archive of SFU job
+descriptions. Measured against that same archive, it now recognises **54.8%** of real qualification
+statements, up from **15.6%** before the update — but that leaves **45.2%** still unrecognised: a genuine
+long tail of specialized, regulatory and role-specific language (think MRI/MEG methods, microfabrication,
+study-permit requirements) that the vocabulary still doesn't cover and will need further, different work to
+close. Until that lands, results on an unmodified real posting will still understate some candidates'
+skills — less often than before the update, but still routinely. **This remains the item that most affects
+whether the tool is useful to you on a posting we did not write for this system.**
 
 **Signing in is now required, and accounts can be issued to recruiters and administrators.** This corrects
 what an earlier version of this page told you. Until 13 August the underlying service accepted instructions
@@ -341,8 +346,9 @@ above the cut-off.
    adverse impact.
 3. **Tell us what you want decision 15 to be.** It is genuinely undecided, and it matters more at SFU than
    the technical-skill questions do.
-4. **Give us two or three real postings to test against** while the vocabulary work is under way. Real
-   postings are how we find out whether the fix is working.
+4. **Give us two or three real postings to test against.** Most of the vocabulary gap has now been closed;
+   real postings are the best way to find out whether the remaining ~45% gap, and the further work meant to
+   close it, are on track.
 
 ---
 

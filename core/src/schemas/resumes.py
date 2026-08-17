@@ -187,7 +187,12 @@ class ResumeParsed(BaseModel):
     candidate: CandidateInfo = Field(default_factory=CandidateInfo)
     summary: str = Field(default="", max_length=2000)
     total_years_experience: int = Field(default=0, ge=0, le=80)
-    skills: list[ResumeSkill] = Field(default_factory=list, max_length=80)
+    # Bounded at 400, not the curated vocabulary's current 306 canonicals: a
+    # cap at/below the vocabulary size would silently truncate skills the
+    # deterministic scan trustworthily found verbatim as the vocabulary
+    # grows (see `_MAX_SKILLS` in `worker/resume_tasks.py`, which mirrors
+    # this and MUST stay in sync).
+    skills: list[ResumeSkill] = Field(default_factory=list, max_length=400)
     experience: list[Experience] = Field(default_factory=list, max_length=30)
     education: list[EducationItem] = Field(default_factory=list, max_length=10)
     # Chunks are populated by the chunker (not the LLM); included here

@@ -18,7 +18,9 @@ Covers:
   5 does not), unrelated skills untouched.
 * ``_extract_skills_merged``: deterministic-scan-floor MERGED with a
   non-fatal best-effort LLM call, first-non-null-wins on canonical
-  collision, capped at 80.
+  collision, capped at 400 (LLM half ordered first so it's never the half
+  truncated), and trailing-technical-skills survive an administrative-heavy
+  overflow.
 * ``_parse_cover_letter``: absent (no I/O), blob branch (mime from
   extension), text branch (``set_pii_key`` before ``decrypt``), and a
   non-fatal LLM failure on the cover letter (must not fail the résumé
@@ -65,10 +67,12 @@ from uuid import UUID, uuid4
 
 import arq
 import pytest
+from annotated_types import MaxLen
 from pydantic import BaseModel, ValidationError
 
 from src.pipeline.llm import LLMOutputInvalidError, LLMUnavailableError
 from src.pipeline.parsing import MIME_DOCX, EncryptedPdfError, UnsupportedMimeError
+from src.pipeline.skills import _alias_table
 from src.schemas import (
     CandidateInfo,
     CoverLetterParsed,
@@ -83,6 +87,7 @@ from src.schemas import (
 from src.settings import Settings
 from src.storage.blob_store import BlobNotFound
 from src.worker.resume_tasks import (
+    _MAX_SKILLS,
     _drop_smeared_years,
     _extract_skills_merged,
     _parse_cover_letter,
@@ -1176,8 +1181,14 @@ async def test_extract_skills_merged_first_non_null_years_wins_on_collision() ->
 
 
 @pytest.mark.asyncio
-async def test_extract_skills_merged_is_capped_at_80() -> None:
-    scan_names = [f"skill_{i:03d}" for i in range(100)]
+async def test_extract_skills_merged_is_capped_at_400() -> None:
+    # 500 deterministic-scan hits: one REAL skill sits well inside the new
+    # 400 cap (index 10) and must survive; another sits past it (index 450)
+    # and must still be truncated -- pins that the cap is enforced, not
+    # merely raised to "unbounded".
+    scan_names = [f"skill_{i:03d}" for i in range(500)]
+    scan_names[10] = "python"
+    scan_names[450] = "kubernetes"
     llm = MagicMock(chat_json=AsyncMock(return_value=ResumeSkillDetails(skills=[])))
     chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="lots of skills")]
 
@@ -1197,7 +1208,188 @@ async def test_extract_skills_merged_is_capped_at_80() -> None:
     ):
         merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
 
-    assert len(merged) == 80
+    names = {s.name for s in merged}
+    assert len(merged) == 400
+    assert "python" in names
+    assert "kubernetes" not in names
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_trailing_technical_skills_survive_admin_overflow() -> (  # noqa: E501
+    None
+):
+    """Reproduces the merge-blocking finding: an administrative-prose-heavy
+    résumé whose deterministic scan alone exceeds the OLD 80-skill cap, with
+    the real technical skills (the ones a must-have skill match depends on)
+    appearing LAST -- the common layout where ``TECHNICAL SKILLS`` is the
+    final section. Under the pre-fix code (``det`` ordered before the LLM
+    half, capped at 80) every one of these technical names was truncated
+    away and never reached ``ResumeParsed.skills``. Both halves of the fix
+    are required: reordering alone doesn't save ``airflow``/``docker``/
+    ``kubernetes``/``rest_api_design`` (the LLM never saw them either --
+    they're scanner-only), so the cap must also rise above the 106-entry
+    merge produced here.
+    """
+    admin_filler = [f"admin_skill_{i:03d}" for i in range(100)]
+    trailing_technical = [
+        "python",
+        "postgresql",
+        "airflow",
+        "docker",
+        "kubernetes",
+        "rest_api_design",
+    ]
+    scan_names = admin_filler + trailing_technical  # det: 106 total
+
+    # The LLM half independently found the two most prominent technologies,
+    # WITH years -- this is the richer half and must never be the one that
+    # gets truncated.
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python", years=5, last_used_year=2025),
+                    ResumeSkillDetail(name="postgresql", years=3, last_used_year=2024),
+                ]
+            )
+        )
+    )
+    chunks = [
+        ResumeChunk(id="c_001", section="skills", page=0, text="administrative resume")
+    ]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text",
+            MagicMock(return_value=scan_names),
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    names = {s.name for s in merged}
+    for tech in trailing_technical:
+        assert tech in names, f"{tech} truncated away by the merge cap"
+
+    by_name = {s.name: s for s in merged}
+    assert by_name["python"].years == 5
+    assert by_name["python"].last_used_year == 2025
+    assert by_name["postgresql"].years == 3
+    assert by_name["postgresql"].last_used_year == 2024
+
+
+# ── A2 recurrence guards (round-1 remediation gaps) ──────────────────────
+#
+# The merge-blocking reviewer approved this branch, then proved that round-1's
+# fix for its own headline defect -- a `_MAX_SKILLS` cap that can silently
+# truncate the deterministic scan, a TRUSTED source, as the curated vocabulary
+# grows -- pinned nothing: three mutations that reintroduce it survive the
+# whole suite. These three guards close that gap; `aliases.yaml`'s header
+# plans a further vocabulary pass that would otherwise silently re-arm it.
+
+
+def test_max_skills_exceeds_curated_vocabulary_size() -> None:
+    """`_MAX_SKILLS`'s own comment (resume_tasks.py:93-104) says it must
+    leave headroom above the curated vocabulary size -- nothing enforced
+    that. A cap at or below the vocabulary size does not merely cap total
+    output: the deterministic scan (`det`, above) can only ever emit a term
+    it found VERBATIM in the résumé text, so truncating it truncates skills
+    this pipeline already trusts, not LLM noise.
+    """
+    vocab_size = len(set(_alias_table().values()))
+    assert _MAX_SKILLS > vocab_size, (
+        f"_MAX_SKILLS={_MAX_SKILLS} does not exceed the curated vocabulary's "
+        f"{vocab_size} distinct canonicals. A cap at or below the vocabulary "
+        "size silently truncates skills the deterministic scan verbatim-"
+        "matched in the résumé text -- a TRUSTED source -- not merely "
+        "'extra' output. Raise _MAX_SKILLS (and its paired "
+        "ResumeParsed.skills max_length, see the sibling test) above the "
+        "new vocabulary size."
+    )
+
+
+def test_max_skills_matches_resume_parsed_skills_schema_cap() -> None:
+    """`ResumeParsed.skills`'s own docstring (resumes.py:190-195) says its
+    `max_length` and `_MAX_SKILLS` here "MUST stay in sync" -- nothing
+    enforced that either. A live desync (schema left low while this merge
+    cap is raised, or vice versa) is not cosmetic: `_extract_skills_merged`
+    can then legitimately build a skills list the schema rejects, and
+    `ResumeParsed.model_validate` raises `ValidationError` for an
+    otherwise-good résumé.
+    """
+    field_info = ResumeParsed.model_fields["skills"]
+    max_lengths = [m.max_length for m in field_info.metadata if isinstance(m, MaxLen)]
+    assert max_lengths, "ResumeParsed.skills has no MaxLen constraint at all"
+    assert max_lengths[0] == _MAX_SKILLS, (
+        f"ResumeParsed.skills max_length={max_lengths[0]} != "
+        f"_MAX_SKILLS={_MAX_SKILLS} in worker/resume_tasks.py -- these two "
+        "caps MUST stay in sync (resumes.py:190-195). A desync lets the "
+        "merge build a skills list the schema then rejects with "
+        "ValidationError, failing the parse of an otherwise-good résumé."
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_llm_skill_survives_when_scan_fills_the_cap() -> (
+    None
+):
+    """Pins the LLM-first merge order (resume_tasks.py:253: LLM names go
+    FIRST, deterministic scan second). Reverting to
+    ``[*det, *[d.name for d in llm_details]]`` passes the whole suite today,
+    because neither existing cap test constructs a case where order
+    genuinely decides the outcome: the admin-overflow test above merges 106
+    distinct names against a 400 cap (nothing is truncated), and the
+    straight cap test supplies zero LLM skills. Here the deterministic scan
+    ALONE produces exactly ``_MAX_SKILLS`` distinct filler hits that never
+    include the LLM's skill, so which half is ordered first is the only
+    thing standing between the LLM skill -- and its ``years``/
+    ``last_used_year``, unrecoverable from a name-only scan -- surviving or
+    being silently discarded.
+    """
+    scan_names = [f"filler_skill_{i:03d}" for i in range(_MAX_SKILLS)]
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="python", years=7, last_used_year=2023)]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="lots of skills")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text",
+            MagicMock(return_value=scan_names),
+        ),
+        patch(
+            "src.worker.resume_tasks.canonicalize_skill_names",
+            MagicMock(side_effect=lambda names: list(names)),
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert len(merged) == _MAX_SKILLS
+    by_name = {s.name: s for s in merged}
+    assert "python" in by_name, (
+        "the LLM-extracted skill was truncated away when a deterministic-"
+        "scan-only filler set alone reached _MAX_SKILLS -- the merge must "
+        "put the LLM half FIRST (resume_tasks.py:253) so the richer half "
+        "(years/last_used_year the scan can never recover) is never the "
+        "half a cap discards"
+    )
+    assert by_name["python"].years == 7
+    assert by_name["python"].last_used_year == 2023
 
 
 # ── ADR-008: `_extract_skills_merged` is shape-only junk filtering now ────
