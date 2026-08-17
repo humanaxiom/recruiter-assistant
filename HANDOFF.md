@@ -2,7 +2,130 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-14: A6's TWO SCORING DEFECTS ARE DISCLOSED; A7 IS NOW SIXTEEN
+### ⚠️⚠️ READ FIRST — 2026-08-17: A2 IS SHIPPED (15.6% → 54.8%), AND A WEEK-LONG BLOCKER WAS MIS-SCOPED
+
+> **Last feature merge: PR #88, squash `a0c3c17`, ADR-042.** Docs commits sit on top, so `origin/main` is at or
+> *after* that sha rather than equal to it. **`git fetch` and check `gh pr list` before trusting any of this.**
+>
+> Supersedes the 2026-08-14 banner below (kept as history). **The four human-only actions from the
+> 2026-08-13 banner are STILL ALL OUTSTANDING** — re-run `quickstart.ps1` with `pwsh`, click through the live
+> UI, and two recorded decisions (auditor access to withdrawal reasons; unscoped reads for a bare service
+> key). Three sessions have now passed them by. **Nobody has run this product end to end.**
+
+#### The lesson that matters more than the feature
+
+**A2 sat "blocked on a human" for a week. The blocker was mis-scoped and nobody checked.**
+
+The blocker is a competency-*scoring* question. The vocabulary work it was thought to gate is additive and
+scoring-math-neutral — A2's own Plan section said so all along. And adding a term is **strictly better than
+the status quo under every option on the table**: today an out-of-vocabulary competency is hashed by ADR-008,
+gets no alias resolution and no family credit, scores `0.0`, **and** trips the ×0.5 must-have penalty.
+
+Three consecutive sessions re-noted the block and picked up something adjacent. Testing whether the blocker
+gated the *whole item* took about ten minutes. **Measured cost of that trajectory: 85 commits after the v1
+scope completed, 35 `docs`/`chore` against 26 `feat`/`fix`, twelve ADRs — on a product nobody had used.**
+
+`CLAUDE.md` now has an **Economy** section with the four rules that came out of this, and PR #87 put the
+matching guidance in `planner.md` (test whether a blocker gates the whole item; write a memo with a
+recommended default, not a note), `reviewer.md` (severity is a routing decision — a nit filed as minor costs
+a commit) and `docs.md` (proportionality; never overclaim in the circulated explainer). **Read them before
+picking anything up.**
+
+#### What shipped — PR #88, ADR-042
+
+234 corpus-derived terms across 13 families merged into the shipped vocabulary. `categories.yaml` 19 → 32
+families, `aliases.yaml` 72 → 306 canonicals. **Coverage of real SFU qualification statements 15.6% → 54.8%.**
+
+**A merge, not a derivation** — the terms had existed at `docs/process/skill-vocabulary/derived-families.yaml`
+since PR #69, derived and measured, never merged. Worth internalising: check for existing artifacts before
+assuming work needs doing.
+
+Terms go in **both** files. `categories.yaml` membership alone confers a cleartext canonical key, but the
+résumé text scanner reads *only* the alias table — so a categories-only term is never found in résumé free
+text. The nine terms that already "shipped" were categories-only and were never findable.
+
+**Competency scoring is deferred, not answered.** `years × recency` remains semantically odd for "three years
+of communication" and should still be revisited — with pilot data, not as a precondition.
+
+#### 🔴 The regression this branch caused, and the shape to remember
+
+`_MAX_SKILLS = 80` mirrored `ResumeParsed.skills` `max_length=80`. At 72 canonicals the deterministic scan
+could never reach 80 — **the cap was unreachable by construction, and nothing stated or enforced that
+invariant.** At 306 canonicals an ordinary administrative résumé scans to ~106 and a trailing
+`TECHNICAL SKILLS` section is truncated away entirely:
+
+> A posting requires Python. A candidate whose résumé lists Python applies. `det` fills all 80 slots with
+> admin terms before reaching the technical block → no `HAS_SKILL` edge → `ontology_weight == 0` → `reason ==
+> "missing"` → **the must-have penalty fires. The recruiter is told the candidate lacks a skill their résumé
+> plainly lists** — on exactly the résumé population A2 exists to serve.
+
+Fixed by merging LLM names first (they carry `years`/`last_used_year`, unrecoverable from a name-only scan)
+and raising the cap to 400, above the 306 canonicals. **The eval corpus is blind to it** — max deterministic
+scan across all 20 fixtures is 8 — and the existing cap test mocked the scanner and asserted only *that*
+truncation happened, never that a real skill survived it.
+
+**Then the fix did not pin its own invariants either.** Reverting the reorder, desyncing the two caps, and
+lowering `_MAX_SKILLS` to 300 all passed the full suite. Four guards now kill each, including the
+vocabulary-size coupling whose absence caused the original defect. This is the third time this session that a
+remediation shipped its own gap.
+
+#### 🆕 A3: the eval corpus is structurally blind to A2
+
+Not a suspicion — measured. The corpus holds **19 distinct skill canonicals, all software/tech**; the 225
+newly-categorised canonicals intersect them at **∅**; family credit requires intersecting the JD's fixed
+`{backend, data, databases, devops}`, which gained **zero** members. The metric dump is byte-identical to
+`main`. In the gate's own words, its green **carries no information about A2's correctness**.
+
+What actually validated A2: the 1,804-JD coverage measurement and the fidelity tests, not the corpus.
+
+**The fix is a corpus addition, not a threshold change** — a JD variant naming at least one derived-family
+skill, with a candidate whose credit comes only through a derived family. Corpus owner's call. Note it could
+not be done on #88: new fixtures would have destroyed the byte-identity comparison that branch's
+non-regression argument rested on.
+
+Also recorded: `thresholds.toml`'s `must_rank_below_every_strong` claims a ~0.19 margin; the real score margin
+is **0.0237** (r09 0.592398 vs worst strong r18 0.616104). The 0.19 matches the margin to the k=5 cutoff, a
+different quantity. `thresholds.toml` deliberately left untouched.
+
+#### Guardrail A0.1 — weakened, NOT retired
+
+A real SFU posting is far more viable at 54.8% than at 15.6%, but **45.2% remains a genuine long tail**
+needing the Phase 3.3 projection-time classifier. The explainer says *"roughly half of what a real posting
+asks for is now recognised"*, not *"it works on real postings"* — in both `.md` and `.html`, word-for-word.
+Do not upgrade that claim without re-measuring.
+
+#### What is left, in the order I would take it
+
+1. **Get the pilot RUN.** The four human-only actions are the critical path and no agent can do them. This is
+   the highest-value item in the project and has been for three sessions.
+2. **The three A6 sibling defects** — `score_education`'s `if not ranked: return 0.0` is the strongest: an
+   unparsed education section scores *worse* than being below the bar, which at least earns partial credit.
+3. **A3's seniority/vector control gap** and the new A2-blindness gap — both measured, both corpus-owner work.
+4. **A3's ADR-008 hashing gap** — still the largest; re-bands the corpus.
+5. **A2's remaining 45.2%** — the Phase 3.3 projection-time classifier. Classification must happen at
+   projection time: the ADR-008 hash is one-way, so categories cannot be backfilled later.
+6. **Competency scoring** — now with real pilot data, if the pilot happens.
+
+#### Environment notes
+
+- **Use `pwsh` (PowerShell 7), not `powershell` (5.1), for `scripts/quickstart.ps1`.** 5.1 cannot parse it and
+  `powershell.exe` still exits 0 on a parse failure, so breakage looks like a successful boot.
+- **There is no `jq` on this host.** `gh pr checks --json … | jq` fails silently in a loop.
+- **🆕 The integration suite flakes with `asyncpg` setup errors against testcontainers — now on a THIRD
+  distinct, unrelated test** (`test_shortlist_scoping_pg`, on a vocabulary-only branch). An `ERROR` (not
+  `FAILED`) at connection setup on a test your diff does not touch is probably this. **Prove it with a clean
+  full re-run; never report the first red as "just a flake".** Three unrelated tests failing the same way at
+  *setup* points at a port/container ceiling in local Docker — worth diagnosing, because "re-run it" will
+  eventually mask something real.
+- `./scripts/verify.sh` already handles stale bytecode (`PYTHONDONTWRITEBYTECODE=1` + `__pycache__` purge).
+  Hand-rolled mutation probes must do the same and use `python -B`.
+- Run mutation-testing gates **sequentially** — reviewer/security/ranking-evals all mutate the shared tree.
+- **MSYS path conversion** bites hand-written `docker run` commands (`$(pwd -W)` → `/repo` gets rewritten).
+  Another reason to use `verify.sh` rather than rolling your own.
+- Standing orders unviolated: unique 29xxx ports · CAS on by default · inference offline-only on `aria-gb10`
+  over Tailscale, no cloud call added.
+
+#### (history) READ FIRST — 2026-08-14: A6's TWO SCORING DEFECTS ARE DISCLOSED; A7 IS NOW SIXTEEN
 
 > **Last feature merge: PR #85, squash `14ba59f`, ADR-041.** Docs-only commits (including this banner's
 > own) sit on top, so `origin/main` is at or *after* `14ba59f` rather than equal to it — stated that way
