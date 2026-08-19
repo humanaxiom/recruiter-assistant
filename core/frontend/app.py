@@ -893,21 +893,22 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    # FU-7 §2 (ADR-021 §2 / ADR-029): only when the shortlist read is still
-    # empty do we consult the fail-closed ranking state, so the poll fragment
-    # can distinguish "awaiting AI to rank" (a retry is queued server-side)
-    # from the ordinary "still generating" path. Once entries exist the cards
-    # render unchanged and the status is irrelevant. A NotFound here still
-    # 404s (the job is genuinely gone); a transient backend outage on JUST the
-    # status endpoint degrades gracefully to the ordinary path, never a 500.
-    shortlist_status = None
-    if not entries:
-        try:
-            shortlist_status = api_client.get_shortlist_status(job_id)
-        except api_client.NotFound:
-            abort(404)
-        except api_client.BackendUnavailable:
-            shortlist_status = None
+    # fix/regenerate-shortlist-no-feedback: fetch the status UNCONDITIONALLY,
+    # even when `entries` is non-empty. It used to be gated on `not entries`
+    # (correct back when the only server-side state was FU-7's fail-closed
+    # `awaiting_llm`, which only ever coexists with an empty shortlist) — but
+    # Regenerate has entries already on screen AND a new run in flight at the
+    # same time (`jobs.shortlist_state = 'ranking'`), so the template needs
+    # this fetched every time to tell "stale but a new run is coming" apart
+    # from "these are current". A NotFound here still 404s (the job is
+    # genuinely gone); a transient backend outage on JUST the status endpoint
+    # degrades gracefully to the ordinary path, never a 500.
+    try:
+        shortlist_status = api_client.get_shortlist_status(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable:
+        shortlist_status = None
     return render_template(
         "shortlist_cards.html",
         job_id=job_id,

@@ -132,6 +132,21 @@ _STATEMENTS: tuple[str, ...] = (
     "CHECK (shortlist_state IN ('awaiting_llm'))",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_reason TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_at TIMESTAMPTZ",
+    # fix/regenerate-shortlist-no-feedback — widen the CHECK to also allow
+    # 'ranking' (set by the API route at enqueue, cleared/overwritten by the
+    # worker on every terminal path — see shortlist_service.py /
+    # matching_tasks.py). The inline CHECK above already shipped on deployed
+    # volumes under the auto-generated name Postgres gave it (confirmed live
+    # against the running dev stack: ``jobs_shortlist_state_check``), and
+    # there is no ``ADD CONSTRAINT IF NOT EXISTS`` pre-Postgres-15, so
+    # widening it needs an explicit DROP-then-ADD pair, unconditionally
+    # re-run on every boot (this whole pair is a no-op once the widened
+    # constraint is already in place — DROP IF EXISTS + ADD is naturally
+    # idempotent together, unlike a bare ADD CONSTRAINT). Keeping the name
+    # matters: a later boot's DROP CONSTRAINT IF EXISTS must still find it.
+    "ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_shortlist_state_check",
+    "ALTER TABLE jobs ADD CONSTRAINT jobs_shortlist_state_check "
+    "CHECK (shortlist_state IN ('awaiting_llm', 'ranking'))",
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (

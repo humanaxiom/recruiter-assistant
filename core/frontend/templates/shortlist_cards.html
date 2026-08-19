@@ -11,20 +11,37 @@
 #}
 {% set a = attempt|default(0) %}
 {% set m = max_attempts|default(400) %}
-{% set polling = (not entries) and (a < m) %}
 {# FU-7 §2 (ADR-021 §2 / ADR-029): the fail-closed ranking state. When ranking
    failed closed a retry is queued server-side, so we keep polling but show a
    DISTINCT "waiting for AI" message. Defaults to "no state" for callers that
    don't pass it (e.g. the shortlist list page). #}
 {% set _status = shortlist_status|default(none) %}
 {% set awaiting_llm = _status is not none and _status.get('state') == 'awaiting_llm' %}
+{# fix/regenerate-shortlist-no-feedback: a run genuinely in flight, recorded
+   server-side by the API route BEFORE it even enqueues (jobs.shortlist_state
+   = 'ranking') and cleared/overwritten by the worker on every terminal path
+   — a RECORDED FACT, not an inference from "entries are empty". That
+   inference is exactly what broke Regenerate: entries already exist while a
+   new run grinds on for minutes, so `not entries` alone can no longer decide
+   whether to keep polling. #}
+{% set ranking = _status is not none and _status.get('state') == 'ranking' %}
+{% set polling = (a < m) and ((not entries) or ranking) %}
 <div id="shortlist-cards"
   {%- if polling %}
      hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
-  {% if entries %}{# fall through to the cards below #}
+  {% if entries and ranking %}
+  <p class="muted">
+    <span class="htmx-indicator spinner">polling…</span>
+    The candidates below are from the <strong>previous run</strong> — a new
+    run is <strong>in progress</strong> and will replace this list
+    automatically when it finishes. The local model runs on every candidate
+    résumé the run considers, so a full pass realistically takes several
+    minutes and scales with the number of résumés involved.
+  </p>
+  {% elif entries %}{# fall through to the cards below #}
   {% elif polling and awaiting_llm %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>

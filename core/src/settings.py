@@ -235,6 +235,17 @@ class Settings(BaseSettings):
     # The arq defer (seconds) between fail-closed shortlist retries.
     shortlist_retry_defer_s: float = 45.0
 
+    # ── fix/regenerate-shortlist-no-feedback — 'ranking' staleness bound ──────
+    # ``jobs.shortlist_state = 'ranking'`` is set by the API route at enqueue
+    # and cleared/overwritten by the worker on every terminal path. A row this
+    # old cannot still be genuinely in flight — the worker would have been
+    # killed by its own job timeout — so ``get_shortlist_state`` treats it as
+    # NOT ranking (without clearing the row) once it is older than this bound.
+    # Defaults to the worker's own ``job_timeout`` (``src/worker/main.py:162``
+    # — 3600s): the two are related by construction, not coincidence, so a
+    # crashed worker can never permanently pin the UI in "Regenerating…".
+    shortlist_ranking_stale_after_s: float = 3600.0
+
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"

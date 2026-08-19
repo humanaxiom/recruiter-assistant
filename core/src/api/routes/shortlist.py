@@ -51,8 +51,15 @@ ExportFormat = Literal["csv", "evidence-csv", "json"]
 )
 async def generate_shortlist(
     job_id: UUID,
+    db: Db,
     arq: Annotated[ArqRedis, Depends(get_arq)],
 ) -> dict[str, str]:
+    """``fix/regenerate-shortlist-no-feedback`` — ``shortlist_state`` is set to
+    ``'ranking'`` BEFORE the job is handed to the queue, so the state is
+    already true the instant this returns and the frontend's very first poll
+    sees it, rather than racing the worker to set it. The worker
+    clears/overwrites it on every terminal path (see ``matching_tasks.py``)."""
+    await shortlist_service.set_shortlist_ranking(db, job_id)
     await arq.enqueue_job("shortlist_job", str(job_id))
     return {"job_id": str(job_id), "status": "enqueued"}
 
