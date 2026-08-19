@@ -7,7 +7,12 @@
 
 ---
 
-## Status at a glance — updated 2026-08-14 (last feature merge `7257c20`, PR #83; A2 below is on `feat/a2-vocabulary-families`, not yet merged)
+## Status at a glance — updated 2026-08-17 (A2's vocabulary merge LANDED as PR #88; `origin/main` is at or after `a0c3c17`)
+
+> This heading pins no equality on purpose. Its previous version said A2 was *"on
+> `feat/a2-vocabulary-families`, not yet merged"* while the A2 row two lines below already read **SHIPPED** —
+> the branch updated the row and left the heading behind, which is the same stale-pin mistake PR #82 fixed in
+> `HANDOFF.md`. **`git fetch` and check `gh pr list` before trusting any line here.**
 
 | Item | State |
 |---|---|
@@ -38,8 +43,9 @@ against 26 `feat`/`fix`** — and twelve ADRs, on a product **nobody has yet use
    competency-scoring model stays deferred, deliberately, with the reasoning recorded in A2 below. The A3
    evals corpus cannot see this merge at all (its own entry below) — that is the next dependency, not more
    vocabulary work.
-2. **Anything that makes the pilot actually run.** The four human-only actions still gate this and no agent
-   can do them.
+2. **Anything that makes the pilot actually run.** The four human-only actions still gate this. Two are
+   physical; the **two decisions now have memos with recommended defaults** in
+   [OPEN_DECISIONS.md](OPEN_DECISIONS.md), so they cost the human a letter rather than a session.
 3. Everything else, and **only if it changes what the product can do**. Hardening a feature nobody has run
    is speculative. See CLAUDE.md's "Economy" section for the finding-disposition and stopping rules that
    now govern this — in particular: nits get **recorded, not fixed**, and mutation probing is **one pass**.

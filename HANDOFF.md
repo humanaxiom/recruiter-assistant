@@ -11,6 +11,11 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 > 2026-08-13 banner are STILL ALL OUTSTANDING** — re-run `quickstart.ps1` with `pwsh`, click through the live
 > UI, and two recorded decisions (auditor access to withdrawal reasons; unscoped reads for a bare service
 > key). Three sessions have now passed them by. **Nobody has run this product end to end.**
+>
+> **🆕 2026-08-17 — the two decisions are no longer bare "blocked" lines.** Both now have memos with options
+> and a recommended default in **[docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md)**, per `CLAUDE.md` Economy
+> rule 3. Handing a P0 on as an unanalysed block is the exact failure this banner leads with, and it was
+> being repeated here for a fourth session. The other two actions are physical and still need the human.
 
 #### The lesson that matters more than the feature
 
@@ -90,14 +95,22 @@ different quantity. `thresholds.toml` deliberately left untouched.
 #### Guardrail A0.1 — weakened, NOT retired
 
 A real SFU posting is far more viable at 54.8% than at 15.6%, but **45.2% remains a genuine long tail**
-needing the Phase 3.3 projection-time classifier. The explainer says *"roughly half of what a real posting
-asks for is now recognised"*, not *"it works on real postings"* — in both `.md` and `.html`, word-for-word.
-Do not upgrade that claim without re-measuring.
+needing the Phase 3.3 projection-time classifier. The explainer says a real posting's requirements are
+*"only partly recognised — roughly half, as of the latest vocabulary update, up from about one statement in
+six before it"* — not *"it works on real postings"*. That sentence is word-for-word identical in the `.md`
+and the `.html`; keep it that way, and do not upgrade the claim without re-measuring.
+
+*(Corrected 2026-08-17: an earlier draft of this banner quoted that claim as "roughly half of what a real
+posting asks for is now recognised" and attributed it to the explainer, "word-for-word". That wording is
+[ROADMAP A0.1](docs/ROADMAP.md)'s, not the explainer's — grepping the explainer for it finds nothing. The
+substance was right and both explainer formats do agree with each other; only the attribution was wrong.)*
 
 #### What is left, in the order I would take it
 
-1. **Get the pilot RUN.** The four human-only actions are the critical path and no agent can do them. This is
-   the highest-value item in the project and has been for three sessions.
+1. **Get the pilot RUN.** The four human-only actions are the critical path. Two of them are *physical* and
+   no agent can do them (run `quickstart.ps1` under `pwsh`; click through the live UI). The other two are
+   **decisions, and they now have memos** — [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md) — so they need a
+   letter answered, not a session. This is the highest-value item in the project and has been for three.
 2. **The three A6 sibling defects** — `score_education`'s `if not ranked: return 0.0` is the strongest: an
    unparsed education section scores *worse* than being below the bar, which at least earns partial credit.
 3. **A3's seniority/vector control gap** and the new A2-blindness gap — both measured, both corpus-owner work.
