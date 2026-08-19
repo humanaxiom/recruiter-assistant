@@ -593,11 +593,19 @@ async def test_resume_side_categories_write_curated_wins_over_a_payload_override
 
 @pytest.mark.asyncio
 async def test_resume_side_writes_classifier_categories_for_a_hashed_skill() -> None:
-    """NEW (ROADMAP A2, Phase 3.3 skill-family classifier, slice 1): the
-    parse-time classifier's assignment rides the outbox payload straight
-    through to the graph for a hashed (out-of-vocab) skill -- projection
-    itself makes no LLM call; it only writes what it was handed
-    (``CLASSIFIER-SPEC.md``'s "strictly additive" design)."""
+    """UPDATED (this decision memo, 2026-08-19, slice 2): the parse-time
+    classifier's assignment rides the outbox payload straight through to the
+    graph for a hashed (out-of-vocab) skill -- projection itself makes no LLM
+    call; it only writes what it was handed. CHANGED from the slice-1
+    behaviour this test used to pin: the write now lands on the SEPARATE
+    ``Skill.classified_categories`` property, NEVER on ``Skill.categories``
+    (which stays exclusively curated, from ``ensure_categories``) -- a
+    curated family and an inferred one must remain distinguishable in the
+    graph forever. Live measurement against the real tailnet gpt-oss:20b
+    found the classifier stably mis-families some skills, and family credit
+    is transitive across the whole résumé, so the record must be provenance-
+    tagged even though (per the new ``match_use_classified_families`` flag,
+    default off) it does not yet drive ranking."""
     payload = _payload(
         skills=[{"name": "microfabrication", "categories": ["hardware"]}]
     )
@@ -608,11 +616,26 @@ async def test_resume_side_writes_classifier_categories_for_a_hashed_skill() -> 
     hashed_key = next(p["cn"] for p in skill_calls if "cn" in p)
     assert hashed_key.startswith(skills_graph._HASH_KEY_PREFIX)
 
-    categories_calls = [(c, p) for c, p in _all_run_calls(tx) if "categories" in c]
-    assert any(p.get("cats") == ["hardware"] for _c, p in categories_calls), (
-        "expected a Cypher call writing s.categories = ['hardware'] for the "
-        "hashed skill node -- the payload's classifier-assigned categories "
-        "never reached the graph"
+    classified_calls = [
+        (c, p)
+        for c, p in _all_run_calls(tx)
+        if re.search(r"SET\s+s\.classified_categories\s*=", c)
+    ]
+    assert any(p.get("cats") == ["hardware"] for _c, p in classified_calls), (
+        "expected a Cypher call writing s.classified_categories = ['hardware'] "
+        "for the hashed skill node -- the payload's classifier-assigned "
+        "categories never reached the graph"
+    )
+
+    curated_calls = [
+        (c, p)
+        for c, p in _all_run_calls(tx)
+        if re.search(r"SET\s+s\.categories\s*=", c)
+    ]
+    assert curated_calls == [], (
+        "a classifier-assigned family for a hashed skill must NEVER be "
+        "written to the curated s.categories property -- curated and "
+        "inferred provenance must stay distinguishable in the graph forever"
     )
 
 
