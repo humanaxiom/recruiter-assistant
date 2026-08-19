@@ -132,6 +132,15 @@ class MatchingContext:
     non_matchable_families: tuple[str, ...] = _NON_MATCHABLE_FAMILIES
     llm_concurrency: int = _LLM_CONCURRENCY
     evidence_max_tokens: int = _EVIDENCE_MAX_TOKENS
+    # ROADMAP A2, Phase 3.3 slice 2 (2026-08-19 decision memo): does the
+    # stage-2 family-credit arm honour the parse-time classifier's
+    # ``Skill.classified_categories``? Default False -- the classifier's
+    # output must never move ranking until a caller opts in explicitly (live
+    # measurement found stable mis-families, and family credit is transitive
+    # across a whole résumé). Mirrors family_weight/non_matchable_families:
+    # sourced from Settings only via matching_context_from_settings, never a
+    # literal at a call site.
+    use_classified_families: bool = False
     # Build provenance (reviewer finding, Phase 4c): sourced from
     # ``settings.git_sha`` (never ``os.environ`` directly — see settings.py's
     # docstring invariant) and threaded into PipelineMeta.git_sha.
@@ -152,7 +161,8 @@ def matching_context_from_settings(
 
     This is the SINGLE call site that populates ``family_weight`` /
     ``non_matchable_families`` / ``llm_concurrency`` / ``evidence_max_tokens`` /
-    ``model_gen`` / ``model_emb`` / ``git_sha`` from settings rather than the
+    ``use_classified_families`` / ``model_gen`` / ``model_emb`` / ``git_sha``
+    from settings rather than the
     dataclass-field defaults (which mirror ``orchestrator.py``'s module-level
     ``_FAMILY_MATCH_WEIGHT`` / ``_NON_MATCHABLE_FAMILIES`` / ``_LLM_CONCURRENCY``
     / ``_EVIDENCE_MAX_TOKENS`` literals). The worker tasks
@@ -172,6 +182,7 @@ def matching_context_from_settings(
         non_matchable_families=non_matchable_families_from_settings(settings),
         llm_concurrency=settings.match_llm_concurrency,
         evidence_max_tokens=settings.match_evidence_max_tokens,
+        use_classified_families=settings.match_use_classified_families,
         git_sha=settings.git_sha,
     )
 
@@ -389,6 +400,14 @@ async def _stage2_skill_rows(
     *,
     family_weight: float = _FAMILY_MATCH_WEIGHT,
     non_matchable_families: tuple[str, ...] = _NON_MATCHABLE_FAMILIES,
+    # ROADMAP A2, Phase 3.3 slice 2 (2026-08-19 decision memo): honour the
+    # parse-time classifier's ``Skill.classified_categories`` in the
+    # family-credit arm below. Default False, and passed as a REAL Cypher
+    # parameter (never a hand-branched query string) so the off-path is
+    # PROVABLY inert -- `$use_classified AND ...` folds the whole classified
+    # branch to `false` regardless of what's on the graph, rather than being
+    # merely "usually" inert because no caller happens to set the flag.
+    use_classified_families: bool = False,
 ) -> list[_SkillRowFromCypher]:
     """One row per REQUIRES edge, joined to the résumé's HAS_SKILL edge when
     it has one.
@@ -430,10 +449,16 @@ async def _stage2_skill_rows(
                 WHEN has IS NOT NULL THEN 1.0
                 WHEN reqSkill.categories IS NOT NULL AND EXISTS {
                        MATCH (:Resume {id: $rid})-[:HAS_SKILL]->(c:Skill)
-                       WHERE c.categories IS NOT NULL
-                         AND any(t IN c.categories
-                                 WHERE t IN reqSkill.categories
-                                   AND NOT t IN $exclude_fam)
+                       WHERE
+                         (c.categories IS NOT NULL
+                           AND any(t IN c.categories
+                                   WHERE t IN reqSkill.categories
+                                     AND NOT t IN $exclude_fam))
+                         OR
+                         ($use_classified AND c.classified_categories IS NOT NULL
+                           AND any(t IN c.classified_categories
+                                   WHERE t IN reqSkill.categories
+                                     AND NOT t IN $exclude_fam))
                      }
                 THEN $family_weight
                 ELSE 0.0
@@ -443,6 +468,7 @@ async def _stage2_skill_rows(
             rid=str(resume_id),
             family_weight=family_weight,
             exclude_fam=list(non_matchable_families),
+            use_classified=use_classified_families,
         )
         rows = [dict(r) async for r in result]
     return [
@@ -502,6 +528,7 @@ async def _stage2_per_candidate(
         candidate.resume_id,
         family_weight=ctx.family_weight,
         non_matchable_families=ctx.non_matchable_families,
+        use_classified_families=ctx.use_classified_families,
     )
     skill_overall, skill_contribs = score_skill_breakdown(
         skill_rows, weights=weights, senior=senior

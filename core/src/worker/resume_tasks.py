@@ -1173,23 +1173,29 @@ async def _resume_projection_tx(
         # key" (the MERGE pattern itself already sets `canonical_key`).
         await tx.run("MERGE (s:Skill {canonical_key: $cn})", cn=canonical)
         await skills_graph.ensure_categories(tx, canonical)
-        # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 1): a HASHED
-        # (out-of-vocab) skill can never have curated categories --
-        # `categories_for(canonical)` always degrades to `[]` for a `h:...`
-        # key, so `ensure_categories`'s `if cats:` guard above never fires
-        # for one. This writes the PARSE-TIME classifier's assignment
-        # instead, straight from the outbox payload
+        # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 2, 2026-08-19
+        # decision memo): a HASHED (out-of-vocab) skill can never have
+        # curated categories -- `categories_for(canonical)` always degrades
+        # to `[]` for a `h:...` key, so `ensure_categories`'s `if cats:`
+        # guard above never fires for one. This writes the PARSE-TIME
+        # classifier's assignment instead, straight from the outbox payload
         # (`_extract_skills_merged`) -- no LLM call happens here, this is a
-        # pure write of a value the caller already computed. Mutually
-        # exclusive with the curated write above BY CONSTRUCTION (this only
-        # ever fires for a hashed canonical, `ensure_categories` only ever
-        # fires for a curated/cleartext one), so a classifier value can
-        # never override a curated one.
+        # pure write of a value the caller already computed. CHANGED from
+        # slice 1: the write now lands on the SEPARATE
+        # `Skill.classified_categories` property, NEVER on `Skill.categories`
+        # (curated, `ensure_categories`-only, forever) -- a curated family
+        # and a model-inferred one must remain distinguishable in the graph
+        # permanently. This is mutually exclusive with the curated write
+        # above BY CONSTRUCTION (this only ever fires for a hashed canonical,
+        # `ensure_categories` only ever fires for a curated/cleartext one),
+        # so a classifier value can never override a curated one -- and now
+        # it cannot even land in the same property.
         if canonical.startswith(skills_graph._HASH_KEY_PREFIX):
             classifier_categories = skill.get("categories")
             if classifier_categories:
                 await tx.run(
-                    "MATCH (s:Skill {canonical_key: $c}) SET s.categories = $cats",
+                    "MATCH (s:Skill {canonical_key: $c}) "
+                    "SET s.classified_categories = $cats",
                     c=canonical,
                     cats=classifier_categories,
                 )
