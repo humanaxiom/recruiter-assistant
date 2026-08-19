@@ -2091,3 +2091,45 @@ def test_verify_evidence_never_surfaces_a_bidi_override_in_a_quote() -> None:
     surfaced = cleaned.requirements[0].evidence
     assert rlo not in surfaced
     assert all(ch not in surfaced for ch in _NON_COLLAPSING_INVISIBLES)
+
+
+# ── ROADMAP A6 siblings: marking the three fallback branches must not move
+# ── any existing number (spec's explicit "no-arithmetic-change" guard) ─────
+
+
+def test_a6_siblings_no_arithmetic_change_pin() -> None:
+    """Adding the three write-path markers (``experience_bar_stated``,
+    ``education_bar_stated``, ``education_readable``) must not change a
+    single ``score_experience``/``score_education`` return value, on any
+    branch. Every value pinned here is the SAME value the pre-existing,
+    per-branch tests above already pin individually -- this is a single
+    consolidated re-statement of them, the guard the spec calls for, so a
+    change to either scorer's arithmetic (as opposed to its disclosure) is
+    caught even if a future edit only touches this file."""
+    # score_experience: the no-bar fallback, both None and 0.
+    assert score_experience(5, None, weights=DEFAULT_WEIGHTS) == 1.0
+    assert score_experience(5, 0, weights=DEFAULT_WEIGHTS) == 1.0
+    # score_experience: real comparisons across every branch.
+    assert score_experience(0, 5, weights=DEFAULT_WEIGHTS) == 0.0
+    assert score_experience(5, 5, weights=DEFAULT_WEIGHTS) == 1.0
+    assert score_experience(2, 4, weights=DEFAULT_WEIGHTS) == pytest.approx(0.5)
+    assert score_experience(15, 5, weights=DEFAULT_WEIGHTS) == pytest.approx(0.9)
+    assert score_experience(100, 5, weights=DEFAULT_WEIGHTS) == pytest.approx(0.8)
+
+    # score_education: the no-bar fallback, both None and "".
+    assert score_education(["bachelors"], None, weights=DEFAULT_WEIGHTS) == 1.0
+    assert score_education(["bachelors"], "", weights=DEFAULT_WEIGHTS) == 1.0
+    # score_education: the unreadable-education fallback -- the strongest of
+    # the three siblings, and the one whose number this guard most needs to
+    # keep honest.
+    assert score_education([], "bachelors", weights=DEFAULT_WEIGHTS) == 0.0
+    assert score_education([None, None], "bachelors", weights=DEFAULT_WEIGHTS) == 0.0
+    # score_education: real comparisons across every branch.
+    assert score_education(["bachelors"], "bachelors", weights=DEFAULT_WEIGHTS) == 1.0
+    assert (
+        score_education(["masters", "associate"], "bachelors", weights=DEFAULT_WEIGHTS)
+        == 1.0
+    )
+    assert score_education(
+        ["associate"], "bachelors", weights=DEFAULT_WEIGHTS
+    ) == pytest.approx(0.5 * (2 / 3))
