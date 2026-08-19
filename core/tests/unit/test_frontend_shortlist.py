@@ -793,12 +793,39 @@ def test_shortlist_cards_no_awaiting_message_when_state_is_null(
     assert "hx-trigger" in body  # ordinary "still generating" path, unchanged
 
 
-def test_shortlist_cards_entries_present_ignores_awaiting_llm_state(
+def test_shortlist_cards_entries_present_and_awaiting_llm_keeps_polling(
     monkeypatch: Any, client: Any
 ) -> None:
-    """If entries exist, render cards (unchanged) — even if the status
-    endpoint still reports a (now-stale) awaiting_llm state from before the
-    successful retry landed."""
+    """Reviewer finding on fix/regenerate-shortlist-no-feedback (PR review,
+    2026-08-18): a Regenerate whose LLM call fails closed calls
+    ``set_shortlist_awaiting_llm`` and returns WITHOUT ever reaching
+    ``persist_shortlist`` (ADR-029's worker mechanism) — so the PREVIOUS run's
+    entries are still on the row when the status endpoint reports
+    ``state == 'awaiting_llm'``. That is the reported no-feedback bug one
+    state over: ``ranking`` is false (the state is 'awaiting_llm', not
+    'ranking'), so the old ``polling = (a < m) and ((not entries) or ranking)``
+    computes False, the poll silently stops, and the recruiter is left on a
+    stale list with no sign a retry is queued.
+
+    ADR-029's own rationale ("a degraded ranking that reaches human eyes is
+    worse than no ranking" / "visibility over silence") and the identical
+    'ranking'-state fix immediately above ("stale-but-labelled beats blank")
+    both point the same way: a retry IS queued server-side here (the worker
+    raises ``arq.Retry`` below the retry ceiling — ADR-029's mechanism
+    section), so polling must continue and the recruiter must be told a
+    retry is in flight, exactly as it already is for the 'ranking' case.
+
+    **Corrected from a prior assertion.** This test previously asserted the
+    OPPOSITE — no trigger, no banner — on the premise that entries could only
+    be non-empty here because a stale flag lingered AFTER a successful
+    retry. That premise doesn't hold: ADR-029 clears ``shortlist_state`` in
+    the SAME transaction as a successful persist, so a genuinely-stale
+    post-success flag is not a reachable state, while a currently-in-flight
+    fail-closed retry with old entries still present (the Regenerate case
+    above) is the dominant real one. The two are indistinguishable from this
+    template's inputs alone, so the fail-safe default (poll + disclose) must
+    win.
+    """
     job_id = uuid4()
     monkeypatch.setattr(
         api_client,
@@ -817,10 +844,51 @@ def test_shortlist_cards_entries_present_ignores_awaiting_llm_state(
             }
         ),
     )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "hx-trigger" in body, "a retry is queued server-side — polling must continue"
+    assert "Candidate A" in body, "the previous run's cards must still render"
+
+
+def test_shortlist_cards_entries_present_and_awaiting_llm_banner_precedes_stale_cards(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Companion to the test above: the "waiting for AI / retry queued"
+    banner must render ABOVE the stale cards (so a recruiter reads the
+    explanation before the possibly-outdated list), and the cards themselves
+    must still be intact underneath it — never blanked in favour of the
+    banner."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": "awaiting_llm",
+                "reason": "llm output invalid: empty response",
+                "at": "2026-08-01T00:00:00+00:00",
+            }
+        ),
+    )
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
-    assert "Candidate A" in body
-    assert "Waiting for AI to rank candidates" not in body
-    assert "hx-trigger" not in body
+    normalized = _norm(body)
+
+    assert "waiting for ai to rank candidates" in normalized
+    assert "retry" in normalized  # "...queued to retry automatically..."
+    assert "candidate a" in normalized
+    # Ordering: the banner text must precede the card content, not follow it.
+    banner_idx = normalized.find("waiting for ai to rank candidates")
+    card_idx = normalized.find("candidate a")
+    assert banner_idx != -1 and card_idx != -1
+    assert (
+        banner_idx < card_idx
+    ), "the awaiting_llm banner must render ABOVE the stale cards, not below"
 
 
 def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
