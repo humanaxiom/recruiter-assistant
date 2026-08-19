@@ -77,7 +77,7 @@ flowchart TD
   CG -->|No| STOP["Nothing is stored.<br/>The file never leaves the browser"]
   CG -->|Yes| ST["Stored, with identifying<br/>details encrypted"]
   ST --> P["The document is read<br/>and split into passages"]
-  P --> LLM["Experience, education and<br/>skills are extracted"]
+  P --> LLM["Experience, education and skills<br/>are extracted — by AI, and by matching<br/>a fixed list of known skill terms"]
   LLM --> POOL["A pool of the closest<br/>candidates is selected"]
 
   POOL --> S2["Each is scored on five<br/>measurable dimensions"]
@@ -88,7 +88,9 @@ flowchart TD
 ```
 
 *Both sides are read by AI. Consent is a hard gate on the candidate side: without the tick, no candidate data
-is stored at all.*
+is stored at all. Skills are found two ways — the AI names them, and the system separately matches the résumé
+against a fixed list of known skill terms. A skill that list does not contain can be missed even when the
+résumé states it plainly, which is the coverage limit described further down.*
 
 **Selecting the pool.** The system picks up to 50 résumés whose content is closest to the job description, by
 meaning rather than keyword. Only résumés uploaded for that specific job are eligible.

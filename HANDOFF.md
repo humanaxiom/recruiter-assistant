@@ -2,7 +2,82 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-17: A2 IS SHIPPED (15.6% → 54.8%), AND A WEEK-LONG BLOCKER WAS MIS-SCOPED
+### ⚠️⚠️ READ FIRST — 2026-08-18: THE BLOCKED DECISIONS NOW HAVE MEMOS; TWO DOCS DESCRIBED THE PIPELINE WRONGLY
+
+> **Last FEATURE merge is still PR #88, squash `a0c3c17`, ADR-042.** Nothing since has changed product
+> behaviour — #90 and this one are docs. `origin/main` is at or *after* `969a323`. **`git fetch` and check
+> `gh pr list` before trusting any of this.**
+>
+> Supersedes the 2026-08-17 banner below (kept as history, and still accurate on A2 itself).
+>
+> **⚠️ Concurrency, new and worth knowing:** two Claude Code sessions worked this repo simultaneously on
+> 2026-08-17 and raced on every action — commit, push and merge — the second beating the first by seconds
+> each time. Git metadata cannot tell them apart (both commit as `claude-code`, both merge as `adamsalah13`),
+> so a commit that "appeared from nowhere" mid-session is probably a sibling session, not automation.
+> **Re-read `git log -1` / `git status -sb` / `gh pr view` in the same tool call that commits, pushes or
+> merges.** A start-of-session snapshot is not safe to write against.
+
+#### What shipped — PR #90 (memos) and this PR (docs)
+
+**The two blocked decisions now have memos: [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md).** Options,
+costs, a recommended default, and what changes if the human picks otherwise — per `CLAUDE.md` Economy rule 3.
+They cost the human **two letters**, not a session.
+
+- **D1 — auditor access to withdrawal reasons.** Recommended **C**: reveal on request, separately audited,
+  reusing the pattern the product already uses for candidate PII. The choice is **retroactive in one
+  direction** — prose already in `audit_log` was typed under today's withheld expectation.
+- **D2 — unscoped reads for a bare service key.** Recommended **B**: 403 on `user is None` for reads,
+  symmetric with writes. Its blast radius is **narrower than ADR-034 assumed**: the CAS-off boot hits the
+  `dev-anonymous` sentinel *before* the `None` branch, and the Flask viewer forwards the session cookie, so
+  both shipped entry points survive. The unmeasured cost is keyed eval/integration tooling.
+- **🔴 They are COUPLED — answer D2 first.** `reveal_service` falls back to `actor="api"` when no identity
+  resolves, which is exactly the caller D2 is about. D1=C decided alone buys an audited reveal whose audit row
+  can read `actor = "api"`: a record that a withdrawal reason was read, but not *who* read it.
+
+#### 🔴 The finding worth carrying: two documents described the pipeline wrongly, in the same place
+
+`docs/ai-usage-overview.md` — whose stated job is "every AI call site" and "what is AI vs deterministic" —
+listed `resume_skills_v2` as though résumé skills were an LLM output, and documented the deterministic
+vocabulary scanner **only as a failure-path fallback** (ADR-030). In fact `_extract_skills_merged` runs
+`match_skills_in_text` *unconditionally* and merges it with the LLM half on the healthy path. The
+user-facing explainer said the same thing to HR: *"Experience, education and skills are extracted"*, under a
+caption reading *"Both sides are read by AI."*
+
+**A2 made the error material rather than pedantic.** The scanner's vocabulary went 72 → 306 canonicals, so on
+the administrative and academic résumés this product exists to serve, the scanner is now a substantial share
+of the result — not a safety net. Both documents now say so, and the explainer says it in the register HR
+needs: a skill absent from the fixed list can be missed even when the résumé states it plainly, which is the
+same coverage limit as the 45.2% tail.
+
+**The shape:** this is [A7](docs/ROADMAP.md) one level out from code. The invariant "skills come from two
+sources" was true, load-bearing, and written down nowhere a reader would find it — and the doc that *did*
+mention the scanner mentioned only its least important role. Grep found it; nothing enforced it.
+
+#### Also corrected — two stale claims (PR #90)
+
+- `ROADMAP`'s status heading said A2 was *"not yet merged"* while the A2 row two lines below read **SHIPPED**.
+  Same stale-pin mistake PR #82 fixed in this file; rewritten to pin no equality.
+- This banner's predecessor quoted the explainer *"word-for-word"* with a string that is actually ROADMAP
+  A0.1's — grepping the explainer found nothing. Substance held; only the attribution was wrong.
+
+#### What is left, in the order I would take it
+
+1. **Get the pilot RUN.** Two *physical* human actions (run `quickstart.ps1` under `pwsh`; click through the
+   live UI) plus **two letters** for the memos above. Highest-value item in the project, for a fourth session.
+2. **The three A6 sibling defects** — `score_education`'s `if not ranked: return 0.0` is the strongest: an
+   unparsed education section scores *worse* than being below the bar, which at least earns partial credit.
+3. **A3's seniority/vector control gap** and the A2-blindness gap — both measured, both corpus-owner work.
+4. **A3's ADR-008 hashing gap** — still the largest; re-bands the corpus.
+5. **A2's remaining 45.2%** — the Phase 3.3 projection-time classifier.
+6. **Competency scoring** — with real pilot data, if the pilot happens.
+
+> **🆕 Open question on that ordering, recorded not acted on.** Item 5 is the only item that changes what the
+> product can *do*, and the only one that retires guardrail A0.1 — which `CLAUDE.md` Economy rule 4 says
+> should outrank hardening. It also cannot be deferred cheaply: the ADR-008 hash is **one-way**, so every
+> résumé projected before the classifier exists is **permanently unclassified**. Items 3 and 4 being
+> corpus-owner work is a real counter-argument. Sequencing is the owner's call; it is a note, not a reorder.
+
+#### (history) READ FIRST — 2026-08-17: A2 IS SHIPPED (15.6% → 54.8%), AND A WEEK-LONG BLOCKER WAS MIS-SCOPED
 
 > **Last feature merge: PR #88, squash `a0c3c17`, ADR-042.** Docs commits sit on top, so `origin/main` is at or
 > *after* that sha rather than equal to it. **`git fetch` and check `gh pr list` before trusting any of this.**

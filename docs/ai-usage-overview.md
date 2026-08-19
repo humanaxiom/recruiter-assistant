@@ -43,11 +43,15 @@ flowchart TB
         UP --> EX
     end
 
-    subgraph PARSE["2 · Parse (LLM · gpt-oss:20b, strict JSON)"]
+    subgraph PARSE["2 · Parse — LLM (gpt-oss:20b, strict JSON) + a deterministic skill scan"]
         JD["parse_job → jd_extract_v1<br/>skills · education · min_years"]
         RC["parse_resume → resume_core_v1<br/>experience · education · contact"]
-        RS["parse_resume → resume_skills_v2<br/>skills"]
+        RS["parse_resume → resume_skills_v2<br/>skill names + years · last-used"]
         CL["parse_resume → cover_letter_v1<br/>motivation"]
+        SC["match_skills_in_text<br/>deterministic scan · 306-canonical curated vocabulary"]
+        MG["merge — LLM half FIRST, then the scan<br/>dedupe → cap 400"]
+        RS --> MG
+        SC --> MG
     end
 
     subgraph EMBED["3 · Embed (nomic-embed-text, 768-d) — PII-redacted"]
@@ -74,11 +78,13 @@ flowchart TB
     classDef det fill:#64748B,stroke:#475569,color:#fff;
     class JD,RC,RS,CL llm;
     class RE,JE,SE emb;
-    class UP,EX,N det;
+    class UP,EX,N,SC,MG det;
 ```
 
 > **Legend:** 🟪 purple = LLM generation · 🟩 teal = embeddings · ⬜ grey = deterministic (no AI).
 > Text extraction, chunking, skill-graph keys, and evidence verification are all deterministic.
+> **Résumé skills are both** — the LLM's named skills are merged with a deterministic scan over the
+> curated vocabulary. See the note under the call-site table.
 
 ---
 
@@ -90,12 +96,24 @@ flowchart TB
 |---|---|---|---|---|---|
 | 1 | `jd_extract_v1` | `worker/tasks.py::parse_job` | Structured JD from raw text (required/nice-to-have skills, education level + **fields**, min years) | 2048 | `JDExtracted` |
 | 2 | `resume_core_v1` | `worker/resume_tasks.py::parse_resume` | Core résumé: experience, education, contact | 3072 | `ResumeCore` |
-| 3 | `resume_skills_v2` | `worker/resume_tasks.py::parse_resume` | Résumé skills | 1536 | `ResumeSkillDetails` |
+| 3 | `resume_skills_v2` | `worker/resume_tasks.py::parse_resume` | Résumé skill names **with `years` / `last_used_year`** — merged with a deterministic scan, never used alone (see below) | 1536 | `ResumeSkillDetails` |
 | 4 | `cover_letter_v1` | `worker/resume_tasks.py::parse_resume` | Cover-letter motivation (feeds the motivation sub-score) | 1024 | `CoverLetterParsed` |
 | 5 | `shortlist_evidence_v1` / `v2` | `pipeline/matching/orchestrator.py` (ranking **stage 3**) | Per-requirement evidence quotes from résumé chunks; `v2` adds a cover-letter block | 2048 (`match_evidence_max_tokens`) | `EvidenceObjectIngest` |
 
 Every call goes through `chat_json(...)`, which enforces JSON mode, validates against the schema, and
 retries once (`max_retries=1`) before raising `LLMOutputInvalidError`.
+
+**Call 3 is not an LLM-only output, and that matters more since [ADR-042](adr/042-skill-vocabulary-domain-families.md).**
+`_extract_skills_merged` *always* runs a deterministic scan (`match_skills_in_text`) over the curated
+vocabulary — **306 canonicals**, up from 72 — and merges it with call 3: LLM names **first**, so their
+`years`/`last_used_year` survive the 400-item cap, then a dedupe. The two halves are complementary. The
+LLM half carries recency data a name-only scan can never recover; the scan half catches vocabulary terms
+the LLM did not name. On the administrative and academic résumés this product mostly sees, the scan is a
+substantial share of the result, not a safety net.
+
+When call 3 fails validation the scan stands **alone** and the parse is marked `degraded` (ADR-030, under
+[Resilience](#resilience--failure-handling)) — so the scan is both the normal-path co-author and the
+failure-path fallback. An earlier version of this page documented only the second role.
 
 ### Embeddings (`nomic-embed-text`, 768-d)
 
