@@ -316,6 +316,23 @@ class ScoreBreakdown(BaseModel):
     # no fold/pop path is needed for them to round-trip.
     seniority_measured: bool | None = None
     vector_discriminating: bool | None = None
+    # ROADMAP A6 siblings (docs/adr/041-sub-score-measurement-markers.md,
+    # "Three siblings found while writing this"). Same THREE-state contract
+    # as the pair above, one dimension over each:
+    #
+    #   experience_bar_stated -- did the JD state a minimum-years bar?
+    #   education_bar_stated  -- did the JD state a minimum education level?
+    #   education_readable    -- did the résumé yield >= 1 readable degree
+    #                            level at all (independent of whether it
+    #                            meets the bar)?
+    #
+    # Same names on both sides of the read path (deliberate deviation from
+    # ADR-041's seniority_measured -> seniority_assessed rename -- see
+    # ADR-041 addendum): a rename buys nothing and is one more place two
+    # copies can drift.
+    experience_bar_stated: bool | None = None
+    education_bar_stated: bool | None = None
+    education_readable: bool | None = None
 
 
 class RequirementEvidence(BaseModel):
