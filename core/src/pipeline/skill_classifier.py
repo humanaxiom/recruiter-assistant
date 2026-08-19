@@ -47,7 +47,11 @@ from pydantic import BaseModel, Field, ValidationError
 from src.pipeline import skills_graph
 from src.pipeline.llm import validation_error_digest
 from src.pipeline.skills import _basic_normalise
-from src.settings import Settings
+from src.settings import (
+    Settings,
+    get_settings,
+    non_matchable_families_from_settings,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,10 +63,17 @@ log = logging.getLogger(__name__)
 # knob.
 _MAX_FAMILIES_PER_SKILL = 2
 
-# Small and bounded: one batched call classifies every out-of-vocab name in
-# one résumé (rarely more than a few dozen), and the whole response is just
-# `{name: [family, ...]}` pairs -- nowhere near resume_skills_v2's budget.
-_CLASSIFY_MAX_TOKENS = 1024
+# FLOOR, not a size-of-response estimate: on a reasoning model the DISCARDED
+# thinking trace counts against max_tokens before any JSON is ever emitted
+# (`client.py:220-235`, ADR-021 §6 -- and `think:false` does NOT reliably
+# suppress it on gpt-oss:20b, on either the OpenAI-compat or native path).
+# Live probe against the tailnet gpt-oss:20b, batching the same 6 real
+# out-of-vocab skill names in one `classify_families` call: at 1024 (the
+# previous value) the trace consumed the whole budget, `content` came back
+# empty, and the feature silently classified 0 of 6 skills. At 4096, 6 of 6.
+# Do not "optimise" this back toward 1024 -- that value was proven live to
+# zero out the feature, not merely untested.
+_CLASSIFY_MAX_TOKENS = 4096
 
 
 def known_families() -> tuple[str, ...]:
@@ -124,8 +135,16 @@ class _ClassifyFamiliesOut(BaseModel):
 
 
 def _build_messages(
-    names: list[str], families: tuple[str, ...]
+    names: list[str],
+    families: tuple[str, ...],
+    settings: Settings | None = None,
 ) -> list[dict[str, str]]:
+    """``settings`` defaults to ``get_settings()`` so existing call sites
+    that only pass ``(names, families)`` still get the real, configured
+    non-matchable set -- never a hardcoded ``{"other", "domain"}`` literal
+    here."""
+    non_matchable = non_matchable_families_from_settings(settings or get_settings())
+    non_matchable_offered = ", ".join(non_matchable)
     offered = ", ".join(families)
     listed = "\n".join(f"- {n}" for n in names)
     return [
@@ -136,8 +155,18 @@ def _build_messages(
                 "for a candidate-ranking system. For EACH skill name given, "
                 "choose at most two families from this CLOSED list, ONLY "
                 f"from this list, never inventing a new one: {offered}. "
-                "If no family confidently applies to a name, use an EMPTY "
-                "list for it rather than guessing. "
+                "A wrong specific family is actively harmful: family credit "
+                "is transitive across the WHOLE résumé, so a doubtful guess "
+                "can falsely credit a candidate with a requirement they do "
+                "not meet, while declining costs nothing. For that reason, "
+                f"PREFER a non-matchable family ({non_matchable_offered}) "
+                "over a specific matchable family whenever the specific "
+                "choice is doubtful -- treat a non-matchable family as "
+                "safer than a specific guess you are unsure of, and as the "
+                "default answer for an uncertain name, not merely a last "
+                "resort reached only before guessing. Only fall back to an "
+                "empty list if even the non-matchable families clearly do "
+                "not fit. "
                 'Respond with strict JSON: {"categories": '
                 '{"<skill name>": ["<family>", ...]}} with one entry per '
                 "skill name given, using the exact skill name text as the "
@@ -159,11 +188,12 @@ async def classify_families(
     names, and the skills LLM call already happens once per résumé at this
     same call site).
 
-    ``settings`` is accepted (keyword-only, per the spec'd signature) for
-    parity with this module's future settings-gated tunables -- reserved,
-    like ``LLMClient``'s ``debug_llm`` -- nothing reads it yet; every actual
-    tunable here (the family cap, the token budget) is a reviewed constant,
-    not a deploy knob, per CLASSIFIER-SPEC.md.
+    ``settings`` is keyword-only, per the spec'd signature, and is threaded
+    into ``_build_messages`` to source the non-matchable family set
+    (``settings.match_non_matchable_families`` via
+    ``non_matchable_families_from_settings``) -- every other tunable here
+    (the family cap, the token budget) stays a reviewed constant, not a
+    deploy knob, per CLASSIFIER-SPEC.md.
 
     Best-effort: any exception (transient LLM failure, schema-invalid
     output, or even a stray ``pydantic.ValidationError``) is caught here and
@@ -173,11 +203,10 @@ async def classify_families(
     because pydantic v2's ``str(ValidationError)`` embeds the offending
     value (here, potentially a skill name) verbatim.
     """
-    _ = settings  # reserved, currently inert — see docstring
     if not names:
         return {}
 
-    messages = _build_messages(names, known_families())
+    messages = _build_messages(names, known_families(), settings)
     try:
         out = await llm.chat_json(
             messages,
