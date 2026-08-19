@@ -43,7 +43,7 @@
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
-  {% if entries and ranking %}
+  {% if entries and ranking and polling %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
     The candidates below are from the <strong>previous run</strong> — a new
@@ -52,17 +52,43 @@
     résumé the run considers, so a full pass realistically takes several
     minutes and scales with the number of résumés involved.
   </p>
-  {% elif entries and awaiting_llm %}
+  {% elif entries and ranking %}
+  {# F3 (minor, review findings 2026-08-18): the poll ceiling (`a >= m`) was
+     already reached, so the wrapping div's own hx-trigger is correctly gone
+     — but a run genuinely was still in flight last we checked. Stop faking
+     progress: no spinner, no "automatically" promise nothing is left to
+     keep. Give an honest, actionable give-up message instead. #}
+  <p class="muted">
+    The candidates below are from the <strong>previous run</strong>. A new
+    run did not finish in the time this page was willing to keep checking —
+    check back later, or click <strong>Regenerate</strong> to try again.
+  </p>
+  {% elif entries and awaiting_llm and polling %}
   {# entries present + a failed-closed retry queued (not a run in flight —
      that's the `ranking` branch above): still show the stale cards below,
-     but explain a retry is queued rather than silently falling through to
-     the bare-cards branch, which would leave no sign anything is happening. #}
+     but explain a retry MAY be queued rather than silently falling through
+     to the bare-cards branch, which would leave no sign anything is
+     happening. F4 (review findings 2026-08-18): worded as a possibility, not
+     an unconditional fact — see the module-level note below the `awaiting_llm`
+     branches for why the frontend cannot tell "a retry is queued" from "the
+     retry ceiling was already hit" apart from this payload alone. #}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
     Waiting for AI to rank candidates… the ranking model was briefly
-    unavailable, so a retry is queued automatically and will replace the
-    list below when it finishes — no action needed. The candidates below are
-    from the <strong>previous run</strong>.
+    unavailable. A retry may be queued automatically and will replace the
+    list below if it finishes — if nothing changes after a while, click
+    <strong>Regenerate</strong> to try again. The candidates below are from
+    the <strong>previous run</strong>.
+  </p>
+  {% elif entries and awaiting_llm %}
+  {# F3/F4 sibling of the branch above, once the poll ceiling has been
+     reached: no spinner, no automatic-replacement promise, and an explicit
+     manual fallback since a retry is no longer being awaited by this page. #}
+  <p class="muted">
+    Waiting for AI to rank candidates did not finish in the time this page
+    was willing to keep checking. The candidates below are from the
+    <strong>previous run</strong> — click <strong>Regenerate</strong> to try
+    again.
   </p>
   {% elif entries %}{# fall through to the cards below #}
   {% elif polling and awaiting_llm %}

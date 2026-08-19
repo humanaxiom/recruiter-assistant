@@ -242,8 +242,17 @@ class Settings(BaseSettings):
     # killed by its own job timeout — so ``get_shortlist_state`` treats it as
     # NOT ranking (without clearing the row) once it is older than this bound.
     # Defaults to the worker's own ``job_timeout`` (``src/worker/main.py:162``
-    # — 3600s): the two are related by construction, not coincidence, so a
-    # crashed worker can never permanently pin the UI in "Regenerating…".
+    # — 3600s). F5 (review findings, 2026-08-18): that default is a
+    # reasonable starting point, NOT because the two clocks measure the same
+    # thing — they don't. ``job_timeout`` bounds worker EXECUTION time once a
+    # job starts running. This bound has to cover enqueue→now
+    # (``jobs.shortlist_state`` is set to ``'ranking'`` at enqueue time, in
+    # ``routes/shortlist.py:62``, before the job is even picked up), so it
+    # also has to absorb however long the job sits queued — and queue wait is
+    # unbounded in principle (``max_jobs = 4``, so a burst of Regenerates can
+    # queue behind each other with no cap on how long the wait is). A crashed
+    # worker can never permanently pin the UI in "Regenerating…" either way,
+    # but sizing this purely off ``job_timeout`` under-covers a busy queue.
     shortlist_ranking_stale_after_s: float = 3600.0
 
     # ── Flask viewer ─────────────────────────────────────────────────────────
