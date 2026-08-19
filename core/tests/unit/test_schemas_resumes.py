@@ -298,7 +298,7 @@ def test_resume_skill_categories_accepts_two_families() -> None:
 
 
 def test_resume_skill_categories_rejects_more_than_the_per_skill_cap() -> None:
-    """The classifier caps at 2 families per skill (CLASSIFIER-SPEC.md) --
+    """The classifier caps at 2 families per skill (ADR-044) --
     the schema itself enforces the same ceiling as a second line of
     defence, so a future classifier bug cannot silently inflate family
     credit past the reviewed cap."""
@@ -310,7 +310,7 @@ def test_resume_skill_categories_old_row_missing_the_key_reads_back_none() -> No
     """``extra="ignore"`` plus this default means a résumé parsed BEFORE
     this feature shipped (no ``categories`` key in the stored jsonb at all)
     reads back identically to a skill the classifier declined to answer for
-    -- the strictly-additive property CLASSIFIER-SPEC.md requires."""
+    -- the strictly-additive property ADR-044 requires."""
     skill = ResumeSkill.model_validate({"name": "python", "years": 3})
     assert skill.categories is None
 

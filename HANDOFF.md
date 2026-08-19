@@ -2,7 +2,29 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
+### ⚠️⚠️ READ FIRST — 2026-08-19: PARSE-TIME SKILL CLASSIFIER SHIPPED; TWO DEFECTS FOUND BY CALLING A REAL MODEL
+
+> **This branch (`feat/skill-family-classifier`) is a `feat`-class change** — new LLM call at parse time, new graph property (`Skill.classified_categories`), new settings flag. It required the integration suite and a live probe against the real LLM to validate. **`git fetch` and check `gh pr list` before trusting any line here.**
+>
+> **The core finding:** Two defects in the parse-time skill classifier were found invisible to a fully green test suite (5,387 unit, 524 integration) because the tests mock the LLM. Only calling the real `gpt-oss:20b` found them:
+> 1. **`_CLASSIFY_MAX_TOKENS=1024` was a silent no-op.** The reasoning trace consumed the entire budget before any JSON was emitted, classifying 0 of 6 out-of-vocab skills. At 4096, all 6. This is invisible to unit tests because they mock `chat_json` wholesale.
+> 2. **The prompt did not signal non-matchable families as preferred.** Two domain-expert phrases were assigned to matchable but incorrect families (`bi`, `research_admin`), granting false credit because family credit is transitive across the whole résumé.
+>
+> Both found, fixed, and documented in [ADR-044](docs/adr/044-skill-family-classifier.md). See that ADR for the full story, including the non-determinism and why this matters for the 45.2% tail.
+
+#### What shipped — ROADMAP A2, Phase 3.3, slice 1
+
+Out-of-vocabulary skill names are classified at **parse time** (where the skills LLM is already being called) into one of the 32 curated families, and written to `Skill.classified_categories` in Neo4j. This stops the irreversible loss: previously, a hashed out-of-vocab skill could never earn family credit.
+
+**The feature is opt-in by default.** The flag `match_use_classified_families` (default `False`) gates whether the ranking engine reads this field. With it off, the field is present but ignored — the path is provably inert at the Cypher level, never just "inert by convention". All ranking paths stay byte-identical to `main`.
+
+Two residuals block enabling the flag: (1) Shared Skill nodes — two candidates with the same phrase overwrite each other's classifications, and re-parsing with decline leaves stale data. (2) No real accuracy measurement yet (eval corpus is blind to it by construction).
+
+#### The 45.2% tail: Phase 3.3 slice 2 is the job side
+
+This slice classified *candidate* out-of-vocab phrases. The 45.2% figure is about *job requirement* phrases that are out-of-vocab. Slice 2 classifies the job side. Together they close the ADR-008 hash irreversibility — currently, anything hashed is permanently lost at every projection; the classifier makes that loss preventable.
+
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
 
 > **This branch (`fix/regenerate-shortlist-no-feedback`) is a `feat`-class change** — a new persisted
 > state value, a DDL constraint change, and changed UI behaviour. It required the integration gate, not

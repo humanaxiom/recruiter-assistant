@@ -41,7 +41,7 @@ now pins, CHANGING two of slice 1's own tests:
 
 The classifier itself is NOT exercised here -- it runs at PARSE time, calls
 an LLM, and this slice's entire design claim is that PROJECTION gains no LLM
-call at all (see ``CLASSIFIER-SPEC.md``'s "The design" section, and the four
+call at all (see ADR-044's "The design" section, and the four
 ADR-008 tests in ``test_worker_project_resume.py`` this slice must leave
 green). This file seeds the outbox payload's ``categories`` field directly,
 exactly as ``_extract_skills_merged`` would already have attached it before
@@ -470,7 +470,7 @@ async def test_baseline_without_categories_still_scores_missing_today(
     minus the classifier's category assignment, still scores exactly as it
     did before this feature existed -- 0.0, ``reason="missing"``. Expected
     to hold both BEFORE and AFTER this slice lands (the strictly-additive
-    property CLASSIFIER-SPEC.md's design section claims by construction)."""
+    property ADR-044's design section claims by construction)."""
     job_id = await _insert_job(pg_pool)
     resume_id = await _insert_resume(pg_pool, job_id)
     await _enqueue_job_requiring_python(pg_pool, job_id)
@@ -502,7 +502,23 @@ async def test_curated_in_vocab_skill_categories_are_not_overridden_by_a_payload
     "python" directly) must keep its curated ``categories.yaml`` families
     even if some future/buggy producer attached a stray ``categories`` value
     to that skill's outbox row -- curated wins, per ``ensure_categories``,
-    never a classifier/payload value, for an in-vocab canonical."""
+    never a classifier/payload value, for an in-vocab canonical.
+
+    M9 mutation-review addition (2026-08-19): this is exactly the payload
+    shape ``_redact_skill_names_pii`` can genuinely produce (pinned at the
+    unit level by
+    ``test_classifier_category_survives_redaction_into_an_in_vocab_name`` in
+    ``test_worker_parse_resume.py``) when an out-of-vocab compound name
+    carrying a classifier-assigned family gets rewritten down to a bare
+    in-vocab remainder AFTER classification but BEFORE the outbox is
+    enqueued -- not a purely hypothetical "buggy producer". The projection
+    write guard (``resume_tasks.py``, ``if
+    canonical.startswith(skills_graph._HASH_KEY_PREFIX)``) is what stops a
+    stray ``categories`` value from landing on ``Skill.classified_categories``
+    for a curated node; deleting that guard changes no OTHER assertion in
+    this file (the original version of this test asserted only on
+    ``s.categories``, never on ``s.classified_categories`` -- a survived
+    mutant), so the new assertion below is the direct pin."""
     job_id = await _insert_job(pg_pool)
     resume_id = await _insert_resume(pg_pool, job_id)
     await _enqueue_resume_with_one_skill(
@@ -518,9 +534,16 @@ async def test_curated_in_vocab_skill_categories_are_not_overridden_by_a_payload
 
     async with neo4j_driver.session() as session:
         result = await session.run(
-            "MATCH (s:Skill {canonical_key: 'python'}) RETURN s.categories AS cats"
+            "MATCH (s:Skill {canonical_key: 'python'}) "
+            "RETURN s.categories AS cats, s.classified_categories AS classified"
         )
         record = await result.single()
     assert record is not None
     assert "not_a_real_family_a_buggy_producer_sent" not in (record["cats"] or [])
     assert record["cats"], "python's curated categories must still be written"
+    assert record["classified"] is None, (
+        "a payload categories value attached to a CURATED (in-vocab) skill "
+        "must never reach s.classified_categories either -- that property "
+        "is reserved for a genuinely hashed/out-of-vocab canonical, and "
+        "this in-vocab node must come back with it entirely absent"
+    )

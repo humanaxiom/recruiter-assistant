@@ -1,7 +1,7 @@
 """Unit tests -- ``src.pipeline.skill_classifier`` (ROADMAP A2, Phase 3.3,
 slice 1). All LLM I/O mocked at the ``llm.chat_json`` boundary.
 
-Design (``CLASSIFIER-SPEC.md``, not restated here): a skill name outside the
+Design (ADR-044, not restated here): a skill name outside the
 306-canonical vocabulary is hashed one-way at projection and can never earn
 family credit. This module classifies such names into one of the 32
 ``categories.yaml`` families AT PARSE TIME (where the LLM is already being
@@ -125,7 +125,7 @@ def test_known_families_shares_the_real_category_family_names_not_a_hardcoded_co
 
 # ── unclassified_names: the drift guard ──────────────────────────────────
 #
-# Requirement (CLASSIFIER-SPEC.md): "It MUST share the existing predicate
+# Requirement (ADR-044): "It MUST share the existing predicate
 # rather than restating it: derive from `_basic_normalise` + the alias/
 # category table lookups already used by `_canonical_key_for_normalised`."
 # A second, independently-maintained copy of that condition is the A7 drift

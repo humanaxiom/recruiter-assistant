@@ -254,7 +254,7 @@ async def _extract_skills_merged(
     ordered = list(dict.fromkeys(canonical))[:_MAX_SKILLS]
 
     # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 1): classify the
-    # OUT-OF-VOCAB subset AT PARSE TIME (CLASSIFIER-SPEC.md's load-bearing
+    # OUT-OF-VOCAB subset AT PARSE TIME (ADR-044's load-bearing
     # decision) -- the skills LLM is already being called above, and there
     # is no drain-time budget here, unlike projection (ADR-008). Best-effort,
     # mirroring this function's own posture for the skills LLM call: any

@@ -1,6 +1,6 @@
 """Parse-time skill-family classifier (ROADMAP A2, Phase 3.3, slice 1).
 
-**The load-bearing design decision** (``CLASSIFIER-SPEC.md``, not restated
+**The load-bearing design decision** (ADR-044, not restated
 here): a résumé skill name outside the 306-canonical vocabulary
 (``aliases.yaml``/``categories.yaml``) is hashed one-way at projection
 (``skills_graph._canonical_key_for_normalised``) and can therefore never earn
@@ -16,7 +16,7 @@ inline per-skill LLM call. Projection itself gains NO LLM call: it only
 calls the LLM/embedder for skill resolution at projection — is unaffected by
 construction, not merely by discipline.
 
-Conservative by construction (CLASSIFIER-SPEC.md):
+Conservative by construction (ADR-044):
 
 * a family the model invents (not in ``known_families()``) is dropped;
 * no confident answer -> the skill's key is ABSENT from the result (never an
@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 # Family credit is transitive across the whole résumé (any résumé skill in a
 # family credits a matching requirement -- orchestrator.py), so an unbounded
 # per-skill family list would amplify false credit far past what a single
-# out-of-vocab skill should earn. A named constant per CLASSIFIER-SPEC.md,
+# out-of-vocab skill should earn. A named constant per ADR-044,
 # not a settings tunable -- this is a reviewed safety ceiling, not a deploy
 # knob.
 _MAX_FAMILIES_PER_SKILL = 2
@@ -193,7 +193,7 @@ async def classify_families(
     (``settings.match_non_matchable_families`` via
     ``non_matchable_families_from_settings``) -- every other tunable here
     (the family cap, the token budget) stays a reviewed constant, not a
-    deploy knob, per CLASSIFIER-SPEC.md.
+    deploy knob, per ADR-044.
 
     Best-effort: any exception (transient LLM failure, schema-invalid
     output, or even a stray ``pydantic.ValidationError``) is caught here and
