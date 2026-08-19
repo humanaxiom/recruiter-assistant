@@ -281,3 +281,43 @@ async def test_the_three_markers_are_set_independently_of_each_other() -> None:
     assert result.breakdown.experience_bar_stated is True
     assert result.breakdown.education_bar_stated is False
     assert result.breakdown.education_readable is False
+
+
+# ── real corpus shape (merge-blocking review, Gap 1): a JD that STATES an
+# ── education bar against a résumé whose only degree string is one
+# ── `_level_from_degree` cannot map to any level at all -- confirmed against
+# ── the eval corpus itself (r07 "Certificate, Full-Stack Web Development",
+# ── r08 "Diploma, Business Administration"), not a hypothetical shape ───────
+
+
+async def test_stated_bachelor_bar_against_an_unmapped_degree_string_is_unreadable_not_unstated() -> (  # noqa: E501
+    None
+):
+    """The production quadrant the anti-re-derivation tests above never hit:
+    ``education_bar_stated`` and ``education_readable`` are True/False on
+    DIFFERENT axes at once. The JD genuinely states a bachelors-level bar
+    (``education_bar_stated`` must read True), but the candidate's only
+    degree string ("Certificate, Full-Stack Web Development", in the spirit
+    of the corpus's own r07 row) matches none of ``_DEGREE_KEYWORDS``, so
+    ``_level_from_degree`` returns ``None`` and the résumé contributes no
+    readable level at all (``education_readable`` must read False) --
+    ``score_education`` takes its unreadable-``0.0`` branch, not a
+    below-the-bar partial-credit branch."""
+    parsed = _parsed(total_years=5, degree="Certificate, Full-Stack Web Development")
+    job = _job(education_min_level="bachelors")
+
+    result = await _run(parsed, job)
+
+    assert result.breakdown.education == 0.0, (
+        "fixture drift -- an unmapped degree string against a stated bar "
+        "must take the unreadable-education 0.0 branch, not a partial-"
+        "credit below-the-bar score"
+    )
+    assert result.breakdown.education_bar_stated is True, (
+        "the JD plainly stated a bachelors-level bar -- this axis must read "
+        "True even though the candidate's own level could not be read"
+    )
+    assert result.breakdown.education_readable is False, (
+        "no degree level was readable from this candidate's résumé -- "
+        "marking it readable would fabricate a comparison that never ran"
+    )

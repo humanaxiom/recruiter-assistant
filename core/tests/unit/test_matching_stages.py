@@ -2133,3 +2133,34 @@ def test_a6_siblings_no_arithmetic_change_pin() -> None:
     assert score_education(
         ["associate"], "bachelors", weights=DEFAULT_WEIGHTS
     ) == pytest.approx(0.5 * (2 / 3))
+
+
+def test_a6_education_levels_materialised_before_readability_consumes_it() -> None:
+    """Mutation guard (merge-blocking review, Gap 2): ``score_education``
+    does ``levels = list(candidate_levels)`` BEFORE calling
+    ``education_levels_readable(levels)``, specifically so a one-shot
+    iterable (the ``Iterable[str | None]`` the signature actually promises,
+    not just the lists every other test in this file happens to pass) is
+    materialised once and backs BOTH the readability check and the
+    ``ranked`` build below it.
+
+    Delete that ``list(...)`` and this breaks: ``education_levels_readable``
+    drains the generator during the readability check, so by the time
+    ``ranked`` is built from the SAME (now-exhausted) generator there is
+    nothing left, ``max()`` on the resulting empty sequence raises
+    ``ValueError``, and a genuinely readable, above-the-bar candidate
+    crashes instead of scoring ``1.0`` -- every other test in this module
+    passes a list and cannot see this at all."""
+
+    def _one_shot_bachelors() -> Any:
+        yield "bachelors"
+
+    generator_result = score_education(
+        _one_shot_bachelors(), "bachelors", weights=DEFAULT_WEIGHTS
+    )
+    list_result = score_education(["bachelors"], "bachelors", weights=DEFAULT_WEIGHTS)
+    assert generator_result == list_result == 1.0, (
+        "a one-shot generator of levels must score identically to the "
+        "equivalent list -- if it does not (or raises), `candidate_levels` "
+        "is being consumed more than once"
+    )

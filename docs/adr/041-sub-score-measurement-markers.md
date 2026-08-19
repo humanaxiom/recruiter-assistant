@@ -193,7 +193,34 @@ The three siblings documented above have been fixed using the same strategy as t
 
 ### Why the arithmetic is unchanged
 
-The eval corpus cannot exercise these branches — all 20 fixtures parse at least one education entry and have JD postings with both minimum-years and minimum-education requirements. Changing any fallback value would be unverifiable by the gate, the same reasoning that earned [ADR-032](032-re-band-the-corpus-on-the-new-skill-family.md) its revert. Renormalising sub-weights when a dimension is unmeasurable remains an owner-assigned decision in ROADMAP A6.
+**The reason is not the same for all three, and an earlier draft of this addendum got it wrong.** That draft
+claimed the eval corpus cannot exercise any of the branches because "all 20 fixtures parse at least one
+education entry". All 20 fixtures do *have* an education section; two of them do not yield a readable
+**level**, which is a different thing. The corrected position:
+
+- **Defects 2 and 3 (the two `1.0` fallbacks) genuinely cannot be exercised.** The corpus has a single JD
+  and it states both a `min_years` and an `education.min_level` (`core/tests/evals/fixtures/jd_backend_data_engineer.json`),
+  so neither no-bar branch is ever taken. Changing either value would be unverifiable by the gate — the
+  reasoning that earned [ADR-032](032-re-band-the-corpus-on-the-new-skill-family.md) its revert.
+- **Defect 1 IS exercised, on 2 of the 20 fixtures.** `r07_alex_nguyen` (`"Certificate, Full-Stack Web
+  Development"`) and `r08_riley_chen` (`"Diploma, Business Administration"`) match none of
+  `_DEGREE_KEYWORDS` ([orchestrator.py:589-595](../../core/src/pipeline/matching/orchestrator.py)), so
+  `_level_from_degree` returns `None`, `education_levels_readable` is `False`, and both score the unreadable
+  `0.0` **against a JD that does state a bachelors bar**. `run_evals.py:722-725` runs this exact code, so the
+  branch fires inside a live corpus run for 10% of the fixtures. A value change here would move both
+  composites and the gate would see it.
+
+So defect 1 is left alone for a *different* reason than 2 and 3, and it is worth stating plainly: the
+corpus's current bands were measured with r07 and r08 sitting at education `0.0`. Changing the fallback
+re-bands the corpus and requires every margin to be re-measured — the same owner-assigned work as
+renormalising sub-weights when a dimension is unmeasurable (ROADMAP A6). It is not that the gate is blind to
+it. **A corpus owner deciding whether to change this fallback should know the gate can measure the change**,
+and that the cost is re-banding, not unverifiability.
+
+That two real fixtures already sit on the strongest of the three defects is also the answer to "is this
+disclosure hypothetical" — it is not. The `(bar stated, education unreadable)` combination is the shape a
+freshly-written row takes for any r07- or r08-like candidate, and it is now pinned by a test at the write
+path and in the template.
 
 ### Deliberate deviation — same field names, not renamed
 
@@ -213,7 +240,7 @@ Each scorer now calls the predicate that owns its condition ([stages.py:202-212,
 
 ### Honest residual — disclosure still reaches the detail panel only
 
-Exactly as this ADR records for its own pair, the shortlist card tiles ([shortlist_cards.html:98-106](../../core/frontend/templates/shortlist_cards.html)) and the CSV export ([shortlist_service.py:1187-1188, 1239-1240](../../core/src/services/shortlist_service.py)) still render the bare `0` / `100` undisclosed. The "Why this rank?" panel is the only surface where disclosure reaches the reader.
+Exactly as this ADR records for its own pair, the shortlist card tiles ([shortlist_cards.html:98-106](../../core/frontend/templates/shortlist_cards.html)) and the CSV export ([shortlist_service.py:1185-1186, 1237-1238](../../core/src/services/shortlist_service.py)) still render the bare `0` / `100` undisclosed. The "Why this rank?" panel is the only surface where disclosure reaches the reader.
 
 ## Gate state
 

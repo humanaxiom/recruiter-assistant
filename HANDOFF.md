@@ -4,9 +4,10 @@ Read this first if you're resuming cold. It captures state, environment quirks, 
 
 ### ⚠️⚠️ READ FIRST — 2026-08-18: THREE A6 SIBLING DEFECTS NOW MARKED AND DISCLOSED
 
-> **Last FEATURE merge is still PR #88, squash `a0c3c17`, ADR-042.** Nothing since has changed product
-> behaviour — #90, this PR, and this one are docs. `origin/main` is at or *after* `a0c3c17`. **`git fetch` and check
-> `gh pr list` before trusting any of this.**
+> **Last FEATURE merge before this one was PR #88, squash `a0c3c17`, ADR-042.** #90 and #91 were docs.
+> **This branch is NOT** — it adds three persisted `ScoreBreakdown` fields and a new UI disclosure, so it is a
+> `feat:` and it required the integration suite, not the offline gate alone. `origin/main` is at or *after*
+> `a0c3c17`. **`git fetch` and check `gh pr list` before trusting any of this.**
 >
 > **The four human-only actions from the 2026-08-13 banner are STILL ALL OUTSTANDING.** Re-run `quickstart.ps1` with `pwsh`, click through the live UI, and the two recorded decisions (auditor access to withdrawal reasons; unscoped reads for a bare service key). Three sessions have now passed them by. **Nobody has run this product end to end.**
 
@@ -19,6 +20,40 @@ Three fallback-to-measurement defects found while fixing ADR-041's two siblings 
 3. `score_education`'s `if not jd_min_level: return 1.0` — no JD education bar now marked with `education_bar_stated` and disclosed.
 
 Full detail in [ADR-041's addendum](docs/adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Implementation mirrors ADR-041 exactly, with one structural difference (same field names, not renamed) and one precedence rule (bar-not-stated wins for education when both markers are false).
+
+
+#### 🔴 The two findings worth carrying forward
+
+**1. The corpus is NOT blind to the strongest of the three, and the first draft of the ADR said it was.**
+The addendum originally justified leaving the arithmetic alone with "the eval corpus cannot exercise these
+branches — all 20 fixtures parse at least one education entry". All 20 fixtures *have* an education section;
+two of them do not yield a readable **level**. `r07_alex_nguyen` (`"Certificate, Full-Stack Web
+Development"`) and `r08_riley_chen` (`"Diploma, Business Administration"`) match none of `_DEGREE_KEYWORDS`
+(`orchestrator.py:589-595`), so both take the unreadable-`0.0` branch **against a JD that does state a
+bachelors bar**, and `run_evals.py:722-725` runs that exact code — the branch fires on 10% of the corpus in
+a live run.
+
+The correction matters because it points the opposite way for the corpus owner: the gate **can** measure a
+change to that fallback. The reason to leave it alone is that the corpus's current bands were measured with
+r07 and r08 sitting at `0.0`, so changing it re-bands the corpus — cost, not blindness. **The shape to
+remember:** "the corpus can't see this" was asserted from the presence of a JSON key, not from running the
+parser over it. Checking the key is not checking the parse.
+
+**2. A7 instance (17), and it is the fourth consecutive branch to do this.** The `list(candidate_levels)`
+materialisation in `score_education` carries a comment explaining precisely why it must exist — and nothing
+enforced it. Deleting the `list(` survived all 349 tests in this branch's own new files. Found by the
+merge-blocking reviewer's mutation pass; now killed by a guard, verified by re-applying the mutant and
+watching exactly that one test fail. Instances (14) through (17) were *all* introduced by branches whose
+purpose was to close instances of this shape. **Budget for one mutation pass on every new invariant you
+ship — it has paid every single time, and `CLAUDE.md` Economy rule 2 bounds it to one pass for exactly this
+reason.**
+
+Also disposed of this round, per Economy rule 1: the reviewer's four other minor findings were fixed
+(the untested `(bar stated, unreadable)` quadrant — which r07/r08 prove is the real production shape, not a
+hypothetical; the CSV-export anchors, which pointed at the seniority/vector columns; `README.md` and
+`ROADMAP.md` still saying "fifteen policy decisions"; and this banner's own predecessor claiming this branch
+was docs-only). Five nits were **recorded in ROADMAP A6, not fixed** — doc-anchor drift, for one future
+sweep rather than one commit each.
 
 #### What is left, in the order I would take it
 

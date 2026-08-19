@@ -2106,6 +2106,46 @@ def test_entry_detail_prefers_bar_not_stated_paragraph_when_both_education_marke
     )
 
 
+def test_entry_detail_shows_unreadable_paragraph_when_bar_stated_but_unreadable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for Gap 1 (merge-blocking review): the real production
+    quadrant, confirmed against the eval corpus itself (r07/r08 both parse
+    to degree strings ``_level_from_degree`` cannot map to any level, e.g.
+    "Certificate, Full-Stack Web Development"), against a JD that DOES
+    state an education bar. ``education_bar_stated=True`` means the
+    bar-not-stated paragraph must NOT fire; ``education_readable=False``
+    means the unreadable-education paragraph must. Mirror image of
+    ``test_entry_detail_prefers_bar_not_stated_paragraph_when_both_education_markers_are_false``
+    immediately above, which pins the opposite precedence when BOTH markers
+    are False -- this pins the precedence when they disagree."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_bar_stated"] = True
+    entry["score_breakdown"]["education_readable"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "education")
+
+    assert _norm(score) == "not assessed", (
+        f"education_readable=False must still render 'not assessed' even "
+        f"though education_bar_stated=True, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}
+    assert "no education could be read" in _norm(body), (
+        "the prose above the table must say WHY -- no degree level could "
+        "be parsed from this résumé at all, even though the JD did state "
+        "a bar"
+    )
+    assert "no minimum education level" not in _norm(body), (
+        "education_bar_stated is True -- the bar-not-stated paragraph must "
+        "not fire, since the JD plainly did state one"
+    )
+
+
 def test_entry_detail_keeps_the_real_education_score_when_bar_stated_and_readable(
     monkeypatch: Any, client: Any
 ) -> None:
