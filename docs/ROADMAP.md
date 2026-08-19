@@ -22,8 +22,8 @@
 | **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **Structurally blind to the A2 vocabulary merge** — the corpus's 19 skill canonicals intersect the 225 newly-categorised ones at ∅; a green run on this branch is byte-identical to `main` and carries no information about A2's correctness. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
-| **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
-| **A7** The pattern worth naming | **Sixteen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. |
+| **A6** Before the pilot widens | 🟡 **Five scoring defects disclosed** — two in [ADR-041](adr/041-sub-score-measurement-markers.md) and three in the [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
+| **A7** The pattern worth naming | **Seventeen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
 
 **Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
 
@@ -471,21 +471,45 @@ at all" be neutral-weighted, or does it genuinely mean no seniority? Owner: corp
 Related and untouched: the reverse-match vector scale is unverified (`stage1_coarse_jobs` uses
 `job_summary_idx` with no analogue of the forward path's index-normalisation integration test).
 
-**🆕 Three more of the same shape, found while fixing these two and NOT fixed (ADR-041 §siblings).**
-Grepping the same two files for the same pattern found three further fallbacks that render as
-measurements — evidence the family is systematic rather than a pair of one-offs:
-1. **`score_education`'s `if not ranked: return 0.0` (`stages.py:277`)** — D2 one dimension over, and
-   the strongest of the three. A résumé whose education section did not parse scores `0.0`, which is
-   *worse* than being below the bar (that earns partial credit via `education_partial`). A parsing
-   failure is indistinguishable from "no qualifications at all", on 10% of the score.
-2. **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:211`)** — D1 one dimension
-   over. A JD stating no minimum gives *every* candidate full marks on 25% of the score.
-3. **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:271`)** — the same, on 10%.
+**✅ Three more of the same shape, found while fixing these two and NOW FIXED — [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18).**
+1. **`score_education`'s `if not ranked: return 0.0` (`stages.py:327`)** — D2 one dimension over, and
+   the strongest of the three. Unparsed education scores `0.0`, which is *worse* than being below the
+   bar (that earns partial credit via `education_partial`). Now marked with `education_readable` and
+   disclosed on the "Why this rank?" panel.
+2. **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:222-223`)** — D1 one dimension
+   over. A JD stating no minimum gives *every* candidate full marks on 25% of the score. Now marked
+   with `experience_bar_stated` and disclosed when the bar is not stated.
+3. **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:315-316`)** — the same, on 10%.
+   Now marked with `education_bar_stated` and disclosed when the bar is not stated.
 
-The two `1.0` cases are defensible as policy (no bar, everyone clears it) but are undisclosed — they
-are the explainer's register decision 10 applied to two more dimensions. Marking all three is
-mechanically identical to ADR-041 and reuses `ScoreBreakdown`'s marker pattern directly, so this is a
-small, well-understood follow-up rather than a new design problem.
+All three reuse `ScoreBreakdown`'s marker pattern directly. Implementation mirrors ADR-041's own two
+markers, with one structural difference (same field names, not renamed) and one precedence rule (bar-not-stated
+wins for education when both markers are false). See the addendum for full detail.
+
+**🆕 Two findings from the branch that marked them, recorded not fixed.**
+
+1. **The corpus already sits on defect 1, and the bands embed it.** `r07_alex_nguyen`
+   (`"Certificate, Full-Stack Web Development"`) and `r08_riley_chen` (`"Diploma, Business
+   Administration"`) match none of `_DEGREE_KEYWORDS` (`orchestrator.py:589-595`), so both score education
+   `0.0` through the unreadable branch against a JD that *does* state a bachelors bar. The corpus's current
+   bands were measured with those two at `0.0`. This is why changing that fallback is corpus-owner work:
+   the gate **can** see the change (contrary to what a first draft of the ADR-041 addendum claimed), so the
+   cost is re-banding, not unverifiability. Owner: corpus owner, alongside the sub-weight renormalisation
+   already open above.
+
+2. **Doc-anchor drift, five instances, in the ADR-041 addendum and this file.** Recorded as nits per
+   CLAUDE.md Economy rule 1, none of them wrong about substance: the addendum and ROADMAP give different
+   line ranges for the same statement (`stages.py:220-223` vs `:222-223`, both stopping one line short of
+   the `return 1.0` at `:224`); two anchors start one line after the construct they name
+   (`stages.py:284-296` for a `def` at `:283`, `explanation.py:143-150` for a comment block at `:142`);
+   the addendum's "each scorer now **calls** the predicate" cites the predicate *definitions*
+   (`stages.py:202-212, 280, 296`) rather than the call sites (`:223`, `:315`, `:326`); the docs quote
+   `if not ranked:` / `if not jd_min_years:` / `if not jd_min_level:` as current source when the branch
+   replaced those literal strings with predicate calls; and ADR-041's `## Gate state` numbers (4466 unit
+   tests, 94.41%) are the original branch's, now sitting immediately after the addendum. Also nit:
+   `test_education_levels_readable_true_for_whitespace_and_unrecognised_strings`'s
+   `assert isinstance(pairs_call, float)` is vacuous — the predicate assertion above it is the one with
+   teeth. Anchored here so a future session can sweep them in one pass rather than one per branch.
 
 🆕 **2026-08-18 — First end-to-end product run surfaced a defect the suite could not see** — 
 [ADR-043](adr/043-shortlist-ranking-state.md) (regenerate shortlist not updating UI). The API worked, the 
@@ -510,7 +534,7 @@ correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **sixteen times**: an
+Across the external review and this session's gate work the same defect shape appears **seventeen times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -547,6 +571,24 @@ whose job is refusing unsafe configurations, and this one in the harness whose j
 scoring. That is worth stating plainly: *the assertions are subject to the pattern they exist to detect*,
 and neither was found by reading the code. Both were found by mutating a value and watching what failed to
 complain.
+
+**A seventeenth, 2026-08-18, from the branch that disclosed the A6 siblings — and it is the fourth
+consecutive branch whose own remediation shipped an unenforced invariant.** `score_education` materialises
+its levels once (`levels = list(candidate_levels)`, `stages.py:320-325`) and the comment above it states
+exactly why: the predicate and the `ranked` build must read the **same** sequence, because consuming a
+one-shot iterable twice would silently desync them. The parameter is typed `Iterable[str | None]`, so the
+hazard is real and reachable. Nothing enforced it. Deleting the `list(` survived all 349 tests in the
+branch's own new A6 files — a green suite, on the line whose comment describes the failure it permits.
+
+Found by the merge-blocking reviewer's mutation pass, not by reading the code, and now killed by
+`test_a6_education_levels_materialised_before_readability_consumes_it` (verified by re-applying the mutant
+and watching exactly that test, and only that test, fail).
+
+**The pattern within the pattern is now the finding.** Instances (14), (15), (16) and (17) were all
+introduced by branches whose stated purpose was to close instances of this shape. A remediation is not
+exempt from the defect it remediates, and the only thing that has ever caught these is mutating the new
+invariant and watching what fails to complain. That is why `CLAUDE.md`'s Economy rule 2 bounds the probe to
+**one pass** rather than dropping it: the probe is load-bearing, and the recursion is what needed stopping.
 
 **Two more, added 2026-08-13 by A6/[ADR-041](adr/041-sub-score-measurement-markers.md)** — the same
 escalation. (14) The `seniority_measured` marker was computed from the branch taken, never re-derived from
@@ -662,7 +704,7 @@ up front.
 
 ## ⭐ 3. Policy Studio — ratify the "hiring policy written as decimals," live
 
-**Pitch.** Turn the static *fifteen policy decisions* register (`docs/process/ranking-metrics-explainer.html`)
+**Pitch.** Turn the static *seventeen policy decisions* register (`docs/process/ranking-metrics-explainer.html`)
 into an **interactive admin tool**: adjust the ratifiable `MatchWeights` knobs (sub-score weights, over-qual
 curve, recency banding, must-have-miss penalty, education field-relevance bar…) and watch a real
 requisition's shortlist **re-rank live**, each change annotated with its register item and its adverse-impact

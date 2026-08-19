@@ -2142,3 +2142,327 @@ def test_vector_disclosure_requires_literal_false_not_merely_falsy_junk(
         f"vector_comparable={junk_value!r} is falsy but not `is False` -- "
         "the disclosure must require identity, not truthiness"
     )
+
+
+# ── ROADMAP A6 siblings: three more sub-scores render as measurements when
+# ── nothing was measured -- disclosed at the same surface as seniority/
+# ── vector immediately above (docs/adr/041-sub-score-measurement-markers.md
+# ── "Three siblings found while writing this, recorded not fixed") ─────────
+
+
+def test_entry_detail_says_experience_not_assessed_when_no_jd_bar_stated(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for the experience sibling. The JD stated no minimum years, so
+    every candidate scores full marks on this row -- it reflects the job
+    posting, not this candidate, and must not be presented as a measured
+    comparison."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["experience_bar_stated"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "experience")
+
+    assert _norm(score) == "not assessed", (
+        f"experience_bar_stated=False must render 'not assessed' in the "
+        f"score cell, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}, (
+        f"no honest contribution can be stated for an unmeasured sub-score, "
+        f"got {contribution!r}"
+    )
+    assert "no minimum years of experience" in _norm(body), (
+        "the prose above the table must say WHY -- the job posting stated "
+        "no minimum years, so every candidate clears this row by policy"
+    )
+    # The other three structured rows are untouched by this marker and must
+    # keep rendering their REAL numbers -- a mutant that suppresses the
+    # wrong row instead of `experience` passes every assertion above
+    # unchanged.
+    other_rows = (
+        ("skill", 0.80),
+        ("education", 0.40),
+        ("seniority", 0.50),
+    )
+    for other_label, other_value in other_rows:
+        _o_component, _o_weight, other_score, _o_contribution = _row_for(
+            rows, other_label
+        )
+        assert _norm(other_score) != "not assessed", (
+            f"the {other_label!r} row was suppressed by experience's "
+            f"marker -- got {other_score!r}"
+        )
+        assert _norm(other_score) == str(int(round(other_value * 100))), (
+            f"expected the real {other_label!r} score ({other_value}) to "
+            f"still render, got {other_score!r}"
+        )
+
+
+def test_entry_detail_keeps_the_real_experience_score_when_a_bar_was_stated(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Mirror-image mutant guard: the fix must not start hiding genuine
+    measurements."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["experience_bar_stated"] = True
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, _contribution = _row_for(rows, "experience")
+
+    assert _norm(score) != "not assessed", (
+        f"a MEASURED experience score must not be labelled not assessed, "
+        f"got {score!r}"
+    )
+    assert "no minimum years of experience" not in _norm(body)
+
+
+def test_entry_detail_says_education_not_assessed_when_no_jd_bar_stated(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for the education-bar sibling. The JD stated no minimum
+    education level, so every candidate scores full marks on this row."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_bar_stated"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "education")
+
+    assert _norm(score) == "not assessed", (
+        f"education_bar_stated=False must render 'not assessed' in the "
+        f"score cell, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}
+    assert "no minimum education level" in _norm(body), (
+        "the prose above the table must say WHY -- the job posting stated "
+        "no minimum education level bar"
+    )
+    assert "no education could be read" not in _norm(body), (
+        "the bar-not-stated paragraph fired -- the UNREADABLE paragraph "
+        "must not also render for a row that only lacks a stated bar"
+    )
+    other_rows = (
+        ("skill", 0.80),
+        ("experience", 0.60),
+        ("seniority", 0.50),
+    )
+    for other_label, other_value in other_rows:
+        _o_component, _o_weight, other_score, _o_contribution = _row_for(
+            rows, other_label
+        )
+        assert _norm(other_score) != "not assessed", (
+            f"the {other_label!r} row was suppressed by education's "
+            f"marker -- got {other_score!r}"
+        )
+        assert _norm(other_score) == str(int(round(other_value * 100))), (
+            f"expected the real {other_label!r} score ({other_value}) to "
+            f"still render, got {other_score!r}"
+        )
+
+
+def test_entry_detail_says_education_not_assessed_when_unreadable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for the education-readability sibling: no degree level could
+    be read from this résumé at all, so the stored education row is a
+    parsing limit, not a finding about the candidate. ``education_bar_stated``
+    is left unset (``None``, i.e. NOT ``False``), so the bar-not-stated
+    paragraph must not fire -- only the unreadable one."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_readable"] = False
+    assert "education_bar_stated" not in entry["score_breakdown"]
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "education")
+
+    assert _norm(score) == "not assessed", (
+        f"education_readable=False must render 'not assessed' in the "
+        f"score cell, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}
+    assert "no education could be read" in _norm(body), (
+        "the prose above the table must say WHY -- no degree level could "
+        "be parsed from this résumé at all"
+    )
+    assert "no minimum education level" not in _norm(body), (
+        "education_bar_stated is None (unknown), not False -- the "
+        "bar-not-stated paragraph must not fire for this row"
+    )
+
+
+def test_entry_detail_prefers_bar_not_stated_paragraph_when_both_education_markers_are_false(  # noqa: E501
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE precedence pin (spec item 4's parenthetical): when the JD states
+    no education bar AT ALL, ``score_education`` returns its 1.0 fallback
+    BEFORE it ever looks at the candidate's levels -- so even though
+    ``education_readable`` is independently recorded as False too, the
+    unreadable-education paragraph would be describing a 0% that was never
+    actually stored. Only the bar-not-stated paragraph may render."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_bar_stated"] = False
+    entry["score_breakdown"]["education_readable"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, _contribution = _row_for(rows, "education")
+
+    assert _norm(score) == "not assessed"
+    assert "no minimum education level" in _norm(body), (
+        "the bar-not-stated paragraph must render when its own marker is "
+        "False, regardless of the readability marker's value"
+    )
+    assert "no education could be read" not in _norm(body), (
+        "the unreadable-education paragraph must NOT render when the "
+        "bar-not-stated paragraph already applies -- both facts are "
+        "recorded independently on the write path, but only one paragraph "
+        "may be shown"
+    )
+
+
+def test_entry_detail_shows_unreadable_paragraph_when_bar_stated_but_unreadable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE pin for Gap 1 (merge-blocking review): the real production
+    quadrant, confirmed against the eval corpus itself (r07/r08 both parse
+    to degree strings ``_level_from_degree`` cannot map to any level, e.g.
+    "Certificate, Full-Stack Web Development"), against a JD that DOES
+    state an education bar. ``education_bar_stated=True`` means the
+    bar-not-stated paragraph must NOT fire; ``education_readable=False``
+    means the unreadable-education paragraph must. Mirror image of
+    ``test_entry_detail_prefers_bar_not_stated_paragraph_when_both_education_markers_are_false``
+    immediately above, which pins the opposite precedence when BOTH markers
+    are False -- this pins the precedence when they disagree."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_bar_stated"] = True
+    entry["score_breakdown"]["education_readable"] = False
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, contribution = _row_for(rows, "education")
+
+    assert _norm(score) == "not assessed", (
+        f"education_readable=False must still render 'not assessed' even "
+        f"though education_bar_stated=True, got {score!r}"
+    )
+    assert contribution.strip() in {"—", "-"}
+    assert "no education could be read" in _norm(body), (
+        "the prose above the table must say WHY -- no degree level could "
+        "be parsed from this résumé at all, even though the JD did state "
+        "a bar"
+    )
+    assert "no minimum education level" not in _norm(body), (
+        "education_bar_stated is True -- the bar-not-stated paragraph must "
+        "not fire, since the JD plainly did state one"
+    )
+
+
+def test_entry_detail_keeps_the_real_education_score_when_bar_stated_and_readable(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Mirror-image mutant guard for both education markers together."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    entry["score_breakdown"]["education_bar_stated"] = True
+    entry["score_breakdown"]["education_readable"] = True
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    rows = _contribution_rows(body)
+    _component, _weight, score, _contribution = _row_for(rows, "education")
+
+    assert _norm(score) != "not assessed"
+    assert "no minimum education level" not in _norm(body)
+    assert "no education could be read" not in _norm(body)
+
+
+def test_entry_detail_makes_no_claim_for_a_legacy_row_with_none_of_the_three_new_markers(  # noqa: E501
+    monkeypatch: Any, client: Any
+) -> None:
+    """A row written before this slice's three markers existed has NONE of
+    the three keys on ``score_breakdown`` -- all validate to None, and the
+    panel must render EXACTLY as it does today for the experience/education
+    rows: no disclosure paragraph, and the real stored percentages."""
+    entry_id = uuid4()
+    entry = _full_entry_detail(entry_id)
+    assert "experience_bar_stated" not in entry["score_breakdown"]
+    assert "education_bar_stated" not in entry["score_breakdown"]
+    assert "education_readable" not in entry["score_breakdown"]
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry)
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+    normalized = _norm(body)
+
+    assert "no minimum years of experience" not in normalized
+    assert "no minimum education level" not in normalized
+    assert "no education could be read" not in normalized
+    rows = _contribution_rows(body)
+    _component, _weight, exp_score, _contribution = _row_for(rows, "experience")
+    _component, _weight, edu_score, _contribution = _row_for(rows, "education")
+    assert _norm(exp_score) == "60"
+    assert _norm(edu_score) == "40"
+
+
+@pytest.mark.parametrize("junk_value", [0, 0.0, "", "no", "off"])
+@pytest.mark.parametrize(
+    "field_name,phrase",
+    [
+        ("experience_bar_stated", "no minimum years of experience"),
+        ("education_bar_stated", "no minimum education level"),
+        ("education_readable", "no education could be read"),
+    ],
+)
+def test_sibling_disclosure_requires_literal_false_not_merely_falsy_junk(
+    monkeypatch: Any,
+    client: Any,
+    field_name: str,
+    phrase: str,
+    junk_value: Any,
+) -> None:
+    """Identity, not truthiness, for all three new markers -- sibling of
+    ``test_seniority_disclosure_requires_literal_false_not_merely_falsy_junk``
+    immediately above. ``0``, ``0.0``, ``""``, ``"no"``, ``"off"`` are all
+    falsy but none ``is False``; only a real, identical ``False`` may
+    trigger a disclosure paragraph."""
+    entry_id = uuid4()
+    entry_payload = _full_entry_detail(entry_id)
+    monkeypatch.setattr(
+        api_client, "get_shortlist_entry", MagicMock(return_value=entry_payload)
+    )
+    real_entry = ShortlistEntry.model_validate(entry_payload)
+    base_explanation = explanation_module.shortlist_entry_explanation(real_entry)
+    junk_explanation = base_explanation.model_copy(update={field_name: junk_value})
+    monkeypatch.setattr(
+        frontend_app_module,
+        "shortlist_entry_explanation",
+        MagicMock(return_value=junk_explanation),
+    )
+    body = client.get(f"/shortlist/{entry_id}").get_data(as_text=True)
+
+    assert phrase not in _norm(body), (
+        f"{field_name}={junk_value!r} is falsy but not `is False` -- the "
+        "disclosure must require identity, not truthiness"
+    )

@@ -199,6 +199,19 @@ def score_skill_breakdown(
 # ---------------- experience / education ----------------
 
 
+def jd_states_experience_bar(jd_min_years: int | None) -> bool:
+    """True iff the JD stated a minimum-years bar.
+
+    ROADMAP A6 sibling of ``vector_pool_is_degenerate``: ``score_experience``
+    below CALLS this (rather than restating ``if not jd_min_years:``
+    independently), so exactly one comparison against the boundary set
+    (``None`` and ``0`` are both "no bar" today) exists in the codebase --
+    the same F3 remediation shape ``normalise_vector_scores`` uses for
+    ``vector_pool_is_degenerate``.
+    """
+    return bool(jd_min_years)
+
+
 def score_experience(
     total_years: int | None,
     jd_min_years: int | None,
@@ -207,8 +220,12 @@ def score_experience(
 ) -> float:
     """Over-qualified does NOT increase past 1.0 and beyond ``overqual_ratio``x
     mildly drops."""
-    if not jd_min_years:
+    if not jd_states_experience_bar(jd_min_years):
         return 1.0
+    # mypy narrowing only -- `jd_states_experience_bar` already made the
+    # actual "is there a bar" decision above; this restates nothing about
+    # that decision, it just tells the checker what the predicate proved.
+    assert jd_min_years is not None
     total = total_years or 0
     raw = total / jd_min_years
     if raw <= 1.0:
@@ -251,6 +268,34 @@ def _field_matches(
     )
 
 
+def jd_states_education_bar(jd_min_level: str | None) -> bool:
+    """True iff the JD stated a minimum education level.
+
+    ROADMAP A6 sibling of ``jd_states_experience_bar`` /
+    ``vector_pool_is_degenerate``: ``score_education`` below CALLS this
+    (rather than restating ``if not jd_min_level:`` independently), so
+    exactly one comparison against the boundary set (``None`` and ``""`` are
+    both "no bar" today) exists in the codebase.
+    """
+    return bool(jd_min_level)
+
+
+def education_levels_readable(candidate_levels: Iterable[str | None]) -> bool:
+    """True iff at least one level string in ``candidate_levels`` is truthy.
+
+    ROADMAP A6 sibling of the two predicates above: ``score_education`` below
+    CALLS this to decide its ``if not ranked: return 0.0`` branch, so exactly
+    one "did anything parse" check exists. Deliberately Python-truthiness on
+    the STRING (``if lvl``), NOT on ``_LEVEL_ORDER.get(lvl, 0)`` -- a
+    whitespace-only string (``"   "``) or an unrecognised level string both
+    survive here, because readability means "we parsed A level", not "we
+    recognised it". An unrecognised level still contributes a `0`-ranked
+    pair to ``ranked`` in ``score_education``, so it is readable but may
+    still lose on the level comparison -- a different branch entirely.
+    """
+    return any(lvl for lvl in candidate_levels)
+
+
 def score_education(
     candidate_levels: Iterable[str | None],
     jd_min_level: str | None,
@@ -267,14 +312,22 @@ def score_education(
     ``fields`` stays level-only (pre-ADR-028 behaviour). Below-level candidates
     are unaffected by field — the field axis is never consulted below the bar.
     """
-    if not jd_min_level:
+    if not jd_states_education_bar(jd_min_level):
         return 1.0
+    # mypy narrowing only -- see the identical comment in `score_experience`.
+    assert jd_min_level is not None
     req = _LEVEL_ORDER.get(jd_min_level, 0)
-    # Pair levels with fields preserving order (index i's level <-> field).
-    pairs = zip_longest(candidate_levels, candidate_fields, fillvalue=None)
-    ranked = [(_LEVEL_ORDER.get(lvl, 0), fld) for lvl, fld in pairs if lvl]
-    if not ranked:
+    # Materialised once so the SAME sequence backs both
+    # ``education_levels_readable`` (the branch predicate) and the
+    # ``ranked`` build below (the pairing/scoring) -- consuming
+    # ``candidate_levels`` twice from a one-shot iterable would silently
+    # desync the two.
+    levels = list(candidate_levels)
+    if not education_levels_readable(levels):
         return 0.0
+    # Pair levels with fields preserving order (index i's level <-> field).
+    pairs = zip_longest(levels, candidate_fields, fillvalue=None)
+    ranked = [(_LEVEL_ORDER.get(lvl, 0), fld) for lvl, fld in pairs if lvl]
     best = max(rank for rank, _ in ranked)
     if best < req:
         # Field is irrelevant below the level bar.

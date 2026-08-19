@@ -2,7 +2,7 @@
 
 **A guide for HR & hiring managers**
 
-What the tool does, how to get good results from it, and the fifteen policy questions only you can answer.
+What the tool does, how to get good results from it, and the seventeen policy decisions only you can answer.
 Every score it produces is the arithmetic consequence of a choice someone made — this guide puts those
 choices in front of you.
 
@@ -190,15 +190,21 @@ that one has fairness implications.
 
 **Experience — 0.25.** Measured against the minimum the job states. Meeting it scores full marks.
 Substantially exceeding it scores slightly *lower* — deliberate handling of over-qualification, with a floor
-so it never costs much. See decision 8.
+so it never costs much. When the job states no minimum years, every candidate scores full marks on this row, and
+the panel discloses this as **"not assessed"** — no comparison happened, so the score is a default, not a
+judgement. See decision 16.
 
 **Seniority — 0.15.** Compares the candidate's most recent job title against the job's title. When no
 readable title is found, the score falls back to zero, and the panel discloses this as **"not assessed"** —
 no comparison happened, so the score is a default, not a judgement. See decision 11.
 
 **Education — 0.10.** Reads the level, from secondary school through doctorate. Meeting or exceeding the
-required level scores full marks; below it earns partial credit; no qualification scores zero. Where the job
-names particular fields of study, a qualifying degree in an unnamed field is capped at partial credit.
+required level scores full marks; below it earns partial credit. When the job states no minimum education level,
+every candidate scores full marks on this row, and the panel discloses this as **"not assessed"** — no comparison
+happened. When no education section can be read from the résumé at all, the score falls back to zero, and the
+panel discloses this as **"not assessed"** — no comparison happened, and notably, this is *lower* than a
+candidate whose degree is below the bar, who earns partial credit. See decisions 16 and 17. Where the job names
+particular fields of study, a qualifying degree in an unnamed field is capped at partial credit.
 
 **Overall similarity — 0.10.** How closely the résumé as a whole resembles the posting. Scored relative to
 the rest of the pool — which is why scores are not comparable between requisitions.
@@ -282,6 +288,8 @@ adjustable without a code change or a release, so a different answer costs a con
 | 13 | If the AI is unavailable, the shortlist is withheld and shown as waiting rather than published with candidates silently scored zero. It retries, then stops and waits for a person. | The safe behaviour is already chosen. What is yours is the patience: how long we wait before a human is asked to step in. |
 | 14 | Consent is one confirmation per upload batch, with no record of wording or its own timestamp. | May not satisfy per-candidate consent evidence obligations. Worth checking against our retention and subject-access commitments. |
 | 15 | Personal qualities — communication, leadership, judgement — would be scored on the same "years of use and how recently" model as technical skills. | **An open question, not yet settled.** "Three years of interpersonal skills, last used 2024" is not a meaningful statement, and the recency rule would penalise a career break on *communication* exactly as on a software tool. How we handle these needs deciding before the system is used on postings that lean on them — which at SFU is most of them. |
+| 16 | When a posting states no minimum years of experience, or no minimum education level, every candidate scores full marks on that row — it reflects the posting, not the candidate. A candidate's **"Why this rank?" page** says **"not assessed"** to indicate no comparison happened. | The marks are still awarded and still count toward the composite; the disclosure says the dimension did not discriminate, it does not stop it inflating everyone equally. As with decisions 10 and 11, the shortlist cards and the CSV export still show the bare number. |
+| 17 | When no education can be read from a résumé at all, education falls back to zero, which is **lower** than a candidate whose degree is below the posting's bar, who earns partial credit. A candidate's **"Why this rank?" page** says **"not assessed"**. | A document-formatting failure is being scored more harshly than genuinely lacking the qualification — a limit of parsing the document, not a finding about the candidate. This is decision 5's unreadable-*field* problem one level up. As with decisions 10 and 11, the shortlist cards and the CSV export still show the bare zero. |
 
 ---
 
@@ -340,7 +348,7 @@ above the cut-off.
 
 ## What we would like from you
 
-1. **Work through the fifteen decisions** and record an owner and an answer for each. They are designed to be
+1. **Work through the seventeen decisions** and record an owner and an answer for each. They are designed to be
    worked through in a single session. Changing any of them is a configuration change, not a development
    project.
 2. **Look at decisions 3, 8 and 9 together, with legal input.** Individually each is defensible; together

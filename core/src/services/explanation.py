@@ -139,6 +139,15 @@ class ShortlistExplanation(BaseModel):
     # score value itself.
     seniority_assessed: bool | None = None
     vector_comparable: bool | None = None
+    # ROADMAP A6 siblings (docs/adr/041-sub-score-measurement-markers.md
+    # addendum). Same different-question pattern as the pair above, one
+    # dimension over each. Deliberately kept under the SAME name as
+    # ``score_breakdown``'s own field (unlike the seniority/vector pair's
+    # rename) -- a rename buys nothing here and is one more place the two
+    # copies could drift.
+    experience_bar_stated: bool | None = None
+    education_bar_stated: bool | None = None
+    education_readable: bool | None = None
 
 
 def _row(score: float | None, weight: float | None) -> ContributionRow:
@@ -206,6 +215,12 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
         # is the only place that knows whether either comparison actually ran.
         seniority_assessed=breakdown.seniority_measured,
         vector_comparable=breakdown.vector_discriminating,
+        # Copied faithfully off ``score_breakdown``'s own markers, same
+        # discipline, same names both sides (spec deviation from the
+        # seniority/vector rename, recorded in the ADR-041 addendum).
+        experience_bar_stated=breakdown.experience_bar_stated,
+        education_bar_stated=breakdown.education_bar_stated,
+        education_readable=breakdown.education_readable,
     )
 
 

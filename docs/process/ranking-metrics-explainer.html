@@ -162,7 +162,7 @@
 <header class="masthead">
   <p class="eyebrow">A guide for HR &amp; hiring managers</p>
   <h1>How this system scores candidates</h1>
-  <p class="standfirst">What the tool does, how to get good results from it, and the fifteen policy questions only you can answer. Every score it produces is the arithmetic consequence of a choice someone made — this guide puts those choices in front of you.</p>
+  <p class="standfirst">What the tool does, how to get good results from it, and the seventeen policy decisions only you can answer. Every score it produces is the arithmetic consequence of a choice someone made — this guide puts those choices in front of you.</p>
 </header>
 
 <div class="wrap">
@@ -358,7 +358,9 @@ flowchart LR
   <div class="metric-head"><span class="metric-name">Experience</span><span class="metric-weight">0.25</span></div>
   <p>Measured against the minimum the job states. Meeting it scores full marks. Substantially exceeding it
   scores slightly <em>lower</em> — deliberate handling of over-qualification, with a floor so it never costs
-  much. See decision 8.</p>
+  much. When the job states no minimum years, every candidate scores full marks on this row, and the panel
+  discloses this as <strong>"not assessed"</strong> — no comparison happened, so the score is a default, not a
+  judgement. See decision 16.</p>
 </div>
 
 <div class="metric">
@@ -371,8 +373,13 @@ flowchart LR
 <div class="metric">
   <div class="metric-head"><span class="metric-name">Education</span><span class="metric-weight">0.10</span></div>
   <p>Reads the level, from secondary school through doctorate. Meeting or exceeding the required level scores
-  full marks; below it earns partial credit; no qualification scores zero. Where the job names particular
-  fields of study, a qualifying degree in an unnamed field is capped at partial credit.</p>
+  full marks; below it earns partial credit. When the job states no minimum education level, every candidate
+  scores full marks on this row, and the panel discloses this as <strong>"not assessed"</strong> — no comparison
+  happened. When no education section can be read from the résumé at all, the score falls back to zero, and the
+  panel discloses this as <strong>"not assessed"</strong> — no comparison happened, and notably, this is
+  <em>lower</em> than a candidate whose degree is below the bar, who earns partial credit. See decisions 16 and 17.
+  Where the job names particular fields of study, a qualifying degree in an unnamed field is capped at partial
+  credit.</p>
 </div>
 
 <div class="metric">
@@ -463,6 +470,8 @@ project.</p>
     <tr><td class="num">13</td><td>If the AI is unavailable, the shortlist is withheld and shown as waiting rather than published with candidates silently scored zero. It retries, then stops and waits for a person.</td><td>The safe behaviour is already chosen. What is yours is the patience: how long we wait before a human is asked to step in.</td></tr>
     <tr><td class="num">14</td><td>Consent is one confirmation per upload batch, with no record of wording or its own timestamp.</td><td>May not satisfy per-candidate consent evidence obligations. Worth checking against our retention and subject-access commitments.</td></tr>
     <tr><td class="num">15</td><td>Personal qualities — communication, leadership, judgement — would be scored on the same "years of use and how recently" model as technical skills.</td><td><strong>An open question, not yet settled.</strong> "Three years of interpersonal skills, last used 2024" is not a meaningful statement, and the recency rule would penalise a career break on <em>communication</em> exactly as on a software tool. How we handle these needs deciding before the system is used on postings that lean on them — which at SFU is most of them.</td></tr>
+    <tr><td class="num">16</td><td>When a posting states no minimum years of experience, or no minimum education level, every candidate scores full marks on that row — it reflects the posting, not the candidate. A candidate's <strong>"Why this rank?" page</strong> says <strong>"not assessed"</strong> to indicate no comparison happened.</td><td>The marks are still awarded and still count toward the composite; the disclosure says the dimension did not discriminate, it does not stop it inflating everyone equally. As with decisions 10 and 11, the shortlist cards and the CSV export still show the bare number.</td></tr>
+    <tr><td class="num">17</td><td>When no education can be read from a résumé at all, education falls back to zero, which is <strong>lower</strong> than a candidate whose degree is below the posting's bar, who earns partial credit. A candidate's <strong>"Why this rank?" page</strong> says <strong>"not assessed"</strong>.</td><td>A document-formatting failure is being scored more harshly than genuinely lacking the qualification — a limit of parsing the document, not a finding about the candidate. This is decision 5's unreadable-<em>field</em> problem one level up. As with decisions 10 and 11, the shortlist cards and the CSV export still show the bare zero.</td></tr>
   </tbody>
 </table>
 </div>
@@ -521,7 +530,7 @@ comparable with those above the cut-off.</p>
 
 <h2>What we would like from you</h2>
 <ol>
-  <li><strong>Work through the fifteen decisions</strong> and record an owner and an answer for each. They are
+  <li><strong>Work through the seventeen decisions</strong> and record an owner and an answer for each. They are
   designed to be worked through in a single session. Changing any of them is a configuration change, not a
   development project.</li>
   <li><strong>Look at decisions 3, 8 and 9 together, with legal input.</strong> Individually each is

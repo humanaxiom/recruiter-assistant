@@ -61,7 +61,10 @@ from src.pipeline.matching.stages import (
     _evidence_completeness,
     _motivation_score,
     _SkillRowFromCypher,
+    education_levels_readable,
     is_senior_candidate,
+    jd_states_education_bar,
+    jd_states_experience_bar,
     normalise_vector_scores,
     score_education,
     score_experience,
@@ -505,6 +508,10 @@ async def _stage2_per_candidate(
     )
 
     exp = score_experience(total_years, job.min_years, weights=weights)
+    # ROADMAP A6 siblings (D-experience). Set from the SAME predicate
+    # `score_experience` itself calls for its `if not jd_min_years:`
+    # fallback branch -- the fact about the JD, never re-derived from `exp`.
+    experience_bar_stated = jd_states_experience_bar(job.min_years)
 
     # Build levels AND fields from the SAME iteration to guarantee index
     # alignment (degree i's level pairs with degree i's field).
@@ -518,6 +525,11 @@ async def _stage2_per_candidate(
         jd_fields=job.education_fields,
         weights=weights,
     )
+    # ROADMAP A6 siblings (D-education x2). Same predicates
+    # `score_education` itself calls for its two fallback branches -- facts
+    # about the JD / the résumé, never re-derived from `edu`.
+    education_bar_stated = jd_states_education_bar(job.education_min_level)
+    education_readable = education_levels_readable(candidate_levels)
 
     # Seniority: cosine between job title + most-recent role title via embedder.
     # ROADMAP A6 (D2): `seniority_measured` marks whether that comparison
@@ -559,6 +571,12 @@ async def _stage2_per_candidate(
         # vec_scores) -- threaded through unchanged, never re-derived from
         # `vec_normalised == 1.0` here.
         vector_discriminating=vec_discriminating,
+        # ROADMAP A6 siblings -- set above, from the branch/fact actually
+        # observed (the JD's own min-years/min-level, the candidate's own
+        # parsed degree levels), never re-derived from `exp`/`edu`.
+        experience_bar_stated=experience_bar_stated,
+        education_bar_stated=education_bar_stated,
+        education_readable=education_readable,
     )
     return Stage2Candidate(
         resume_id=candidate.resume_id,
