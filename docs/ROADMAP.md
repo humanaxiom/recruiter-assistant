@@ -22,7 +22,7 @@
 | **A3** The evals harness is blind | 🟡 **Two gates added** (ADR-038 bait ordering; the shipped `must_have_miss_penalty`, which could be switched **off** with the corpus green). **Structurally blind to the A2 vocabulary merge** — the corpus's 19 skill canonicals intersect the 225 newly-categorised ones at ∅; a green run on this branch is byte-identical to `main` and carries no information about A2's correctness. **Band enforcement is 🔴 blocked on a corpus-contract decision**, not on r18 as A3 assumed. |
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
-| **A6** Before the pilot widens | 🟡 **Two scoring defects disclosed** ([ADR-041](adr/041-sub-score-measurement-markers.md)). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
+| **A6** Before the pilot widens | 🟡 **Five scoring defects disclosed** — two in [ADR-041](adr/041-sub-score-measurement-markers.md) and three in the [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
 | **A7** The pattern worth naming | **Sixteen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. |
 
 **Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
@@ -471,21 +471,20 @@ at all" be neutral-weighted, or does it genuinely mean no seniority? Owner: corp
 Related and untouched: the reverse-match vector scale is unverified (`stage1_coarse_jobs` uses
 `job_summary_idx` with no analogue of the forward path's index-normalisation integration test).
 
-**🆕 Three more of the same shape, found while fixing these two and NOT fixed (ADR-041 §siblings).**
-Grepping the same two files for the same pattern found three further fallbacks that render as
-measurements — evidence the family is systematic rather than a pair of one-offs:
-1. **`score_education`'s `if not ranked: return 0.0` (`stages.py:277`)** — D2 one dimension over, and
-   the strongest of the three. A résumé whose education section did not parse scores `0.0`, which is
-   *worse* than being below the bar (that earns partial credit via `education_partial`). A parsing
-   failure is indistinguishable from "no qualifications at all", on 10% of the score.
-2. **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:211`)** — D1 one dimension
-   over. A JD stating no minimum gives *every* candidate full marks on 25% of the score.
-3. **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:271`)** — the same, on 10%.
+**✅ Three more of the same shape, found while fixing these two and NOW FIXED — [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18).**
+1. **`score_education`'s `if not ranked: return 0.0` (`stages.py:327`)** — D2 one dimension over, and
+   the strongest of the three. Unparsed education scores `0.0`, which is *worse* than being below the
+   bar (that earns partial credit via `education_partial`). Now marked with `education_readable` and
+   disclosed on the "Why this rank?" panel.
+2. **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:222-223`)** — D1 one dimension
+   over. A JD stating no minimum gives *every* candidate full marks on 25% of the score. Now marked
+   with `experience_bar_stated` and disclosed when the bar is not stated.
+3. **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:315-316`)** — the same, on 10%.
+   Now marked with `education_bar_stated` and disclosed when the bar is not stated.
 
-The two `1.0` cases are defensible as policy (no bar, everyone clears it) but are undisclosed — they
-are the explainer's register decision 10 applied to two more dimensions. Marking all three is
-mechanically identical to ADR-041 and reuses `ScoreBreakdown`'s marker pattern directly, so this is a
-small, well-understood follow-up rather than a new design problem.
+All three reuse `ScoreBreakdown`'s marker pattern directly. Implementation mirrors ADR-041's own two
+markers, with one structural difference (same field names, not renamed) and one precedence rule (bar-not-stated
+wins for education when both markers are false). See the addendum for full detail.
 
 Remaining open in A6: retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a
 **recorded deferral** (ADR-026 §4) needing an HR decision; reverse match fails *open* at stage 3 and
