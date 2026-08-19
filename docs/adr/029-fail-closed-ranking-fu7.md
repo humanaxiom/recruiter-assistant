@@ -169,6 +169,26 @@ renders "Waiting for AI to rank candidates…" — distinct from the pre-existin
 entries exist, the normal cards render regardless of state (a stale `awaiting_llm` flag from a prior failed
 attempt does not block a subsequent successful shortlist from displaying).
 
+#### Amendment — 2026-08-18 (branch `fix/regenerate-shortlist-no-feedback`)
+
+The decision itself is preserved: cards render when `entries` exist. What changed is the polling gate and
+a correction to the text above.
+
+**The decision is unchanged:** a successful run clears `awaiting_llm` in the same transaction as the write,
+so the case described — *"entries from success + stale awaiting_llm flag from prior failure"* — **cannot
+actually occur**. A successful persist atomically clears the flag.
+
+**The reachable case is its reverse:** entries from a prior successful run exist, while a *current* failure
+has set `awaiting_llm` with a retry queued. The old behavior left the recruiter with a stale list and no
+sign that a retry was queued. This branch adds a banner for exactly this case: `if entries and
+awaiting_llm, render "previous run ... retry queued automatically"`. (ADR-043 adds the sibling `ranking`
+state for the parallel case when a *new* run is still in flight.)
+
+The cards themselves still render unchanged; the polling gate was the real defect. The old gate checked
+`not entries`, correct only for a first Generate. The new gate checks `(not entries) or ranking or
+awaiting_llm`, allowing polling to continue when a *fresh* run is in flight even though old entries
+still exist — the core fix for regenerate not updating the UI.
+
 ### §6 — empty-content detection (`core/src/pipeline/llm/client.py`)
 
 Both `_chat_openai` and `_chat_native` already raised `LLMOutputInvalidError` when `content` was not a

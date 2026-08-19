@@ -487,6 +487,14 @@ are the explainer's register decision 10 applied to two more dimensions. Marking
 mechanically identical to ADR-041 and reuses `ScoreBreakdown`'s marker pattern directly, so this is a
 small, well-understood follow-up rather than a new design problem.
 
+🆕 **2026-08-18 — First end-to-end product run surfaced a defect the suite could not see** — 
+[ADR-043](adr/043-shortlist-ranking-state.md) (regenerate shortlist not updating UI). The API worked, the 
+worker ran, the database persisted correctly, but the frontend's polling gate was broken (inferred "run in 
+flight" from `not entries`, which fails for Regenerate). The entire unit + integration suite was green, because
+it proves the API returns 202, the worker runs and the rows land -- none of which is the same claim as
+"the screen updates". This is direct evidence for "get the pilot
+running" being the highest-value item: the suite cannot see what only the product can show.
+
 Remaining open in A6: retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a
 **recorded deferral** (ADR-026 §4) needing an HR decision; reverse match fails *open* at stage 3 and
 is **unwrapped at stage 2** (reverse match starts at `orchestrator.py:883`, its stage-2 loop at
