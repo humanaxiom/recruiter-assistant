@@ -70,6 +70,14 @@ flags answering two questions, deliberately not collapsed.
 **That is the fourth remediation in this session's work to ship a gap of the shape it was fixing.** Budget
 for the review pass; it has paid every single time.
 
+#### 🔴 The bigger finding: a pre-existing boot-race defect (F2b)
+
+While fixing the constraint-widen race, the review audit of `init_schema` found a **larger, pre-existing defect:** Postgres's native `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` clauses are **not atomic against a second connection**. On a fresh `docker compose up`, if `api` and `worker` boot together, one of them can raise `42710 duplicate_object` and stay exited — silently breaking the stack. Measured against real Postgres: 100/100 failures on brand-new objects, 0/50 on existing relations (which Postgres locks for free).
+
+**Fix:** `init_schema` now retries any statement that raises a known duplicate-object sqlstate up to 5 times. The retry loop is central (not per-statement) because the fix applies to every `CREATE EXTENSION`, `CREATE TABLE IF NOT EXISTS`, and `CREATE INDEX IF NOT EXISTS` in the file. Measured (unmocked): two-way and three-way concurrent boots against brand-new Postgres now both succeed every time. **Consequence:** a clean volume, first boot is now safe against concurrent initializers. This is a major defect because it silently breaks the stack on first boot.
+
+Also found in review: **the page-load fix was missing (F1).** The `'ranking'` state was recorded and cleared correctly, but the full-page job-detail route wasn't fetching the status at all — so a recruiter who hit "Regenerate" then reloaded the page would see a stale shortlist. Fixed: the status is now fetched unconditionally on page load, not just when entries are empty.
+
 #### One reversal a human should know about
 
 This branch **reverses a pre-existing assertion** from ADR-029. That ADR decided *"once entries exist, the
