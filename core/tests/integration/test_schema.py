@@ -589,17 +589,29 @@ async def test_shortlist_state_check_constraint_keeps_its_original_name(
     Postgres originally gave it (confirmed live — see the module comment
     above), not leave a stray differently-named constraint behind; otherwise a
     second boot's DROP CONSTRAINT IF EXISTS silently stops finding it and the
-    widening becomes a one-shot fluke instead of a re-runnable migration."""
+    widening becomes a one-shot fluke instead of a re-runnable migration.
+
+    **F11 (PR review, 2026-08-18):** this used to read the constraint name
+    via ``fetchval`` — first row only — while claiming to prove no STRAY
+    differently-named constraint survives. ``fetchval`` cannot prove that: a
+    second, differently-named constraint sitting in a later row is invisible
+    to it. Reading every matching row via ``fetch`` and asserting there is
+    exactly one makes the assertion match the docstring's claim.
+    """
     connection = await asyncpg.connect(pg_dsn)
     try:
         await init_schema(connection)
         await init_schema(connection)
 
-        conname = await connection.fetchval("""
+        rows = await connection.fetch("""
             SELECT conname FROM pg_constraint
             WHERE conrelid = 'jobs'::regclass
               AND pg_get_constraintdef(oid) ILIKE '%shortlist_state%'
             """)
-        assert conname == "jobs_shortlist_state_check"
+        assert len(rows) == 1, (
+            "expected exactly one shortlist_state-related constraint, found "
+            f"{len(rows)}: {[r['conname'] for r in rows]}"
+        )
+        assert rows[0]["conname"] == "jobs_shortlist_state_check"
     finally:
         await connection.close()
