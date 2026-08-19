@@ -21,6 +21,24 @@ one attribute ``classify_families`` must read off whatever object
 return shape. A future implementation is free to name its *internal*
 pydantic schema class anything it likes, as long as an instance of it
 exposes ``.categories`` in this shape.
+
+── Two live defects (this file's newest section, below) ────────────────────
+Everything above mocks ``llm.chat_json`` wholesale, so it cannot see how the
+REAL client behaves against a REAL reasoning model. A live probe against the
+tailnet ``gpt-oss:20b`` found two defects invisible to the entire mocked
+suite:
+
+1. ``_CLASSIFY_MAX_TOKENS`` (1024) is too small for a reasoning model: the
+   discarded thinking trace consumes the whole budget, ``content`` comes
+   back empty, and the feature silently classifies 0 of 6 live-probed
+   skills. At 4096, 6 of 6.
+2. The prompt (``_build_messages``) never tells the model the non-matchable
+   bucket (``other``/``domain``) is a PREFERRED answer for a doubtful name --
+   only that an empty list is a last resort. Live, this let two nonsense
+   assignments through to a MATCHABLE family (``bi``), which -- because
+   family credit is transitive across the whole résumé
+   (``orchestrator.py``) -- would grant false credit toward a requirement
+   the candidate does not meet.
 """
 
 from __future__ import annotations
@@ -35,6 +53,7 @@ from annotated_types import MaxLen
 from pydantic import BaseModel, ValidationError
 
 from src.pipeline import skill_classifier, skills_graph
+from src.pipeline.llm import LLMOutputInvalidError
 from src.schemas.resumes import ResumeSkill
 from src.settings import get_settings
 
@@ -397,8 +416,6 @@ async def test_classify_families_llm_raises_returns_empty_dict_without_raising()
 async def test_classify_families_llm_output_invalid_error_is_non_fatal() -> None:
     """The REAL ``LLMClient.chat_json`` raises this (not a bare
     ``RuntimeError``) after exhausting its self-correction retries."""
-    from src.pipeline.llm import LLMOutputInvalidError
-
     llm = MagicMock(
         chat_json=AsyncMock(side_effect=LLMOutputInvalidError("categories: list_type"))
     )
@@ -483,3 +500,245 @@ def test_classify_families_is_async() -> None:
     import inspect
 
     assert inspect.iscoroutinefunction(skill_classifier.classify_families)
+
+
+# ── Defect 1 (live probe against the real tailnet model, gpt-oss:20b): the
+# feature is a SILENT NO-OP in production ────────────────────────────────
+#
+# Every test above mocks `llm.chat_json` at the boundary, so `content` is
+# always whatever `SimpleNamespace(categories=...)` the test hands back --
+# a MagicMock has no reasoning/thinking trace to discard, so it cannot see
+# a max_tokens budget that is too small to survive one. Live, batching the
+# SAME 6 out-of-vocab skill names in one `classify_families` call against
+# gpt-oss:20b: at `_CLASSIFY_MAX_TOKENS=1024` (today's value) the discarded
+# reasoning trace consumed the whole budget, `content` came back empty, and
+# `classify_families` correctly degraded to `{}` -- 0 of 6 assigned. At
+# 4096, 6 of 6. `client.py`'s own `_empty_content_message` docstring names
+# this exact failure mode (ADR-021 §6) and documents that `think:false`
+# does not reliably suppress it on gpt-oss:20b (client.py:71-73,
+# :223-235). Compare the existing budgets this repo already ships:
+# `resume_tasks.py:186` uses 1536 for FULL skill extraction (many skills,
+# names + evidence + years); `skills_graph.py:443` uses 128 for a one-word
+# tiebreaker. 1024 for a batched, multi-name JSON-object response is not
+# obviously wrong by comparison -- it is only provably wrong against a real
+# reasoning model, which is exactly why two green gates and 5,890 mocked
+# tests missed it.
+
+
+def test_classify_max_tokens_is_a_named_floor_a_reasoning_trace_cannot_exhaust() -> (
+    None
+):
+    """4096 is the smallest budget the live probe actually cleared (6/6);
+    1024 (today's value) cleared 0/6. Pinned as a FLOOR (`>=`), not an exact
+    value, so a future increase for an unrelated reason does not need to
+    touch this test -- only a regression back toward the value proven live
+    to zero out the feature should fail it."""
+    assert skill_classifier._CLASSIFY_MAX_TOKENS >= 4096, (
+        f"_CLASSIFY_MAX_TOKENS={skill_classifier._CLASSIFY_MAX_TOKENS} -- live probe "
+        "against the tailnet gpt-oss:20b assigned 0 of 6 skills at 1024 (the "
+        "discarded reasoning trace ate the whole budget, content came back empty, "
+        "classify_families correctly degraded to {}) and 6 of 6 at 4096. The mocked "
+        "unit suite cannot see this because a MagicMock has no thinking trace to "
+        "discard -- this is the ONLY reason the feature shipped as a silent no-op."
+    )
+
+
+@pytest.mark.asyncio
+async def test_classify_families_sends_the_floor_value_to_chat_json() -> None:
+    """Pins the VALUE THAT ACTUALLY REACHES ``chat_json``, not merely the
+    module constant in isolation -- a fix that bumped
+    ``_CLASSIFY_MAX_TOKENS`` but left a stale literal at the ``chat_json``
+    call site (or a second, uncoupled budget constant) would pass the
+    constant-only test above while still failing live, exactly the A7 drift
+    shape this repo has recorded repeatedly for other coupled literals
+    (see ``test_max_families_per_skill_matches_resume_skill_categories_schema_cap``
+    above)."""
+    llm = _fake_llm({"mri methods": ["health_wellness"]})
+    await skill_classifier.classify_families(
+        llm, ["mri methods"], settings=get_settings()
+    )
+    kwargs = llm.chat_json.await_args.kwargs
+    assert kwargs["max_tokens"] >= 4096, (
+        f"chat_json was called with max_tokens={kwargs.get('max_tokens')!r} -- below "
+        "the floor a reasoning model's discarded thinking trace cannot exhaust "
+        "(live: 0/6 assigned at 1024, 6/6 at 4096)"
+    )
+    assert kwargs["max_tokens"] == skill_classifier._CLASSIFY_MAX_TOKENS, (
+        "the value passed to chat_json must BE the named constant, never a second, "
+        "independently-set literal -- otherwise raising the constant alone proves "
+        "nothing about what actually reaches the model"
+    )
+
+
+# ── Defect 2 (live probe): wrong SPECIFIC-family assignments create FALSE
+# family credit, which is worse than the abstention it replaces ──────────
+#
+# Live, two of six probed names got a wrong SPECIFIC matchable family
+# (`"expert scientific knowledge of MRI and MEG research methods" ->
+# ['bi']`, `"wildlife habitat restoration planning" -> ['bi']`). `bi` is a
+# MATCHABLE family and family credit is transitive across the WHOLE résumé
+# (`orchestrator.py` matches ANY résumé skill in the family via
+# `reqSkill.categories` / `c.categories` overlap, `NOT t IN $exclude_fam`),
+# so a candidate holding any unrelated business-intelligence skill would
+# earn credit toward "expert knowledge of MRI research methods" -- the
+# product asserting a qualification the candidate does not have. That is
+# worse than the `0.0` (no credit) it replaces. Meanwhile
+# `"eligibility to practice law in British Columbia" -> ['other']` was a
+# CORRECT abstention: `other` is in `settings.match_non_matchable_families`
+# (settings.py:204) so it is excluded from family credit
+# (`orchestrator.py`'s `NOT t IN $exclude_fam`) -- it earns no credit and
+# costs nothing. The system prompt (`_build_messages`) must make declining
+# via the non-matchable bucket the PREFERRED answer when a specific
+# matchable family is doubtful, not merely a last-resort empty list.
+
+
+def test_build_messages_prefers_non_matchable_over_a_doubtful_guess() -> None:
+    """Pins the INSTRUCTION, not incidental wording: the family names
+    themselves are sourced from ``settings.match_non_matchable_families``
+    (never hardcoded ``"other"``/``"domain"`` literals in THIS test), and
+    the assertion only requires that the prompt (a) actually names the
+    non-matchable bucket as a legal answer, AND (b) tells the model to
+    PREFER it over a doubtful specific matchable family -- not that any
+    particular sentence appears verbatim. Today's prompt does neither: it
+    only ever offers an empty list as a last resort ("If no family
+    confidently applies... rather than guessing"), and never mentions the
+    non-matchable family names at all, so the model has no signal that
+    declining THROUGH THEM is preferable to a wrong specific guess."""
+    settings = get_settings()
+    non_matchable = {
+        f.strip().lower()
+        for f in settings.match_non_matchable_families.split(",")
+        if f.strip()
+    }
+    assert non_matchable, "settings must configure a non-empty non-matchable set"
+    assert non_matchable <= set(skill_classifier.known_families()), (
+        "test precondition: the non-matchable names must themselves be assignable "
+        "answers (known_families()), or the prompt could never legally offer them"
+    )
+
+    messages = skill_classifier._build_messages(
+        ["probe skill"], skill_classifier.known_families()
+    )
+    assert messages[0]["role"] == "system"
+    system = messages[0]["content"].lower()
+
+    mentioned = {fam for fam in non_matchable if fam in system}
+    assert mentioned, (
+        f"system prompt never names the non-matchable bucket {sorted(non_matchable)!r} "
+        "at all, so the model has no way to know those families are a legal, "
+        f"PREFERRED fallback answer -- got prompt: {system!r}"
+    )
+
+    preference_markers = (
+        "prefer",
+        "default to",
+        "rather than guess a specific",
+        "before guessing",
+        "over a specific",
+        "safer than",
+    )
+    assert any(m in system for m in preference_markers), (
+        "system prompt names the non-matchable bucket but never instructs the model "
+        "to PREFER it over a doubtful specific matchable family -- declining must be "
+        "the DEFAULT posture for a doubtful name, not a last resort reached only via "
+        "an 'if no family confidently applies' escape hatch (today's wording), which "
+        "is exactly the gap that let 'expert knowledge of MRI research methods' -> "
+        "['bi'] and 'wildlife habitat restoration planning' -> ['bi'] both ship live "
+        "instead of declining via 'other'"
+    )
+
+
+# ── regression guards: behaviour that is ALREADY correct today and must
+# not be broken by the defect-1/defect-2 fixes above ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_classify_families_non_matchable_answer_survives_the_filter() -> None:
+    """Verified against the real source (``classify_families`` keeps any
+    ``c in known`` where ``known = set(known_families())``, and
+    ``known_families()`` includes the non-matchable catch-alls per its own
+    docstring: "assignable here, since assigning either grants zero family
+    credit"): an ``other``/``domain`` answer ALREADY survives the
+    known-families filter exactly like any matchable family. Pinned here as
+    a REGRESSION GUARD, not a new requirement -- the defect-2 fix (making
+    the model prefer this bucket) must not "succeed" by secretly dropping
+    non-matchable answers at this filter instead of the prompt actually
+    steering the model."""
+    settings = get_settings()
+    non_matchable = [
+        f.strip() for f in settings.match_non_matchable_families.split(",") if f.strip()
+    ]
+    assert non_matchable, "settings must configure a non-empty non-matchable set"
+    fallback = non_matchable[0]
+
+    llm = _fake_llm({"eligibility to practice law in bc": [fallback]})
+    result = await skill_classifier.classify_families(
+        llm, ["eligibility to practice law in bc"], settings=get_settings()
+    )
+    assert result == {"eligibility to practice law in bc": [fallback]}
+
+
+@pytest.mark.asyncio
+async def test_classify_families_families_are_always_a_subset_of_known() -> None:
+    """A doubtful answer must NEVER silently become a matchable family that
+    was not actually offered by ``known_families()``: whatever the model
+    returns (a mix of real matchable, real non-matchable, and invented
+    names), only members of ``known_families()`` survive -- and the
+    non-matchable names are themselves LEGAL members of that survivor set,
+    not filtered out as a side effect of some other rule."""
+    known = set(skill_classifier.known_families())
+    non_matchable = {
+        f.strip()
+        for f in get_settings().match_non_matchable_families.split(",")
+        if f.strip()
+    }
+    assert non_matchable <= known
+
+    first_non_matchable = sorted(non_matchable)[:1]
+    llm = _fake_llm(
+        {
+            "a": ["backend", "totally_made_up_family_xyz"],
+            "b": first_non_matchable,
+            "c": ["ml", "also_not_real"],
+        }
+    )
+    result = await skill_classifier.classify_families(
+        llm, ["a", "b", "c"], settings=get_settings()
+    )
+    all_returned = {fam for fams in result.values() for fam in fams}
+    assert all_returned <= known, (
+        f"classify_families returned families outside known_families(): "
+        f"{all_returned - known!r}"
+    )
+    assert result["b"] == first_non_matchable
+
+
+@pytest.mark.asyncio
+async def test_classify_families_empty_content_degrades_with_no_name_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The specific live failure shape (Defect 1, at the OLD 1024 budget):
+    the real client raises ``LLMOutputInvalidError`` with the REAL
+    ``_empty_content_message`` text when a reasoning trace exhausts the
+    budget. Pinned as a REGRESSION GUARD so raising ``_CLASSIFY_MAX_TOKENS``
+    to fix Defect 1 cannot reopen this: if the model STILL returns empty
+    content for some other reason, the caller must still degrade to ``{}``
+    with no exception and no skill name in any log line -- never crash the
+    résumé parse, never leak the skill name via a caught exception's own
+    ``str()``."""
+    from src.pipeline.llm.client import _empty_content_message
+
+    sentinel = "mri methods"
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            side_effect=LLMOutputInvalidError(_empty_content_message(True))
+        )
+    )
+    with caplog.at_level(logging.WARNING):
+        result = await skill_classifier.classify_families(
+            llm, [sentinel], settings=get_settings()
+        )
+    assert result == {}
+    assert (
+        sentinel not in caplog.text
+    ), "the skill name leaked into a log line on the empty-content degrade path"
