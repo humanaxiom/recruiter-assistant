@@ -470,3 +470,136 @@ async def test_withdrawal_columns_survive_init_schema_run_twice(pg_dsn: str) -> 
         assert reason_row["is_nullable"] == "YES"
     finally:
         await connection.close()
+
+
+# ── fix/regenerate-shortlist-no-feedback — widen shortlist_state's CHECK ───
+#
+# ``jobs.shortlist_state`` today (ddl.py:132) carries
+# ``CHECK (shortlist_state IN ('awaiting_llm'))`` — added by FU-7 §2 and, per
+# CLAUDE.md's "offline is not always enough", this widening is EXACTLY the
+# class of change the unit suite structurally cannot verify: it is a real
+# constraint on a real server, not a string in a module.
+#
+# Confirmed live against the running dev stack (docker compose postgres,
+# 2026-08-18) BEFORE writing these tests — the auto-generated name Postgres
+# actually gave the inline CHECK is:
+#
+#     jobs_shortlist_state_check | CHECK ((shortlist_state = 'awaiting_llm'::text))
+#
+# (a single-value CHECK compiles to ``= 'awaiting_llm'``, not an ``IN (...)``
+# — same constraint, Postgres's own normal form). The spec's suggested
+# ``DROP CONSTRAINT IF EXISTS jobs_shortlist_state_check`` / ``ADD CONSTRAINT
+# jobs_shortlist_state_check CHECK (... IN ('awaiting_llm', 'ranking'))`` pair
+# targets the RIGHT name — this is not an assumption, it is what Postgres
+# reported.
+#
+# ``test_init_schema_twice_in_a_row_succeeds`` above and
+# ``test_withdrawal_columns_survive_init_schema_run_twice`` are the direct
+# precedent for the pattern below: ``ADD COLUMN IF NOT EXISTS`` is a no-op the
+# SECOND time ``init_schema`` runs (a real deployed volume that already has
+# the column), so the FIRST call here stands in for "the database an existing
+# deploy already carries" and the SECOND stands in for "the next boot, once
+# this fix has landed" — the exact upgrade path the spec requires proof of,
+# not merely a fresh-create. Today (before the fix) the constraint is
+# unconditionally re-declared as the SAME narrow CHECK on every call (no
+# DROP+ADD pair exists yet), so the UPDATE below fails with
+# ``asyncpg.CheckViolationError`` — the real defect this test pins.
+
+
+@pytest.mark.asyncio
+async def test_shortlist_state_check_accepts_ranking_after_init_schema_run_twice(
+    pg_dsn: str,
+) -> None:
+    """The upgrade path: a database that already carries the OLD
+    awaiting_llm-only constraint (first ``init_schema`` call, standing in for
+    an already-migrated volume) must accept ``'ranking'`` once ``init_schema``
+    runs again (the next boot, carrying the widened CHECK)."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)  # "already deployed" — old constraint
+        await init_schema(connection)  # next boot — must widen it
+
+        job_id = await _insert_job(connection)
+        await connection.execute(
+            "UPDATE jobs SET shortlist_state = 'ranking', shortlist_state_at = now() "
+            "WHERE id = $1",
+            job_id,
+        )
+        row = await connection.fetchrow(
+            "SELECT shortlist_state FROM jobs WHERE id = $1", job_id
+        )
+        assert row is not None
+        assert row["shortlist_state"] == "ranking"
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_shortlist_state_check_still_accepts_awaiting_llm_after_widening(
+    pg_dsn: str,
+) -> None:
+    """Widening must not be a REPLACEMENT — the pre-existing fail-closed
+    ``awaiting_llm`` value (FU-7 §2) must still round-trip after the CHECK is
+    widened to also allow ``'ranking'``."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+
+        job_id = await _insert_job(connection)
+        await connection.execute(
+            "UPDATE jobs SET shortlist_state = 'awaiting_llm', "
+            "shortlist_state_at = now() WHERE id = $1",
+            job_id,
+        )
+        row = await connection.fetchrow(
+            "SELECT shortlist_state FROM jobs WHERE id = $1", job_id
+        )
+        assert row is not None
+        assert row["shortlist_state"] == "awaiting_llm"
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_shortlist_state_check_still_rejects_an_arbitrary_value(
+    pg_dsn: str,
+) -> None:
+    """Widening to exactly two legal values, not opening the column up
+    entirely — a third, unrelated string must still violate the CHECK."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+
+        job_id = await _insert_job(connection)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await connection.execute(
+                "UPDATE jobs SET shortlist_state = 'bogus' WHERE id = $1", job_id
+            )
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_shortlist_state_check_constraint_keeps_its_original_name(
+    pg_dsn: str,
+) -> None:
+    """The DROP+ADD pair must re-create the constraint under the SAME name
+    Postgres originally gave it (confirmed live — see the module comment
+    above), not leave a stray differently-named constraint behind; otherwise a
+    second boot's DROP CONSTRAINT IF EXISTS silently stops finding it and the
+    widening becomes a one-shot fluke instead of a re-runnable migration."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+
+        conname = await connection.fetchval("""
+            SELECT conname FROM pg_constraint
+            WHERE conrelid = 'jobs'::regclass
+              AND pg_get_constraintdef(oid) ILIKE '%shortlist_state%'
+            """)
+        assert conname == "jobs_shortlist_state_check"
+    finally:
+        await connection.close()
