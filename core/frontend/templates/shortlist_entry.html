@@ -153,6 +153,39 @@
     the vector row below shows "not assessed" rather than a score — the
     percentage would reflect the pool, not this candidate's match.</p>
   {% endif %}
+  {# ROADMAP A6 siblings. Same `is sameas false` identity discipline as the
+     two above. Precedence for education: when the JD states no education
+     bar at all, `score_education` returns its 1.0 fallback BEFORE it ever
+     looks at the candidate's parsed levels, so an unreadable-education
+     paragraph would be describing a 0% that was never computed. Both facts
+     are still recorded independently on the write path; only the paragraph
+     SHOWN is chosen -- the bar-not-stated one wins when both are false. #}
+  {% set experience_bar_not_stated = explanation.experience_bar_stated is sameas false %}
+  {% set education_bar_not_stated  = explanation.education_bar_stated  is sameas false %}
+  {% set education_unreadable      = explanation.education_readable    is sameas false %}
+  {% set education_not_assessed = education_bar_not_stated or education_unreadable %}
+  {% if experience_bar_not_stated %}
+  <p class="muted"><strong>Experience was not assessed for this candidate.</strong>
+    This job posting states no minimum years of experience, so every
+    candidate scores full marks on this row — it reflects the job posting,
+    not this candidate. The experience row below therefore shows "not
+    assessed" rather than a score.</p>
+  {% endif %}
+  {% if education_bar_not_stated %}
+  <p class="muted"><strong>Education was not assessed for this candidate.</strong>
+    This job posting states no minimum education level, so every candidate
+    scores full marks on this row — it reflects the job posting, not this
+    candidate. The education row below therefore shows "not assessed" rather
+    than a score.</p>
+  {% elif education_unreadable %}
+  <p class="muted"><strong>Education was not assessed for this candidate.</strong>
+    No education could be read from this résumé at all, so the education row
+    stores 0% — which is <em>lower</em> than a candidate whose degree is
+    below this job's bar would score, since that earns partial credit. This
+    is a limit of parsing the document, not a finding about this candidate's
+    qualifications. The education row below therefore shows "not assessed"
+    rather than a score.</p>
+  {% endif %}
   <table class="table contribution-table">
     <thead>
       <tr><th>Component</th><th>Weight</th><th>Score</th><th>Contribution</th></tr>
@@ -160,8 +193,8 @@
     <tbody>
       {% for label, row, not_assessed in [
           ('skill', explanation.skill, false),
-          ('experience', explanation.experience, false),
-          ('education', explanation.education, false),
+          ('experience', explanation.experience, experience_bar_not_stated),
+          ('education', explanation.education, education_not_assessed),
           ('seniority', explanation.seniority, seniority_not_assessed),
           ('vector', explanation.vector, vector_not_comparable),
       ] %}

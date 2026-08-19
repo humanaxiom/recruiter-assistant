@@ -9,7 +9,7 @@ Two sub-scores fall back to a numeric value when no comparison happened, produci
 
 ### D1 — Vector degenerate pool
 
-`normalise_vector_scores` (`stages.py:300-311`) min-max scales the stage-1 pool. When `hi - lo < 1e-9` — which includes **every single-candidate pool** — it returns `1.0` for everyone. The panel rendered `vector | 10 | 100 | 10`: a perfect semantic match. Reverse match hits this routinely, since a résumé with one candidate job is a one-element pool.
+`normalise_vector_scores` (`stages.py:379-398`, was `:300-311` when recorded — this branch shifted the file) min-max scales the stage-1 pool. When `hi - lo < 1e-9` — which includes **every single-candidate pool** — it returns `1.0` for everyone. The panel rendered `vector | 10 | 100 | 10`: a perfect semantic match. Reverse match hits this routinely, since a résumé with one candidate job is a one-element pool.
 
 ### D2 — Seniority untitled role
 
@@ -156,23 +156,91 @@ should be considered can be dropped) and is deliberately left as-is.
 - **Renormalise the remaining weights when a dimension is unmeasurable.** The real fix for D2's gravity, and out of scope: it re-bands the corpus and requires every margin to be re-measured. Owner: corpus owner + HR.
 - **Change the fallback values.** Rejected per the spec's reasoning: the eval corpus cannot exercise either branch (all 20 fixtures have distinct summaries and titled current roles), so changing the values would be unverifiable and earn a revert like ADR-032.
 
-### Three siblings found while writing this, recorded not fixed
+### Three siblings found while writing this, now marked and disclosed
 
 Grepping for the same shape in the same two files turned up three more fallbacks that render as
-measurements. None is in this slice's scope; all belong to the A6 family:
+measurements. All belong to the A6 family and are now fixed using the same strategy:
 
-- **`score_education`'s `if not ranked: return 0.0` (`stages.py:277`)** is D2 again, one dimension over.
+- **`score_education`'s `if not ranked: return 0.0` (`stages.py:327`, was `:277` when recorded)** is D2 again, one dimension over.
   A résumé whose education section did not parse scores `0.0` — and that is *worse* than being below the
   bar, which earns partial credit via `education_partial`. A parsing failure is indistinguishable from
-  "no qualifications at all", on 10% of the score. This is the strongest of the three.
-- **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:211`)** is D1 again: a JD that
+  "no qualifications at all", on 10% of the score. This is the strongest of the three. ✅ **Now marked
+  with `education_readable` and disclosed when `False`.**
+- **`score_experience`'s `if not jd_min_years: return 1.0` (`stages.py:220-223`, was `:211` when recorded)** is D1 again: a JD that
   states no minimum gives *every* candidate full marks on 25% of the score. Defensible as policy — no
-  bar, everyone clears it — but no comparison happened, and nothing says so.
-- **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:271`)** is the same, on 10%.
+  bar, everyone clears it — but no comparison happened, and nothing says so. ✅ **Now marked with
+  `experience_bar_stated` and disclosed when `False`.**
+- **`score_education`'s `if not jd_min_level: return 1.0` (`stages.py:315-316`, was `:271` when recorded)** is the same, on 10%. ✅
+  **Now marked with `education_bar_stated` and disclosed when `False`.**
 
 The two `1.0` cases are the explainer's register decision 10 ("scored relative to the batch") applied to
-two more dimensions, and are equally undisclosed. Marking them is mechanically identical to this slice
-and would reuse `ScoreBreakdown`'s marker pattern directly.
+two more dimensions. Marking all three is mechanically identical to this slice and reuses `ScoreBreakdown`'s
+marker pattern directly. **See the addendum below for details — the implementation mirrors ADR-041's own
+two markers, with one structural difference (same field names, not renamed) and one precedence rule (bar-not-stated
+wins for education when both markers are false).**
+
+## Addendum — Three siblings now marked and disclosed (2026-08-18)
+
+The three siblings documented above have been fixed using the same strategy as this ADR.
+
+### The three defects, now fixed
+
+1. **`score_education`'s `if not ranked: return 0.0` ([stages.py:327](../../core/src/pipeline/matching/stages.py))** — Unparsed education scored worse than below-bar. An `education_readable` marker is now set from `education_levels_readable(candidate_levels)` ([stages.py:284-296](../../core/src/pipeline/matching/stages.py), called from [orchestrator.py:532](../../core/src/pipeline/matching/orchestrator.py)) and disclosed in the template when `False` ([shortlist_entry.html:180-187](../../core/frontend/templates/shortlist_entry.html)).
+
+2. **`score_experience`'s `if not jd_min_years: return 1.0` ([stages.py:220-223](../../core/src/pipeline/matching/stages.py))** — No JD bar gives everyone full marks. An `experience_bar_stated` marker is now set from `jd_states_experience_bar(job.min_years)` ([stages.py:202-212](../../core/src/pipeline/matching/stages.py), called from [orchestrator.py:514](../../core/src/pipeline/matching/orchestrator.py)) and disclosed when `False` ([shortlist_entry.html:167-172](../../core/frontend/templates/shortlist_entry.html)).
+
+3. **`score_education`'s `if not jd_min_level: return 1.0` ([stages.py:315-316](../../core/src/pipeline/matching/stages.py))** — No JD education bar gives everyone full marks. An `education_bar_stated` marker is now set from `jd_states_education_bar(job.education_min_level)` ([stages.py:271-280](../../core/src/pipeline/matching/stages.py), called from [orchestrator.py:531](../../core/src/pipeline/matching/orchestrator.py)) and disclosed when `False` ([shortlist_entry.html:174-179](../../core/frontend/templates/shortlist_entry.html)).
+
+### Why the arithmetic is unchanged
+
+**The reason is not the same for all three, and an earlier draft of this addendum got it wrong.** That draft
+claimed the eval corpus cannot exercise any of the branches because "all 20 fixtures parse at least one
+education entry". All 20 fixtures do *have* an education section; two of them do not yield a readable
+**level**, which is a different thing. The corrected position:
+
+- **Defects 2 and 3 (the two `1.0` fallbacks) genuinely cannot be exercised.** The corpus has a single JD
+  and it states both a `min_years` and an `education.min_level` (`core/tests/evals/fixtures/jd_backend_data_engineer.json`),
+  so neither no-bar branch is ever taken. Changing either value would be unverifiable by the gate — the
+  reasoning that earned [ADR-032](032-re-band-the-corpus-on-the-new-skill-family.md) its revert.
+- **Defect 1 IS exercised, on 2 of the 20 fixtures.** `r07_alex_nguyen` (`"Certificate, Full-Stack Web
+  Development"`) and `r08_riley_chen` (`"Diploma, Business Administration"`) match none of
+  `_DEGREE_KEYWORDS` ([orchestrator.py:589-595](../../core/src/pipeline/matching/orchestrator.py)), so
+  `_level_from_degree` returns `None`, `education_levels_readable` is `False`, and both score the unreadable
+  `0.0` **against a JD that does state a bachelors bar**. `run_evals.py:722-725` runs this exact code, so the
+  branch fires inside a live corpus run for 10% of the fixtures. A value change here would move both
+  composites and the gate would see it.
+
+So defect 1 is left alone for a *different* reason than 2 and 3, and it is worth stating plainly: the
+corpus's current bands were measured with r07 and r08 sitting at education `0.0`. Changing the fallback
+re-bands the corpus and requires every margin to be re-measured — the same owner-assigned work as
+renormalising sub-weights when a dimension is unmeasurable (ROADMAP A6). It is not that the gate is blind to
+it. **A corpus owner deciding whether to change this fallback should know the gate can measure the change**,
+and that the cost is re-banding, not unverifiability.
+
+That two real fixtures already sit on the strongest of the three defects is also the answer to "is this
+disclosure hypothetical" — it is not. The `(bar stated, education unreadable)` combination is the shape a
+freshly-written row takes for any r07- or r08-like candidate, and it is now pinned by a test at the write
+path and in the template.
+
+### Deliberate deviation — same field names, not renamed
+
+This ADR renamed the seniority/vector pair on the read path (`seniority_measured` → `seniority_assessed`, `vector_discriminating` → `vector_comparable`). These three siblings keep the same names on both sides — `experience_bar_stated` / `education_bar_stated` / `education_readable` in both `ScoreBreakdown` and the read-path DTO.
+
+This is a deliberate exception to the pattern above, not an oversight: a rename buys no semantic clarity here (the direction is already unambiguous) and introduces one more place the two copies can drift. The comments in [schemas/matching.py:319-332](../../core/src/schemas/matching.py) and [services/explanation.py:143-150](../../core/src/services/explanation.py) record this decision.
+
+### Precedence rule in the template — bar-not-stated wins when both are false
+
+The template ([shortlist_entry.html:156-188](../../core/frontend/templates/shortlist_entry.html)) implements a precedence rule for education disclosure: when both `education_bar_stated` and `education_readable` are `False`, the bar-not-stated paragraph is shown, not the unreadable-education one.
+
+The reason: `score_education` returns its `1.0` fallback BEFORE checking whether the candidate's education parsed ([stages.py:315-327](../../core/src/pipeline/matching/stages.py)). If the JD states no education bar, the function never looks at candidate levels at all, so an unreadable-education paragraph would describe a `0%` that was never computed. Both facts stay recorded independently on the write path; only the *paragraph shown* changes — when both markers are `False`, the first one ("this job posting states no bar") is the honest claim about what the scorer did.
+
+### Structural point — predicates called, not re-stated
+
+Each scorer now calls the predicate that owns its condition ([stages.py:202-212, 280, 296](../../core/src/pipeline/matching/stages.py)), the same structural remedy as this ADR's `vector_pool_is_degenerate` / `normalise_vector_scores` precedent ([stages.py:360-398](../../core/src/pipeline/matching/stages.py)). A second `if not jd_min_years` written independently cannot appear at the write site — drift made impossible rather than tested against. The comments at [orchestrator.py:511-514, 528-532](../../core/src/pipeline/matching/orchestrator.py) record this discipline.
+
+### Honest residual — disclosure still reaches the detail panel only
+
+Exactly as this ADR records for its own pair, the shortlist card tiles ([shortlist_cards.html:98-106](../../core/frontend/templates/shortlist_cards.html)) and the CSV export ([shortlist_service.py:1185-1186, 1237-1238](../../core/src/services/shortlist_service.py)) still render the bare `0` / `100` undisclosed. The "Why this rank?" panel is the only surface where disclosure reaches the reader.
 
 ## Gate state
 
