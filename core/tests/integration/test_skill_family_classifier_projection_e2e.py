@@ -29,7 +29,6 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
@@ -42,19 +41,18 @@ from src.pipeline.matching.orchestrator import _stage2_skill_rows
 from src.pipeline.matching.stages import score_skill_breakdown
 from src.schemas.matching import DEFAULT_WEIGHTS
 from src.services import outbox_service
-from src.settings import get_settings
 from src.worker.graph_tasks import project_to_graph
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
-_DIM = get_settings().llm_embedding_dim
-
-
-def _vec(seed: int) -> list[float]:
-    import random
-
-    rng = random.Random(seed)
-    return [rng.uniform(-1.0, 1.0) for _ in range(_DIM)]
-
+# Reuse, not a second ad hoc copy: `tests/integration/` is a real package
+# (`tests/__init__.py` + `tests/integration/__init__.py` both exist), so the
+# sibling `test_graph_projection_e2e.py`'s helpers ARE importable, and the
+# TESTER-agent instruction for this file was explicit: import if importable,
+# only mirror otherwise. `_vec`'s near-orthogonality across distinct seeds
+# (see that module's own docstring on `_vec`) is exactly what keeps the two
+# tests below off the vector auto-merge/tiebreaker enrichment branches --
+# duplicating the formula here would risk a silent drift from that property.
+from tests.integration.test_graph_projection_e2e import _make_embedder, _make_llm, _vec
 
 # ── fixtures (same technique as test_graph_projection_e2e.py) ─────────────
 
@@ -97,12 +95,26 @@ async def neo4j_driver(neo4j_container: Neo4jContainer) -> AsyncIterator[AsyncDr
         await driver.close()
 
 
+# NOTE (originally a DATA-PIPELINE-CODER fix, replaced with an import above
+# by the TESTER agent): the job side's projection (`_project_job` ->
+# `resolve_canonical_names` -> `_resolve_one`) still runs a REAL
+# vector-recall round trip for a brand-new Skill node (this fixture DETACH
+# DELETEs the whole graph per test, so even an in-vocab name like "python"
+# has no existing node on its first write) -- see `skills_graph.py`'s
+# `_resolve_one` step 2, `[emb] = await embedder.embed([normalised])`. A
+# bare, unconfigured `AsyncMock()` (as this file originally had) returns a
+# `MagicMock()` whose default `__iter__` yields nothing, so that unpack
+# raises `ValueError` and the job.parsed row dead-letters -- entirely
+# unrelated to anything this file's classifier scenario is actually testing
+# (which never touches the job/LLM/embedder path at all; see the module
+# docstring). `_make_llm`/`_make_embedder`/`_vec` are imported from the
+# sibling `test_graph_projection_e2e.py` above rather than duplicated here.
 def _ctx(pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver) -> dict[str, Any]:
     return {
         "pg_pool": pg_pool,
         "neo4j": neo4j_driver,
-        "llm": MagicMock(chat_json=AsyncMock()),
-        "embedder": MagicMock(embed=AsyncMock()),
+        "llm": _make_llm(),
+        "embedder": _make_embedder(),
     }
 
 

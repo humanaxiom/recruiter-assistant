@@ -31,9 +31,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
+from annotated_types import MaxLen
 from pydantic import BaseModel, ValidationError
 
 from src.pipeline import skill_classifier, skills_graph
+from src.schemas.resumes import ResumeSkill
 from src.settings import get_settings
 
 # ── independent oracle for known_families() ─────────────────────────────
@@ -65,18 +67,39 @@ def test_known_families_returns_a_tuple() -> None:
     assert all(isinstance(f, str) for f in result)
 
 
-def test_known_families_shares_the_real_category_table_not_a_hardcoded_copy(
+def test_known_families_shares_the_real_category_family_names_not_a_hardcoded_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Drift guard: ``known_families`` must read the SAME
-    ``skills_graph._category_table()`` the graph itself uses, not a second,
-    independently-maintained copy of the family list. Proven by mutating the
-    real cached table and confirming ``known_families()`` tracks it."""
+    """UPDATED, EXPLICITLY, post-RED (coordinator correction on this same
+    slice): this test originally monkeypatched ``skills_graph._category_table``
+    and asserted ``known_families()`` tracked it. That pinned an
+    implementation choice -- deriving ``known_families()`` from
+    ``_category_table()`` (canonical -> [families], inverted from
+    categories.yaml for per-skill lookup) -- that turned out to be unsafe:
+    that table structurally cannot see a family with zero curated skill
+    members (``domain``/``other``), and an earlier version of this slice
+    closed that gap by giving each a fake curated member in the shipped,
+    ADR-042-governed vocabulary file. That widened
+    ``_canonical_key_for_normalised``'s in-vocab predicate (ANY key in
+    ``_category_table()`` counts as in-vocabulary/cleartext) -- exactly the
+    predicate ``unclassified_names`` above shares and must never drift wider
+    than. Reverted; ``known_families()`` now reads
+    ``skills_graph._category_family_names()``, a SEPARATE, purpose-built
+    accessor beside ``_category_table()`` (same ``_CATEGORIES_PATH``, same
+    ``@lru_cache``) that reads the file's top-level family names directly --
+    a second VIEW of the same on-disk source of truth, never a second,
+    independently-maintained copy of it, and never a mutation of
+    ``_category_table()``'s security-relevant key space or of the shipped
+    vocabulary data. This test now pins THAT rule, proven the same way as
+    before: mutate the real cached accessor and confirm ``known_families()``
+    tracks it."""
 
-    def _stub_category_table() -> dict[str, list[str]]:
-        return {"some-skill": ["probe_family_xyz"]}
+    def _stub_category_family_names() -> tuple[str, ...]:
+        return ("probe_family_xyz",)
 
-    monkeypatch.setattr(skills_graph, "_category_table", _stub_category_table)
+    monkeypatch.setattr(
+        skills_graph, "_category_family_names", _stub_category_family_names
+    )
 
     assert skill_classifier.known_families() == ("probe_family_xyz",)
 
@@ -317,6 +340,43 @@ async def test_classify_families_two_valid_families_are_not_trimmed() -> None:
         llm, ["skill u"], settings=get_settings()
     )
     assert result == {"skill u": ["backend", "data"]}
+
+
+# ── A2 recurrence guard: this repo's own recurring defect shape ──────────
+#
+# `_MAX_SKILLS` mirroring `ResumeParsed.skills`'s `max_length` as an
+# uncoupled literal became unreachable-by-construction and truncated a
+# TRUSTED source (ADR-042, ROADMAP A2) -- see
+# `test_worker_parse_resume.py::test_max_skills_matches_resume_parsed_skills_schema_cap`
+# -- the established remedy for exactly this shape. `_MAX_FAMILIES_PER_SKILL`
+# here (skill_classifier.py:60) and `ResumeSkill.categories`'s own
+# `max_length` (resumes.py:155) are the SAME coupling: two literal `2`s tied
+# together only by a comment naming the constant, nothing enforcing
+# agreement between them.
+
+
+def test_max_families_per_skill_matches_resume_skill_categories_schema_cap() -> None:
+    """`ResumeSkill.categories`'s own docstring (resumes.py:150-158) says it
+    is "capped at `skill_classifier._MAX_FAMILIES_PER_SKILL` (2) as a second
+    line of defence" -- nothing enforced that either. A live desync (the
+    classifier's cap raised while the schema's `max_length` is left behind,
+    or vice versa) is not cosmetic: `classify_families` could legitimately
+    assign more families than the schema's `max_length` permits, and
+    `ResumeParsed.model_validate` -- called on the SAME LLM turn's résumé
+    payload -- would raise `ValidationError` for an otherwise-good résumé
+    (identical failure mode to the `_MAX_SKILLS` incident this guard
+    mirrors)."""
+    field_info = ResumeSkill.model_fields["categories"]
+    max_lengths = [m.max_length for m in field_info.metadata if isinstance(m, MaxLen)]
+    assert max_lengths, "ResumeSkill.categories has no MaxLen constraint at all"
+    assert max_lengths[0] == skill_classifier._MAX_FAMILIES_PER_SKILL, (
+        f"ResumeSkill.categories max_length={max_lengths[0]} != "
+        f"_MAX_FAMILIES_PER_SKILL={skill_classifier._MAX_FAMILIES_PER_SKILL} "
+        "in skill_classifier.py -- these two caps MUST stay in sync "
+        "(resumes.py:150-158). A desync lets the classifier legitimately "
+        "assign more families than the schema then accepts, failing "
+        "ResumeParsed.model_validate for an otherwise-good résumé."
+    )
 
 
 # ── failure posture: best-effort, never fails the caller ─────────────────
