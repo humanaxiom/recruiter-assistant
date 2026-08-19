@@ -53,14 +53,15 @@ relies on.
 
 Given that, the correct, non-"long list" fix is structural, not per-statement:
 ``init_schema`` below catches the known duplicate-object sqlstates and
-retries the SAME statement once. After the loser's failed attempt, the
-winner has necessarily already committed (the loser's own conflicting insert
-only resolves once the winner's transaction ends), so the retry's fresh ``IF
-NOT EXISTS``/pg_catalog check sees the object already there and is a true
-no-op. One retry is provably sufficient here specifically because there are
-only ever two concurrent callers (``api`` and ``worker``) — this is not a
-general N-way-race retry loop and should not be copied somewhere that
-assumption doesn't hold.
+retries the SAME statement in a small bounded loop (see
+``_MAX_STATEMENT_ATTEMPTS``). After a loser's failed attempt, the winner of
+that particular collision has necessarily already committed (the loser's own
+conflicting insert only resolves once the winner's transaction ends), so the
+very next retry's fresh ``IF NOT EXISTS``/pg_catalog check sees the object
+already there and is a true no-op. The attempt cap is a safety stop against
+looping forever if something keeps raising a retryable sqlstate — it is not
+a claim about, or derived from, how many callers can be racing concurrently,
+and nothing here depends on that count.
 """
 
 from __future__ import annotations
@@ -511,32 +512,53 @@ _RETRYABLE_DUPLICATE_SQLSTATES = frozenset(
     }
 )
 
+# How many times a single statement may be attempted in total (the first try
+# plus retries) before a retryable duplicate-object error is allowed to
+# propagate. This is a safety stop, not a correctness argument: a single
+# retry normally already succeeds (see the module docstring's "Concurrent-
+# boot safety" section for why), so this only needs headroom above 2 to
+# absorb more than one competing creator without asserting an exact count of
+# concurrent callers anywhere. Kept as a small, named constant rather than a
+# magic number so the bound is visible and changeable in one place.
+_MAX_STATEMENT_ATTEMPTS = 5
+
 
 async def init_schema(conn: _Executor) -> None:
     """Create the schema. Idempotent — safe to run on every boot, INCLUDING
-    two boots (``api`` and ``worker``) running it concurrently against the
-    same, possibly brand-new, database.
+    multiple boots (e.g. ``api`` and ``worker``, or any other concurrent
+    caller) running it concurrently against the same, possibly brand-new,
+    database.
 
     Executes against whatever it is handed: an asyncpg ``Connection`` (the
     integration tests, the worker startup) or a ``Pool`` (the API lifespan).
 
-    Every statement is retried once if it raises one of
-    ``_RETRYABLE_DUPLICATE_SQLSTATES`` — see the module docstring for why
-    this is the correct fix (measured, not assumed) and why exactly one
-    retry is sufficient (exactly two concurrent callers, never more). Any
-    other exception propagates immediately and un-retried: this must never
-    mask a real bug in the DDL.
+    Every statement is retried, up to ``_MAX_STATEMENT_ATTEMPTS`` attempts in
+    total, if it raises one of ``_RETRYABLE_DUPLICATE_SQLSTATES`` — see the
+    module docstring for why this is the correct fix (measured, not
+    assumed). Each retry re-runs the same statement after a competing
+    creator's transaction has committed, so the object it was racing to
+    create (or the guard it was checking) is now genuinely there and the
+    retry is a true no-op. The attempt cap exists only to stop the loop if
+    something keeps raising a retryable sqlstate; it is not a statement
+    about, or derived from, how many callers can be concurrent. Any other
+    exception propagates immediately and un-retried: this must never mask a
+    real bug in the DDL.
     """
     for statement in _STATEMENTS:
-        try:
-            await conn.execute(statement)
-        except asyncpg.PostgresError as exc:
-            if exc.sqlstate not in _RETRYABLE_DUPLICATE_SQLSTATES:
-                raise
-            # The other connection's conflicting create only resolves to a
-            # committed row once ITS transaction ends — which is exactly the
-            # event that unblocked ours and produced this error — so by this
-            # point the object genuinely exists and the retry is a true
-            # no-op (or, for the hand-rolled `IF NOT EXISTS (SELECT ...)`
-            # enum guards, the guard now correctly sees it and skips).
-            await conn.execute(statement)
+        for attempt in range(1, _MAX_STATEMENT_ATTEMPTS + 1):
+            try:
+                await conn.execute(statement)
+                break
+            except asyncpg.PostgresError as exc:
+                if exc.sqlstate not in _RETRYABLE_DUPLICATE_SQLSTATES:
+                    raise
+                if attempt == _MAX_STATEMENT_ATTEMPTS:
+                    raise
+                # The other connection's conflicting create only resolves to
+                # a committed row once ITS transaction ends — which is
+                # exactly the event that unblocked ours and produced this
+                # error — so by this point the object genuinely exists and
+                # the retry is a true no-op (or, for the hand-rolled `IF NOT
+                # EXISTS (SELECT ...)` enum guards, the guard now correctly
+                # sees it and skips). Loop around and try again rather than
+                # recursing.

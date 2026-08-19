@@ -164,3 +164,63 @@ async def test_two_concurrent_boots_from_a_genuinely_fresh_database_also_succeed
         "two containers booting together against a brand-new volume must "
         f"both succeed -- got {[repr(e) for e in errors]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_three_concurrent_boots_from_a_genuinely_fresh_database_also_succeed(
+    pg_dsn: str,
+) -> None:
+    """``init_schema``'s retry loop must not be a two-caller special case.
+
+    Nothing about ``docker compose up`` guarantees exactly two concurrent
+    callers forever -- an ``api`` replica, a test harness, or a future
+    migration runner could make it three (or more). This races THREE fresh
+    connections through ``init_schema`` against a genuinely fresh database
+    (its own container, not the module-scoped ``pg_dsn`` fixture the earlier
+    tests have already migrated) and asserts all three finish without error
+    and the resulting schema is correct -- specifically that the widened
+    ``jobs_shortlist_state_check`` constraint (the one statement in
+    ``_STATEMENTS`` proven above to race under concurrency) survives exactly
+    once, with both legal values present.
+    """
+    with PostgresContainer("postgres:16-alpine") as pg:
+        fresh_dsn = re.sub(r"\+\w+", "", pg.get_connection_url(), count=1)
+        conn_a = await _fresh_conn(fresh_dsn)
+        conn_b = await _fresh_conn(fresh_dsn)
+        conn_c = await _fresh_conn(fresh_dsn)
+        try:
+            results = await asyncio.gather(
+                init_schema(conn_a),
+                init_schema(conn_b),
+                init_schema(conn_c),
+                return_exceptions=True,
+            )
+        finally:
+            await conn_a.close()
+            await conn_b.close()
+            await conn_c.close()
+
+        errors = [r for r in results if isinstance(r, BaseException)]
+        assert not errors, (
+            "three concurrent init_schema() boots against a brand-new "
+            f"volume must all succeed -- got {[repr(e) for e in errors]}"
+        )
+
+        check_conn = await _fresh_conn(fresh_dsn)
+        try:
+            rows = await check_conn.fetch("""
+                SELECT conname, pg_get_constraintdef(oid) AS def
+                  FROM pg_constraint
+                 WHERE conrelid = 'jobs'::regclass
+                   AND pg_get_constraintdef(oid) ILIKE '%shortlist_state%'
+                """)
+        finally:
+            await check_conn.close()
+
+    assert len(rows) == 1, (
+        "expected exactly one shortlist_state CHECK constraint to survive "
+        f"the three-way race, found {len(rows)}: {[dict(r) for r in rows]}"
+    )
+    assert rows[0]["conname"] == "jobs_shortlist_state_check"
+    assert "ranking" in rows[0]["def"]
+    assert "awaiting_llm" in rows[0]["def"]
