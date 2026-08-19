@@ -628,8 +628,10 @@ class ShortlistStateOut(BaseModel):
 
 class ShortlistStatusResponse(BaseModel):
     """Response for GET /jobs/{id}/shortlist/status. ``state`` is ``None``
-    (with ``reason``/``at`` also ``None``) when the job carries no
-    fail-closed ``awaiting_llm`` state."""
+    (with ``reason``/``at`` also ``None``) when no run is in flight and the
+    job carries no fail-closed ``awaiting_llm`` state. The other two legal
+    values are ``'ranking'`` (a run is currently in flight) and
+    ``'awaiting_llm'`` (a run failed closed and a retry is queued)."""
 
     model_config = ConfigDict(extra="forbid")
 

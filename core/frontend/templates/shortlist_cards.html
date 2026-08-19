@@ -25,7 +25,18 @@
    new run grinds on for minutes, so `not entries` alone can no longer decide
    whether to keep polling. #}
 {% set ranking = _status is not none and _status.get('state') == 'ranking' %}
-{% set polling = (a < m) and ((not entries) or ranking) %}
+{# fix/regenerate-shortlist-no-feedback — awaiting_llm sibling of the
+   `ranking` fix above: a Regenerate whose LLM call fails closed calls
+   `set_shortlist_awaiting_llm` and returns WITHOUT ever reaching
+   `persist_shortlist`, so the PREVIOUS run's entries are still on the row
+   while a server-side retry is queued (ADR-029's arq.Retry mechanism, below
+   the retry ceiling). `ranking` and `awaiting_llm` answer two DIFFERENT
+   questions — "is a run in flight right now" vs. "did a run just fail
+   closed, with a retry already queued" — and must both keep polling, so
+   both belong in this OR. Do not collapse them into one flag: each drives a
+   distinctly-worded banner below, and merging them would silently pick the
+   wrong message for whichever state actually applies. #}
+{% set polling = (a < m) and ((not entries) or ranking or awaiting_llm) %}
 <div id="shortlist-cards"
   {%- if polling %}
      hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
@@ -40,6 +51,18 @@
     automatically when it finishes. The local model runs on every candidate
     résumé the run considers, so a full pass realistically takes several
     minutes and scales with the number of résumés involved.
+  </p>
+  {% elif entries and awaiting_llm %}
+  {# entries present + a failed-closed retry queued (not a run in flight —
+     that's the `ranking` branch above): still show the stale cards below,
+     but explain a retry is queued rather than silently falling through to
+     the bare-cards branch, which would leave no sign anything is happening. #}
+  <p class="muted">
+    <span class="htmx-indicator spinner">polling…</span>
+    Waiting for AI to rank candidates… the ranking model was briefly
+    unavailable, so a retry is queued automatically and will replace the
+    list below when it finishes — no action needed. The candidates below are
+    from the <strong>previous run</strong>.
   </p>
   {% elif entries %}{# fall through to the cards below #}
   {% elif polling and awaiting_llm %}
