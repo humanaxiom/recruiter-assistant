@@ -42,7 +42,7 @@ from typing import Any
 import pytest
 
 from src.schemas.jobs import JDExtracted
-from src.schemas.resumes import ResumeChunk, ResumeParsed
+from src.schemas.resumes import ResumeChunk, ResumeParsed, ResumeSkill
 
 EVALS_DIR = Path(__file__).resolve().parent.parent / "evals"
 FIXTURES_DIR = EVALS_DIR / "fixtures"
@@ -385,6 +385,62 @@ def test_outbox_parsed_exclude_constant_excludes_only_text_from_chunk_lists() ->
     assert _OUTBOX_PARSED_EXCLUDE.get("summary") is True
     assert _OUTBOX_PARSED_EXCLUDE.get("chunks") == {"__all__": {"text"}}
     assert _OUTBOX_PARSED_EXCLUDE.get("cover_letter_chunks") == {"__all__": {"text"}}
+
+
+# ── ROADMAP A2, Phase 3.3 skill-family classifier: the fixture's new
+# per-skill `categories` field must be REAL, schema-backed data ──────────
+#
+# UPDATED guard (not a new independent claim): the payload GAINED a field
+# (`ResumeSkill.categories`, nested under `parsed.skills[]`) -- this repo's
+# fixture is hand-curated JSON that already omits null-valued keys for
+# readability (`years`/`last_used_year` are absent, not `null`, on several
+# entries above), so the existing TOP-LEVEL-key drift guards
+# (``test_outbox_parsed_exclude_constant_matches_the_fixtures_dropped_keys``
+# / ``test_resume_fixture_parsed_retains_the_n1_allowed_structured_fields``)
+# are structurally unaffected by a nested, optional per-skill field and stay
+# green either way -- they were never the right granularity to catch this.
+# This is the real, intended strengthening the fixture-drift guard needed:
+# tying the fixture's NEW `categories` key to the real schema and the real
+# closed family vocabulary, so a future refactor can't let it silently rot
+# into decorative JSON nobody validates.
+
+
+def test_resume_fixture_declares_at_least_one_classifier_assigned_category() -> None:
+    """Guards the guard below: if the fixture ever lost its one `categories`
+    example, the schema/family-membership assertions would pass vacuously."""
+    payload = _load_json(RESUME_FIXTURE_PATH)
+    skills = payload["parsed"]["skills"]
+    assert any("categories" in s for s in skills), (
+        "fixture must demonstrate at least one classifier-assigned "
+        "category (Phase 3.3, ROADMAP A2) -- otherwise this guard is vacuous"
+    )
+
+
+def test_resume_fixture_skill_categories_are_real_schema_backed_families() -> None:
+    """The fixture's `categories` values must validate against the REAL
+    ``ResumeSkill`` model (not merely happen to parse as JSON) and every
+    family name in them must be one of the REAL, closed
+    ``skill_classifier.known_families()`` -- both checked against the actual
+    implementation, never re-typed here, so this cannot silently drift from
+    either side."""
+    from src.pipeline.skill_classifier import known_families
+
+    families = set(known_families())
+    payload = _load_json(RESUME_FIXTURE_PATH)
+    for raw in payload["parsed"]["skills"]:
+        validated = ResumeSkill.model_validate(raw)
+        assert validated.categories == raw.get("categories"), (
+            f"{raw.get('name')!r}: fixture's categories did not round-trip "
+            "through the real ResumeSkill schema unchanged"
+        )
+        if validated.categories:
+            assert set(validated.categories) <= families, (
+                f"{raw['name']!r} carries a family not in the real, closed "
+                f"categories.yaml vocabulary: {validated.categories!r}"
+            )
+            assert (
+                len(validated.categories) <= 2
+            ), f"{raw['name']!r} exceeds the per-skill family cap"
 
 
 # ── The new fixtures/outbox/ directory is actually PII-scanned ──────────

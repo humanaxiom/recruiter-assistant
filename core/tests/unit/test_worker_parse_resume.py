@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1711,6 +1712,302 @@ async def test_extract_skills_merged_degradation_reason_is_pii_free() -> None:
     assert "jane" not in reason.lower()
     assert "555-0100" not in reason
     assert "example.com" not in reason.lower()
+
+
+# ── skill-family classifier integration (ROADMAP A2, Phase 3.3 slice 1) ──
+#
+# Design: classification runs INSIDE `_extract_skills_merged`, after
+# `canonicalize_skill_names`, on the out-of-vocab subset only (the LLM is
+# already being called here at parse time, with no drain deadline --
+# CLASSIFIER-SPEC.md). `skill_classifier.classify_families` is mocked in
+# every test below -- its OWN contract (batching, the family cap, the
+# unknown-family drop, the no-confident-answer omission, PII-safe failure)
+# is pinned independently in `test_skill_classifier.py`; these tests pin
+# ONLY `_extract_skills_merged`'s integration with it: which names it sends,
+# how the result attaches to `ResumeSkill.categories`, and the failure
+# posture at THIS call site.
+#
+# `canonicalize_skill_names` is deliberately left UNPATCHED (unlike most
+# tests above) so "python" really is in-vocab and "mri methods" really is
+# out-of-vocab for `unclassified_names`' real predicate -- these tests would
+# be meaningless against a stubbed identity canonicaliser.
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_sends_only_the_out_of_vocab_subset_to_the_classifier() -> (  # noqa: E501
+    None
+):
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="python"),  # in-vocab
+                    ResumeSkillDetail(name="mri methods"),  # out of vocab
+                ]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as classify,
+    ):
+        await _extract_skills_merged(llm, chunks, "res-1")
+
+    classify.assert_awaited_once()
+    call = classify.await_args
+    sent_names = next(
+        a for a in (*call.args, *call.kwargs.values()) if isinstance(a, list)
+    )
+    assert "mri methods" in sent_names
+    assert "python" not in sent_names
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_attaches_classifier_categories_to_the_skill() -> (
+    None
+):
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="mri methods")]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            return_value={"mri methods": ["health_wellness"]},
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    skill = next(s for s in merged if s.name == "mri methods")
+    assert skill.categories == ["health_wellness"]
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_vocab_skill_never_gets_classifier_categories() -> (
+    None
+):
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(skills=[ResumeSkillDetail(name="python")])
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            # Even if a buggy/future classifier answered for a vocab name
+            # anyway, `_extract_skills_merged` must never attach it -- the
+            # guarantee that it's never even SENT is proven by the dedicated
+            # test above; this proves the attach side too.
+            return_value={"python": ["backend"]},
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    skill = next(s for s in merged if s.name == "python")
+    assert skill.categories is None
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_no_classifier_answer_leaves_categories_none() -> (
+    None
+):
+    """Conservative default: no confident answer -> `categories` stays at
+    its schema default (``None``, not ``[]``) -- behaviourally identical to
+    a résumé parsed before this feature existed."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="mri methods")]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+    ):
+        merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    skill = next(s for s in merged if s.name == "mri methods")
+    assert skill.categories is None
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_classifier_failure_is_non_fatal() -> None:
+    """Mirrors `_extract_skills_merged`'s own failure posture for the skills
+    LLM call: the classifier is best-effort. Its failure must not fail the
+    parse, must not set the skills-extraction degradation reason (a
+    DIFFERENT, unrelated signal), and every skill is still extracted."""
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[ResumeSkillDetail(name="mri methods")]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ollama down"),
+        ),
+    ):
+        merged, reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert reason is None  # not the skills-extraction degradation signal
+    skill = next(s for s in merged if s.name == "mri methods")
+    assert skill.categories is None
+
+
+@pytest.mark.asyncio
+async def test_extract_skills_merged_classifier_failure_logs_no_skill_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    llm = MagicMock(
+        chat_json=AsyncMock(
+            return_value=ResumeSkillDetails(
+                skills=[
+                    ResumeSkillDetail(name="a very distinctive sentinel skill xyz123")
+                ]
+            )
+        )
+    )
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="irrelevant")]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.match_skills_in_text", MagicMock(return_value=[])
+        ),
+        patch(
+            "src.worker.resume_tasks.load_prompt",
+            return_value=_fake_prompt("resume_skills_v2"),
+        ),
+        patch(
+            "src.worker.resume_tasks.skill_classifier.classify_families",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ollama down"),
+        ),
+    ):
+        with caplog.at_level(logging.DEBUG):
+            merged, _reason = await _extract_skills_merged(llm, chunks, "res-1")
+
+    assert any("sentinel" in s.name for s in merged)
+    assert "sentinel" not in caplog.text.lower()
+    assert "xyz123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_outbox_payload_carries_classifier_categories_through_to_projection() -> (
+    None
+):
+    """The categories a parse-time classifier assigned must ride the
+    EXISTING outbox payload unchanged -- `_OUTBOX_PARSED_EXCLUDE` excludes
+    nothing under `skills` (CLASSIFIER-SPEC.md's whole "strictly additive"
+    claim depends on this)."""
+    resume_id = uuid4()
+    job_id = uuid4()
+    conn = _make_conn(
+        _meta_row(job_id=job_id, status="uploaded", blob_key="resumes/abc.pdf")
+    )
+    blob_store = MagicMock(get=AsyncMock(return_value=b"pdf-bytes"))
+    core = ResumeCore(
+        candidate=CandidateInfo(name="Ada Lovelace"),
+        summary="Backend engineer.",
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=core))
+    chunks = [ResumeChunk(id="c_001", section="skills", page=0, text="MRI methods")]
+    embedder = MagicMock(embed=AsyncMock(side_effect=[[[0.1] * 8], [[0.2] * 8]]))
+    ctx = _make_ctx(conn, llm=llm, blob_store=blob_store, embedder=embedder)
+    merged_skills = [ResumeSkill(name="mri methods", categories=["health_wellness"])]
+
+    with (
+        patch(
+            "src.worker.resume_tasks.extract_text", MagicMock(return_value=MagicMock())
+        ),
+        patch("src.worker.resume_tasks.chunk_resume", MagicMock(return_value=chunks)),
+        patch(
+            "src.worker.resume_tasks._extract_skills_merged",
+            new_callable=AsyncMock,
+            return_value=(merged_skills, None),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.encrypt_pii_via_session",
+            new_callable=AsyncMock,
+            return_value=(b"enc-name", b"enc-email", b"enc-phone", "hash123"),
+        ),
+        patch(
+            "src.worker.resume_tasks.resume_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.worker.resume_tasks.outbox_service.enqueue_outbox",
+            new_callable=AsyncMock,
+        ) as enqueue,
+    ):
+        result = await parse_resume(ctx, str(resume_id))
+
+    assert result == "parsed"
+    payload = enqueue.await_args.kwargs["payload"]
+    skill_row = next(
+        s for s in payload["parsed"]["skills"] if s["name"] == "mri methods"
+    )
+    assert skill_row["categories"] == ["health_wellness"]
 
 
 # ── _parse_cover_letter ──────────────────────────────────────────────────
