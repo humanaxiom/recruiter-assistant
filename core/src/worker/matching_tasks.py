@@ -78,15 +78,37 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
 
     async with pool.acquire() as conn:
         if not await try_job_lock(conn, "shortlist", job_id):
+            # fix/regenerate-shortlist-no-feedback: a concurrent duplicate run
+            # genuinely holds the lock and is in flight — deliberately do NOT
+            # touch shortlist_state here. It was set to 'ranking' by that
+            # OTHER run's own enqueue (or is about to be), and clearing it
+            # from this early return would blank the UI mid-run.
             log.info("shortlist_job.already_running job_id=%s", job_id_str)
             return "already_running"
 
+        # fix/regenerate-shortlist-no-feedback: an unexpected exception
+        # anywhere below (not caught as RankingUnavailableError) propagates
+        # past this function with shortlist_state left at 'ranking' — there is
+        # no blanket except/finally here to clear it, since arq's own retry
+        # may still legitimately be in flight. The staleness bound
+        # (settings.shortlist_ranking_stale_after_s, read by
+        # get_shortlist_state) is the backstop: a 'ranking' row past that age
+        # reads back as NOT ranking even though nothing wrote NULL over it.
         try:
             row = await conn.fetchrow(_JOB_META_SQL, job_id)
             if row is None:
+                # fix/regenerate-shortlist-no-feedback: the row itself is gone
+                # (deleted between enqueue and pickup), so this UPDATE affects
+                # zero rows and must not raise — mirrors clear_shortlist_state's
+                # own no-op-on-no-match contract.
+                await clear_shortlist_state(conn, job_id)
                 log.warning("shortlist_job.missing job_id=%s", job_id_str)
                 return "missing"
             if row["description_parsed"] is None:
+                # fix/regenerate-shortlist-no-feedback: no run is happening —
+                # clear any 'ranking' the route set at enqueue so the UI stops
+                # polling instead of being pinned on "Regenerating…" forever.
+                await clear_shortlist_state(conn, job_id)
                 log.info("shortlist_job.not_parsed job_id=%s", job_id_str)
                 return "not_parsed"
 
@@ -149,7 +171,14 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
 
 
 async def reverse_match_job(ctx: dict[str, Any], resume_id_str: str) -> str:
-    """Generate + persist the reverse match (résumé -> jobs) for one résumé."""
+    """Generate + persist the reverse match (résumé -> jobs) for one résumé.
+
+    ``fix/regenerate-shortlist-no-feedback`` — checked and deliberately left
+    alone: this task has no state column of its own (``jobs.shortlist_state``
+    is keyed on a job, not a résumé) and no equivalent "regenerate shows a
+    stale list" report exists for it. It relies solely on
+    ``try_job_lock``/``already_running`` for in-flight detection, same as
+    before this fix. Widening it is out of this branch's scope."""
     pool = ctx["pg_pool"]
     resume_id = UUID(resume_id_str)
     settings = get_settings()

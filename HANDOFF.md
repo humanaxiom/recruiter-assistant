@@ -2,7 +2,93 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-18: THREE A6 SIBLING DEFECTS NOW MARKED AND DISCLOSED
+### ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
+
+> **This branch (`fix/regenerate-shortlist-no-feedback`) is a `feat`-class change** — a new persisted
+> state value, a DDL constraint change, and changed UI behaviour. It required the integration gate, not
+> the offline one. **`git fetch` and check `gh pr list` before trusting any line here.**
+>
+> **PR #92 MERGED FIRST** (squash `a4eb8bf`) — the A6 sibling sub-score markers, ADR-041 addendum, banner
+> demoted to history below. The two were independent: #92 touched the "Why this rank?" detail panel
+> (`shortlist_entry.html`) and the scoring write path, this one touches the shortlist list's poll fragment
+> (`shortlist_cards.html`) and the ranking run state. Neither enabled the other. They both touched
+> `HANDOFF.md`, which conflicted on this merge exactly as predicted and was resolved by keeping both
+> banners.
+>
+> **The two came from different places, and that is the point.** #92 came off the ROADMAP A6 backlog.
+> This one came from a human clicking a button.
+
+#### What happened
+
+Someone clicked **Regenerate shortlist** on a job that already had one, and reported that nothing
+happened. Everything underneath had worked:
+
+| Layer | Evidence |
+|---|---|
+| Button fires | frontend `POST /jobs/<id>/shortlist` → `200`; API → `202 Accepted` |
+| Job runs | worker: `shortlist_job(...)` twice, both `● 'persisted'` (119s and 78s) |
+| Data written | `shortlist_entries`: 2 rows, `generated_at = 02:57:43` — the second the run finished |
+| UI updates | **never**, until a manual page reload |
+
+**Root cause, one line** — `core/frontend/templates/shortlist_cards.html:14` before this branch:
+
+```jinja
+{% set polling = (not entries) and (a < m) %}
+```
+
+`polling` answers *"is the shortlist empty?"* and was being used to answer *"is a run in flight?"*. True
+for a first Generate, false for every Regenerate — so the fragment came back with no `hx-trigger` and
+re-rendered the previous run's cards, unchanged, while the real run ground on for another 78-119 seconds.
+
+The fix records the fact instead of inferring it: `jobs.shortlist_state = 'ranking'`, written by the API
+route **before** it enqueues, cleared or overwritten by the worker on every terminal path except
+`already_running`. See **[ADR-043](docs/adr/043-shortlist-ranking-state.md)**.
+
+#### 🔴 The lesson, and it outranks the fix
+
+**A green suite could not see this, and one click could.** The defect sat behind every gate this repo
+has: ruff, black, `mypy --strict`, thousands of unit tests, hundreds of integration tests against real
+Postgres, Neo4j and Redis, 94%+ coverage. All of it green, on a product whose most visible button did
+nothing. The suite proves the API returns 202, the worker runs, and the rows land — none of which is the
+same claim as *the screen updates*.
+
+This is the strongest evidence yet for what the ROADMAP has said for four sessions: **getting the pilot
+actually run is the highest-value item in the project**, and it is worth more than any amount of further
+hardening. That item is now partly underway — someone is finally using this thing.
+
+It is also [A7](docs/ROADMAP.md) one layer further out than usual: the invariant was in a Jinja
+expression, and nothing anywhere enforced that "empty" and "not running" are different facts.
+
+#### The gap the fix itself shipped
+
+The `'ranking'` fix left its own twin open, found in review before merge: with entries present and the
+state `awaiting_llm` (a Regenerate whose LLM call failed closed — `persist_shortlist` is never reached, so
+the previous run's entries survive), polling stopped and no banner rendered. The recruiter saw a stale
+list with no sign a retry was queued. Fixed on this branch; `ranking` and `awaiting_llm` are kept as two
+flags answering two questions, deliberately not collapsed.
+
+**That is the fourth remediation in this session's work to ship a gap of the shape it was fixing.** Budget
+for the review pass; it has paid every single time.
+
+#### 🔴 The bigger finding: a pre-existing boot-race defect (F2b)
+
+While fixing the constraint-widen race, the review audit of `init_schema` found a **larger, pre-existing defect:** Postgres's native `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` clauses are **not atomic against a second connection**. On a fresh `docker compose up`, if `api` and `worker` boot together, one of them can raise `42710 duplicate_object` and stay exited — silently breaking the stack. Measured against real Postgres: 100/100 failures on brand-new objects, 0/50 on existing relations (which Postgres locks for free).
+
+**Fix:** `init_schema` now retries any statement that raises a known duplicate-object sqlstate up to 5 times. The retry loop is central (not per-statement) because the fix applies to every `CREATE EXTENSION`, `CREATE TABLE IF NOT EXISTS`, and `CREATE INDEX IF NOT EXISTS` in the file. Measured (unmocked): two-way and three-way concurrent boots against brand-new Postgres now both succeed every time. **Consequence:** a clean volume, first boot is now safe against concurrent initializers. This is a major defect because it silently breaks the stack on first boot.
+
+Also found in review: **the page-load fix was missing (F1).** The `'ranking'` state was recorded and cleared correctly, but the full-page job-detail route wasn't fetching the status at all — so a recruiter who hit "Regenerate" then reloaded the page would see a stale shortlist. Fixed: the status is now fetched unconditionally on page load, not just when entries are empty.
+
+#### One reversal a human should know about
+
+This branch **reverses a pre-existing assertion** from ADR-029. That ADR decided *"once entries exist, the
+normal cards render regardless of state"*, justified by a **stale** `awaiting_llm` flag not blocking a
+later success. That case is unreachable — a successful run clears the flag in the same transaction as the
+write. The reachable case is the reverse: entries from a prior success, flag from a *current* failure.
+ADR-029's decision is preserved (the cards still render); what changed is the banner and the poll above
+them. Recorded as a dated amendment in ADR-029 rather than a rewrite.
+
+
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-18: THREE A6 SIBLING DEFECTS NOW MARKED AND DISCLOSED — MERGED as PR #92, squash `a4eb8bf`
 
 > **Last FEATURE merge before this one was PR #88, squash `a0c3c17`, ADR-042.** #90 and #91 were docs.
 > **This branch is NOT** — it adds three persisted `ScoreBreakdown` fields and a new UI disclosure, so it is a
@@ -70,20 +156,7 @@ sweep rather than one commit each.
 > résumé projected before the classifier exists is **permanently unclassified**. Items 2 and 3 being
 > corpus-owner work is a real counter-argument. Sequencing is the owner's call; it is a note, not a reorder.
 
-#### (history) READ FIRST — 2026-08-18: THE BLOCKED DECISIONS NOW HAVE MEMOS; TWO DOCS DESCRIBED THE PIPELINE WRONGLY
-
-> **Last FEATURE merge is still PR #88, squash `a0c3c17`, ADR-042.** Nothing since has changed product
-> behaviour — #90 and this one are docs. `origin/main` is at or *after* `969a323`. **`git fetch` and check
-> `gh pr list` before trusting any of this.**
->
-> Supersedes the 2026-08-17 banner below (kept as history, and still accurate on A2 itself).
->
-> **⚠️ Concurrency, new and worth knowing:** two Claude Code sessions worked this repo simultaneously on
-> 2026-08-17 and raced on every action — commit, push and merge — the second beating the first by seconds
-> each time. Git metadata cannot tell them apart (both commit as `claude-code`, both merge as `adamsalah13`),
-> so a commit that "appeared from nowhere" mid-session is probably a sibling session, not automation.
-> **Re-read `git log -1` / `git status -sb` / `gh pr view` in the same tool call that commits, pushes or
-> merges.** A start-of-session snapshot is not safe to write against.
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-18: THE BLOCKED DECISIONS NOW HAVE MEMOS; TWO DOCS DESCRIBED THE PIPELINE WRONGLY
 
 #### What shipped — PR #90 (memos) and this PR (docs)
 

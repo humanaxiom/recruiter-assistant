@@ -511,6 +511,18 @@ wins for education when both markers are false). See the addendum for full detai
    `assert isinstance(pairs_call, float)` is vacuous — the predicate assertion above it is the one with
    teeth. Anchored here so a future session can sweep them in one pass rather than one per branch.
 
+🆕 **2026-08-18 — First end-to-end product run surfaced a defect the suite could not see** — 
+[ADR-043](adr/043-shortlist-ranking-state.md) (regenerate shortlist not updating UI). The API worked, the 
+worker ran, the database persisted correctly, but the frontend's polling gate was broken (inferred "run in 
+flight" from `not entries`, which fails for Regenerate). The entire unit + integration suite was green, because
+it proves the API returns 202, the worker runs and the rows land -- none of which is the same claim as
+"the screen updates". This is direct evidence for "get the pilot
+running" being the highest-value item: the suite cannot see what only the product can show.
+
+🆕 **Pre-existing boot-race defect found in review (ADR-043 §1b).** Postgres's native `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` clauses are not atomic against concurrent callers — on a fresh volume, `docker compose up` with `api` and `worker` booting together can leave one dead with a duplicate-object error, silently breaking the stack. Measured 100/100 failures in trials; measured 0/50 on existing relations (Postgres locks them). Fix: `init_schema` retries any statement raising a duplicate-object sqlstate (5 attempts, bounded loop). **Consequence:** first boot against a clean volume is now safe; operationally, this closes a silent failure mode on deployment. Severity is major because it leaves the stack exited with no log explaining why; the defect existed since the DDL was written but was only observable with concurrent schema initializers (both services boot together).
+
+**Recorded residuals from the regenerate-shortlist review (ADR-043):** (1) the staleness bound is wall-clock, not job-time — a 2+ hour ranking would read stale after 1 hour (`shortlist_service.py:276-279`); (2) a second Regenerate during a run is silently dropped by the advisory lock with no user acknowledgement (`matching_tasks.py:80-87`).
+
 Remaining open in A6: retention is stored but never enforced (`ddl.py:76-77`); revoke-and-purge is a
 **recorded deferral** (ADR-026 §4) needing an HR decision; reverse match fails *open* at stage 3 and
 is **unwrapped at stage 2** (reverse match starts at `orchestrator.py:883`, its stage-2 loop at

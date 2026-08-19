@@ -386,3 +386,29 @@ def test_shortlist_retry_defer_s_is_positive() -> None:
 def test_env_override_shortlist_retry_defer_s(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("SHORTLIST_RETRY_DEFER_S", "12.5")
     assert Settings().shortlist_retry_defer_s == pytest.approx(12.5)
+
+
+# ── fix/regenerate-shortlist-no-feedback — 'ranking' staleness bound ────────
+#
+# The UI now polls on a real ``jobs.shortlist_state = 'ranking'`` fact set at
+# enqueue time (see the ADR-021/ADR-029-style spec for this fix). A crashed
+# worker must not pin the UI in a permanent "Regenerating…": ``get_shortlist_
+# state`` treats a 'ranking' row older than this threshold as NOT ranking
+# (without clearing the row). Named/defaulted here (never hard-coded in
+# ``shortlist_service``) per CLAUDE.md's "config only via src/settings.py".
+# Defaults to the worker's own ``job_timeout`` (``src/worker/main.py:162`` —
+# 3600s) because a run genuinely cannot still be in flight past its own
+# job-level timeout; the two are related by construction, not coincidence.
+
+
+def test_shortlist_ranking_stale_after_s_default_matches_worker_job_timeout() -> None:
+    assert Settings().shortlist_ranking_stale_after_s == pytest.approx(3600.0)
+
+
+def test_shortlist_ranking_stale_after_s_is_positive() -> None:
+    assert Settings().shortlist_ranking_stale_after_s > 0
+
+
+def test_env_override_shortlist_ranking_stale_after_s(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTLIST_RANKING_STALE_AFTER_S", "120")
+    assert Settings().shortlist_ranking_stale_after_s == pytest.approx(120.0)

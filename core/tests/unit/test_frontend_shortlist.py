@@ -793,12 +793,39 @@ def test_shortlist_cards_no_awaiting_message_when_state_is_null(
     assert "hx-trigger" in body  # ordinary "still generating" path, unchanged
 
 
-def test_shortlist_cards_entries_present_ignores_awaiting_llm_state(
+def test_shortlist_cards_entries_present_and_awaiting_llm_keeps_polling(
     monkeypatch: Any, client: Any
 ) -> None:
-    """If entries exist, render cards (unchanged) — even if the status
-    endpoint still reports a (now-stale) awaiting_llm state from before the
-    successful retry landed."""
+    """Reviewer finding on fix/regenerate-shortlist-no-feedback (PR review,
+    2026-08-18): a Regenerate whose LLM call fails closed calls
+    ``set_shortlist_awaiting_llm`` and returns WITHOUT ever reaching
+    ``persist_shortlist`` (ADR-029's worker mechanism) — so the PREVIOUS run's
+    entries are still on the row when the status endpoint reports
+    ``state == 'awaiting_llm'``. That is the reported no-feedback bug one
+    state over: ``ranking`` is false (the state is 'awaiting_llm', not
+    'ranking'), so the old ``polling = (a < m) and ((not entries) or ranking)``
+    computes False, the poll silently stops, and the recruiter is left on a
+    stale list with no sign a retry is queued.
+
+    ADR-029's own rationale ("a degraded ranking that reaches human eyes is
+    worse than no ranking" / "visibility over silence") and the identical
+    'ranking'-state fix immediately above ("stale-but-labelled beats blank")
+    both point the same way: a retry IS queued server-side here (the worker
+    raises ``arq.Retry`` below the retry ceiling — ADR-029's mechanism
+    section), so polling must continue and the recruiter must be told a
+    retry is in flight, exactly as it already is for the 'ranking' case.
+
+    **Corrected from a prior assertion.** This test previously asserted the
+    OPPOSITE — no trigger, no banner — on the premise that entries could only
+    be non-empty here because a stale flag lingered AFTER a successful
+    retry. That premise doesn't hold: ADR-029 clears ``shortlist_state`` in
+    the SAME transaction as a successful persist, so a genuinely-stale
+    post-success flag is not a reachable state, while a currently-in-flight
+    fail-closed retry with old entries still present (the Regenerate case
+    above) is the dominant real one. The two are indistinguishable from this
+    template's inputs alone, so the fail-safe default (poll + disclose) must
+    win.
+    """
     job_id = uuid4()
     monkeypatch.setattr(
         api_client,
@@ -817,10 +844,51 @@ def test_shortlist_cards_entries_present_ignores_awaiting_llm_state(
             }
         ),
     )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "hx-trigger" in body, "a retry is queued server-side — polling must continue"
+    assert "Candidate A" in body, "the previous run's cards must still render"
+
+
+def test_shortlist_cards_entries_present_and_awaiting_llm_banner_precedes_stale_cards(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Companion to the test above: the "waiting for AI / retry queued"
+    banner must render ABOVE the stale cards (so a recruiter reads the
+    explanation before the possibly-outdated list), and the cards themselves
+    must still be intact underneath it — never blanked in favour of the
+    banner."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(resume_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": "awaiting_llm",
+                "reason": "llm output invalid: empty response",
+                "at": "2026-08-01T00:00:00+00:00",
+            }
+        ),
+    )
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
-    assert "Candidate A" in body
-    assert "Waiting for AI to rank candidates" not in body
-    assert "hx-trigger" not in body
+    normalized = _norm(body)
+
+    assert "waiting for ai to rank candidates" in normalized
+    assert "retry" in normalized  # "...queued to retry automatically..."
+    assert "candidate a" in normalized
+    # Ordering: the banner text must precede the card content, not follow it.
+    banner_idx = normalized.find("waiting for ai to rank candidates")
+    card_idx = normalized.find("candidate a")
+    assert banner_idx != -1 and card_idx != -1
+    assert (
+        banner_idx < card_idx
+    ), "the awaiting_llm banner must render ABOVE the stale cards, not below"
 
 
 def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
@@ -835,6 +903,170 @@ def test_shortlist_cards_404s_when_status_endpoint_reports_missing_job(
     )
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     assert resp.status_code == 404
+
+
+# ── fix/regenerate-shortlist-no-feedback — poll on a real 'ranking' state ──
+#
+# Root cause (measured live): shortlist_cards.html gates its htmx poll on
+# ``not entries`` — true only on first Generate. On Regenerate, entries
+# already exist, so the returned fragment carries NO hx-trigger and silently
+# re-renders the stale list while the real run grinds on for minutes. The fix
+# records a real ``'ranking'`` state on ``jobs.shortlist_state`` (set by the
+# API route before it even enqueues) and polls on THAT fact instead of
+# inferring "empty == in progress".
+#
+# ``api_client.get_shortlist_status`` already exists (FU-7 §2 above); what's
+# new here is (1) ``_render_shortlist_cards`` must fetch it UNCONDITIONALLY —
+# today it only fetches when ``entries`` is empty (frontend/app.py:904), so
+# with entries present the spy below is never even called — and (2) the
+# template must treat ``state == 'ranking'`` as "still polling" even when
+# ``entries`` is non-empty. Every test in this section fails against today's
+# code for exactly that reason (not a broken test): with entries present, the
+# fragment renders the terminal (non-polling) branch unconditionally,
+# regardless of what the status endpoint reports.
+
+
+def test_shortlist_cards_entries_present_and_ranking_shows_trigger_banner_and_old_cards(  # noqa: E501
+    monkeypatch: Any, client: Any
+) -> None:
+    """THE regression guard for the actually-reported bug: Regenerate with a
+    prior shortlist already on screen. Entries present + a real 'ranking' run
+    in flight must (a) keep the htmx poll trigger, (b) show a clearly-worded
+    banner explaining a new run is in progress, and (c) still render the
+    previous run's cards — stale-but-labelled, never blank."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": "ranking",
+                "reason": None,
+                "at": "2026-08-18T00:00:00+00:00",
+            }
+        ),
+    )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    normalized = _norm(body)
+
+    assert resp.status_code == 200
+    assert "hx-trigger" in body, "a run is in flight — polling must continue"
+    # A clearly-worded banner: the cards below are the PREVIOUS run, a NEW one
+    # is in progress. Phrasing lifted straight from the spec's own wording so
+    # the assertion pins the required MEANING, not an incidental rewrite.
+    assert "previous run" in normalized
+    assert "in progress" in normalized
+    assert "several minutes" in normalized  # same honest-duration copy as Generate
+    # The stale cards themselves must still render — never blanked.
+    assert "Candidate A" in body
+    assert "87" in body  # score_final = 0.87 -> round(87)
+
+
+def test_shortlist_cards_entries_present_and_not_ranking_has_no_trigger(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The negative case, pinned explicitly: entries present and NO run in
+    flight must NOT trigger a poll — trading the no-feedback bug for an
+    infinite poll is exactly as broken as the original bug."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": None,
+                "reason": None,
+                "at": None,
+            }
+        ),
+    )
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "hx-trigger" not in body
+    assert "Candidate A" in body
+
+
+def test_shortlist_cards_no_entries_no_ranking_state_still_shows_generating(
+    monkeypatch: Any, client: Any
+) -> None:
+    """No entries, status carries no state at all -> the ordinary first-
+    Generate path, byte-for-byte unchanged by the 'ranking' branch existing."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        api_client,
+        "get_shortlist_status",
+        MagicMock(
+            return_value={
+                "job_id": str(job_id),
+                "state": None,
+                "reason": None,
+                "at": None,
+            }
+        ),
+    )
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    assert "hx-trigger" in body
+    assert "Generating" in body
+
+
+def test_shortlist_cards_fetches_status_even_when_entries_present(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``_render_shortlist_cards`` must consult the status endpoint
+    UNCONDITIONALLY (frontend/app.py currently gates the call on ``not
+    entries`` — see the module comment above), because a Regenerate has
+    entries present AND a run in flight at the same time."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    spy = MagicMock(
+        return_value={"job_id": str(job_id), "state": None, "reason": None, "at": None}
+    )
+    monkeypatch.setattr(api_client, "get_shortlist_status", spy)
+    client.get(f"/jobs/{job_id}/shortlist-cards")
+    spy.assert_called_once()
+
+
+def test_shortlist_cards_status_backend_unavailable_with_entries_degrades_gracefully(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A transient outage on JUST the status endpoint, with entries present,
+    must never 500 and must never crash — it degrades to the ordinary
+    (non-polling) rendering of the cards already in hand."""
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "list_shortlist",
+        MagicMock(return_value=[_full_entry(uuid4())]),
+    )
+    spy = MagicMock(side_effect=api_client.BackendUnavailable("down"))
+    monkeypatch.setattr(api_client, "get_shortlist_status", spy)
+    resp = client.get(f"/jobs/{job_id}/shortlist-cards")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    # A test that passes merely because the fetch was never attempted would
+    # prove nothing about graceful degradation -- assert it really was called.
+    spy.assert_called_once()
+    assert "Candidate A" in body
+    assert "hx-trigger" not in body
 
 
 # ── "Why this rank?" defense pack, slice 1 — entry detail panel ───────────

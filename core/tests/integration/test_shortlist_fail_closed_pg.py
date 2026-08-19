@@ -36,6 +36,7 @@ What a REAL Postgres proves that a mocked-conn unit test
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -235,6 +236,77 @@ async def test_shortlist_job_fails_closed_on_llm_output_invalid_error(
     assert row["shortlist_state"] == "awaiting_llm"
     assert row["shortlist_state_reason"] is not None
     assert row["shortlist_state_at"] is not None
+
+
+# ── fail-closed on a REGENERATE — prior entries survive untouched ──────────
+#
+# Reviewer finding (fix/regenerate-shortlist-no-feedback follow-up,
+# 2026-08-18): every fail-closed test above starts from a job with NO prior
+# shortlist. The reported no-feedback bug (and the frontend's
+# ``awaiting_llm``-with-entries tests in ``test_frontend_shortlist.py``) both
+# depend on a fact this file never actually drove through a real Postgres:
+# that a Regenerate whose LLM call fails closed leaves a job's PRIOR run's
+# ``shortlist_entries`` row completely untouched, because ``persist_shortlist``
+# is never reached on this path (ADR-029's worker mechanism — the
+# ``set_shortlist_awaiting_llm`` write and the ``raise Retry`` both happen
+# before any delete/insert into ``shortlist_entries``). This is a real-DB fact
+# (does the DELETE-first persist path get anywhere NEAR the table on this
+# branch?), not something a template-level test can prove.
+
+
+@pytest.mark.asyncio
+async def test_shortlist_job_fail_closed_leaves_prior_entries_untouched(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.pipeline.matching.orchestrator import RankingUnavailableError
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume_with_chunks(pg_pool, job_id)
+
+    # Seed a PRIOR successful run's entry directly -- this file has no
+    # dependency on shortlist_service.persist_shortlist, and only the row's
+    # continued existence (not how it got there) matters for this test.
+    prior_generated_at = dt.datetime(2026, 8, 1, tzinfo=dt.UTC)
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO shortlist_entries
+                (job_id, resume_id, rank, score_final, score_breakdown,
+                 evidence, pipeline_meta, generated_at)
+            VALUES ($1, $2, 1, 0.75, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, $3)
+            """,
+            job_id,
+            resume_id,
+            prior_generated_at,
+        )
+
+    neo4j = _fake_neo4j(resume_id)
+    llm = _failing_llm(LLMOutputInvalidError("response content was empty"))
+    ctx = _worker_ctx(pg_pool, neo4j, llm)
+
+    with pytest.raises(Retry) as exc_info:
+        await shortlist_job(ctx, str(job_id))
+    assert isinstance(exc_info.value.__cause__, RankingUnavailableError)
+
+    async with pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT rank, score_final, generated_at FROM shortlist_entries "
+            "WHERE job_id = $1 AND resume_id = $2",
+            job_id,
+            resume_id,
+        )
+    assert row is not None, (
+        "the prior run's entry must survive a fail-closed regenerate — "
+        "persist_shortlist is never reached on this path"
+    )
+    assert row["rank"] == 1
+    assert row["score_final"] == pytest.approx(0.75)
+    assert row["generated_at"] == prior_generated_at
+
+    state_row = await _job_state_row(pg_pool, job_id)
+    assert state_row is not None
+    assert state_row["shortlist_state"] == "awaiting_llm"
 
 
 # ── fail-closed: Mode A (LLMUnavailableError) ───────────────────────────────

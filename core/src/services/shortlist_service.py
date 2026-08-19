@@ -37,6 +37,7 @@ write path silently.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import io
 import json
 import logging
@@ -67,6 +68,7 @@ from src.services.redaction import (
     redact_text,
     redacted_filename,
 )
+from src.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +183,14 @@ _SET_SHORTLIST_STATE_SQL = (
     "UPDATE jobs SET shortlist_state = 'awaiting_llm', "
     "shortlist_state_reason = $2, shortlist_state_at = now() WHERE id = $1"
 )
+# fix/regenerate-shortlist-no-feedback — a run genuinely in flight (set by the
+# API route BEFORE it enqueues, so the very first poll after the POST returns
+# already sees it true; overwritten/cleared by the worker on every terminal
+# path — see matching_tasks.py).
+_SET_SHORTLIST_RANKING_SQL = (
+    "UPDATE jobs SET shortlist_state = 'ranking', "
+    "shortlist_state_reason = NULL, shortlist_state_at = now() WHERE id = $1"
+)
 _CLEAR_SHORTLIST_STATE_SQL = (
     "UPDATE jobs SET shortlist_state = NULL, shortlist_state_reason = NULL, "
     "shortlist_state_at = NULL WHERE id = $1"
@@ -211,6 +221,16 @@ async def set_shortlist_awaiting_llm(
     await conn.execute(_SET_SHORTLIST_STATE_SQL, job_id, reason)
 
 
+async def set_shortlist_ranking(conn: DbConn, job_id: UUID) -> None:
+    """Record the ``'ranking'`` state (a run genuinely in flight) with a
+    ``now()`` timestamp on ``job_id``, clearing any stale ``reason``.
+    ``fix/regenerate-shortlist-no-feedback`` — called by the API route
+    synchronously, BEFORE ``arq.enqueue_job``, so the state is already true
+    the instant the POST returns and the frontend's very first poll sees
+    it."""
+    await conn.execute(_SET_SHORTLIST_RANKING_SQL, job_id)
+
+
 async def clear_shortlist_state(conn: DbConn, job_id: UUID) -> None:
     """Null out every ``shortlist_state*`` column for ``job_id``. A no-op on a
     job that carries no state (the columns are already NULL) — never raises."""
@@ -220,12 +240,19 @@ async def clear_shortlist_state(conn: DbConn, job_id: UUID) -> None:
 async def get_shortlist_state(
     conn: DbConn, job_id: UUID, *, user_id: UUID | None = None
 ) -> ShortlistStateOut | None:
-    """Read the fail-closed ranking state for ``job_id``.
+    """Read the visible ranking state for ``job_id`` — either the fail-closed
+    ``awaiting_llm`` state (FU-7 §2) or the in-flight ``ranking`` state
+    (``fix/regenerate-shortlist-no-feedback``).
 
     Raises ``NotFoundError`` when the job does not resolve (mirroring every
     other single-entity read here — ``get_one`` / ``job_service.get_job``);
-    returns ``None`` only when the job resolves but carries no ``awaiting_llm``
-    state.
+    returns ``None`` when the job resolves but carries no state at all, OR
+    when it carries ``'ranking'`` whose ``shortlist_state_at`` is older than
+    ``settings.shortlist_ranking_stale_after_s`` — a row that old cannot
+    still be genuinely in flight (the worker would have been killed by its
+    own job timeout), so a crashed worker must not permanently pin the UI on
+    "Regenerating…". The stale row itself is left untouched — reported as
+    not-ranking, never silently cleared.
 
     FU-6/ADR-020 §3/§5 (IDOR fix) — ``user_id`` row-scopes the read to a
     hiring_manager SESSION's assigned jobs via an ``EXISTS`` predicate against
@@ -246,6 +273,10 @@ async def get_shortlist_state(
         raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
     if row["shortlist_state"] is None:
         return None
+    if row["shortlist_state"] == "ranking":
+        age = dt.datetime.now(dt.UTC) - row["shortlist_state_at"]
+        if age.total_seconds() > get_settings().shortlist_ranking_stale_after_s:
+            return None
     return ShortlistStateOut(
         state=row["shortlist_state"],
         reason=row["shortlist_state_reason"],

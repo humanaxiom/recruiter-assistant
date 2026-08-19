@@ -22,11 +22,53 @@ PII (``candidate_name``/``candidate_email``/``candidate_phone``/
 ``cover_letter_text``) is ``BYTEA``, encrypted at rest with pgcrypto's
 ``pgp_sym_encrypt`` under the ``app.pii_key`` GUC. Only the *hash* of the email
 is plaintext, and only so subject-access requests can find a candidate.
+
+**Concurrent-boot safety (F2/F2b, review findings 2026-08-18).** ``api`` and
+``worker`` both call ``init_schema`` and start together with no ``restart:``
+policy, so every statement here also has to be safe against a second,
+concurrent, freshly-connected caller — not just safe to re-run sequentially.
+
+The ``jobs_shortlist_state_check`` widen (F2) gets a bespoke fix: DROP+ADD
+combined into ONE guarded ``DO $$ ... $$`` transaction, so the table-level
+lock ``ALTER TABLE`` takes on the (already-existing) ``jobs`` relation
+serializes the two boots — see the statement's own comment for why.
+
+Everything else that creates a genuinely NEW catalog object — extensions,
+enum types, tables, indexes — turned out to share ONE hazard, bigger than the
+single ``pgcrypto`` statement F2b originally named: Postgres's native ``...
+IF NOT EXISTS`` clause on ``CREATE EXTENSION``/``CREATE TABLE``/``CREATE
+INDEX`` is NOT atomic against a second connection. Measured directly against
+a real Postgres (not theorized): two bare connections racing a single
+``CREATE TABLE IF NOT EXISTS`` or ``CREATE INDEX IF NOT EXISTS`` against a
+table/index that doesn't yet exist raised ``UniqueViolationError`` on
+``pg_type_typname_nsp_index`` / ``pg_class_relname_nsp_index`` in **100/100**
+trials (50 each) — this is not a rare edge case, it is the deterministic
+outcome of two sessions both passing the guard before either commits. The
+hand-rolled ``CREATE TYPE ... IF NOT EXISTS (SELECT ...)`` guard blocks race
+identically (20/20). By contrast, every statement that ALTERs an EXISTING
+relation (``ADD COLUMN IF NOT EXISTS``, the constraint DROP+ADD) raced ZERO
+times in the same measurement — Postgres's own lock on the existing relation
+serializes those for free, which is exactly the mechanism F2's fix above
+relies on.
+
+Given that, the correct, non-"long list" fix is structural, not per-statement:
+``init_schema`` below catches the known duplicate-object sqlstates and
+retries the SAME statement in a small bounded loop (see
+``_MAX_STATEMENT_ATTEMPTS``). After a loser's failed attempt, the winner of
+that particular collision has necessarily already committed (the loser's own
+conflicting insert only resolves once the winner's transaction ends), so the
+very next retry's fresh ``IF NOT EXISTS``/pg_catalog check sees the object
+already there and is a true no-op. The attempt cap is a safety stop against
+looping forever if something keeps raising a retryable sqlstate — it is not
+a claim about, or derived from, how many callers can be racing concurrently,
+and nothing here depends on that count.
 """
 
 from __future__ import annotations
 
 from typing import Protocol
+
+import asyncpg
 
 
 class _Executor(Protocol):
@@ -38,8 +80,22 @@ class _Executor(Protocol):
 _STATEMENTS: tuple[str, ...] = (
     # ── Extensions ───────────────────────────────────────────────────────────
     # pgp_sym_encrypt/pgp_sym_decrypt underpin every PII column.
+    #
+    # F2b (review findings, 2026-08-18, PRE-EXISTING — found by the F2
+    # boot-race test, not introduced on this branch, but fixed here anyway
+    # per severity, not provenance): this statement's native `IF NOT EXISTS`
+    # is not atomic against a second connection racing the same create — see
+    # the module docstring's "Concurrent-boot safety" section for the
+    # measurement and why the fix lives centrally in `init_schema` (a
+    # catch-and-retry-once around every statement) rather than here. This
+    # statement itself is left in its plain, natural form.
     "CREATE EXTENSION IF NOT EXISTS pgcrypto",
     # ── Enums (no IF NOT EXISTS for CREATE TYPE — guard on pg_type) ──────────
+    # F2b audit: these two blocks have the EXACT SAME concurrent-boot hazard
+    # as the pgcrypto extension above (and, it turned out, as every other
+    # brand-new-catalog-object create in this file — see the module
+    # docstring). Covered by the same central retry-once fix; no per-statement
+    # change needed here either.
     """
     DO $$
     BEGIN
@@ -132,6 +188,59 @@ _STATEMENTS: tuple[str, ...] = (
     "CHECK (shortlist_state IN ('awaiting_llm'))",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_reason TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_at TIMESTAMPTZ",
+    # fix/regenerate-shortlist-no-feedback — widen the CHECK to also allow
+    # 'ranking' (set by the API route at enqueue, cleared/overwritten by the
+    # worker on every terminal path — see shortlist_service.py /
+    # matching_tasks.py). The inline CHECK above already shipped on deployed
+    # volumes under the auto-generated name Postgres gave it (confirmed live
+    # against the running dev stack: ``jobs_shortlist_state_check``), and
+    # there is no ``ADD CONSTRAINT IF NOT EXISTS`` pre-Postgres-15, so
+    # widening it needs an explicit DROP-then-ADD.
+    #
+    # F2 (review findings, 2026-08-18): this used to be a bare DROP-then-ADD
+    # pair as TWO separate statements/autocommit transactions. That is safely
+    # idempotent for one boot running alone, but ``api`` and ``worker`` both
+    # call ``init_schema`` and start together with no ``restart:`` policy, so
+    # two connections can each pass the DROP (both succeed — "IF EXISTS") and
+    # then race the bare ADD CONSTRAINT: Postgres's own uniqueness check on
+    # the constraint name lets only one land, and the loser raises asyncpg
+    # 42710 (duplicate_object) and the container stays exited. Reproduced
+    # 25/25 in the boot-race test written for this finding
+    # (core/tests/integration/test_ddl_boot_race_pg.py).
+    #
+    # The fix wraps DROP+ADD in ONE ``DO $$ ... $$`` block guarded by a
+    # ``pg_constraint`` existence check for the WIDENED definition
+    # specifically (matched via ``pg_get_constraintdef(...) LIKE '%ranking%'``
+    # — the narrower pre-widen constraint of the same name must NOT satisfy
+    # this guard, or the widen would never fire on an old volume). This MUST
+    # stay ONE statement, not two — a ``DO`` block is one statement, hence one
+    # implicit transaction, so Postgres's row lock on the ``jobs`` catalog
+    # entry (taken by the first ALTER inside it) is held across BOTH the DROP
+    # and the ADD; the second connection blocks on that lock until the first
+    # commits, then re-evaluates its own guard, sees the widened constraint
+    # already exists, and does nothing. Splitting this back into two
+    # statements (as a "simplification") reopens exactly this race — the lock
+    # from a standalone ALTER releases at the end of THAT statement, not at
+    # the end of the pair, so a second connection can interleave between them
+    # again. It is also a true no-op on every later boot (the guard is
+    # already satisfied), which avoids revalidating the CHECK against every
+    # row under ACCESS EXCLUSIVE on each restart.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'jobs'::regclass
+              AND conname = 'jobs_shortlist_state_check'
+              AND pg_get_constraintdef(oid) LIKE '%ranking%'
+        ) THEN
+            ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_shortlist_state_check;
+            ALTER TABLE jobs ADD CONSTRAINT jobs_shortlist_state_check
+                CHECK (shortlist_state IN ('awaiting_llm', 'ranking'));
+        END IF;
+    END
+    $$
+    """,
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (
@@ -387,11 +496,69 @@ _STATEMENTS: tuple[str, ...] = (
 )
 
 
+# Sqlstates that mean "two connections both tried to create the same
+# brand-new catalog object" — see the module docstring's "Concurrent-boot
+# safety" section for the measurement behind this list. Deliberately a
+# whitelist, not a broad class match (e.g. not "any 42xxx"): those classes
+# also contain genuine syntax/programming errors this must NOT swallow.
+_RETRYABLE_DUPLICATE_SQLSTATES = frozenset(
+    {
+        "23505",  # unique_violation — e.g. pg_type/pg_class/pg_extension name races
+        "42710",  # duplicate_object — e.g. CREATE TYPE "already exists"
+        "42P06",  # duplicate_schema
+        "42P07",  # duplicate_table
+        "42701",  # duplicate_column
+        "42723",  # duplicate_function
+    }
+)
+
+# How many times a single statement may be attempted in total (the first try
+# plus retries) before a retryable duplicate-object error is allowed to
+# propagate. This is a safety stop, not a correctness argument: a single
+# retry normally already succeeds (see the module docstring's "Concurrent-
+# boot safety" section for why), so this only needs headroom above 2 to
+# absorb more than one competing creator without asserting an exact count of
+# concurrent callers anywhere. Kept as a small, named constant rather than a
+# magic number so the bound is visible and changeable in one place.
+_MAX_STATEMENT_ATTEMPTS = 5
+
+
 async def init_schema(conn: _Executor) -> None:
-    """Create the schema. Idempotent — safe to run on every boot.
+    """Create the schema. Idempotent — safe to run on every boot, INCLUDING
+    multiple boots (e.g. ``api`` and ``worker``, or any other concurrent
+    caller) running it concurrently against the same, possibly brand-new,
+    database.
 
     Executes against whatever it is handed: an asyncpg ``Connection`` (the
     integration tests, the worker startup) or a ``Pool`` (the API lifespan).
+
+    Every statement is retried, up to ``_MAX_STATEMENT_ATTEMPTS`` attempts in
+    total, if it raises one of ``_RETRYABLE_DUPLICATE_SQLSTATES`` — see the
+    module docstring for why this is the correct fix (measured, not
+    assumed). Each retry re-runs the same statement after a competing
+    creator's transaction has committed, so the object it was racing to
+    create (or the guard it was checking) is now genuinely there and the
+    retry is a true no-op. The attempt cap exists only to stop the loop if
+    something keeps raising a retryable sqlstate; it is not a statement
+    about, or derived from, how many callers can be concurrent. Any other
+    exception propagates immediately and un-retried: this must never mask a
+    real bug in the DDL.
     """
     for statement in _STATEMENTS:
-        await conn.execute(statement)
+        for attempt in range(1, _MAX_STATEMENT_ATTEMPTS + 1):
+            try:
+                await conn.execute(statement)
+                break
+            except asyncpg.PostgresError as exc:
+                if exc.sqlstate not in _RETRYABLE_DUPLICATE_SQLSTATES:
+                    raise
+                if attempt == _MAX_STATEMENT_ATTEMPTS:
+                    raise
+                # The other connection's conflicting create only resolves to
+                # a committed row once ITS transaction ends — which is
+                # exactly the event that unblocked ours and produced this
+                # error — so by this point the object genuinely exists and
+                # the retry is a true no-op (or, for the hand-rolled `IF NOT
+                # EXISTS (SELECT ...)` enum guards, the guard now correctly
+                # sees it and skips). Loop around and try again rather than
+                # recursing.
