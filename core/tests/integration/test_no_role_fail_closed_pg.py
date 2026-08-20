@@ -300,17 +300,27 @@ async def test_no_role_session_still_reaches_auth_cas_user_200(
     assert body["role"] is None
 
 
-# ── unaffected: a bare recruiter key, no session at all ──
+# ── REVERSED 2026-08-19 (D2 = option B): a bare recruiter key, no session at
+#    all, used to be unaffected here -- it now 403s too, see below ──
 
 
 @pytest.mark.asyncio
-async def test_bare_recruiter_key_with_no_session_cookie_still_200s_get_jobs(
+async def test_bare_recruiter_key_with_no_session_cookie_now_403s_get_jobs(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pre-slice behaviour, unaffected: a caller presenting only the shared
-    recruiter API key and NO session cookie at all is governed by
-    ``require_role`` alone -- ``require_role_assigned`` must PASS a
-    ``user is None`` resolution (no session to judge), never 403 it."""
+    """REVERSED 2026-08-19 -- D2 = option B, ``docs/OPEN_DECISIONS.md`` §D2,
+    answered by product; the question ADR-034's "Accepted residuals" carried
+    forward as undecided. Until today this test asserted the OPPOSITE (see
+    its old name, ``..._still_200s_get_jobs``): a caller presenting only the
+    shared recruiter API key and NO session cookie at all was governed by
+    ``require_role`` alone, and ``require_role_assigned`` PASSED a
+    ``user is None`` resolution. Product decided reads must be symmetric
+    with writes (ADR-034 F1a already 403s ``user is None`` for
+    ``require_session_role``) -- a bare key with no session now needs a
+    real principal for reads too, same as writes. Full router-by-router
+    coverage of this reversal lives in
+    ``tests/integration/test_close_unscoped_reads_pg.py``; this test stays
+    to keep the original regression location honest about what changed."""
     settings = _settings()
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
     app = _build_app(pg_pool)
@@ -318,7 +328,7 @@ async def test_bare_recruiter_key_with_no_session_cookie_still_200s_get_jobs(
     async with await _client(app) as client:
         resp = await client.get("/jobs", headers={"X-API-Key": RECRUITER_KEY})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 403
 
 
 # ── the gate only blocks role=None — any real assigned role still 200s ──
