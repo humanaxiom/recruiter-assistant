@@ -23,7 +23,7 @@
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Five scoring defects disclosed** — two in [ADR-041](adr/041-sub-score-measurement-markers.md) and three in the [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
-| **A7** The pattern worth naming | **Seventeen instances.** Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
+| **A7** The pattern worth naming | **Nineteen instances.** **(18) and (19) added 2026-08-20 by the D1=C branch, and (18) is the first found by neither mutation nor review but by RUNNING THE PRODUCT** — a form field that was never rendered, structurally invisible to the suite because the only test exercising it supplied the input itself. Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
 
 **Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
 
@@ -43,9 +43,15 @@ against 26 `feat`/`fix`** — and twelve ADRs, on a product **nobody has yet use
    competency-scoring model stays deferred, deliberately, with the reasoning recorded in A2 below. The A3
    evals corpus cannot see this merge at all (its own entry below) — that is the next dependency, not more
    vocabulary work.
-2. **Anything that makes the pilot actually run.** The four human-only actions still gate this. Two are
-   physical (run `quickstart.ps1` under `pwsh`; click through the live UI); the **two decisions were
-   answered 2026-08-19** (D1 = option C — answered, implementation pending; D2 = option B — implemented).
+2. **Anything that makes the pilot actually run.** **Both decisions are now answered AND shipped** — D2 =
+   option B (PR #95, 2026-08-19) and D1 = option C (2026-08-20, [ADR-036](adr/036-auditor-audit-log-viewer.md)
+   amendment). What remains is purely physical: run `quickstart.ps1` under `pwsh`, and click through the
+   live UI. Nothing is blocked on a human decision any more.
+
+   **D1=C also produced the strongest evidence yet for why the physical half matters.** The reveal shipped
+   green across 5,448 unit and 541 integration tests — and a live click found that the withdraw form never
+   collected a reason, so the control would have had nothing to reveal, ever. Fifth defect in two sessions
+   found only by running the product.
 3. Everything else, and **only if it changes what the product can do**. Hardening a feature nobody has run
    is speculative. See CLAUDE.md's "Economy" section for the finding-disposition and stopping rules that
    now govern this — in particular: nits get **recorded, not fixed**, and mutation probing is **one pass**.
@@ -88,11 +94,16 @@ Four things that make the difference between a demo that lands and one that disc
    **Operationally:** the stack refuses to boot until `./scripts/quickstart.ps1` is re-run to generate the
    keys — that is the fix working, not a break.
 
-   **Before widening, two honest caveats** (neither is an authorization gap): nobody has clicked through
-   the live UI for ADR-035/036, because the stack does not boot in the agent's environment; and whether an
-   auditor should see résumé **withdrawal reasons** is now decided (2026-08-19, D1 = option C, reveal-on-request
-   via the same audited pattern as candidate PII reveal — being implemented on a separate branch). They are
-   withheld today pending that implementation (ADR-036 §1).
+   **Before widening, one honest caveat** (not an authorization gap): nobody has clicked through the full
+   live UI for ADR-035/036 end to end as a signed-in auditor. The **withdrawal-reason question is CLOSED** —
+   D1 = option C shipped 2026-08-20. Reasons stay withheld by default and are revealable on request via
+   `POST /audit/log/{id}/reveal`, each reveal separately audited (ADR-036's D1 amendment). That reveal path
+   *was* exercised live, end to end, including the withdraw → withhold → reveal → re-mask cycle.
+
+   **One residual worth knowing before issuing auditor accounts:** with CAS disabled, a reveal is recorded
+   as `service:dev-anonymous` rather than a named person (ADR-019 §10b — the sentinel is not a `users` row).
+   The attributability that justifies option C only materialises **with CAS on**, which is another reason
+   the pilot must run authenticated.
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build
@@ -546,7 +557,7 @@ correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **seventeen times**: an
+Across the external review and this session's gate work the same defect shape appears **nineteen times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -759,3 +770,47 @@ weight profile that fails the `MatchWeights` sums-to-1.0 validator.
   `aria-gb10` outages fail over instead of fail closed).
 - `resume_parse_max_tries` upper sanity cap; extend fail-closed to the reverse-match path; a
   `POST /resumes/{id}/reparse` route (makes degraded résumés recoverable without re-upload).
+
+**An eighteenth and a nineteenth, 2026-08-20, from the D1 = option C branch — and the eighteenth is the
+first one in this list found by *neither* mutation nor review, but by running the product.**
+
+**(18) The withdraw form never collected a reason** (`frontend/templates/resume_detail.html:102`, before
+this branch). `resume_withdraw` has always read `request.form.get("reason")`; the backend has always
+accepted one (`WithdrawRequest.reason`, `schemas/resumes.py:512`); and
+`test_resume_withdraw_route_forwards_the_reason_field` has always proved the forwarding worked — **by
+POSTing the field itself**. No rendered form contained the input, so every withdrawal in the live database
+recorded `reason = None`. The whole of D1 = option C would have shipped as a control to disclose a value
+the product could not record.
+
+This is a **new variant** worth naming separately from the twelfth's "mechanism wired to 3 of 12 routes".
+Here the mechanism was wired end to end and correct at every layer — route, client, schema, service,
+column. The only missing link was the **input a human types into**, and the one test that exercises the
+field supplies it itself, which makes the gap structurally invisible to the suite. Call it *the test that
+plays both parts*: a test that provides the input a user was supposed to provide can never notice that no
+user can.
+
+**(19) Both audit reads could 500 on one malformed row** (`services/audit_service.py`, before this branch).
+`redact_audit_details`'s docstring has promised since Phase 1.4 that "an audit read must degrade, never
+500" — and it does, for anything handed to it. But both reads called `json.loads` on the raw `jsonb`
+column *before* handing it over, and a row whose text is not valid JSON raised first. One such row would
+have taken down the whole access-record page. The classic shape: the invariant was written one layer below
+where it needed to hold. Closed by `_decode_details`, which degrades fail-closed, plus the matching
+`is mapping` guard in the template, which called `.items()` unconditionally on the same column.
+
+**What (18) changes about how to hunt these.** Every previous instance was reachable by mutating code and
+watching what failed to complain. (18) is not: there was nothing to mutate, because the defect was an
+*absence* in a template, and no mutation of existing code makes an absent input appear. Mutation probing
+finds unenforced invariants; only running the product finds uncollected ones. Both are needed, and the
+second has now produced five defects in two sessions.
+
+### Recorded, not fixed (D1 = C branch, 2026-08-20)
+
+- **The shortlist card's quick withdraw still collects no reason**
+  (`frontend/templates/shortlist_cards.html:151-158`). Same defect shape as A7 instance (18), left in
+  place deliberately: a text input on every card in a shortlist grid is poor UX, and the résumé-detail
+  form is where a considered note belongs. Consequence to accept: withdrawals performed from the shortlist
+  still record `None`, so the audited reveal has nothing to offer for them. Revisit if pilot users turn out
+  to withdraw mostly from cards.
+- **Reveals are not rate-limited.** An auditor can reveal every withheld row one click at a time and reach
+  option B's disclosure with a trail behind it. The trail *is* the control — C records access rather than
+  preventing it — but nothing alerts on the pattern. Recorded in ADR-036's D1 residuals.
