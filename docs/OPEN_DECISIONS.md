@@ -1,19 +1,21 @@
 # Open decisions — memos, not notes
 
-Two product decisions block work. Both have been carried as bare "blocked on a human" lines for four
-sessions; this file exists because `CLAUDE.md`'s Economy rule 3 says that is not a terminal state, and that a
-blocked item must be handed on as **options plus a recommended default**, not as a note.
+**One product decision remains open.** D2 was answered by the product owner on 2026-08-19 (D2 = option B,
+implemented on branch `feat/d2-close-unscoped-reads`); see the amendment in [ADR-034](adr/034-auth-boundary-fails-open.md).
 
-Each memo below is decidable in one sitting. Reply with a letter per decision, or say "take the default".
+D1 has also been answered by the product owner on 2026-08-19 (D1 = option C) and is being implemented on a separate
+branch; it is updated below with that decision noted.
+
+Each remaining memo is decidable in one sitting. Reply with a letter per decision, or say "take the default".
 
 **How to answer:** pick an option, and an agent implements it. Nothing here is implemented already — the
-status quo in both cases is option A, which is a real choice with real costs, not a neutral waiting state.
+status quo in the remaining case is option A, which is a real choice with real costs, not a neutral waiting state.
 
 ---
 
 ## D1 — Should an auditor be able to read résumé withdrawal reasons?
 
-**Owner:** whoever owns privacy policy for the pilot. **Blocks:** [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
+**Owner:** whoever owns privacy policy for the pilot. **Status: ANSWERED 2026-08-19 — D1 = option C. NOT YET IMPLEMENTED** (D2 was implemented first, deliberately: see the coupling note below). This memo is kept until the implementation lands. **Blocks:** [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
 named residual; the auditor role is otherwise complete and usable.
 
 ### What the code does today
@@ -70,79 +72,19 @@ honest implementation would disclose only rows written after the policy changed,
 anyway.
 **If you pick D:** worth it only if withdrawal reasons are expected to be analysed in aggregate later.
 
----
 
-## D2 — Should a bare service key get unscoped READS?
+## Coupling now resolved
 
-**Owner:** product. **Blocks:** [ADR-034](adr/034-auth-boundary-fails-open.md)'s explicitly carried question.
+D1's option C — reveal on request, separately audited — rests on the reveal being **attributable**. Before
+2026-08-19, `reveal_service` sourced its actor from the CAS session identity and fell back to the literal
+`"api"` when no identity resolved. D2 = option B (2026-08-19) closes that fallback case — every read now
+requires a real principal — so D1=C's audited reveal will carry a real actor `(actor_kind='user', actor_id=...)`,
+not `actor='api'`.
 
-### What the code does today
+When D1=C is implemented: the reveal will be logged with the user who requested it, on the audit trail that
+is being read. Closure is complete.
 
-`require_role_assigned` ([deps.py:366-368](../core/src/api/deps.py#L366-L368)) passes when `user is None`, by
-documented design — "this gate never judges the ABSENCE of a session, only a REAL session's role." So a
-caller holding a valid API key with **no session** gets unscoped reads. Verified live in a previous session:
-with an admin key and no session, `GET /jobs` and `GET /audit/reveals-legacy` both return **200**.
+## Implementation
 
-Writes are already closed — ADR-034 made `require_session_role` 403 on `user is None`. The asymmetry is
-deliberate and undecided, not an oversight.
-
-The sharpest instance is `/audit/reveals-legacy`: a bare key reading the audit log, unattributably. That is
-an unaudited read of the audit trail — the same shape as the problem ADR-036 was created to fix.
-
-### What I verified about the blast radius
-
-The question ADR-034 could not answer is "are machine readers legitimate at all". Two facts narrow it:
-
-- **The CAS-off dev boot does not depend on this.** When auth is disabled, `resolve_user` returns a
-  `dev-anonymous` admin sentinel *before* the `if not ra_session: return None` branch, so `user` is non-None
-  and a 403-on-None rule would not touch that path.
-- **The Flask viewer forwards the browser session cookie** alongside its fixed recruiter key
-  ([api_client.py:117-128](../core/frontend/api_client.py#L117-L128)), and with CAS on an unauthenticated
-  browser is redirected to login before reaching a data page. Its data reads therefore carry a session.
-
-So closing this looks survivable for both shipped entry points. **I have not proven it against the eval and
-integration tooling**, which calls the API with a key directly — that is the real cost, and it should be
-measured before implementing, not assumed.
-
-### Options
-
-| | Option | Cost | Consequence |
-|---|---|---|---|
-| **A** | Keep (status quo) | none | A leaked key is a full unscoped **read** credential with no attributable actor, including over the audit log |
-| **B** ⭐ | 403 on `user is None` for reads too | small in product code; unknown in test/eval tooling | Symmetric with writes. Every read has a real principal. May break keyed tooling |
-| **C** | Named service principals with roles | large | Correct end state if machine readers are legitimate; real auth work |
-| **D** | Keep keyed reads, but 403 on the audit routes only | small | Closes the sharpest instance, leaves the general question open |
-
-### Recommended default: B
-
-ADR-034 rejected "F1a alone" precisely because it "closes the write path but leaves reads open." B finishes
-that job and makes the boundary say one thing rather than two. There is no known legitimate machine reader in
-this product — the two shipped entry points both carry a real principal — so B closes a live hole at the cost
-of a constraint on tooling, and tooling can hold a session.
-
-**If keyed tooling turns out to depend on it,** take **D** now and **C** later: D removes the unattributable
-audit-log read, which is the part that is indefensible on its own terms, and leaves the broader question for
-when a real machine reader actually exists.
-**If you pick A:** record it as an accepted risk with an owner, rather than carrying it as undecided — a
-leaked read key over candidate data is a reportable event, and "we discussed it" is a materially better
-position than "nobody decided."
-
----
-
-## These two are coupled — answer D2 first
-
-D1's recommended option C rests on the reveal being **attributable**. But `reveal_service` sources its actor
-from the CAS session identity and falls back to the literal `"api"` when no identity resolves — which is
-exactly the unattributable caller D2 is about. So C answered on its own, with D2 left at option A, buys an
-audited reveal whose audit row can read `actor = "api"`: a log entry that records *that* a withdrawal reason
-was read and not *who* read it.
-
-That is not fatal — it is still better than no record — but it means **D2=B (or D)** is what makes **D1=C**
-worth building. Answer D2 first, or answer both together.
-
-## Answering these
-
-Both are recorded in [ROADMAP.md](ROADMAP.md) and the current [HANDOFF.md](../HANDOFF.md) banner as
-outstanding human actions. When one is answered, implement it, update the owning ADR
-(036 for D1, 034 for D2) and delete the memo from this file — a decided question should not keep
-occupying the next session's attention.
+D1 and D2 are implemented on separate branches. D2 is already done. When D1 = option C ships, update
+[ADR-036](adr/036-auditor-audit-log-viewer.md) with its decision.

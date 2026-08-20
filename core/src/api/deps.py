@@ -364,8 +364,20 @@ async def require_role_assigned(
     Three cases:
 
     * ``user is None`` — no session at all (a bare service-key caller, or
-      CAS disabled outside the sentinel path) — PASS. This gate never judges
-      the ABSENCE of a session, only a REAL session's role.
+      CAS disabled outside the sentinel path) — **403**. REVERSED 2026-08-19
+      (D2 = option B, ``docs/OPEN_DECISIONS.md`` §D2, closing the question
+      ADR-034's "Accepted residuals" carried forward). Until that date this
+      case PASSED, on the theory that "this gate never judges the ABSENCE of
+      a session, only a REAL session's role" — so a caller holding a valid
+      API key with no CAS session got unscoped reads across every business
+      router, the sharpest instance being a bare key reading
+      ``GET /audit/reveals-legacy`` unattributably. Product decided reads
+      must be symmetric with writes (ADR-034 F1a already 403s ``user is
+      None`` for ``require_session_role``): every read now needs a real
+      principal too. The CAS-off dev boot is untouched by this — see
+      ``resolve_user``'s docstring: it returns the ``dev-anonymous`` sentinel
+      BEFORE the ``if not ra_session: return None`` branch even runs, so
+      ``user`` is never ``None`` on that path.
     * ``user.role is None`` — a genuinely resolved session with no assigned
       role — 403, fail-closed, before any route body runs. Uses the same
       plain ``fastapi.HTTPException(status_code=403, ...)`` mechanism as
@@ -379,12 +391,17 @@ async def require_role_assigned(
     deactivated account's still-live session must not keep passing this
     gate just because its role was assigned before deactivation.
     """
-    if user is not None and user.role is None:
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="a verified session is required for this route",
+        )
+    if user.role is None:
         raise HTTPException(
             status_code=403,
             detail="no role assigned to this account — contact an administrator",
         )
-    if user is not None and not user.active:
+    if not user.active:
         raise HTTPException(
             status_code=403,
             detail="this account has been deactivated",

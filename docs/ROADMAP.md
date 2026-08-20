@@ -44,8 +44,8 @@ against 26 `feat`/`fix`** — and twelve ADRs, on a product **nobody has yet use
    evals corpus cannot see this merge at all (its own entry below) — that is the next dependency, not more
    vocabulary work.
 2. **Anything that makes the pilot actually run.** The four human-only actions still gate this. Two are
-   physical; the **two decisions now have memos with recommended defaults** in
-   [OPEN_DECISIONS.md](OPEN_DECISIONS.md), so they cost the human a letter rather than a session.
+   physical (run `quickstart.ps1` under `pwsh`; click through the live UI); the **two decisions were
+   answered 2026-08-19** (D1 = option C — answered, implementation pending; D2 = option B — implemented).
 3. Everything else, and **only if it changes what the product can do**. Hardening a feature nobody has run
    is speculative. See CLAUDE.md's "Economy" section for the finding-disposition and stopping rules that
    now govern this — in particular: nits get **recorded, not fixed**, and mutation probing is **one pass**.
@@ -89,8 +89,9 @@ Four things that make the difference between a demo that lands and one that disc
 
    **Before widening, two honest caveats** (neither is an authorization gap): nobody has clicked through
    the live UI for ADR-035/036, because the stack does not boot in the agent's environment; and whether an
-   auditor should see résumé **withdrawal reasons** is an open product/privacy decision — they are withheld
-   today (ADR-036 §1).
+   auditor should see résumé **withdrawal reasons** is now decided (2026-08-19, D1 = option C, reveal-on-request
+   via the same audited pattern as candidate PII reveal — being implemented on a separate branch). They are
+   withheld today pending that implementation (ADR-036 §1).
 3. ~~**Do not circulate `docs/process/ranking-metrics-explainer.html`.**~~ **RESOLVED — rewritten twice,
    2026-08-07 then 2026-08-09 (PR #70).** The first pass made it accurate; the second made it *useful*, after
    the reader's own verdict that it "reads like a chronicle of what is not working and technical build
@@ -161,10 +162,12 @@ enforced in all four session gates, which none of them had consulted while `refr
 expiry forward on every request. (iv) **F4** — the 403→500 Flask regression ADR-033 introduced, fixed on
 all six routes plus `resume_reveal`.
 
-**Carried, not decided:** `require_role_assigned` still passes on `user is None`, so a bare service-key
-reader gets unscoped reads. F1b closes it in practice; whether machine readers are legitimate at all is a
-**product question, recorded rather than silently answered**. Also deliberately out of scope: F3 (three
-flaky reveal tests), F7 (dead `_EXISTS_SCOPED_SQL`).
+**Decided and implemented (2026-08-19, D2 = option B):** `require_role_assigned` now 403s on `user is None`,
+closing the last unscoped-read case symmetrically with writes. See the amendment in
+[ADR-034](adr/034-auth-boundary-fails-open.md#amendment--d2--option-b-closes-the-carried-question-dated-2026-08-19) —
+the decision measured that no legitimate keyed tooling depends on bare-key unscoped reads, and both shipped entry points
+(CAS-off dev boot, Flask viewer) are untouched. Also deliberately out of scope: F3 (three flaky reveal tests), F7
+(dead `_EXISTS_SCOPED_SQL`).
 
 <details>
 <summary><strong>The defect as it stood</strong> (retained — the clearest A7 instance we have)</summary>

@@ -126,3 +126,53 @@ own scope. Write controls are now role-gated in the templates as defence in dept
 captured directly rather than piped**, after a piped invocation earlier in the same session fooled one
 agent into reporting success on a non-zero exit. `EXIT=0`, **4296 unit tests @ 94.39% coverage, 482
 integration tests**. CI green on PR #72 (all checks SUCCESS) before merge.
+
+---
+
+## Amendment — D2 = option B closes the carried question (dated 2026-08-19)
+
+**The product decision answered.** `docs/OPEN_DECISIONS.md` §D2 recorded an undecided question: *"are
+machine readers legitimate at all?"* ADR-034's "Accepted residuals" carried it forward — `require_role_assigned`
+still passed on `user is None`, so a bare service-key reader got unscoped reads. Writes were already closed
+by F1a. Product answered: **every read now requires a real principal.** D2 = option B (closes the read path
+symmetrically with writes).
+
+**What changed: `require_role_assigned` (deps.py:351-393).**
+
+- **Before:** `user is None` → PASS (lines 366-372 in the pre-D2 version documented the theory: "this gate never
+  judges the ABSENCE of a session, only a REAL session's role").
+- **After:** `user is None` → **403** (the 403 is reversal of ADR-033 §1's contract, documented inline with
+  the 2026-08-19 reversal date and the D2 decision reference). `require_role_assigned`'s docstring
+  (`deps.py:354-393`) now explains the three cases: `user is None` (no session at all, now 403), `user.role is
+  None` (real session, no assigned role, 403 as before), any other real user (PASS if active, 403 if
+  deactivated — F5, unchanged).
+
+**Measurement of legitimacy: no keyed tooling depends on bare-key reads.** Applying the change and running
+the full suite broke exactly **three tests**, all of which asserted the old behaviour being removed
+(`core/tests/unit/test_api_deps_d2_close_unscoped_reads.py`; `core/tests/integration/test_close_unscoped_reads_pg.py`;
+and one in `test_no_role_fail_closed_pg.py`). The integration tests pin both entry points that D2 could have
+broken:
+
+- **CAS-off dev boot:** `resolve_user` (`deps.py:261-313`) returns the `dev-anonymous` sentinel on line 288-297,
+  **before** the `if not ra_session: return None` branch on line 299-300 even runs. The sentinel's
+  `role="admin"` means `user is not None`, so the 403-on-None rule never applies to this path. Untouched.
+- **Flask viewer forwarding session:** `api_client.py:117-128` forwards both the fixed recruiter key (header)
+  **and** the browser's `ra_session` cookie (on line 121-124, reading it from `request.cookies` inside a
+  `has_request_context()` guard). A keyed request that carries a session is never `user is None`, so still
+  200s. Untouched.
+
+The eval harness never calls the API directly — it runs `orchestrator.py` and asserts corpus metrics.
+No machine reader exists in this product today.
+
+**Survivability fact 1: the CAS-off dev boot is untouched.** The dev-anonymous sentinel is a real `User`
+object, not `None`, so any `user is None` gate structurally cannot affect it. `resolve_user`'s docstring
+records this as the load-bearing point.
+
+**Survivability fact 2: the Flask viewer is untouched.** It is the only shipped entry point that carries
+both a key AND a session. Forward-and-back are the intended pattern: a key with a session reads exactly as
+before; a key alone is now rejected at the router gate before route bodies run, failing safely closed rather
+than returning unattributable data.
+
+**The sharpest instance closed:** a bare key reading `GET /audit/reveals-legacy` with no session now 403s
+instead of 200, unattributable audit-log access (`actor='api'`) closed. Same shape as ADR-036's audit-access
+problem, different vector (keyed instead of sessioned).

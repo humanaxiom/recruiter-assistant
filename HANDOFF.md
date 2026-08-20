@@ -2,7 +2,13 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
+### ⚠️⚠️ READ FIRST — 2026-08-19: THE TWO BLOCKED DECISIONS HAVE MOVED FOR THE FIRST TIME
+
+**D2 is implemented** (branch `feat/d2-close-unscoped-reads` — `require_role_assigned` now 403s on `user is None`, closing the last unscoped-read case). **D1 is answered but NOT yet implemented** (D1 = option C; no branch exists for it yet — it is the next piece of work, and its memo stays in `docs/OPEN_DECISIONS.md` until it lands). Both decisions were carried as bare "blocked" lines for four sessions; neither is still outstanding. The banner below (2026-08-18) becomes history.
+
+**The three human actions that are still outstanding:** (1) re-run `quickstart.ps1` under `pwsh` (the stack won't boot without it — that is the D2 fix working); (2) click through the live UI (now that it can boot); (3) nothing else. Neither decision needs any action from you — both are built. Whoever was waiting on these to unblock pilot prep can do that now.
+
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
 
 > **This branch (`fix/regenerate-shortlist-no-feedback`) is a `feat`-class change** — a new persisted
 > state value, a DDL constraint change, and changed UI behaviour. It required the integration gate, not
@@ -95,7 +101,7 @@ them. Recorded as a dated amendment in ADR-029 rather than a rewrite.
 > `feat:` and it required the integration suite, not the offline gate alone. `origin/main` is at or *after*
 > `a0c3c17`. **`git fetch` and check `gh pr list` before trusting any of this.**
 >
-> **The four human-only actions from the 2026-08-13 banner are STILL ALL OUTSTANDING.** Re-run `quickstart.ps1` with `pwsh`, click through the live UI, and the two recorded decisions (auditor access to withdrawal reasons; unscoped reads for a bare service key). Three sessions have now passed them by. **Nobody has run this product end to end.**
+> **Status 2026-08-19:** The two decisions (auditor access to withdrawal reasons; unscoped reads for a bare service key) are now answered and implemented. Two human actions remain outstanding: re-run `quickstart.ps1` with `pwsh`, and click through the live UI.
 
 #### What shipped — A6 sibling defects disclosed (same strategy as ADR-041)
 
@@ -323,10 +329,11 @@ substance was right and both explainer formats do agree with each other; only th
 
 #### What is left, in the order I would take it
 
-1. **Get the pilot RUN.** The four human-only actions are the critical path. Two of them are *physical* and
-   no agent can do them (run `quickstart.ps1` under `pwsh`; click through the live UI). The other two are
-   **decisions, and they now have memos** — [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md) — so they need a
-   letter answered, not a session. This is the highest-value item in the project and has been for three.
+1. **Get the pilot RUN.** Two human-only actions are the critical path: run `quickstart.ps1` under `pwsh` and
+   click through the live UI. Both are *physical* and no agent can do them. (The two decisions that blocked
+   this are answered as of 2026-08-19: D1 = option C, D2 = option B, both implemented on separate branches.
+   See the new 2026-08-19 banner at the top.) This is the highest-value item in the project and has been
+   for five sessions.
 2. **The three A6 sibling defects** — `score_education`'s `if not ranked: return 0.0` is the strongest: an
    unparsed education section scores *worse* than being below the bar, which at least earns partial credit.
 3. **A3's seniority/vector control gap** and the new A2-blindness gap — both measured, both corpus-owner work.
