@@ -17,6 +17,7 @@ and the docstrings say which.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -165,16 +166,29 @@ def test_a_backend_403_becomes_a_403_not_an_unhandled_500(client: Any) -> None:
     assert "Internal Server Error" not in resp.get_data(as_text=True)
 
 
-def test_the_page_has_no_write_control(client: Any) -> None:
-    """Read-only by construction. An audit surface that can be edited from the
-    browser is not an audit surface — and a POST form here would also be the
-    one place a CSRF token was needed on a page that should never need one.
+def test_the_pages_only_post_control_is_the_audited_reveal(client: Any) -> None:
+    """**This test previously asserted the page had NO POST control at all**,
+    and that assertion was correct until the product owner answered D1 with
+    option C (2026-08-19): reveal a withheld withdrawal reason on request, each
+    read separately audited. The page now has exactly one write-method control,
+    and it performs an audited READ, not a mutation.
+
+    The invariant worth keeping is the one underneath the old assertion — an
+    audit surface that can be *edited* from the browser is not an audit
+    surface. So this pins the narrower claim: every POST target on this page is
+    a reveal route, and nothing else. If a future change adds a second POST
+    here, this fails and someone has to justify it.
     """
-    with patch.object(api_client, "list_audit_log", return_value=[_entry()]):
+    entry = _entry(action="withdraw_resume", details={"reason": "<withheld>"})
+    with patch.object(api_client, "list_audit_log", return_value=[entry]):
         resp = client.get("/audit")
     body = resp.get_data(as_text=True)
-    assert 'method="post"' not in body.lower()
     assert "hx-post" not in body.lower()
+    targets = re.findall(r'<form[^>]+method="post"[^>]+action="([^"]+)"', body, re.I)
+    targets += re.findall(r'<form[^>]+action="([^"]+)"[^>]+method="post"', body, re.I)
+    assert targets, "the audited reveal control is missing from the page"
+    for target in targets:
+        assert target.endswith("/reveal"), f"unexpected write control: {target}"
 
 
 def test_the_action_filter_is_forwarded_to_the_backend(client: Any) -> None:
