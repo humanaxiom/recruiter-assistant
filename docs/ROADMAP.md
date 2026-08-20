@@ -23,7 +23,7 @@
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Five scoring defects disclosed** — two in [ADR-041](adr/041-sub-score-measurement-markers.md) and three in the [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
-| **A7** The pattern worth naming | **Nineteen instances.** **(18) and (19) added 2026-08-20 by the D1=C branch, and (18) is the first found by neither mutation nor review but by RUNNING THE PRODUCT** — a form field that was never rendered, structurally invisible to the suite because the only test exercising it supplied the input itself. Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
+| **A7** The pattern worth naming | **Twenty instances.** **(20), 2026-08-20, is the longest-fuse variant yet — "the fix that never ran": ADR-032 shipped 2026-08-07 and had never applied to a single row, because every job predated it and the write only fires on projection. Recruiters saw salted hashes where skill names belonged for thirteen days, behind a green suite.** **(18) and (19) added 2026-08-20 by the D1=C branch, and (18) is the first found by neither mutation nor review but by RUNNING THE PRODUCT** — a form field that was never rendered, structurally invisible to the suite because the only test exercising it supplied the input itself. Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
 
 **Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
 
@@ -557,7 +557,7 @@ correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **nineteen times**: an
+Across the external review and this session's gate work the same defect shape appears **twenty times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -814,3 +814,60 @@ second has now produced five defects in two sessions.
 - **Reveals are not rate-limited.** An auditor can reveal every withheld row one click at a time and reach
   option B's disclosure with a trail behind it. The trail *is* the control — C records access rather than
   preventing it — but nothing alerts on the pattern. Recorded in ADR-036's D1 residuals.
+
+**A twentieth, 2026-08-20 — and it is the variant with the longest fuse: a fix
+that shipped, passed every gate, and then never ran.**
+
+[ADR-032](adr/032-skill-display-names.md) / PR #66 (`8bf7a16`, 2026-08-07) is
+titled *"render JD-authored skill display names, not ADR-008 hashes"*. It writes
+the JD's own wording onto each job's `REQUIRES`/`NICE_TO_HAVE` edge
+(`worker/tasks.py::_job_projection_tx`), and Stage 2 renders
+`coalesce(req.display_name, reqSkill.canonical_key)`. The code is correct. The
+tests are correct. It has been correct for thirteen days.
+
+**It had never applied to a single row.** That write only runs during *job
+projection*, and the newest job in the live database was parsed **2026-08-02** —
+five days before the fix landed. So all 160 `REQUIRES` edges carried
+`display_name = NULL`, every shortlist fell through to the fallback, and a
+recruiter saw `h:2431ff17cb58a88d057650c93758977d — missing · must-have` where
+the word *Facilitation* belonged. Reported from the live product, with the
+entirely reasonable follow-up "…although I rerun the generate shortlist":
+**Regenerate re-ranks against the same edges, so the one control that looks like
+it should fix this provably cannot.**
+
+**Why this variant is worth naming separately.** (18) and (19) were defects in
+code. This is not: the code is right, the tests pass, and the defect is that
+*existing data was never migrated and nothing said so*. It is invisible to every
+gate in this repo by construction — a test fixture is always freshly projected,
+so it always has the property that production lacks. Call it **the fix that never
+ran**: a change whose correctness depends on a write path that only fires on
+new data, shipped without a backfill and without a check that would notice.
+
+**Fixed in the data, 2026-08-20**, by a two-pass backfill that writes only the
+label and never deletes or recreates an edge: pass 1 recomputed each job's
+canonical keys from its own stored extraction (146 edges); pass 2 recovered the
+remainder, whose keys had shifted under the [ADR-042](adr/042-skill-vocabulary-domain-families.md)
+vocabulary merge, by matching `Skill.display_name` against **that job's own** JD
+wording (26 edges). All 172 job skill edges across 15 jobs are now labelled.
+
+Pass 2 stays inside orchestrator **S2**'s boundary deliberately: S2 forbids
+*rendering* `reqSkill.display_name` because it is global/last-writer-wins and
+could show job B's wording on job A's shortlist. The backfill uses it only as a
+**join key** — an edge is labelled only when the node property matches a skill
+name in that job's own extraction, and the value written is that job's own raw
+wording, so a cross-job value can never be written.
+
+### Recorded, not fixed (2026-08-20, second report)
+
+- **Nothing detects "the fix that never ran".** No check reports job edges
+  missing `display_name`, so the next projection-shaped fix will be inert for
+  exactly as long before someone happens to look at a screen. A startup or
+  health-check count of unlabelled edges would have surfaced this in a day.
+- **There is no way to re-project a job without re-parsing it.** The remedy
+  above had to be run by hand against the graph. `parse_job` re-runs the LLM and
+  can change the extracted requirements, so it is not a safe "refresh the
+  projection" control — which is why one is needed.
+- **`shortlist_entries.score_breakdown` caches the rendered label**, so a graph
+  backfill is invisible until each job is regenerated (55 entries still held
+  hashed labels immediately after the backfill). Any future label change carries
+  the same two-step.

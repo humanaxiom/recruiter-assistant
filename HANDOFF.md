@@ -68,6 +68,29 @@ the sentinel is not a `users` row and cannot be `actor_kind='user'` without viol
 probe above recorded exactly that. This is correct behaviour, and it means **the attributability that
 justifies option C only materialises with CAS on.** One more reason the pilot must run authenticated.
 
+#### ⚠️ 2026-08-20, later: THREE MORE DEFECTS FROM THE FIRST REAL CLICK-THROUGH
+
+The first authenticated session found three things no gate had:
+
+1. **A withdrawn candidate looked identical to an active one** on the job page —
+   `resumes_table.html` rendered the PARSE status and never read `withdrawn_at`.
+   Fixed (`8cf4977`).
+2. **Withdrawing from a shortlist card threw the user off the shortlist.** The
+   card has posted `context=shortlist` since FU-8 and the route never read it,
+   so you landed on the résumé page; pressing Back served a CACHED shortlist
+   with the candidate still on it. The withdrawal had always worked. Fixed
+   (`818bf14`).
+3. **Skill chips rendered salted hashes** (`h:2431ff17…`) instead of names.
+   ADR-032/PR #66 fixed this on 2026-08-07 — and had **never applied to a single
+   row**, because the newest job was parsed 2026-08-02 and the write only fires
+   on job projection. Regenerate could not fix it: it re-ranks the same edges.
+   **Fixed in the DATA** by a two-pass backfill (172/172 edges now labelled);
+   see ROADMAP A7 (20), "the fix that never ran".
+
+**After a label backfill each job must be REGENERATED** —
+`shortlist_entries.score_breakdown` caches the rendered label, so the graph fix
+is invisible until the shortlist is rebuilt.
+
 #### 🔴 What is left — and it is now ONLY physical
 
 1. **Run the product as a signed-in user.** `scripts/quickstart.ps1` under **`pwsh` (PowerShell 7 — 5.1
