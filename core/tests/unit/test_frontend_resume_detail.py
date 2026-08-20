@@ -1178,3 +1178,90 @@ def test_the_form_says_the_note_can_be_disclosed_to_an_auditor(
     )
     body = client.get(f"/resumes/{resume_id}").get_data(as_text=True).lower()
     assert "auditor" in body
+
+
+# ── withdrawing from a shortlist card must return to the shortlist ────────
+#
+# Reported from the live product, 2026-08-20: "withdraw candidate doesn't work
+# as expected — candidate still shows", on the SHORTLIST screen.
+#
+# The withdrawal itself always worked (the row is written, and every shortlist
+# read filters it out). What did not work is where the user ended up. The card's
+# form has posted `context=shortlist` since FU-8 — and
+# `test_shortlist_card_withdraw_form_carries_context_shortlist` has pinned that
+# it does — but `resume_withdraw` never READ it, redirecting unconditionally to
+# the résumé-detail page.
+#
+# So: click Withdraw on the shortlist, get thrown to a different page, press
+# Back, and the browser serves the CACHED shortlist with the candidate still on
+# it. Withdrawal looks like it did nothing.
+#
+# The signal was designed and nothing consumed it — the same shape as the three
+# other defects found by running the product today.
+
+
+def test_withdraw_from_a_shortlist_card_returns_to_that_shortlist(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token, "context": "shortlist", "job_id": str(job_id)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/jobs/{job_id}/shortlist"), (
+        "withdrawing from a shortlist card dumped the user on the résumé page; "
+        "pressing Back then shows a cached list with the candidate still on it"
+    )
+
+
+def test_withdraw_from_the_resume_page_still_returns_there(
+    monkeypatch: Any, client: Any
+) -> None:
+    """No regression for the other caller, which sends no context at all."""
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")
+
+
+@pytest.mark.parametrize("job_id", ["", "not-a-uuid", "../../etc/passwd"])
+def test_a_missing_or_junk_job_id_falls_back_to_the_resume_page(
+    monkeypatch: Any, client: Any, job_id: str
+) -> None:
+    """The return address is attacker-controllable form input, so it is parsed
+    as a UUID and the URL is built server-side from it — never echoed into a
+    Location header. Anything unparseable degrades to the résumé page rather
+    than 500ing or redirecting somewhere chosen by the request."""
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token, "context": "shortlist", "job_id": job_id},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")

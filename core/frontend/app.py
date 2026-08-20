@@ -1080,9 +1080,21 @@ def resume_withdraw(resume_id: UUID) -> Any:
     same-origin check first, then a one-shot CSRF token — this time scoped to
     ``action="withdraw"``, independent of the SAME résumé's reveal token —
     BOTH evaluated before any call reaches the backend, so a rejected forgery
-    attempt can never imply a withdrawal audit row. Redirects back to the
-    résumé-detail page (whichever context — résumé page or shortlist card —
-    the form was posted from)."""
+    attempt can never imply a withdrawal audit row.
+
+    **Returns the user to the page they acted on** (2026-08-20, reported from
+    the live product). The shortlist card's form has posted
+    ``context=shortlist`` since FU-8 and this route never read it, redirecting
+    unconditionally to the résumé page — so withdrawing from the shortlist
+    threw the user onto a different screen, and pressing Back served the
+    browser's CACHED shortlist with the candidate still on it. The withdrawal
+    had worked every time; only the destination was wrong, which is
+    indistinguishable from "withdraw does nothing" at the keyboard.
+
+    ``job_id`` is the return address, and it is attacker-controllable form
+    input: it is parsed as a ``UUID`` and the URL is built server-side with
+    ``url_for``, never echoed into a ``Location`` header, so there is no open
+    redirect here. Anything unparseable degrades to the résumé page."""
     if not csrf.same_origin(request):
         abort(403)
     if not csrf.verify_and_consume(
@@ -1099,6 +1111,13 @@ def resume_withdraw(resume_id: UUID) -> Any:
     except api_client.BadRequest as exc:
         # See the F4 comment on transition_status above.
         abort(exc.status_code)
+    if (request.form.get("context") or "").strip() == "shortlist":
+        try:
+            job_id = UUID((request.form.get("job_id") or "").strip())
+        except ValueError:
+            pass
+        else:
+            return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
