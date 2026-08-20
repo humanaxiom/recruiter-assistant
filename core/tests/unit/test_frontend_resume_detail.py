@@ -1098,3 +1098,83 @@ def test_withdraw_token_does_not_validate_the_reveal_route_and_vice_versa(
         f"/resumes/{resume_id}/withdraw", data={"csrf_token": withdraw_token}
     )
     assert resp4.status_code == 302
+
+
+# ── D1 = option C follow-on: the form must actually COLLECT a reason ──────
+#
+# Found by running the product, not by the suite. `resume_withdraw` reads
+# `request.form.get("reason")` and `test_resume_withdraw_route_forwards_the_
+# reason_field` above proves it forwards one — by POSTing the field directly.
+# No rendered form ever contained it. So in the real application every
+# withdrawal recorded `reason = None`: all five withdrawals in the live dev
+# database have a NULL `audit_log.details`, and that is structural, not
+# incidental.
+#
+# That makes the audited-reveal control shipped in this branch dead on
+# arrival — a button to disclose a value the product cannot record. The
+# decision the owner answered (D1 = C) is about a field the UI never offered.
+#
+# This is the ROADMAP A7 shape one layer out, and the same class as the
+# `polling` defect in ADR-043: the plumbing was proved end to end and the
+# screen was never asked.
+
+
+def test_the_withdraw_form_actually_collects_a_reason(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The gap between "the route forwards a reason" and "a person can type
+    one". Only the second makes the reveal control mean anything."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    start = body.index("/withdraw")
+    form = body[start : body.index("</form>", start)]
+    assert 'name="reason"' in form, (
+        "the withdraw form has no reason field, so every withdrawal records "
+        "None and the audited reveal has nothing to reveal"
+    )
+
+
+def test_the_reason_field_is_capped_at_the_backends_own_limit(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``WithdrawRequest.reason`` is ``max_length=500``. A form that lets
+    someone type 900 characters and then 422s on submit loses the note they
+    wrote — and a withdrawal note is written once, at the moment of a decision
+    someone may later be asked to justify."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    start = body.index("/withdraw")
+    form = body[start : body.index("</form>", start)]
+    assert 'maxlength="500"' in form
+
+
+def test_the_form_says_the_note_can_be_disclosed_to_an_auditor(
+    monkeypatch: Any, client: Any
+) -> None:
+    """**The privacy point, and it is the reason this is on THIS branch.**
+
+    D1's memo turns on an asymmetry: prose already in ``audit_log`` was typed
+    under a withheld expectation, and disclosing it later changes the status of
+    data already collected. Option C keeps existing rows closed and opens new
+    ones deliberately — which only holds if the person typing a NEW note is
+    told it can be revealed. Without that line, C quietly reproduces the
+    retroactive problem it was chosen to avoid, one row at a time.
+    """
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True).lower()
+    assert "auditor" in body
