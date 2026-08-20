@@ -122,6 +122,36 @@ def test_matching_context_from_settings_default_settings_still_wires_through() -
     assert ctx.git_sha == settings.git_sha
 
 
+def test_matching_context_from_settings_use_classified_families_true() -> None:
+    """ROADMAP A2, Phase 3.3 slice 2 (2026-08-19 decision memo): the flag must
+    flow through the SAME factory as family_weight/non_matchable_families --
+    never a hardcoded False, never read ad hoc at a call site."""
+    settings = Settings(match_use_classified_families=True)
+    ctx = matching_context_from_settings(
+        settings,
+        db=MagicMock(),
+        neo4j=MagicMock(),
+        llm=MagicMock(),
+        embedder=MagicMock(),
+    )
+    assert ctx.use_classified_families is True
+
+
+def test_matching_context_from_settings_use_classified_families_default_false() -> None:
+    """An UNCONFIGURED Settings must flow through as False -- the classifier's
+    output must never move ranking by accident."""
+    settings = Settings()
+    assert settings.match_use_classified_families is False
+    ctx = matching_context_from_settings(
+        settings,
+        db=MagicMock(),
+        neo4j=MagicMock(),
+        llm=MagicMock(),
+        embedder=MagicMock(),
+    )
+    assert ctx.use_classified_families is False
+
+
 # ── 2. shortlist_job / reverse_match_job pass weights_from_settings(...) ────
 #       not DEFAULT_WEIGHTS ──────────────────────────────────────────────────
 

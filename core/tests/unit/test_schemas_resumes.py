@@ -275,6 +275,54 @@ def test_resume_skill_last_used_year_coercion(
     assert skill.last_used_year == expected
 
 
+# ── ResumeSkill.categories (ROADMAP A2, Phase 3.3 skill-family classifier,
+# slice 1) ──────────────────────────────────────────────────────────────
+
+
+def test_resume_skill_categories_defaults_to_none() -> None:
+    """Conservative default: absent input means ``categories`` is ``None``,
+    not ``[]`` -- the same value a pre-feature parsed row (no key at all)
+    reads back as, per ``extra="ignore"``'s forward-compatibility contract."""
+    skill = ResumeSkill(name="python")
+    assert skill.categories is None
+
+
+def test_resume_skill_categories_accepts_a_list_of_strings() -> None:
+    skill = ResumeSkill(name="mri methods", categories=["health_wellness"])
+    assert skill.categories == ["health_wellness"]
+
+
+def test_resume_skill_categories_accepts_two_families() -> None:
+    skill = ResumeSkill(name="canvas", categories=["frontend", "edtech"])
+    assert skill.categories == ["frontend", "edtech"]
+
+
+def test_resume_skill_categories_rejects_more_than_the_per_skill_cap() -> None:
+    """The classifier caps at 2 families per skill (ADR-044) --
+    the schema itself enforces the same ceiling as a second line of
+    defence, so a future classifier bug cannot silently inflate family
+    credit past the reviewed cap."""
+    with pytest.raises(ValidationError):
+        ResumeSkill(name="x", categories=["a", "b", "c"])
+
+
+def test_resume_skill_categories_old_row_missing_the_key_reads_back_none() -> None:
+    """``extra="ignore"`` plus this default means a résumé parsed BEFORE
+    this feature shipped (no ``categories`` key in the stored jsonb at all)
+    reads back identically to a skill the classifier declined to answer for
+    -- the strictly-additive property ADR-044 requires."""
+    skill = ResumeSkill.model_validate({"name": "python", "years": 3})
+    assert skill.categories is None
+
+
+def test_resume_parsed_skill_categories_roundtrips_through_model_validate() -> None:
+    parsed = ResumeParsed(
+        skills=[ResumeSkill(name="mri methods", categories=["health_wellness"])]
+    )
+    again = ResumeParsed.model_validate(parsed.model_dump())
+    assert again.skills[0].categories == ["health_wellness"]
+
+
 # ── ResumeParsed._drop_invalid_rows (lossy per-row filter) ────────────────────
 
 

@@ -2,11 +2,85 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-19: THE TWO BLOCKED DECISIONS HAVE MOVED FOR THE FIRST TIME
+### ⚠️⚠️ READ FIRST — 2026-08-20: THE BLOCKED DECISIONS MOVED, AND THE PILOT IS NOW THE ONLY THING LEFT
 
-**D2 is implemented** (branch `feat/d2-close-unscoped-reads` — `require_role_assigned` now 403s on `user is None`, closing the last unscoped-read case). **D1 is answered but NOT yet implemented** (D1 = option C; no branch exists for it yet — it is the next piece of work, and its memo stays in `docs/OPEN_DECISIONS.md` until it lands). Both decisions were carried as bare "blocked" lines for four sessions; neither is still outstanding. The banner below (2026-08-18) becomes history.
+> **Four PRs merged in this session: #92, #93, #94 and this one (#95).** **`git fetch` and check
+> `gh pr list` before trusting any line here** — two Claude sessions have raced on this repo before.
 
-**The three human actions that are still outstanding:** (1) re-run `quickstart.ps1` under `pwsh` (the stack won't boot without it — that is the D2 fix working); (2) click through the live UI (now that it can boot); (3) nothing else. Neither decision needs any action from you — both are built. Whoever was waiting on these to unblock pilot prep can do that now.
+#### The decisions, after five sessions of being carried as bare "blocked" lines
+
+The owner answered both on 2026-08-19: **D1 = C**, **D2 = B**. Both were the recommended defaults, and the
+coupling was respected — D2 answered first is what makes D1 worth building.
+
+- **D2 = B — ANSWERED AND IMPLEMENTED (PR #95).** `require_role_assigned` now 403s on `user is None`, so a
+  caller with a valid API key and no CAS session no longer gets unscoped reads. Reads are symmetric with
+  writes. The sharpest case closed: a bare key reading `/audit/reveals-legacy` unattributably.
+- **D1 = C — ANSWERED, NOT IMPLEMENTED.** The audited reveal for withdrawal reasons is **the next piece of
+  work**. No branch exists for it. Its memo deliberately stays in
+  [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md) until it lands — do not treat the answer as the delivery.
+
+**The measurement worth keeping from D2.** ADR-034 carried "are machine readers legitimate at all" as an
+unanswerable question. Applying the change broke **exactly three tests across 5,331 unit and 527
+integration**, all of them asserting the behaviour being removed. Nothing else in the codebase reads through
+a bare key; the eval harness never calls the API. Recorded in ADR-034's amendment so the next person to
+propose a machine reader does not re-litigate it.
+
+#### 🔴 What is left, and it is now genuinely short
+
+1. **Run the product.** Two physical actions, unchanged for five sessions and now the *only* thing blocking
+   the pilot: run `scripts/quickstart.ps1` under **`pwsh` (PowerShell 7 — 5.1 cannot parse it and
+   `powershell.exe` still exits 0 on the parse failure)**, and click through the live UI.
+   **⚠️ The running containers are days old and predate PR #93** — restart the stack or the regenerate fix
+   and the DDL boot-race fix are not actually live. Check `docker compose ps` shows all eight services up,
+   the worker especially: a dead worker looks exactly like a healthy stack that silently never ranks.
+2. **D1 = C.** Answered, scoped, unbuilt. Reuse `reveal_service`'s audited-reveal pattern; with D2 merged
+   the audit row now carries a real actor instead of falling back to `actor = "api"`.
+3. **Phase 3.3 slice 2 — the job side.** See the classifier banner below. This is where the 45.2% actually
+   lives.
+
+#### 🔴 The lesson from this session, and it cost real defects to learn
+
+**Four defects shipped past a fully green gate and were caught only by reading a diff, running the gate
+myself, or calling the real model.** Not one was caught by a subagent's report, and several were reported to
+me as green:
+
+- **the regenerate button did nothing** — the pipeline was perfect; the UI never said so (PR #93)
+- **a schema boot race** that could kill a container on a clean first `docker compose up`, with no restart
+  policy — pre-existing, and precisely what a pilot deployment does first (PR #93)
+- **the skill classifier was a complete no-op in production** — the reasoning trace ate its token budget,
+  0 of 6 assigned, while 5,388 unit and 524 integration tests passed (PR #94)
+- **an ADR that fabricated its own findings** — claiming a fix worked that was measured failing, and
+  inventing a reviewer correction, which would have buried the finding that a résumé listing *Excel* could
+  earn credit toward "expert knowledge of MRI and MEG research methods"
+
+**A subagent's claim of green is not evidence of green** — `CLAUDE.md` already says this, and every instance
+this session confirmed it. Two agents stalled without reporting at all; the defects were in the diffs
+regardless.
+
+**And the deeper one:** the suite cannot see what only the product can show. The eval harness never executes
+the projection path. Live probes found in one call what thousands of tests could not.
+
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-19: PARSE-TIME SKILL CLASSIFIER SHIPPED; TWO DEFECTS FOUND BY CALLING A REAL MODEL
+
+> **This branch (`feat/skill-family-classifier`) is a `feat`-class change** — new LLM call at parse time, new graph property (`Skill.classified_categories`), new settings flag. It required the integration suite and a live probe against the real LLM to validate. **`git fetch` and check `gh pr list` before trusting any line here.**
+>
+> **The core finding:** Two defects in the parse-time skill classifier were found invisible to a fully green test suite (5,387 unit, 524 integration) because the tests mock the LLM. Only calling the real `gpt-oss:20b` found them:
+> 1. **`_CLASSIFY_MAX_TOKENS=1024` was a silent no-op.** The reasoning trace consumed the entire budget before any JSON was emitted, classifying 0 of 6 out-of-vocab skills. At 4096, all 6. This is invisible to unit tests because they mock `chat_json` wholesale.
+> 2. **The prompt did not signal non-matchable families as preferred.** Two domain-expert phrases were assigned to matchable but incorrect families (`bi`, `research_admin`), granting false credit because family credit is transitive across the whole résumé.
+>
+> Both found, fixed, and documented in [ADR-044](docs/adr/044-skill-family-classifier.md). See that ADR for the full story, including the non-determinism and why this matters for the 45.2% tail.
+
+#### What shipped — ROADMAP A2, Phase 3.3, slice 1
+
+Out-of-vocabulary skill names are classified at **parse time** (where the skills LLM is already being called) into one of the 32 curated families, and written to `Skill.classified_categories` in Neo4j. This stops the irreversible loss: previously, a hashed out-of-vocab skill could never earn family credit.
+
+**The feature is opt-in by default.** The flag `match_use_classified_families` (default `False`) gates whether the ranking engine reads this field. With it off, the field is present but ignored — the path is provably inert at the Cypher level, never just "inert by convention". All ranking paths stay byte-identical to `main`.
+
+Two residuals block enabling the flag: (1) Shared Skill nodes — two candidates with the same phrase overwrite each other's classifications, and re-parsing with decline leaves stale data. (2) No real accuracy measurement yet (eval corpus is blind to it by construction).
+
+#### The 45.2% tail: Phase 3.3 slice 2 is the job side
+
+This slice classified *candidate* out-of-vocab phrases. The 45.2% figure is about *job requirement* phrases that are out-of-vocab. Slice 2 classifies the job side. Together they close the ADR-008 hash irreversibility — currently, anything hashed is permanently lost at every projection; the classifier makes that loss preventable.
 
 #### (history) ⚠️⚠️ READ FIRST — 2026-08-18: THE FIRST LIVE RUN OF THIS PRODUCT FOUND A DEFECT THE WHOLE SUITE COULD NOT SEE
 

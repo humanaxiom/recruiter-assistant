@@ -350,6 +350,35 @@ def _category_table() -> dict[str, list[str]]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _category_family_names() -> tuple[str, ...]:
+    """The file's TOP-LEVEL family names, read straight from
+    ``categories.yaml`` -- a SECOND, purpose-built VIEW of the same on-disk
+    source ``_category_table()`` reads (same ``_CATEGORIES_PATH``, same
+    ``@lru_cache``, same graceful-degrade-to-empty posture), not a second,
+    independently-maintained copy of the family list.
+
+    ``_category_table()`` inverts family -> [skills] into canonical ->
+    [families] for per-skill lookup (``categories_for``/``ensure_categories``)
+    and therefore structurally cannot see a family with zero curated skill
+    members (``domain``/``other``, per the yaml header) -- that is a
+    limitation of the INVERTED view, not a reason to give either family a
+    fake curated member. Adding one (to the shipped, ADR-042-governed
+    vocabulary file, or as a synthetic key injected into
+    ``_category_table()``'s own dict) would silently widen the résumé side's
+    in-vocab predicate: ``_canonical_key_for_normalised`` treats ANY key in
+    ``_category_table()`` as in-vocabulary/cleartext, and
+    ``skill_classifier.unclassified_names`` shares that exact predicate.
+    ``skill_classifier.known_families()`` reads THIS accessor instead, for
+    exactly that reason.
+    """
+    if not _CATEGORIES_PATH.is_file():
+        log.warning("skill_categories.missing path=%s", _CATEGORIES_PATH)
+        return ()
+    data = yaml.safe_load(_CATEGORIES_PATH.read_text(encoding="utf-8")) or {}
+    return tuple(sorted({str(family).strip().lower() for family in data}))
+
+
 def categories_for(canonical: str) -> list[str]:
     """Curated families for a canonical skill name, or [] if not seeded."""
     return list(_category_table().get(canonical.strip().lower(), []))

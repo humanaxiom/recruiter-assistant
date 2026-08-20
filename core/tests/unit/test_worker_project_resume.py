@@ -554,14 +554,104 @@ async def test_resume_side_merges_the_skill_node_itself_not_just_the_edge() -> N
 
 
 @pytest.mark.asyncio
-async def test_resume_side_categories_write_is_still_vocab_scoped() -> None:
-    """Categories are safe, vocab-scoped metadata (``categories_for``
-    degrades to ``[]`` for a hash-keyed non-vocab skill) — unaffected by
-    ADR-008, still exercised from the résumé side."""
-    tx, _driver, _events = await _project(_payload(skills=[{"name": "python"}]))
+async def test_resume_side_categories_write_curated_wins_over_a_payload_override() -> (
+    None
+):
+    """UPDATED (ROADMAP A2, Phase 3.3 skill-family classifier, slice 1):
+    the OLD name/docstring here ("still vocab scoped") meant, pre-feature,
+    that a categories WRITE ever happening at all implied vocab membership
+    -- true only because ``categories_for`` degrading to ``[]`` for a
+    hash-keyed skill meant ``ensure_categories``'s ``if cats:`` guard never
+    fired for one. Post-feature that implication is gone: a hashed skill CAN
+    now get a categories write too, from the payload's classifier-assigned
+    value (see ``test_resume_side_writes_classifier_categories_for_a_hashed_skill``
+    below). What this test pins now is the STRONGER, more precise claim the
+    old name only implied by accident: for an IN-VOCAB skill specifically,
+    the write is ``ensure_categories``'s curated set ONLY, never a
+    classifier/payload value -- even if a buggy or future producer attached
+    a bogus ``categories`` list to an in-vocab skill's outbox row. Curated
+    must win; a classifier value must never override it."""
+    tx, _driver, _events = await _project(
+        _payload(
+            skills=[
+                {
+                    "name": "python",
+                    # A payload override that MUST be ignored -- "python" is
+                    # in-vocab, so only its curated categories.yaml families
+                    # may ever be written for it.
+                    "categories": ["not_a_real_family_a_buggy_producer_sent"],
+                }
+            ]
+        )
+    )
     categories_calls = [(c, p) for c, p in _all_run_calls(tx) if "categories" in c]
     assert categories_calls
-    assert any(p.get("cats") for _c, p in categories_calls)
+    written = next(p["cats"] for _c, p in categories_calls if "cats" in p)
+    assert written == skills_graph.categories_for("python")
+    assert "not_a_real_family_a_buggy_producer_sent" not in written
+
+
+@pytest.mark.asyncio
+async def test_resume_side_writes_classifier_categories_for_a_hashed_skill() -> None:
+    """UPDATED (this decision memo, 2026-08-19, slice 2): the parse-time
+    classifier's assignment rides the outbox payload straight through to the
+    graph for a hashed (out-of-vocab) skill -- projection itself makes no LLM
+    call; it only writes what it was handed. CHANGED from the slice-1
+    behaviour this test used to pin: the write now lands on the SEPARATE
+    ``Skill.classified_categories`` property, NEVER on ``Skill.categories``
+    (which stays exclusively curated, from ``ensure_categories``) -- a
+    curated family and an inferred one must remain distinguishable in the
+    graph forever. Live measurement against the real tailnet gpt-oss:20b
+    found the classifier stably mis-families some skills, and family credit
+    is transitive across the whole résumé, so the record must be provenance-
+    tagged even though (per the new ``match_use_classified_families`` flag,
+    default off) it does not yet drive ranking."""
+    payload = _payload(
+        skills=[{"name": "microfabrication", "categories": ["hardware"]}]
+    )
+    tx, _driver, _events = await _project(payload)
+    skill_calls = [
+        p for c, p in _all_run_calls(tx) if "HAS_SKILL" in c and "MERGE" in c.upper()
+    ]
+    hashed_key = next(p["cn"] for p in skill_calls if "cn" in p)
+    assert hashed_key.startswith(skills_graph._HASH_KEY_PREFIX)
+
+    classified_calls = [
+        (c, p)
+        for c, p in _all_run_calls(tx)
+        if re.search(r"SET\s+s\.classified_categories\s*=", c)
+    ]
+    assert any(p.get("cats") == ["hardware"] for _c, p in classified_calls), (
+        "expected a Cypher call writing s.classified_categories = ['hardware'] "
+        "for the hashed skill node -- the payload's classifier-assigned "
+        "categories never reached the graph"
+    )
+
+    curated_calls = [
+        (c, p)
+        for c, p in _all_run_calls(tx)
+        if re.search(r"SET\s+s\.categories\s*=", c)
+    ]
+    assert curated_calls == [], (
+        "a classifier-assigned family for a hashed skill must NEVER be "
+        "written to the curated s.categories property -- curated and "
+        "inferred provenance must stay distinguishable in the graph forever"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_side_no_categories_write_for_a_hashed_skill_the_classifier_skipped() -> (  # noqa: E501
+    None
+):
+    """Conservative default, pinned at the projection layer: a hashed skill
+    whose payload carries NO ``categories`` key at all (the classifier gave
+    no confident answer, or was never run) gets NO categories write --
+    identical to how every hash-keyed skill behaved before this feature
+    existed."""
+    payload = _payload(skills=[{"name": "a totally novel unclassified skill"}])
+    tx, _driver, _events = await _project(payload)
+    categories_calls = [(c, p) for c, p in _all_run_calls(tx) if "categories" in c]
+    assert categories_calls == []
 
 
 # ── ADR-026 (FU-8): unproject_resume — the withdrawal un-project point ────

@@ -202,6 +202,15 @@ class Settings(BaseSettings):
     # Semantic skill matching (ADR 0020) + latency caps (ADR 0021).
     match_family_weight: float = 0.5
     match_non_matchable_families: str = "other,domain"
+    # ROADMAP A2, Phase 3.3 slice 2 (2026-08-19 decision memo): the parse-time
+    # classifier's output (Skill.classified_categories) must never move
+    # ranking until this is explicitly switched on. Live measurement against
+    # the real tailnet gpt-oss:20b found the classifier stably mis-families
+    # domain-expert phrases, and family credit is transitive across a whole
+    # résumé, so an unreviewed misfire would tell a recruiter a candidate
+    # holds a qualification they don't. Default False; record the fact,
+    # defer the scoring change (ADR-040/ADR-041 precedent).
+    match_use_classified_families: bool = False
     match_coarse_k: int = 50
     match_evidence_k: int = 15
     # Blocker #10: recruiter-assistant has NO synchronous reverse-match endpoint
