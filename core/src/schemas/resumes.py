@@ -144,6 +144,18 @@ class ResumeSkill(BaseModel):
     years: int | None = Field(default=None, ge=0, le=80)
     last_used_year: int | None = Field(default=None, ge=1900, le=2100)
     evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
+    # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 1): families a
+    # PARSE-TIME classifier assigned to an out-of-vocab skill name
+    # (`src.pipeline.skill_classifier.classify_families`). Absent (`None`),
+    # NOT `[]`, when the classifier gave no confident answer or was never run
+    # (in-vocab skill, classifier failure) — that is what keeps a résumé
+    # parsed before this feature shipped byte-identical to one parsed after
+    # it, for any skill the classifier declines to touch. Capped at
+    # `skill_classifier._MAX_FAMILIES_PER_SKILL` (2) as a second line of
+    # defence: family credit is transitive across the whole résumé
+    # (`orchestrator.py`), so this schema ceiling holds even if a future
+    # classifier bug tries to over-assign.
+    categories: list[str] | None = Field(default=None, max_length=2)
 
     @field_validator("last_used_year", mode="before")
     @classmethod

@@ -11,16 +11,28 @@
 #
 # A skill may belong to MORE THAN ONE family (list it under each); the matcher
 # credits a shared family. Keep names lower-cased and matching the canonical
-# names in aliases.yaml. Skills not listed here are simply left uncategorised
-# today; the Phase 3.3 plan includes an LLM backfill task to categorise them
-# against the families below.
+# names in aliases.yaml. Skills not listed here get no CURATED family. Since
+# ADR-044 a parse-time classifier may assign them a family from the keys below,
+# recorded separately on `Skill.classified_categories` so a curated family and
+# a model-inferred one stay distinguishable forever. Note it is NOT a backfill:
+# the ADR-008 skill hash is one-way, so classification has to happen while the
+# cleartext name is still in hand and can never be run over the graph later.
+# (An earlier version of this comment described a backfill task; that design is
+# impossible for exactly that reason.)
 #
-# The TOP-LEVEL KEYS of this file are the family VOCABULARY. The only code that
-# reads them in THIS repo is `skills_graph._category_table()` and the
-# `match_non_matchable_families` setting — `worker.skill_normalize
+# The TOP-LEVEL KEYS of this file are the family VOCABULARY. Three things read
+# them in THIS repo: `skills_graph._category_table()`, the
+# `match_non_matchable_families` setting, and — since ADR-044 —
+# `skills_graph._category_family_names()`, which feeds
+# `skill_classifier.known_families()`. `worker.skill_normalize
 # .skill_categories_vocab()`, named in the hris original, was never ported and
-# does not exist here. Grow the taxonomy by
-# adding a family key here (no code change). `other` and `domain` are deliberate
+# does not exist here.
+#
+# Grow the taxonomy by adding a family key here (no code change) — but note it
+# is no longer inert: a new key also widens the parse-time classifier's closed
+# assignable set and the family list named in its prompt (ADR-044). Adding a
+# family makes it a legal answer the model may assign to any out-of-vocabulary
+# skill name. `other` and `domain` are deliberate
 # catch-alls kept in the vocab but EXCLUDED from family credit by
 # `match_non_matchable_families` (they're junk/ambiguous buckets, not a
 # relatedness signal). Add freely; matching quality compounds from this map.

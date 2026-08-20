@@ -105,6 +105,23 @@ def test_match_family_and_non_matchable_families_defaults() -> None:
     assert s.match_non_matchable_families == "other,domain"
 
 
+def test_match_use_classified_families_default_is_false() -> None:
+    """ROADMAP A2, Phase 3.3 slice 2 (2026-08-19 decision memo): the
+    parse-time classifier's output must never move ranking until this flag
+    is explicitly switched on -- live measurement against the real tailnet
+    gpt-oss:20b found stable mis-families ("expert scientific knowledge of
+    MRI and MEG research methods" -> bi) and family credit is transitive
+    across the whole résumé. Record the fact, defer the scoring change."""
+    assert Settings().match_use_classified_families is False
+
+
+def test_env_override_of_match_use_classified_families(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATCH_USE_CLASSIFIED_FAMILIES", "true")
+    assert Settings().match_use_classified_families is True
+
+
 def test_match_coarse_and_evidence_k_defaults() -> None:
     s = Settings()
     assert s.match_coarse_k == 50
@@ -150,6 +167,7 @@ def test_match_llm_concurrency_and_max_tokens_defaults() -> None:
         "match_motivation_min_confidence",
         "match_family_weight",
         "match_non_matchable_families",
+        "match_use_classified_families",
         "match_coarse_k",
         "match_evidence_k",
         "match_reverse_evidence_k",

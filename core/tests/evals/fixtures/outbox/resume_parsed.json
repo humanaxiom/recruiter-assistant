@@ -5,7 +5,7 @@
       { "name": "python", "years": 6, "last_used_year": 2026, "evidence_chunk_ids": ["c_001"] },
       { "name": "postgresql", "years": 5, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
       { "name": "apache airflow", "years": 4, "last_used_year": 2026, "evidence_chunk_ids": ["c_002"] },
-      { "name": "cisco certified network associate security specialist exam", "evidence_chunk_ids": ["c_001"] },
+      { "name": "cisco certified network associate security specialist exam", "evidence_chunk_ids": ["c_001"], "categories": ["security"] },
       { "name": "c++", "years": 3, "last_used_year": 2024, "evidence_chunk_ids": ["c_002"] }
     ],
     "experience": [

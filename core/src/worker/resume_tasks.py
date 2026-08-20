@@ -45,7 +45,7 @@ from asyncpg import Record
 from neo4j import AsyncDriver
 from pydantic import ValidationError
 
-from src.pipeline import skills_graph
+from src.pipeline import skill_classifier, skills_graph
 from src.pipeline.llm import (
     CachedEmbedder,
     LLMClient,
@@ -252,7 +252,44 @@ async def _extract_skills_merged(
     # LLM missed; that is what raising ``_MAX_SKILLS`` above is for.
     canonical = canonicalize_skill_names([*[d.name for d in llm_details], *det])
     ordered = list(dict.fromkeys(canonical))[:_MAX_SKILLS]
-    skills = [detail_by_canonical.get(c, ResumeSkill(name=c)) for c in ordered]
+
+    # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 1): classify the
+    # OUT-OF-VOCAB subset AT PARSE TIME (ADR-044's load-bearing
+    # decision) -- the skills LLM is already being called above, and there
+    # is no drain-time budget here, unlike projection (ADR-008). Best-effort,
+    # mirroring this function's own posture for the skills LLM call: any
+    # classifier failure yields no categories for anything, never fails the
+    # parse, and is logged count-only (never a skill name). This is a
+    # SEPARATE, unrelated signal from ``degradation_reason`` (that reason is
+    # reserved for the skills LLM call itself failing).
+    unclassified = skill_classifier.unclassified_names(ordered)
+    classifier_categories: dict[str, list[str]] = {}
+    if unclassified:
+        try:
+            classifier_categories = await skill_classifier.classify_families(
+                llm, unclassified, settings=get_settings()
+            )
+        except Exception:  # noqa: BLE001 — best-effort, never fails the parse
+            log.warning(
+                "parse_resume.skill_classifier_failed resume_id=%s count=%d",
+                resume_id_str,
+                len(unclassified),
+            )
+            classifier_categories = {}
+
+    unclassified_set = set(unclassified)
+    skills: list[ResumeSkill] = []
+    for c in ordered:
+        skill = detail_by_canonical.get(c, ResumeSkill(name=c))
+        # Only ever attach a category to a name THIS call actually sent to
+        # the classifier -- an in-vocab name is never sent (see
+        # ``unclassified_names``), so a buggy/future classifier answering
+        # for one anyway must still never reach ``ResumeSkill.categories``.
+        cats = classifier_categories.get(c) if c in unclassified_set else None
+        if cats:
+            skill = skill.model_copy(update={"categories": cats})
+        skills.append(skill)
+
     return _drop_smeared_years(skills, resume_id_str), degradation_reason
 
 
@@ -1136,6 +1173,32 @@ async def _resume_projection_tx(
         # key" (the MERGE pattern itself already sets `canonical_key`).
         await tx.run("MERGE (s:Skill {canonical_key: $cn})", cn=canonical)
         await skills_graph.ensure_categories(tx, canonical)
+        # ROADMAP A2 Phase 3.3 (skill-family classifier, slice 2, 2026-08-19
+        # decision memo): a HASHED (out-of-vocab) skill can never have
+        # curated categories -- `categories_for(canonical)` always degrades
+        # to `[]` for a `h:...` key, so `ensure_categories`'s `if cats:`
+        # guard above never fires for one. This writes the PARSE-TIME
+        # classifier's assignment instead, straight from the outbox payload
+        # (`_extract_skills_merged`) -- no LLM call happens here, this is a
+        # pure write of a value the caller already computed. CHANGED from
+        # slice 1: the write now lands on the SEPARATE
+        # `Skill.classified_categories` property, NEVER on `Skill.categories`
+        # (curated, `ensure_categories`-only, forever) -- a curated family
+        # and a model-inferred one must remain distinguishable in the graph
+        # permanently. This is mutually exclusive with the curated write
+        # above BY CONSTRUCTION (this only ever fires for a hashed canonical,
+        # `ensure_categories` only ever fires for a curated/cleartext one),
+        # so a classifier value can never override a curated one -- and now
+        # it cannot even land in the same property.
+        if canonical.startswith(skills_graph._HASH_KEY_PREFIX):
+            classifier_categories = skill.get("categories")
+            if classifier_categories:
+                await tx.run(
+                    "MATCH (s:Skill {canonical_key: $c}) "
+                    "SET s.classified_categories = $cats",
+                    c=canonical,
+                    cats=classifier_categories,
+                )
         evidence = skill.get("evidence_chunk_ids") or []
         await tx.run(
             """

@@ -65,8 +65,9 @@ Four things that make the difference between a demo that lands and one that disc
    NOT RETIRED, 2026-08-14 — [ADR-042](adr/042-skill-vocabulary-domain-families.md).** Vocabulary coverage of
    real SFU qualification statements went 15.6% → 54.8%, so a real posting is far more viable than it was:
    roughly half of what a real posting asks for is now recognised, not one statement in six. **A real posting
-   is still not a safe unscripted demo.** 45.2% remains a genuine long tail (the Phase 3.3 classifier's job,
-   not yet built), so an unscripted real posting can still surface a wall of red *"— missing · must-have"*
+   is still not a safe unscripted demo.** 45.2% remains a genuine long tail (the Phase 3.3 classifier's job; its
+   résumé half shipped 2026-08-19 as ADR-044, but that half is credit-DISABLED by default and the
+   45.2% is job-side work still to come), so an unscripted real posting can still surface a wall of red *"— missing · must-have"*
    chips for skills the candidate plainly has. If demoing against a real posting, pre-check its extracted
    requirements against the shipped vocabulary first, or say the constraint out loud: *"about half of a real
    posting's requirements are recognised today; the rest needs the classifier that's still open work."*
@@ -202,7 +203,7 @@ sessionless write. **(iii) needed a human decision** on whether any legitimate n
 
 </details>
 
-## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage — ✅ VOCABULARY MERGE SHIPPED (ADR-042)
+## A2. P0 · Skill matching — domain mismatch, not vocabulary shortage — ✅ VOCABULARY MERGE + PARSE-TIME CLASSIFIER SHIPPED (ADR-042 · ADR-044)
 
 **Reframe, confirmed by measurement:** not "the vocabulary is too small" but **"the ontology was for the
 wrong domain."** Measured from **1,802 real SFU canonical JDs** (9,176 qualification statements, 1,222
@@ -214,9 +215,17 @@ equity_indigenous, facilities_operations, interpersonal_core, health_wellness) h
 PR #69. **Merged 2026-08-14 — [ADR-042](adr/042-skill-vocabulary-domain-families.md).**
 `categories.yaml` 19 → 32 families, `aliases.yaml` 72 → 306 canonicals, coverage **15.6% → 54.8%** (+39.2
 points). Remaining gap: **45.2%**, a genuine long tail (MRI/MEG methods, microfabrication, study-permit
-requirements, other role-specific knowledge) that needs the Phase 3.3 projection-time classifier, not more
-curation. Full mechanism (why an out-of-vocabulary skill scores `0.0`, the cap regression the merge
+requirements, other role-specific knowledge) that needs the Phase 3.3 classifier, not more
+curation. NOTE the shipped design is PARSE-time, not projection-time (ADR-044): the ADR-008 hash is
+one-way, so classification must happen while the cleartext name is in hand and can never be run over
+the graph afterwards. Earlier text here said "projection-time"; that design is impossible. Full mechanism (why an out-of-vocabulary skill scores `0.0`, the cap regression the merge
 triggered, why `rest api design` must never get a family) is in ADR-042 — not repeated here.
+
+**Parse-time skill-family classifier now shipped 2026-08-19 ([ADR-044](adr/044-skill-family-classifier.md)):** out-of-vocabulary skill names are now classified at parse time (where the LLM is already being called) into one of the 32 curated families, and their assignments are written to the `Skill.classified_categories` graph property. This stops the irreversible loss: previously, a hashed skill never earned family credit and could not be recovered later. The feature is **opt-in** — the default `match_use_classified_families=False` means the field is read but its value is ignored by the ranking engine's family-credit arm. Two live defects invisible to the full test suite were found and fixed:
+1. `_CLASSIFY_MAX_TOKENS=1024` was a silent no-op (reasoning trace consumed the budget, 0 of 6 skills classified); raised to 4096.
+2. The prompt did not signal non-matchable families as preferred for doubtful names, letting two domain-expert phrases misfire into matchable families.
+
+**Two residuals block enabling the flag:** (1) Shared Skill nodes — two candidates with the same out-of-vocab phrase overwrite each other's `classified_categories`, and a re-parse that declines still leaves the prior value; needs to clear the field on every write and test the re-parse case. (2) A real accuracy measurement must run before flag flip — the eval corpus is blind to the classifier by construction (all 20 fixtures hold only in-vocab skills).
 
 **Three corrections to anchors this section previously cited, found while writing ADR-042 (a fourth,
 ADR-008's own residual #12, is corrected in that ADR directly):**
