@@ -29,7 +29,7 @@ import json
 from typing import Any
 from uuid import UUID
 
-from src.schemas.audit import AuditLogItem
+from src.schemas.audit import AuditDetail, AuditLogItem
 from src.services import DbConn
 
 #: Rendered in place of a value the auditor viewer will not disclose. A marker,
@@ -53,10 +53,63 @@ WITHHELD = "<withheld>"
 #: Deliberately NOT listed: ``withdraw_resume``'s ``reason``. It is operator-
 #: typed prose about a specific, named candidate, and this viewer is exactly the
 #: surface that would render it. Whether an auditor should be able to read it at
-#: all is a product/privacy question recorded in ADR-036, not answered here.
+#: all WAS a product/privacy question carried in ADR-036; it is now answered —
+#: D1 = option C, 2026-08-19 — and the answer is "on request, separately
+#: audited", NOT "disclosed here". So it stays off this allowlist and appears
+#: instead on ``_REVEALABLE_DETAIL_ACTIONS`` below.
+#:
+#: ``reveal_audit_detail``'s ``revealed_action`` IS listed. It names which
+#: action's details a reveal disclosed, and it is enum-shaped and non-PII
+#: (``"withdraw_resume"``). Withholding it would make the trail of reveals
+#: unreadable without revealing it in turn, which defeats the compensating
+#: control the reveal route exists to provide.
 _DISCLOSABLE_DETAIL_KEYS: dict[str, frozenset[str]] = {
     "role_changed": frozenset({"old_role", "new_role"}),
+    "reveal_audit_detail": frozenset({"revealed_action"}),
 }
+
+#: ALLOWLIST of actions whose WITHHELD ``details`` an auditor may reveal on
+#: request, each reveal separately audited — D1 = option C, answered by the
+#: product owner on 2026-08-19 (see ``docs/adr/036-auditor-audit-log-viewer.md``).
+#:
+#: **This is the same fail-closed posture as ``_DISCLOSABLE_DETAIL_KEYS``, and
+#: for a sharper reason.** That allowlist governs what is disclosed to everyone
+#: with audit access; this one governs what can be *un*-withheld at all. A
+#: blocklist here would hand every future ``record_audit`` caller a reveal path
+#: for its new details key by default — the exact ROADMAP A7 shape, where the
+#: rule is written in prose and nothing enforces it.
+#:
+#: Two invariants hold between the two allowlists, and
+#: ``tests/unit/test_audit_service_detail_reveal.py`` enforces both rather than
+#: leaving them to a comment: (1) no action is both freely disclosed and
+#: revealable — a "reveal" of a value already on screen would audit a
+#: restricted read that was never restricted; (2) every revealable action
+#: actually has something withheld, or the control is dead weight that reads,
+#: to an auditor, as though something is being kept from them.
+_REVEALABLE_DETAIL_ACTIONS: frozenset[str] = frozenset({"withdraw_resume"})
+
+
+def _decode_details(raw: Any) -> Any:
+    """Decode a ``details`` value as asyncpg hands it back.
+
+    asyncpg returns ``jsonb`` as ``str``, so both audit reads must parse it —
+    but a legacy or hand-written row can hold text that is not valid JSON, and
+    ``json.loads`` on it raises. **An audit read must degrade, never 500**:
+    ``redact_audit_details`` has promised exactly that since Phase 1.4, and the
+    promise was enforced only *inside* that function while the decode one layer
+    above it could still crash the whole page. The ROADMAP A7 shape — an
+    invariant stated in prose with nothing holding it.
+
+    An undecodable payload is returned verbatim, which makes it a non-``dict``,
+    which makes ``redact_audit_details`` withhold it wholesale and the reveal
+    route refuse it. Fail-closed by construction rather than by remembering.
+    """
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
 
 
 def redact_audit_details(action: str, details: Any) -> Any:
@@ -188,10 +241,9 @@ async def list_audit_log(
     rows = await conn.fetch(_LIST_SQL, action, subject_type, job_id, limit, offset)
     items: list[AuditLogItem] = []
     for row in rows:
-        raw = row["details"]
-        # asyncpg hands back `jsonb` as `str`; the isinstance guard mirrors
-        # `resume_service`'s established idiom for the same column type.
-        decoded = json.loads(raw) if isinstance(raw, str) else raw
+        # asyncpg hands back `jsonb` as `str`; `_decode_details` also survives
+        # a row whose text is not valid JSON (see its docstring).
+        decoded = _decode_details(row["details"])
         items.append(
             AuditLogItem(
                 id=row["id"],
@@ -211,9 +263,61 @@ async def list_audit_log(
     return items
 
 
+def is_revealable_action(action: str) -> bool:
+    """Is this ``action``'s withheld ``details`` payload revealable on request?
+
+    The single read of :data:`_REVEALABLE_DETAIL_ACTIONS`. Exposed as a
+    function rather than the set itself so the route layer cannot accidentally
+    grow its own membership rule — the frontend does not even know this
+    allowlist exists (it offers the control wherever a value is withheld and
+    lets this fail-close), which keeps one implementation of the disclosure
+    decision instead of two that drift.
+    """
+    return action in _REVEALABLE_DETAIL_ACTIONS
+
+
+_READ_DETAIL_SQL = """
+SELECT id, action, details, occurred_at
+FROM audit_log
+WHERE id = $1
+"""
+
+
+async def read_audit_detail(conn: DbConn, *, audit_id: UUID) -> AuditDetail | None:
+    """Read ONE ``audit_log`` row's ``details`` **un-redacted** — D1 = option C.
+
+    This is the only read in the codebase that bypasses
+    :func:`redact_audit_details`, and it is deliberately a separate function
+    rather than a flag on :func:`list_audit_log`: a boolean parameter on the
+    list read would put "disclose everything" one keyword argument away from
+    every existing caller, which is precisely how a fail-closed boundary stops
+    being one.
+
+    **This function does NOT decide whether the reveal is allowed.** It returns
+    the row; the route gates on :func:`is_revealable_action` and on an
+    attributable human session, and writes the audit row BEFORE the value is
+    returned to the caller. Keeping the read dumb means there is exactly one
+    place (the route) where the ordering guarantee can be read off.
+
+    Selects ``audit_log``'s own columns only — no join against ``resumes`` or
+    ``jobs``, matching every other read in this module, so nothing decrypts and
+    no candidate PII can reach this path even by accident.
+
+    Returns ``None`` for a missing row rather than raising: "no such row" is an
+    ordinary outcome the route turns into a 404, not an error condition.
+    """
+    row = await conn.fetchrow(_READ_DETAIL_SQL, audit_id)
+    if row is None:
+        return None
+    decoded = _decode_details(row["details"])
+    return AuditDetail(id=row["id"], action=row["action"], details=decoded)
+
+
 __all__ = [
     "record_audit",
     "list_audit_log",
+    "read_audit_detail",
     "redact_audit_details",
+    "is_revealable_action",
     "WITHHELD",
 ]

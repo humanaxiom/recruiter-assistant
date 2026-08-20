@@ -307,6 +307,31 @@ def list_audit_log(
     return response.json()
 
 
+def reveal_audit_detail(
+    audit_id: Any,
+    *,
+    context: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """D1 = option C — reveal ONE withheld ``audit_log.details`` payload.
+
+    The backend records who asked, for which row, before it answers; a 403 here
+    means either the session is not an auditor/admin or the row's action is not
+    on the revealable allowlist, and the caller must render that rather than
+    letting it become a 500.
+
+    Like :func:`list_audit_log` this is authorized by the forwarded session
+    cookie, not by the fixed ``recruiter`` key this client presents.
+    """
+    params: dict[str, Any] = {}
+    if context:
+        params["context"] = context
+    response = _request(
+        "POST", f"/audit/log/{audit_id}/reveal", params=params, client=client
+    )
+    return response.json()
+
+
 def upload_resumes(
     job_id: UUID,
     files: list[tuple[str, bytes, str]],

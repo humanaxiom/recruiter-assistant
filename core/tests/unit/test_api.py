@@ -158,6 +158,12 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # had NO read path anywhere in the application. Admin + auditor, and
         # additionally gated on a real CAS session (ADR-036 §4).
         "/audit/log",
+        # D1 = option C (answered 2026-08-19) — POST /audit/log/{id}/reveal,
+        # the separately-audited reveal of a withheld details value. The only
+        # route in the app that reads audit_log un-redacted, and the second
+        # (after /resumes/{id}/reveal) whose write method performs an audited
+        # read rather than a mutation.
+        "/audit/log/{audit_id}/reveal",
         # FU-6 slice 3 (ADR-020 §2) — src.api.routes.job_assignees, the
         # assign/unassign routes, admin + recruiter only.
         "/jobs/{job_id}/assignees",

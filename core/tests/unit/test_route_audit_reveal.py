@@ -64,6 +64,10 @@ _REASON = "candidate asked to be removed after accepting another offer"
 _AUDIT_READER_ROLES: tuple[Role, ...] = (Role.ADMIN, Role.AUDITOR)
 _NON_AUDIT_READER_ROLES: tuple[Role, ...] = (Role.RECRUITER, Role.HIRING_MANAGER)
 
+#: Distinguishes "caller did not pass details" from "caller passed None".
+#: `None` is a real jsonb value this file must be able to exercise.
+_UNSET = object()
+
 
 class _Row(dict[str, Any]):
     def __getitem__(self, key: str) -> Any:
@@ -74,13 +78,13 @@ def _detail_row(
     *,
     audit_id: UUID,
     action: str = "withdraw_resume",
-    details: Any = None,
+    details: Any = _UNSET,
 ) -> _Row:
     return _Row(
         {
             "id": audit_id,
             "action": action,
-            "details": {"reason": _REASON} if details is None else details,
+            "details": {"reason": _REASON} if details is _UNSET else details,
             "occurred_at": _NOW,
         }
     )

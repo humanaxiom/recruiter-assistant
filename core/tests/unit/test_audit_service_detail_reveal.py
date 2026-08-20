@@ -146,3 +146,65 @@ def test_the_reveal_marker_itself_is_disclosed() -> None:
     """The trail of reveals must be readable without revealing it in turn."""
     details = {"revealed_action": "withdraw_resume"}
     assert audit_service.redact_audit_details("reveal_audit_detail", details) == details
+
+
+async def test_an_undecodable_jsonb_payload_degrades_rather_than_raising() -> None:
+    """Found by the reveal route's own "legacy scalar" case, and it was a real
+    defect one layer up from where the promise was written.
+
+    ``redact_audit_details``'s docstring has promised since Phase 1.4 that "an
+    audit read must degrade, never 500" — and it does, for anything handed to
+    it. But BOTH reads call ``json.loads`` on the raw column first, and a row
+    whose text is not valid JSON made that raise before the promise could
+    apply. Exactly the ROADMAP A7 shape: the invariant is in prose, and nothing
+    holds it.
+
+    Degrading means the value stays a non-``dict``, so it is withheld wholesale
+    and the reveal route refuses it — fail-closed, not merely non-crashing.
+    """
+    audit_id = uuid4()
+    conn = _conn(
+        _Row(
+            {
+                "id": audit_id,
+                "action": "withdraw_resume",
+                "details": "not json at all",
+                "occurred_at": _NOW,
+            }
+        )
+    )
+    row = await audit_service.read_audit_detail(conn, audit_id=audit_id)
+    assert row is not None
+    assert not isinstance(row.details, dict)
+    assert audit_service.redact_audit_details(row.action, row.details) == (
+        audit_service.WITHHELD
+    )
+
+
+async def test_the_list_read_also_survives_an_undecodable_payload() -> None:
+    """The same crash sat on the list read, which is the page an auditor opens
+    first — one malformed row would have taken down the whole record."""
+    conn = MagicMock(name="conn")
+    conn.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                {
+                    "id": uuid4(),
+                    "actor_kind": "user",
+                    "actor_user_id": uuid4(),
+                    "actor_username": "priya",
+                    "actor_service": None,
+                    "action": "withdraw_resume",
+                    "subject_type": "resume",
+                    "subject_id": uuid4(),
+                    "job_id": None,
+                    "context": None,
+                    "details": "not json at all",
+                    "occurred_at": _NOW,
+                }
+            )
+        ]
+    )
+    items = await audit_service.list_audit_log(conn)
+    assert len(items) == 1
+    assert items[0].details == audit_service.WITHHELD
