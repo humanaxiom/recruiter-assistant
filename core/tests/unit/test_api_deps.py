@@ -106,6 +106,17 @@ no-role human ends up with full recruiter-equivalent, company-wide access.
   the CAS-disabled dev-anonymous synthetic sentinel whose ``role='admin'``)
   -> PASS.
 
+**REVERSED 2026-08-19 (D2 = option B, docs/OPEN_DECISIONS.md §D2).** The
+first bullet above described this gate's behaviour only up to that date.
+Product decided reads must be symmetric with writes: ``user is None`` now
+ALSO ``HTTPException(403)``s -- closing the last case this gate still
+passed unscoped, the sharpest instance being a bare key reading
+``GET /audit/reveals-legacy`` unattributably. See the dedicated
+``test_require_role_assigned_403s_a_bare_service_key_caller_with_no_session``
+below (renamed from ``..._passes_..._with_no_session``, reversed in place)
+and ``tests/unit/test_api_deps_d2_close_unscoped_reads.py`` for the fuller
+new-behaviour coverage.
+
 Wired ONCE, at the ROUTER level (``app.include_router(..., dependencies=[
 Depends(require_role_assigned)])``) on every business router
 (``jobs``/``resumes``/``shortlist``/``job_assignees``/``audit``) in
@@ -1227,16 +1238,28 @@ def _no_role_user() -> User:
 
 
 @pytest.mark.asyncio
-async def test_require_role_assigned_passes_a_bare_service_key_caller_with_no_session() -> (  # noqa: E501
+async def test_require_role_assigned_403s_a_bare_service_key_caller_with_no_session() -> (  # noqa: E501
     None
 ):
-    """``user is None`` — no session at all (a bare service-key caller with
-    CAS enabled, or any caller when CAS is disabled and the sentinel path
-    isn't reached in this unit) — must PASS. This gate never judges the
-    ABSENCE of a session, only a REAL session's role."""
+    """REVERSED 2026-08-19 -- D2 = option B, ``docs/OPEN_DECISIONS.md`` §D2,
+    answered by product; the question ADR-034's "Accepted residuals" carried
+    forward. Until today this test asserted the OPPOSITE: ``user is None``
+    PASSED, by documented design -- "this gate never judges the ABSENCE of a
+    session, only a REAL session's role" -- so a bare service-key caller
+    with no CAS session got unscoped reads across every business router.
+    Product decided reads must be symmetric with writes (ADR-034 F1a already
+    403s ``user is None`` for ``require_session_role``): every read now
+    needs a real principal too, closing the sharpest instance -- a bare key
+    reading ``GET /audit/reveals-legacy`` unattributably. See
+    ``tests/unit/test_api_deps_d2_close_unscoped_reads.py`` for the
+    dedicated new-behaviour coverage this reversal is paired with, and
+    ``tests/integration/test_close_unscoped_reads_pg.py`` for the router-
+    level proof."""
     from src.api.deps import require_role_assigned
 
-    await require_role_assigned(user=None)  # must not raise
+    with pytest.raises(HTTPException) as excinfo:
+        await require_role_assigned(user=None)
+    assert excinfo.value.status_code == 403
 
 
 @pytest.mark.parametrize("role", ["admin", "recruiter", "hiring_manager", "auditor"])
@@ -1310,7 +1333,13 @@ async def test_require_role_assigned_composes_with_resolve_user_via_dependency_o
     ``test_require_role_composes_with_resolve_role_via_dependency_override``
     above exactly, but for the session-identity gate instead of the
     key-role gate. Overriding the SHARED ``resolve_user`` dependency
-    propagates through ``require_role_assigned``'s check."""
+    propagates through ``require_role_assigned``'s check.
+
+    **Final block REVERSED 2026-08-19** -- D2 = option B,
+    ``docs/OPEN_DECISIONS.md`` §D2. Overriding ``resolve_user`` to ``None``
+    used to compose to 200 (the pre-D2 PASS-on-``None`` contract); it now
+    must compose to 403, the same as every other business route reached
+    with no session at all."""
     from src.api import deps
 
     app = FastAPI()
@@ -1338,4 +1367,4 @@ async def test_require_role_assigned_composes_with_resolve_user_via_dependency_o
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         resp = await client.get("/protected")
-    assert resp.status_code == 200
+    assert resp.status_code == 403

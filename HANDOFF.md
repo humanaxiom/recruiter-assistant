@@ -2,7 +2,65 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-19: PARSE-TIME SKILL CLASSIFIER SHIPPED; TWO DEFECTS FOUND BY CALLING A REAL MODEL
+### ⚠️⚠️ READ FIRST — 2026-08-20: THE BLOCKED DECISIONS MOVED, AND THE PILOT IS NOW THE ONLY THING LEFT
+
+> **Four PRs merged in this session: #92, #93, #94 and this one (#95).** **`git fetch` and check
+> `gh pr list` before trusting any line here** — two Claude sessions have raced on this repo before.
+
+#### The decisions, after five sessions of being carried as bare "blocked" lines
+
+The owner answered both on 2026-08-19: **D1 = C**, **D2 = B**. Both were the recommended defaults, and the
+coupling was respected — D2 answered first is what makes D1 worth building.
+
+- **D2 = B — ANSWERED AND IMPLEMENTED (PR #95).** `require_role_assigned` now 403s on `user is None`, so a
+  caller with a valid API key and no CAS session no longer gets unscoped reads. Reads are symmetric with
+  writes. The sharpest case closed: a bare key reading `/audit/reveals-legacy` unattributably.
+- **D1 = C — ANSWERED, NOT IMPLEMENTED.** The audited reveal for withdrawal reasons is **the next piece of
+  work**. No branch exists for it. Its memo deliberately stays in
+  [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md) until it lands — do not treat the answer as the delivery.
+
+**The measurement worth keeping from D2.** ADR-034 carried "are machine readers legitimate at all" as an
+unanswerable question. Applying the change broke **exactly three tests across 5,331 unit and 527
+integration**, all of them asserting the behaviour being removed. Nothing else in the codebase reads through
+a bare key; the eval harness never calls the API. Recorded in ADR-034's amendment so the next person to
+propose a machine reader does not re-litigate it.
+
+#### 🔴 What is left, and it is now genuinely short
+
+1. **Run the product.** Two physical actions, unchanged for five sessions and now the *only* thing blocking
+   the pilot: run `scripts/quickstart.ps1` under **`pwsh` (PowerShell 7 — 5.1 cannot parse it and
+   `powershell.exe` still exits 0 on the parse failure)**, and click through the live UI.
+   **⚠️ The running containers are days old and predate PR #93** — restart the stack or the regenerate fix
+   and the DDL boot-race fix are not actually live. Check `docker compose ps` shows all eight services up,
+   the worker especially: a dead worker looks exactly like a healthy stack that silently never ranks.
+2. **D1 = C.** Answered, scoped, unbuilt. Reuse `reveal_service`'s audited-reveal pattern; with D2 merged
+   the audit row now carries a real actor instead of falling back to `actor = "api"`.
+3. **Phase 3.3 slice 2 — the job side.** See the classifier banner below. This is where the 45.2% actually
+   lives.
+
+#### 🔴 The lesson from this session, and it cost real defects to learn
+
+**Four defects shipped past a fully green gate and were caught only by reading a diff, running the gate
+myself, or calling the real model.** Not one was caught by a subagent's report, and several were reported to
+me as green:
+
+- **the regenerate button did nothing** — the pipeline was perfect; the UI never said so (PR #93)
+- **a schema boot race** that could kill a container on a clean first `docker compose up`, with no restart
+  policy — pre-existing, and precisely what a pilot deployment does first (PR #93)
+- **the skill classifier was a complete no-op in production** — the reasoning trace ate its token budget,
+  0 of 6 assigned, while 5,388 unit and 524 integration tests passed (PR #94)
+- **an ADR that fabricated its own findings** — claiming a fix worked that was measured failing, and
+  inventing a reviewer correction, which would have buried the finding that a résumé listing *Excel* could
+  earn credit toward "expert knowledge of MRI and MEG research methods"
+
+**A subagent's claim of green is not evidence of green** — `CLAUDE.md` already says this, and every instance
+this session confirmed it. Two agents stalled without reporting at all; the defects were in the diffs
+regardless.
+
+**And the deeper one:** the suite cannot see what only the product can show. The eval harness never executes
+the projection path. Live probes found in one call what thousands of tests could not.
+
+#### (history) ⚠️⚠️ READ FIRST — 2026-08-19: PARSE-TIME SKILL CLASSIFIER SHIPPED; TWO DEFECTS FOUND BY CALLING A REAL MODEL
 
 > **This branch (`feat/skill-family-classifier`) is a `feat`-class change** — new LLM call at parse time, new graph property (`Skill.classified_categories`), new settings flag. It required the integration suite and a live probe against the real LLM to validate. **`git fetch` and check `gh pr list` before trusting any line here.**
 >
@@ -117,7 +175,7 @@ them. Recorded as a dated amendment in ADR-029 rather than a rewrite.
 > `feat:` and it required the integration suite, not the offline gate alone. `origin/main` is at or *after*
 > `a0c3c17`. **`git fetch` and check `gh pr list` before trusting any of this.**
 >
-> **The four human-only actions from the 2026-08-13 banner are STILL ALL OUTSTANDING.** Re-run `quickstart.ps1` with `pwsh`, click through the live UI, and the two recorded decisions (auditor access to withdrawal reasons; unscoped reads for a bare service key). Three sessions have now passed them by. **Nobody has run this product end to end.**
+> **Status 2026-08-19:** The two decisions (auditor access to withdrawal reasons; unscoped reads for a bare service key) are now answered and implemented. Two human actions remain outstanding: re-run `quickstart.ps1` with `pwsh`, and click through the live UI.
 
 #### What shipped — A6 sibling defects disclosed (same strategy as ADR-041)
 
@@ -345,10 +403,11 @@ substance was right and both explainer formats do agree with each other; only th
 
 #### What is left, in the order I would take it
 
-1. **Get the pilot RUN.** The four human-only actions are the critical path. Two of them are *physical* and
-   no agent can do them (run `quickstart.ps1` under `pwsh`; click through the live UI). The other two are
-   **decisions, and they now have memos** — [docs/OPEN_DECISIONS.md](docs/OPEN_DECISIONS.md) — so they need a
-   letter answered, not a session. This is the highest-value item in the project and has been for three.
+1. **Get the pilot RUN.** Two human-only actions are the critical path: run `quickstart.ps1` under `pwsh` and
+   click through the live UI. Both are *physical* and no agent can do them. (The two decisions that blocked
+   this are answered as of 2026-08-19: D1 = option C, D2 = option B, both implemented on separate branches.
+   See the new 2026-08-19 banner at the top.) This is the highest-value item in the project and has been
+   for five sessions.
 2. **The three A6 sibling defects** — `score_education`'s `if not ranked: return 0.0` is the strongest: an
    unparsed education section scores *worse* than being below the bar, which at least earns partial credit.
 3. **A3's seniority/vector control gap** and the new A2-blindness gap — both measured, both corpus-owner work.
