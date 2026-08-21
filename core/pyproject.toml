@@ -34,6 +34,12 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  # tests/smoke — drives the RUNNING stack over HTTP. Never collected by
+  # `make gates` (which targets tests/unit), because it needs a live
+  # deployment and a reachable LLM. Run it with scripts/smoke.sh.
+  "smoke: exercises the live product end to end; requires a running stack",
+]
 
 [tool.coverage.run]
 source = ["src"]

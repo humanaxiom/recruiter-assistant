@@ -64,6 +64,23 @@ class LLMOutputInvalidError(RuntimeError):
     """Model produced non-JSON or schema-invalid JSON after the retry budget."""
 
 
+#: The minimum ``max_tokens`` any JSON-extraction call may use against a
+#: reasoning model. NOT a response-size estimate: on ``gpt-oss:20b`` the
+#: DISCARDED thinking trace is charged against this budget BEFORE any JSON is
+#: emitted (ADR-021 §6), and ``think:false`` does not reliably suppress it on
+#: either the OpenAI-compat or the native path. A value below this does not
+#: truncate the answer — it returns an EMPTY one.
+#:
+#: 4096 is measured, not chosen: ADR-044 probed the live tailnet model and found
+#: 1024 classified 0 of 6 skills while 4096 classified 6 of 6. That lesson was
+#: then recorded against one call site while four others kept their own smaller
+#: literals — and on 2026-08-21 one of those (résumé skills, at 1536) returned
+#: empty content for every résumé uploaded, degrading them all and emptying the
+#: shortlist entirely. Hence one shared constant, enforced by
+#: ``tests/unit/test_reasoning_token_floor.py`` rather than by a comment.
+REASONING_JSON_MIN_TOKENS = 4096
+
+
 def _empty_content_message(reasoning_present: bool) -> str:
     """PII-free diagnostic for an empty/whitespace-only chat completion.
 

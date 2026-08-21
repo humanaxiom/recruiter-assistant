@@ -23,7 +23,7 @@
 | **A4** Two ranking defects + the cliff | ✅ **FULLY CLOSED** — ADR-**037** (M1) · **039** (M2) · **040** (the cliff, disclosed not removed). |
 | **A5** Docs contradicting the code | Largely addressed as each item landed; the explainer was updated four times this session. |
 | **A6** Before the pilot widens | 🟡 **Five scoring defects disclosed** — two in [ADR-041](adr/041-sub-score-measurement-markers.md) and three in the [ADR-041 addendum](adr/041-sub-score-measurement-markers.md#addendum--three-siblings-now-marked-and-disclosed-2026-08-18). Retention unenforced, unsalted email hash, audit immutability by convention, shallow `/health` still stand. |
-| **A7** The pattern worth naming | **Twenty instances.** **(20), 2026-08-20, is the longest-fuse variant yet — "the fix that never ran": ADR-032 shipped 2026-08-07 and had never applied to a single row, because every job predated it and the write only fires on projection. Recruiters saw salted hashes where skill names belonged for thirteen days, behind a green suite.** **(18) and (19) added 2026-08-20 by the D1=C branch, and (18) is the first found by neither mutation nor review but by RUNNING THE PRODUCT** — a form field that was never rendered, structurally invisible to the suite because the only test exercising it supplied the input itself. Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
+| **A7** The pattern worth naming | **Twenty-one instances.** **(21), 2026-08-21, was found by the smoke suite's FIRST run and had left the product unable to rank anyone** — a measured lesson from ADR-044 recorded against one call site while four others kept smaller literals, including the one the whole product depends on.** **(20), 2026-08-20, is the longest-fuse variant yet — "the fix that never ran": ADR-032 shipped 2026-08-07 and had never applied to a single row, because every job predated it and the write only fires on projection. Recruiters saw salted hashes where skill names belonged for thirteen days, behind a green suite.** **(18) and (19) added 2026-08-20 by the D1=C branch, and (18) is the first found by neither mutation nor review but by RUNNING THE PRODUCT** — a form field that was never rendered, structurally invisible to the suite because the only test exercising it supplied the input itself. Three added A1b/A3, **three more added A6** — same escalation: (14), (15) and (16) all sat inside code whose purpose was to prevent them, and (16) was found by the reviewer *after* (14) and (15) were closed. **(17) came from the branch that disclosed the A6 siblings** — see A7 below.  |
 
 **Read this before picking anything up — rewritten 2026-08-14 after a regroup.**
 
@@ -557,7 +557,7 @@ correlation IDs.
 
 ## A7. The pattern worth naming
 
-Across the external review and this session's gate work the same defect shape appears **twenty times**: an
+Across the external review and this session's gate work the same defect shape appears **twenty-one times**: an
 invariant stated in a comment, docstring, ADR, threshold file or HR document, **with nothing enforcing it**.
 The evidence cliff, `must=True`, the unenforced corpus assertions, the authz test axis that was never
 exercised, the explainer's reveal claim, and the `Skill.display_name` cross-job leak are all instances. Every
@@ -871,3 +871,54 @@ wording, so a cross-job value can never be written.
   backfill is invisible until each job is regenerated (55 entries still held
   hashed labels immediately after the backfill). Any future label change carries
   the same two-step.
+
+**A twenty-first, 2026-08-21 — found by the smoke suite's FIRST real run, and it
+had made the product unable to rank anybody.**
+
+Three résumés uploaded through the UI; none of them got LLM skill extraction.
+Two fell back to the keyword scan (`degraded`) and one failed outright, every
+one logging `parse_resume.skills_llm_failed ... response content was empty
+(possibly reasoning model exhausted token budget); reasoning_present=True`.
+Degraded résumés are excluded from shortlisting (ADR-030), so the shortlist came
+back **empty**. The most visible function of the product was inert.
+
+The cause was one number: `resume_skills_v2` was called with `max_tokens=1536`,
+and on `gpt-oss:20b` the discarded reasoning trace is charged against that budget
+before a single byte of JSON is emitted (ADR-021 §6).
+
+**What makes this an A7 instance rather than a plain bug is that it was already
+known.** [ADR-044](adr/044-skill-family-classifier.md) / PR #94 hit the identical
+failure on the skill classifier, proved live that 1024 classified 0 of 6 skills
+while 4096 classified 6 of 6, and left a comment reading *"do not optimise this
+back toward 1024 — that value was proven live to zero out the feature"*. The
+lesson was recorded against **one call site** while four others kept their own
+hand-picked literals (1536, 1024, 2048, 3072, 128) — and the one the entire
+product depends on was among them. A hard-won, measured invariant, written in a
+comment, enforced nowhere.
+
+Closed by `REASONING_JSON_MIN_TOKENS` in `pipeline/llm/client.py` — one shared
+floor, used by every extraction call — and by
+`tests/unit/test_reasoning_token_floor.py`, which **scans the source** rather
+than asserting per call. The failure mode is a new call site added later with a
+hand-picked literal, and nobody writes a test for the call they forgot to think
+about; a scan sees the ones that do not exist yet.
+
+**The tool-building point.** This was the first thing `scripts/smoke.sh` ever
+did, and no amount of further unit testing would have found it: the suite mocks
+the LLM everywhere, by necessity. It is the third distinct defect class this
+session has shown the gates are structurally blind to — the untested seam
+(smoke), stale deployment state (doctor), and now **the real model's actual
+behaviour**, which only a live call can show.
+
+### Recorded, not fixed (2026-08-21)
+
+- **`skills_graph.py:443`'s vocabulary tiebreaker still calls the model with
+  `max_tokens=128`** — far below the proven floor, so on a reasoning model it
+  almost certainly returns empty content too. NOT fixed here on purpose: it asks
+  for a single token, it HAS a deterministic fallback (so it degrades resolution
+  rather than emptying a shortlist), and raising it changes canonical-key
+  resolution, which is a scoring-path change that does not belong in an incident
+  fix. It is listed in `_RECORDED_EXCEPTIONS` in the enforcing test, so it is a
+  decision with a reason attached rather than an oversight the scan tolerates
+  silently. Worth measuring: if the tiebreaker has been silently inert, some
+  share of skill resolutions have been falling back for a long time.

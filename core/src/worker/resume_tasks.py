@@ -47,6 +47,7 @@ from pydantic import ValidationError
 
 from src.pipeline import skill_classifier, skills_graph
 from src.pipeline.llm import (
+    REASONING_JSON_MIN_TOKENS,
     CachedEmbedder,
     LLMClient,
     LLMOutputInvalidError,
@@ -183,7 +184,10 @@ async def _extract_skills_merged(
     try:
         prompt = load_prompt("resume_skills_v2", chunks=chunks)
         out = await llm.chat_json(
-            prompt.messages, ResumeSkillDetails, max_tokens=1536, max_retries=1
+            prompt.messages,
+            ResumeSkillDetails,
+            max_tokens=REASONING_JSON_MIN_TOKENS,
+            max_retries=1,
         )
         llm_details = out.skills
     except LLMOutputInvalidError as exc:
@@ -443,7 +447,10 @@ async def _parse_cover_letter(
     try:
         prompt = load_prompt("cover_letter_v1", chunks=cl_chunks)
         cl_parsed = await llm.chat_json(
-            prompt.messages, CoverLetterParsed, max_tokens=1024, max_retries=1
+            prompt.messages,
+            CoverLetterParsed,
+            max_tokens=REASONING_JSON_MIN_TOKENS,
+            max_retries=1,
         )
     except LLMOutputInvalidError as exc:
         log.warning(
@@ -716,7 +723,10 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
             core_prompt = load_prompt("resume_core_v1", chunks=chunks)
             try:
                 core = await llm.chat_json(
-                    core_prompt.messages, ResumeCore, max_tokens=3072, max_retries=1
+                    core_prompt.messages,
+                    ResumeCore,
+                    max_tokens=REASONING_JSON_MIN_TOKENS,
+                    max_retries=1,
                 )
             except LLMOutputInvalidError as exc:
                 await resume_service.record_parse_failure(

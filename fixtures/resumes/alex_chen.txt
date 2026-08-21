@@ -1,0 +1,62 @@
+ALEX CHEN
+
+CONTACT INFORMATION
+Email: alex.chen@email.com
+Phone: (212) 555-0187
+LinkedIn: linkedin.com/in/alexchen
+GitHub: github.com/alexchen
+
+PROFESSIONAL SUMMARY
+
+Frontend-focused engineer with 4 years of experience building beautiful, performant user interfaces with React and TypeScript. Currently expanding backend knowledge through self-study and side projects. Detail-oriented with strong CSS skills and passion for web accessibility and user experience optimization.
+
+EXPERIENCE
+
+Frontend Engineer — DesignFlow (2021–Present)
+- Built responsive, accessible React component library used across 8+ internal applications
+- Implemented advanced React patterns: suspense boundaries, concurrent features, custom hooks
+- Optimized bundle size using code splitting and lazy loading; reduced initial load time by 40%
+- Led migration from Class components to Hooks; established testing best practices with React Testing Library
+- Advocated for accessibility; achieved WCAG 2.1 AA compliance across all products
+
+UI Engineer — CreativeStudio (2019–2021)
+- Developed React applications for design collaboration platform
+- Built animations and transitions using Framer Motion and CSS modules
+- Collaborated with designers on component design; implemented design systems
+- Wrote unit tests and integration tests using Jest and React Testing Library
+- Maintained frontend performance; used Lighthouse and Chrome DevTools for optimization
+
+Junior Frontend Developer — WebStartup (2018–2019)
+- Contributed to React codebase; fixed bugs and implemented small features
+- Learned web fundamentals (HTML, CSS, JavaScript) and best practices
+- Participated in code reviews and team discussions
+
+SKILLS
+
+Frontend: React, TypeScript, Next.js, HTML5, CSS3 (Flexbox, Grid, animations), JavaScript (ES6+)
+
+Testing & Quality: Jest, React Testing Library, Cypress, Accessibility testing (WCAG, axe)
+
+Tools & Build: Webpack, Vite, npm/yarn, Git, GitHub, CSS-in-JS (styled-components, CSS modules)
+
+Backend (Learning): Node.js (basics), Express.js (started learning), SQL (beginner)
+
+Other: Figma (design handoff), responsive design, web performance optimization
+
+EDUCATION
+
+BS Information Technology — City University (2018)
+GPA: 3.7/4.0
+Relevant coursework: Web Development, Database Fundamentals, UI/UX Design
+
+ACHIEVEMENTS
+
+- "Rising Star" Award — DesignFlow (2023)
+- Speaker at React NYC Meetup on "Building Accessible React Components" (2023)
+- Active contributor to design system documentation and best practices guide
+
+OPEN SOURCE & PROJECTS
+
+- a11y-react: Accessibility utilities library for React (200+ stars)
+- component-cookbook: Collection of reusable React components with storybook
+- Currently learning Node.js and express to transition toward full-stack development
