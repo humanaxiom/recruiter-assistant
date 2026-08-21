@@ -27,6 +27,17 @@ from src.model_probe import ModelProfile, PromptResult, render
 #: that happens to.
 _PROBE_BUDGETS = (1536, 4096, 8192)
 
+#: Per-call ceiling, and an ACCEPTANCE CRITERION rather than an arbitrary large
+#: number. A model that cannot answer one prompt within this under the worker's
+#: own concurrency is not deployable here whatever it eventually returns: résumés
+#: would sit in `parsing` for the length of an upload batch, and the job-layer
+#: retry budget would multiply it threefold before the circuit breaker opened.
+#:
+#: The first version used 1800s, which meant a single starved call could stall
+#: the whole run for half an hour with no output and no verdict — measuring
+#: patience rather than the model.
+_CALL_TIMEOUT_S = 420.0
+
 
 def _load_cases(fixtures: Path) -> list[tuple[str, Any, Any]]:
     """``(prompt_name, prompt, schema)`` built from REAL fixture documents.
@@ -123,11 +134,19 @@ async def measure(
     profile = ModelProfile(
         model=model, endpoint=endpoint, transport=transport, max_jobs=max_jobs
     )
-    async with httpx.AsyncClient(timeout=1800) as http:
+    async with httpx.AsyncClient(timeout=_CALL_TIMEOUT_S) as http:
         for name, prompt, schema in _load_cases(fixtures):
             print(f"  probing {name} at concurrency {max_jobs} ...", flush=True)
             result: PromptResult | None = None
             for budget in _PROBE_BUDGETS:
+                # Per-budget progress, because silence is indistinguishable from
+                # a hang. The first live run sat on one prompt for twenty
+                # minutes with no output, and there was no way to tell whether
+                # it was working, wedged, or queued behind another model on a
+                # shared GPU. A tool built to remove false confidence must not
+                # be opaque about its own state.
+                print(f"    budget {budget} ...", end="", flush=True)
+                started = time.monotonic()
                 outcomes = await asyncio.gather(
                     *(
                         _one_call(
@@ -135,6 +154,11 @@ async def measure(
                         )
                         for _ in range(max_jobs)
                     )
+                )
+                passed = sum(1 for ok, _s, _t in outcomes if ok)
+                print(
+                    f" {passed}/{max_jobs} valid in {time.monotonic() - started:.0f}s",
+                    flush=True,
                 )
                 if all(ok for ok, _s, _t in outcomes):
                     result = PromptResult(
@@ -157,7 +181,11 @@ async def measure(
                     concurrency=max_jobs,
                     thinking_chars=0,
                     structured_output=True,
-                    note=f"no budget up to {_PROBE_BUDGETS[-1]} produced valid JSON",
+                    note=(
+                        f"no budget up to {_PROBE_BUDGETS[-1]} produced valid JSON "
+                        f"within {_CALL_TIMEOUT_S:.0f}s per call at concurrency "
+                        f"{max_jobs}"
+                    ),
                 )
             )
     return profile
