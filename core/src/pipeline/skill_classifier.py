@@ -45,7 +45,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from src.pipeline import skills_graph
-from src.pipeline.llm import validation_error_digest
+from src.pipeline.llm import REASONING_JSON_MIN_TOKENS, validation_error_digest
 from src.pipeline.skills import _basic_normalise
 from src.settings import (
     Settings,
@@ -73,7 +73,7 @@ _MAX_FAMILIES_PER_SKILL = 2
 # empty, and the feature silently classified 0 of 6 skills. At 4096, 6 of 6.
 # Do not "optimise" this back toward 1024 -- that value was proven live to
 # zero out the feature, not merely untested.
-_CLASSIFY_MAX_TOKENS = 4096
+_CLASSIFY_MAX_TOKENS = REASONING_JSON_MIN_TOKENS
 
 
 def known_families() -> tuple[str, ...]:

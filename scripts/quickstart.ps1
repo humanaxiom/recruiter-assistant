@@ -107,6 +107,18 @@ $PortVars = [ordered]@{
 $EnvDefaults = [ordered]@{
     LLM_BASE_URL  = 'http://100.88.247.106:11434/v1'   # aria-gb10 over Tailscale
     LLM_TIMEOUT_S = '300'
+    # CAS on by default. The comment below has claimed this since FU-5 and the
+    # role keys above are generated BECAUSE of it — but CAS_ENABLED was never
+    # actually written, so every quickstart produced an auth-DISABLED stack
+    # while asserting the opposite, and the audit-log viewer was reachable with
+    # no login. (docker-compose.yml had the mirror-image bug: it named
+    # CAS_ENABLED only in a comment, so even a correct .env never reached the
+    # containers. Fixed there with env_file.) Written only when ABSENT, so an
+    # operator who deliberately set false keeps it.
+    CAS_ENABLED           = 'true'
+    CAS_SERVER_URL        = 'https://cas.sfu.ca/cas'
+    CAS_SERVICE_BASE_URL  = 'http://localhost:29800'
+    CAS_FRONTEND_BASE_URL = 'http://localhost:29500'
 }
 
 # Repo root = parent of this script's directory (scripts/quickstart.ps1).
