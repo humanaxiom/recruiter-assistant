@@ -32,6 +32,22 @@ something narrower than the real gate and let a defect through.
 
 Gates: ruff · black · mypy --strict · pytest unit · pytest integration (testcontainers) · coverage ≥ 80% · branch-name. **A single red gate = the work is not done. Iterate until all green — do not report success, do not open a PR, do not stop.**
 
+### `./scripts/doctor.sh` — the gates prove the CODE; this proves the DATA
+
+`verify.sh` cannot see a defect that lives in STATE rather than in code, and this
+repo has now shipped four of those. The sharpest (ROADMAP A7 (20)) was a fix that
+was correct, gated green, and had **never applied to a single row** thirteen days
+later, because the write only fires on new data and every row predated it.
+
+No test can catch that class: a fixture is always freshly built, always
+well-formed, always young. `scripts/doctor.sh` asks the RUNNING deployment
+whether the invariants the code promises are actually true of the data that is
+there. Run it after any change to projection, migration, or a rendered label,
+and before handing the stack to anyone.
+
+It exits non-zero on a failed invariant **or on a datastore it could not reach** —
+"could not check" is never a clean bill of health.
+
 ### `offline` is not always enough
 
 If the correctness of a change depends on how a real database, driver, or
