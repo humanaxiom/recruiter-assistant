@@ -106,7 +106,15 @@ $PortVars = [ordered]@{
 # http://host.docker.internal:11434/v1 + LLM_TIMEOUT_S=120 (+ pull the models).
 $EnvDefaults = [ordered]@{
     LLM_BASE_URL  = 'http://100.88.247.106:11434/v1'   # aria-gb10 over Tailscale
-    LLM_TIMEOUT_S = '300'
+    # 900, not 300. The two numbers are coupled and were set independently:
+    # REASONING_JSON_MIN_TOKENS is 4096 (the only budget proven to make
+    # gpt-oss:20b emit JSON at all), and at the ~23.5 tok/s this peer sustains
+    # that is ~174s for ONE uncontended call. WorkerSettings.max_jobs is 4, so
+    # four résumés parsing at once share the GPU and land at ~520-700s. At 300s
+    # every one of them timed out, the circuit breaker opened, and parsing
+    # stopped entirely (2026-08-21). Raising the token budget without raising
+    # this trades empty responses for timeouts.
+    LLM_TIMEOUT_S = '900'
     # CAS on by default. The comment below has claimed this since FU-5 and the
     # role keys above are generated BECAUSE of it — but CAS_ENABLED was never
     # actually written, so every quickstart produced an auth-DISABLED stack
