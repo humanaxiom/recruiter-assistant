@@ -111,7 +111,7 @@ async def test_an_unreachable_neo4j_reports_a_failure_not_a_clean_bill() -> None
     that is supposed to be immune to it."""
     driver = MagicMock(name="driver")
     driver.session = MagicMock(side_effect=OSError("connection refused"))
-    findings = await doctor.run_checks(pg=_pg(a=0, b=0, c=0, d=0), neo4j=driver)
+    findings = await doctor.run_checks(pg=_pg(a=0, b=0, c=0, d=0, e=0), neo4j=driver)
     unreachable = [f for f in findings if f.severity == "fail" and "neo4j" in f.check]
     assert unreachable, "an unreachable Neo4j was reported as healthy"
     assert "connection refused" in unreachable[0].detail
@@ -137,7 +137,7 @@ async def test_unlabelled_job_skill_edges_are_reported() -> None:
     carried no label and every shortlist rendered `h:<hash>` where a skill name
     belonged. This single number would have said so on day one."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=0, undecodable=0, unattributable=0),
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=0, unattributable=0),
         neo4j=_neo([{"n": 160}, {"n": 0}]),
     )
     edge = next(f for f in findings if f.check == "neo4j.job_skill_labels")
@@ -148,7 +148,7 @@ async def test_unlabelled_job_skill_edges_are_reported() -> None:
 
 async def test_a_fully_labelled_graph_reports_nothing_for_that_check() -> None:
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=0, undecodable=0, unattributable=0),
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=0, unattributable=0),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     assert not [f for f in findings if f.check == "neo4j.job_skill_labels"]
@@ -160,7 +160,7 @@ async def test_shortlists_still_caching_hashed_labels_are_reported() -> None:
     the graph and stopping there leaves the screen unchanged — which is
     indistinguishable, to the person looking at it, from not having fixed it."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=55, stuck=0, undecodable=0, unattributable=0),
+        pg=_pg(jobs=0, stale=55, stuck=0, undecodable=0, unattributable=0),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     stale = next(f for f in findings if f.check == "pg.shortlist_hashed_labels")
@@ -173,7 +173,7 @@ async def test_resumes_stuck_mid_parse_are_reported() -> None:
     the résumé at `uploaded` forever, and a dead worker looks exactly like a
     healthy stack that silently never ranks."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=7, undecodable=0, unattributable=0),
+        pg=_pg(jobs=0, stale=0, stuck=7, undecodable=0, unattributable=0),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     stuck = next(f for f in findings if f.check == "pg.resumes_stuck")
@@ -185,7 +185,7 @@ async def test_undecodable_audit_details_are_reported() -> None:
     """ROADMAP A7 (19): one row of `details` that is not valid JSON used to
     500 the entire access record — the first page an auditor opens."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=0, undecodable=2, unattributable=0),
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=2, unattributable=0),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     bad = next(f for f in findings if f.check == "pg.audit_details_decodable")
@@ -196,7 +196,7 @@ async def test_unattributable_audit_writes_are_reported() -> None:
     """The ADR-034 exploit signature. D2 = option B closed the fallback that
     produced these; a NEW one appearing means it has been reintroduced."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=0, undecodable=0, unattributable=4),
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=0, unattributable=4),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     api = next(f for f in findings if f.check == "pg.unattributable_audit_writes")
@@ -207,7 +207,7 @@ async def test_a_clean_deployment_reports_healthy() -> None:
     """The counterpart to every check above: a doctor that always finds
     something is a doctor nobody runs twice."""
     findings = await doctor.run_checks(
-        pg=_pg(stale=0, stuck=0, undecodable=0, unattributable=0),
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=0, unattributable=0),
         neo4j=_neo([{"n": 0}, {"n": 0}]),
     )
     assert findings == []
@@ -221,3 +221,57 @@ def test_render_never_raises_on_any_finding_detail(payload: Any) -> None:
         check="x", severity="warn", count=1, detail=str(payload), remedy="r"
     )
     assert isinstance(doctor.render([f]), str)
+
+
+# ── the check that would have caught an unauthenticated pilot stack ──────
+#
+# Found 2026-08-21, and it is the sharpest argument for this module existing.
+# `docker-compose.yml` mentions CAS_ENABLED only in a COMMENT ("Set in .env"),
+# and a variable in `.env` reaches a container only if the compose file names it
+# in that service's `environment:` block. It does not. So every `docker compose
+# up` produced an auth-DISABLED stack while the comment said otherwise, and the
+# audit-log viewer — the most sensitive read in the product — was reachable with
+# no login.
+#
+# Nothing could have caught this: not the unit suite (settings default to False
+# and the tests say so), not the integration suite (it never boots compose), not
+# `validate_startup_auth_config` (which only refuses CAS-ON-with-no-keys, never
+# CAS silently OFF). It is deployment STATE, which is exactly this module's job,
+# and the first version of this module missed it — so it is pinned now.
+#
+# It fires only when there is DATA to protect: an empty dev stack running open
+# is a reasonable default, and a check that cries wolf on a fresh clone is a
+# check people learn to ignore.
+
+
+async def test_an_auth_disabled_stack_with_real_data_is_a_failure() -> None:
+    settings = MagicMock(cas_enabled=False, auth_enabled=False)
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=3, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+    )
+    auth = next(f for f in findings if f.check == "deploy.auth_disabled")
+    assert auth.severity == "fail"
+    assert "cas" in auth.remedy.lower() or "auth" in auth.remedy.lower()
+
+
+async def test_an_empty_stack_running_open_is_not_reported() -> None:
+    """A check that fires on a fresh clone is a check people learn to skim."""
+    settings = MagicMock(cas_enabled=False, auth_enabled=False)
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=0, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+    )
+    assert not [f for f in findings if f.check == "deploy.auth_disabled"]
+
+
+async def test_an_authenticated_stack_is_not_reported() -> None:
+    settings = MagicMock(cas_enabled=True, auth_enabled=True)
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=9, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+    )
+    assert not [f for f in findings if f.check == "deploy.auth_disabled"]

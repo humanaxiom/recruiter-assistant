@@ -108,15 +108,42 @@ SELECT count(*) FROM audit_log
 WHERE actor_kind = 'service' AND actor_service = 'api'
 """
 
+#: Is there anything here worth protecting? An empty dev stack running with auth
+#: off is a reasonable default; a stack holding real jobs and résumés is a
+#: different claim entirely. A check that fires on a fresh clone is a check
+#: people learn to skim past, so this one is conditioned on the data existing.
+_HAS_DATA_SQL = "SELECT count(*) FROM jobs"
 
-async def _check_postgres(pg: Any) -> list[Finding]:
+
+async def _check_postgres(pg: Any, settings: Any) -> list[Finding]:
     async with pg.acquire() as conn:
+        jobs = await conn.fetchval(_HAS_DATA_SQL)
         stale = await conn.fetchval(_STALE_LABEL_SQL)
         stuck = await conn.fetchval(_STUCK_SQL)
         undecodable = await conn.fetchval(_UNDECODABLE_SQL)
         unattributable = await conn.fetchval(_UNATTRIBUTABLE_SQL)
 
     found: list[Finding] = []
+    if jobs and settings is not None and not getattr(settings, "cas_enabled", False):
+        found.append(
+            Finding(
+                check="deploy.auth_disabled",
+                severity="fail",
+                count=int(jobs),
+                detail=(
+                    "CAS is DISABLED on a stack holding "
+                    f"{jobs} jobs — every page, including the audit-log viewer, "
+                    "is reachable with no login"
+                ),
+                remedy=(
+                    "Set CAS_ENABLED=true in .env and recreate the stack. NOTE: "
+                    "docker-compose.yml must also NAME CAS_ENABLED in the api "
+                    "and frontend environment blocks — a variable in .env "
+                    "reaches a container only if the compose file references "
+                    "it, and for a long time it did not."
+                ),
+            )
+        )
     if stale:
         found.append(
             Finding(
@@ -250,7 +277,7 @@ async def _check_neo4j(driver: Any) -> list[Finding]:
 # ── the runner ───────────────────────────────────────────────────────────
 
 
-async def run_checks(*, pg: Any, neo4j: Any) -> list[Finding]:
+async def run_checks(*, pg: Any, neo4j: Any, settings: Any = None) -> list[Finding]:
     """Run every check, returning only what is actually wrong.
 
     **Each datastore is guarded separately and neither can silence the other.**
@@ -261,12 +288,13 @@ async def run_checks(*, pg: Any, neo4j: Any) -> list[Finding]:
     defeat the entire purpose.
     """
     findings: list[Finding] = []
-    for name, check, target in (
-        ("pg", _check_postgres, pg),
-        ("neo4j", _check_neo4j, neo4j),
-    ):
+    checks: list[tuple[str, Any]] = [
+        ("pg", lambda: _check_postgres(pg, settings)),
+        ("neo4j", lambda: _check_neo4j(neo4j)),
+    ]
+    for name, run in checks:
         try:
-            findings.extend(await check(target))
+            findings.extend(await run())
         except Exception as exc:  # noqa: BLE001 — a report must never crash
             findings.append(
                 Finding(
@@ -318,7 +346,7 @@ async def main() -> int:
         s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password)
     )
     try:
-        findings = await run_checks(pg=pg, neo4j=driver)
+        findings = await run_checks(pg=pg, neo4j=driver, settings=s)
     finally:
         await driver.close()
         if pg is not None:

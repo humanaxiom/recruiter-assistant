@@ -45,6 +45,18 @@ services:
 
   # ─── App Tier ────────────────────────────────────────────────────────────
   api:
+    # Every setting in `.env` reaches this container. NOT a style choice: before
+    # this line, `CAS_ENABLED` appeared ONLY in a comment below saying "Set in
+    # .env" — and a variable in `.env` reaches a container solely if the compose
+    # file references it. It did not, so every `docker compose up` booted
+    # auth-DISABLED however `.env` was written, and the audit-log viewer was
+    # reachable with no login. `env_file` fixes the whole class rather than one
+    # variable, and cannot drift the way a hand-copied list of names does.
+    #
+    # The explicit `environment:` block below still WINS over anything here
+    # (compose precedence), which is what keeps the in-network hostnames
+    # (postgres, neo4j, redis) authoritative over a host-side `.env`.
+    env_file: [.env]
     build:
       context: ./core
       dockerfile: Dockerfile
@@ -112,6 +124,10 @@ services:
       redis: { condition: service_healthy }
 
   frontend:
+    # Same reason as the api service above — the browser-side CAS gate in
+    # frontend/app.py reads settings.cas_enabled, so without this it is an
+    # unconditional passthrough no matter what `.env` says.
+    env_file: [.env]
     build:
       context: ./core
       dockerfile: Dockerfile
