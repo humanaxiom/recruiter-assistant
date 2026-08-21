@@ -1,0 +1,41 @@
+{
+  "accepted": false,
+  "endpoint": "http://100.88.247.106:11434",
+  "max_jobs": 4,
+  "model": "gpt-oss:20b",
+  "recommended_max_tokens": 8192,
+  "recommended_timeout_s": 3040,
+  "results": [
+    {
+      "concurrency": 4,
+      "latency_s": 1520.3,
+      "min_tokens_needed": 8192,
+      "note": "",
+      "prompt": "resume_core_v1",
+      "schema_valid": true,
+      "structured_output": true,
+      "thinking_chars": 21550
+    },
+    {
+      "concurrency": 4,
+      "latency_s": 0.0,
+      "min_tokens_needed": null,
+      "note": "no budget up to 8192 produced valid JSON",
+      "prompt": "resume_skills_v2",
+      "schema_valid": false,
+      "structured_output": true,
+      "thinking_chars": 0
+    },
+    {
+      "concurrency": 4,
+      "latency_s": 489.8,
+      "min_tokens_needed": 8192,
+      "note": "",
+      "prompt": "jd_extract_v1",
+      "schema_valid": true,
+      "structured_output": true,
+      "thinking_chars": 7722
+    }
+  ],
+  "transport": "openai-compat"
+}

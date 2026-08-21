@@ -44,6 +44,7 @@ from src.storage.blob_store import BlobStore
 from src.worker.graph_tasks import project_to_graph
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
+from src.worker.reconcile import reconcile_stalled_parses
 from src.worker.resume_tasks import parse_resume
 from src.worker.tasks import parse_job
 
@@ -148,7 +149,20 @@ class WorkerSettings:
     # Phase 4b: the graph-projection drainer runs on its own schedule, not by
     # enqueue — every ~5s, matching decision 3's rationale (skill resolution
     # must be cheap enough to finish well inside one cron tick).
-    cron_jobs = [cron(project_to_graph, second=set(range(0, 60, 5)))]
+    # `reconcile_stalled_parses` runs once a minute. A résumé row is the source
+    # of truth for "this candidate needs parsing", but the WORK ITEM lives only
+    # in Redis — lose the queue and the row is stranded non-terminal forever
+    # with nothing to retry it. That is not hypothetical: doctor.sh found 20
+    # résumés stuck since July. It also matters more here than in most systems,
+    # because the GPU peer is shared and its capacity comes and goes, so work
+    # must survive the windows where the model is unavailable.
+    #
+    # A cron entry, not a `functions` entry, for the same reason
+    # `project_to_graph` is: nothing enqueues it by name.
+    cron_jobs = [
+        cron(project_to_graph, second=set(range(0, 60, 5))),
+        cron(reconcile_stalled_parses, second={7}),
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
