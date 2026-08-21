@@ -32,6 +32,32 @@ something narrower than the real gate and let a defect through.
 
 Gates: ruff · black · mypy --strict · pytest unit · pytest integration (testcontainers) · coverage ≥ 80% · branch-name. **A single red gate = the work is not done. Iterate until all green — do not report success, do not open a PR, do not stop.**
 
+### `./scripts/model-check.sh` — run this BEFORE swapping models
+
+Every token budget, timeout and concurrency number in this repo was measured
+against `gpt-oss:20b`. Point the stack at a different model and all of them are
+wrong at the same moment, with no signal — on 2026-08-21 that happened *within*
+one model and stopped the product ranking anyone, behind a green suite.
+
+`scripts/model-check.sh` builds the REAL prompts from `./fixtures`, runs each at
+the worker's own concurrency, finds the smallest budget that yields
+schema-valid JSON, and writes `docs/model-profiles/<model>.json`. **Commit that
+file** — `doctor.sh` fails when the configured model has no profile, or when
+`LLM_TIMEOUT_S` is below the measured latency.
+
+Both design choices were earned: a synthetic prompt of the same length passed
+while the real résumé failed 3/3, and a single uncontended call took ~35s while
+four concurrent ones blew a 300s timeout. Measure real inputs, at real
+concurrency, or the number is accurate and useless.
+
+### `./scripts/smoke.sh` — the gates prove the CODE; this proves the SCREEN
+
+~6,000 tests and not one crosses the browser→Flask→API seam: every frontend test
+mocks `api_client`. Four of the last nine defects to reach users lived exactly
+there. `smoke.sh` drives the running product over HTTP with real fixtures and
+asserts on rendered HTML. It needs CAS OFF and FAILS rather than skips when CAS
+is on — a green run that tested nothing is worse than no run.
+
 ### `./scripts/doctor.sh` — the gates prove the CODE; this proves the DATA
 
 `verify.sh` cannot see a defect that lives in STATE rather than in code, and this
