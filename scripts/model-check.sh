@@ -37,6 +37,21 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Git Bash rewrites container-side paths like /tmp/fixtures into Windows paths
+# before docker ever sees them (the first run of this script measured nothing
+# because --fixtures arrived as C:/Users/.../Temp/fixtures). Same guard, and the
+# same reason, as scripts/verify.sh.
+# HOST_ROOT is the repo in a form docker itself understands (C:/... on Windows);
+# REPO_ROOT stays POSIX for shell use. Both are needed and they are not
+# interchangeable: with path conversion off, a host path must already be native,
+# while container-side paths must be left alone.
+HOST_ROOT="$REPO_ROOT"
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL='*'
+  HOST_ROOT="$(cd "$REPO_ROOT" && pwd -W 2>/dev/null || echo "$REPO_ROOT")"
+fi
+
 if [[ ! -d "$REPO_ROOT/fixtures" ]]; then
   echo "🔴 model-check: no ./fixtures directory — the harness measures REAL" >&2
   echo "   documents on purpose; a synthetic prompt certified a broken" >&2
@@ -48,7 +63,7 @@ echo "▶ model-check: measuring the live model against this product's real prom
 echo "  (runs at the worker's own concurrency — allow several minutes)"
 echo
 
-docker cp "$REPO_ROOT/fixtures" "$CONTAINER:/tmp/fixtures" >/dev/null
+docker cp "${HOST_ROOT}/fixtures" "${CONTAINER}:/tmp/fixtures" >/dev/null
 
 status=0
 # Flags, not env vars: CLAUDE.md forbids `os.environ` outside settings.py and a
@@ -59,9 +74,17 @@ docker exec "$CONTAINER" python -m src.model_probe_live \
   --concurrency "${MODEL_CHECK_CONCURRENCY:-4}" || status=$?
 
 mkdir -p "$REPO_ROOT/docs/model-profiles"
-docker cp "$CONTAINER:/tmp/model-profiles/." "$REPO_ROOT/docs/model-profiles/" 2>/dev/null || true
+docker cp "${CONTAINER}:/tmp/model-profiles/." "${HOST_ROOT}/docs/model-profiles/" \
+  2>/dev/null || true
 docker exec "$CONTAINER" rm -rf /tmp/fixtures /tmp/model-profiles >/dev/null 2>&1 || true
 
 echo
-echo "profile written into docs/model-profiles/ — commit it."
+if [[ "$status" -eq 0 ]]; then
+  echo "profile written into docs/model-profiles/ — commit it."
+else
+  # Do NOT claim a profile was written when the run failed. Announcing success
+  # on a failed run is the exact false-confidence this whole tool exists to
+  # remove, and the first version of this script did it.
+  echo "🔴 model-check FAILED — no usable profile. Do not deploy this model." >&2
+fi
 exit "$status"

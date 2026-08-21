@@ -63,7 +63,7 @@ def _load_cases(fixtures: Path) -> list[tuple[str, Any, Any]]:
         ),
         (
             "jd_extract_v1",
-            load_prompt("jd_extract_v1", description=jd_text),
+            load_prompt("jd_extract_v1", jd_text=jd_text),
             JDExtracted,
         ),
     ]
