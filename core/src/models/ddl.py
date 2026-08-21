@@ -291,6 +291,17 @@ _STATEMENTS: tuple[str, ...] = (
     # ``withdrawn_at IS NULL`` (not withdrawn) the instant the ALTER lands.
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawn_at TIMESTAMPTZ",
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawal_reason TEXT",
+    # How many times `worker.reconcile.reconcile_stalled_parses` has re-queued
+    # this row. Nullable with NO default so every pre-existing row reads back as
+    # NULL and is COALESCEd to 0 — a row stranded since July gets a full quota
+    # of attempts the moment the reconciler first runs, rather than being
+    # abandoned on sight.
+    #
+    # It exists to BOUND the retry, not to enable it: `extract.py` warns that a
+    # row which crashes before reaching a terminal state would otherwise be
+    # re-queued forever, burning an LLM pass each time on a peer shared with
+    # other systems.
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER",
     # Powers the per-job status breakdown's ``withdrawn`` bucket and any
     # "excluded résumés" listing — partial so it only indexes the rare
     # withdrawn rows.
