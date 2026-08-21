@@ -44,7 +44,9 @@ Run it with ``scripts/doctor.sh`` (which executes it inside the stack, the way
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import asyncpg
@@ -60,6 +62,10 @@ Severity = Literal["fail", "warn", "info"]
 #: parse or a dead worker, and a dead worker looks exactly like a healthy stack
 #: that silently never ranks.
 _STUCK_HOURS = 6
+
+#: Committed model measurements — see `src.model_probe`. Repo-root relative so
+#: the doctor finds them whether it runs from /app or a mounted checkout.
+_DEFAULT_PROFILE_DIR = Path(__file__).resolve().parents[2] / "docs" / "model-profiles"
 
 
 @dataclass(frozen=True)
@@ -277,7 +283,95 @@ async def _check_neo4j(driver: Any) -> list[Finding]:
 # ── the runner ───────────────────────────────────────────────────────────
 
 
-async def run_checks(*, pg: Any, neo4j: Any, settings: Any = None) -> list[Finding]:
+async def _check_model_profile(settings: Any, profile_dir: Path) -> list[Finding]:
+    """Has the configured model ever been measured against our real prompts?
+
+    Every model-shaped constant in this repo was measured against gpt-oss:20b.
+    Pointing the stack at a larger model — which the data-centre move will do —
+    invalidates all of them at once, silently. On 2026-08-21 that happened
+    WITHIN one model: a budget moved, the timeout did not, and parsing stopped
+    entirely behind a green suite. This makes the unmeasured state loud.
+    """
+    if settings is None:
+        return []
+    model = str(getattr(settings, "llm_model_generation", "") or "")
+    if not model:
+        return []
+    path = profile_dir / f"{model.replace(':', '-')}.json"
+    if not path.is_file():
+        return [
+            Finding(
+                check="deploy.model_unprofiled",
+                severity="fail",
+                count=0,
+                detail=(
+                    f"the configured model {model!r} has no acceptance profile — "
+                    "nobody has measured whether it can produce schema-valid "
+                    "JSON for this product's prompts, or how long it takes"
+                ),
+                remedy=(
+                    "Run scripts/model-check.sh and commit the profile it writes "
+                    "to docs/model-profiles/. Every token budget and timeout in "
+                    "this repo was measured against gpt-oss:20b and does not "
+                    "transfer to another model."
+                ),
+            )
+        ]
+    try:
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [
+            Finding(
+                check="deploy.model_unprofiled",
+                severity="fail",
+                count=0,
+                detail=f"model profile {path.name} is unreadable: {exc}",
+                remedy="Re-run scripts/model-check.sh to regenerate it.",
+            )
+        ]
+    found: list[Finding] = []
+    if not profile.get("accepted", False):
+        found.append(
+            Finding(
+                check="deploy.model_unprofiled",
+                severity="fail",
+                count=0,
+                detail=f"model {model!r} has a profile but was NOT accepted",
+                remedy=(
+                    "At least one real prompt failed to produce schema-valid "
+                    "JSON on this model. See the profile's per-prompt results."
+                ),
+            )
+        )
+    recommended = int(profile.get("recommended_timeout_s") or 0)
+    configured = int(getattr(settings, "llm_timeout_s", 0) or 0)
+    if recommended and configured and configured < recommended:
+        found.append(
+            Finding(
+                check="deploy.timeout_below_profile",
+                severity="fail",
+                count=recommended - configured,
+                detail=(
+                    f"LLM_TIMEOUT_S is {configured}s but {model!r} was measured "
+                    f"to need {recommended}s under this concurrency"
+                ),
+                remedy=(
+                    f"Set LLM_TIMEOUT_S={recommended}. A timeout below the "
+                    "measured latency does not fail one call — it trips the "
+                    "circuit breaker and stops parsing entirely (2026-08-21)."
+                ),
+            )
+        )
+    return found
+
+
+async def run_checks(
+    *,
+    pg: Any,
+    neo4j: Any,
+    settings: Any = None,
+    profile_dir: Path | None = None,
+) -> list[Finding]:
     """Run every check, returning only what is actually wrong.
 
     **Each datastore is guarded separately and neither can silence the other.**
@@ -288,9 +382,11 @@ async def run_checks(*, pg: Any, neo4j: Any, settings: Any = None) -> list[Findi
     defeat the entire purpose.
     """
     findings: list[Finding] = []
+    profiles = profile_dir if profile_dir is not None else _DEFAULT_PROFILE_DIR
     checks: list[tuple[str, Any]] = [
         ("pg", lambda: _check_postgres(pg, settings)),
         ("neo4j", lambda: _check_neo4j(neo4j)),
+        ("model", lambda: _check_model_profile(settings, profiles)),
     ]
     for name, run in checks:
         try:
@@ -346,7 +442,7 @@ async def main() -> int:
         s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password)
     )
     try:
-        findings = await run_checks(pg=pg, neo4j=driver, settings=s)
+        findings = await run_checks(pg=pg, neo4j=driver, settings=s)  # noqa: E501
     finally:
         await driver.close()
         if pg is not None:
