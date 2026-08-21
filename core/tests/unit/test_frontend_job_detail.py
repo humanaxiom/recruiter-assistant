@@ -486,3 +486,136 @@ def test_resume_status_widget_route_backend_unavailable_not_500(
     resp = client.get(f"/jobs/{uuid4()}/resume-status")
     assert resp.status_code in (502, 503)
     assert resp.status_code != 500
+
+
+# ── the résumé table must show that a candidate was withdrawn ─────────────
+#
+# Reported from the live product, 2026-08-20: "withdraw candidate doesn't work
+# as expected — candidate still shows".
+#
+# The ranked shortlist is NOT the defect: `shortlist_service`'s four read paths
+# all filter `withdrawn_at IS NULL`, verified against live data (16 entries, 6
+# withdrawn, 10 returned). What "still shows" is THIS table — the job page's
+# candidate list, which renders `resume.status` (the PARSE status) and never
+# reads `withdrawn_at` at all, even though `ResumeListItem` has carried the
+# field since ADR-026/FU-8.
+#
+# So a withdrawn candidate renders `parsed`, byte-identical to an active one,
+# on the page a recruiter lands on. Withdrawal appears to have done nothing.
+#
+# The `degraded` pill immediately beside it is the precedent AND the proof this
+# was an oversight rather than a decision: degraded rows are excluded from
+# shortlists and say so in a tooltip. Withdrawn rows are excluded by the same
+# reads and say nothing.
+#
+# Marked, NOT hidden. ADR-026's decision is "exclude and RETAIN" — the row is
+# kept for audit, and hiding it here would also make Reinstate unreachable,
+# since the résumé-detail page is reached through this table.
+
+
+def _resume_row(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": str(uuid4()),
+        "original_filename": "candidate.pdf",
+        "status": "parsed",
+        "uploaded_at": "2026-08-20T10:00:00Z",
+        "parsed_at": "2026-08-20T10:02:00Z",
+        "candidate_name": None,
+        "has_cover_letter": False,
+        "withdrawn_at": None,
+        "withdrawal_reason": None,
+        "degraded": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_a_withdrawn_candidate_is_marked_in_the_resume_table(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The reported defect. Without this the row is indistinguishable from an
+    active candidate, so withdrawal looks like it did nothing."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(
+        api_client,
+        "list_resumes",
+        MagicMock(return_value=[_resume_row(withdrawn_at="2026-08-20T20:31:09Z")]),
+    )
+    body = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert "withdrawn" in body.lower(), (
+        "a withdrawn candidate renders identically to an active one — the "
+        "screen gives no sign the withdrawal took effect"
+    )
+
+
+def test_an_active_candidate_is_not_marked_withdrawn(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The counterpart — a marker that appears on every row says nothing."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[_resume_row()])
+    )
+    body = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert "withdrawn" not in body.lower()
+
+
+def test_the_withdrawn_row_is_retained_not_hidden(
+    monkeypatch: Any, client: Any
+) -> None:
+    """ADR-026 is "exclude and RETAIN". Hiding the row would lose the record
+    and strand Reinstate, which is only reachable through this table."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(
+        api_client,
+        "list_resumes",
+        MagicMock(
+            return_value=[
+                _resume_row(
+                    original_filename="withdrawn-person.pdf",
+                    withdrawn_at="2026-08-20T20:31:09Z",
+                )
+            ]
+        ),
+    )
+    body = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert "withdrawn-person.pdf" in body
+
+
+def test_the_withdrawn_marker_says_the_candidate_is_out_of_the_shortlist(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The marker has to answer the question the user actually asked — "did my
+    withdrawal do anything?" — not merely restate the word. The sibling
+    `degraded` pill already sets this precedent by naming the consequence."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(
+        api_client,
+        "list_resumes",
+        MagicMock(return_value=[_resume_row(withdrawn_at="2026-08-20T20:31:09Z")]),
+    )
+    body = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert "shortlist" in body.lower()
+
+
+def test_the_withdrawn_pill_is_actually_styled(monkeypatch: Any, client: Any) -> None:
+    """A marker nobody notices does not answer "did my withdrawal work?".
+
+    Base ``.pill`` sets padding and weight but **no background and no colour**,
+    so an unclassed pill renders as bare text beside the green ``parsed`` pill
+    it is meant to qualify. ``.pill-withdrawn`` has been used by
+    ``resume_detail.html`` since FU-8 with no rule behind it; this pins the rule
+    now that the job page depends on the marker being visible.
+    """
+    from pathlib import Path
+
+    css = Path(__file__).resolve().parents[2] / "frontend" / "static" / "app.css"
+    text = css.read_text(encoding="utf-8")
+    assert ".pill-withdrawn" in text, "the withdrawn pill has no styling rule"
+    rule = text[text.index(".pill-withdrawn") :]
+    rule = rule[: rule.index("}")]
+    assert "background" in rule and "color" in rule

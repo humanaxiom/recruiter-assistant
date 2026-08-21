@@ -90,6 +90,12 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/jobs/{job_id}/shortlist"),
     ("POST", "/jobs/{job_id}/assignees"),
     ("DELETE", "/jobs/{job_id}/assignees/{user_id}"),
+    # D1 = option C — the audited reveal of a withheld audit_log detail. A
+    # write METHOD performing an audited READ (same shape as POST
+    # /resumes/{id}/reveal above), so it belongs in this registry for exactly
+    # the reason the registry exists: it must carry a session-role gate, and
+    # for this route the attributable session IS the feature.
+    ("POST", "/audit/log/{audit_id}/reveal"),
 )
 
 # The one write route explicitly exempted — see the module docstring for why.

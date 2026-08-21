@@ -20,11 +20,19 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from src.api.deps import Role, require_role, require_session_role
+from src.api.deps import (
+    Role,
+    actor_fields_from_user,
+    require_role,
+    require_session_role,
+    resolve_user,
+)
+from src.errors import NotFoundError
 from src.models.pool import Db
-from src.schemas.audit import AuditLogItem, RevealAuditItem
+from src.schemas.audit import AuditDetail, AuditLogItem, RevealAuditItem
+from src.schemas.auth import User
 from src.services import audit_service, reveal_service
 
 router = APIRouter()
@@ -97,6 +105,101 @@ async def list_audit_log(
         subject_type=subject_type,
         job_id=job_id,
     )
+
+
+@router.post(
+    "/audit/log/{audit_id}/reveal",
+    dependencies=[Depends(require_session_role(*_AUDIT_READERS))],
+)
+async def reveal_audit_detail(
+    audit_id: UUID,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+    context: Annotated[str | None, Query(max_length=64)] = None,
+) -> AuditDetail:
+    """D1 = option C (answered 2026-08-19) — the AUDITED reveal of one withheld
+    ``audit_log.details`` payload.
+
+    **What this exists to fix.** ``withdraw_resume``'s ``reason`` is the only
+    free-text an operator types about a named candidate, and
+    ``redact_audit_details`` withholds it. That is right by default and wrong in
+    the one case that matters: an auditor investigating a wrongful-withdrawal
+    complaint could not do the job without escalating to an engineer running SQL
+    by hand — the unaudited read ADR-036 was written to eliminate. Option C
+    keeps the default closed and makes the exception *recorded* rather than
+    *ad hoc*.
+
+    **The shape is copied, on purpose, from ``POST /resumes/{id}/reveal``** —
+    the audited un-blinding of candidate PII. Same class of data, same
+    mechanism: an explicit POST (never a query parameter on a GET, per ADR-016),
+    an attributable human, and the audit row written first.
+
+    Ordering, restating ADR-016 / ADR-019 §7: **read → gate → audit → return.**
+    The audit row is written and autocommitted (``record_audit`` is a bare
+    ``execute``) BEFORE the value leaves this function, so a crash mid-response
+    leaves a record of a reveal that may have been seen, never a disclosure with
+    no record. The read that precedes it discloses nothing — its result does not
+    leave this function unless the gates pass.
+
+    **A refused reveal writes NOTHING**, matching ``reveal_resume``'s discipline
+    for a scope-blocked reveal. An audit trail that records reads which never
+    happened is not a trail an auditor can rely on.
+
+    Three refusals, and each is a different fact:
+
+    1. *No attributable session* -> 403, before anything is read.
+       ``require_session_role`` already 403s on ``user is None`` since D2 =
+       option B; the explicit check here is what makes the guarantee local and
+       readable, and it is the whole basis of C over B — a reveal a bare service
+       key could perform would launder an unattributable read through a route
+       whose only justification is that it records one.
+    2. *No such row* -> 404.
+    3. *The row's action is not revealable, or it holds no withheld object*
+       -> 403. Fail-closed via ``audit_service.is_revealable_action``: this
+       route must not become a general un-redactor that every future ``details``
+       writer inherits. ``details`` is ``jsonb``, so a legacy row may hold a
+       scalar, a list, or nothing — none of which is a withheld value to reveal.
+
+    Gated on the CAS SESSION role alone, for the two reasons ``GET /audit/log``
+    above documents at length: attributability, and reachability behind the BFF's
+    one fixed ``recruiter`` key.
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="revealing an audit detail requires an attributable human session",
+        )
+
+    detail = await audit_service.read_audit_detail(db, audit_id=audit_id)
+    if detail is None:
+        raise NotFoundError(f"audit row {audit_id} not found", audit_id=str(audit_id))
+
+    if (
+        not audit_service.is_revealable_action(detail.action)
+        or not isinstance(detail.details, dict)
+        # An empty object is "nothing was recorded", not "something is being
+        # kept from you" — revealing it would write an audit row asserting a
+        # disclosure that did not occur.
+        or not detail.details
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=f"no revealable detail is recorded for action '{detail.action}'",
+        )
+
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    await audit_service.record_audit(
+        db,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+        action="reveal_audit_detail",
+        subject_type="audit_log",
+        subject_id=audit_id,
+        context=context,
+        details={"revealed_action": detail.action},
+    )
+    return detail
 
 
 __all__ = ["router"]

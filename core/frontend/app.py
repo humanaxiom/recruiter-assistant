@@ -317,12 +317,19 @@ _AUDIT_PAGE_SIZE = 100
 #: newly-added action from an auditor.
 _AUDIT_ACTIONS = (
     "reveal",
+    "reveal_audit_detail",
     "withdraw_resume",
     "reinstate_resume",
     "role_changed",
     "assign_job",
     "unassign_job",
 )
+
+#: The marker the BACKEND substitutes for a value it will not disclose
+#: (``audit_service.WITHHELD``). The page compares against it to decide where to
+#: offer the audited-reveal control — it is a rendering cue, never a second
+#: implementation of the disclosure rule, which lives only in the backend.
+_AUDIT_WITHHELD_MARKER = "<withheld>"
 
 
 def _require_audit_page() -> None:
@@ -1073,9 +1080,21 @@ def resume_withdraw(resume_id: UUID) -> Any:
     same-origin check first, then a one-shot CSRF token — this time scoped to
     ``action="withdraw"``, independent of the SAME résumé's reveal token —
     BOTH evaluated before any call reaches the backend, so a rejected forgery
-    attempt can never imply a withdrawal audit row. Redirects back to the
-    résumé-detail page (whichever context — résumé page or shortlist card —
-    the form was posted from)."""
+    attempt can never imply a withdrawal audit row.
+
+    **Returns the user to the page they acted on** (2026-08-20, reported from
+    the live product). The shortlist card's form has posted
+    ``context=shortlist`` since FU-8 and this route never read it, redirecting
+    unconditionally to the résumé page — so withdrawing from the shortlist
+    threw the user onto a different screen, and pressing Back served the
+    browser's CACHED shortlist with the candidate still on it. The withdrawal
+    had worked every time; only the destination was wrong, which is
+    indistinguishable from "withdraw does nothing" at the keyboard.
+
+    ``job_id`` is the return address, and it is attacker-controllable form
+    input: it is parsed as a ``UUID`` and the URL is built server-side with
+    ``url_for``, never echoed into a ``Location`` header, so there is no open
+    redirect here. Anything unparseable degrades to the résumé page."""
     if not csrf.same_origin(request):
         abort(403)
     if not csrf.verify_and_consume(
@@ -1092,6 +1111,13 @@ def resume_withdraw(resume_id: UUID) -> Any:
     except api_client.BadRequest as exc:
         # See the F4 comment on transition_status above.
         abort(exc.status_code)
+    if (request.form.get("context") or "").strip() == "shortlist":
+        try:
+            job_id = UUID((request.form.get("job_id") or "").strip())
+        except ValueError:
+            pass
+        else:
+            return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
@@ -1292,6 +1318,27 @@ def audit_log() -> Any:
         offset = max(0, int(request.args.get("offset") or 0))
     except ValueError:
         offset = 0
+    return _render_audit_page(action=action, offset=offset)
+
+
+def _render_audit_page(
+    *,
+    action: str | None,
+    offset: int,
+    revealed_id: str | None = None,
+    revealed_details: Any = None,
+    error: str | None = None,
+    status: int = 200,
+) -> Any:
+    """Render the access record, optionally with ONE row's withheld value
+    un-masked (D1 = option C).
+
+    Factored out of :func:`audit_log` so the reveal POST comes back to the same
+    view of the record — same filter, same page — instead of bouncing an
+    auditor three pages deep back to the top to read one value. The revealed
+    payload is passed per-request and never persisted: a reload re-masks it,
+    because one audited read should not silently entitle every later page load.
+    """
     try:
         entries = api_client.list_audit_log(
             limit=_AUDIT_PAGE_SIZE, offset=offset, action=action
@@ -1303,14 +1350,65 @@ def audit_log() -> Any:
         abort(403)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    return render_template(
-        "audit_log.html",
-        entries=entries,
-        action=action or "",
+    return (
+        render_template(
+            "audit_log.html",
+            entries=entries,
+            action=action or "",
+            offset=offset,
+            page_size=_AUDIT_PAGE_SIZE,
+            actions=_AUDIT_ACTIONS,
+            withheld=_AUDIT_WITHHELD_MARKER,
+            revealed_id=revealed_id,
+            revealed_details=revealed_details,
+            error=error,
+            current_year=dt.date.today().year,
+        ),
+        status,
+    )
+
+
+@app.post("/audit/<uuid:audit_id>/reveal")
+def audit_reveal_detail(audit_id: UUID) -> Any:
+    """D1 = option C — ask the backend to disclose one withheld value, and
+    render it in place.
+
+    **This page does not know which actions are revealable, deliberately.** It
+    offers the control wherever the backend withheld something and lets
+    ``audit_service.is_revealable_action`` fail-close, so the disclosure rule
+    has exactly one implementation instead of two that drift apart — the
+    ROADMAP A7 shape, where a rule lives in prose in two places and nothing
+    reconciles them. A refusal comes back as a message on the page.
+
+    The reveal happens ONLY here, never on a GET: pagination and filtering must
+    not manufacture audit rows for reads nobody performed. One click, one
+    recorded read.
+    """
+    _require_audit_page()
+    action = (request.form.get("action") or "").strip() or None
+    try:
+        offset = max(0, int(request.form.get("offset") or 0))
+    except ValueError:
+        offset = 0
+    try:
+        revealed = api_client.reveal_audit_detail(audit_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BadRequest as exc:
+        return _render_audit_page(
+            action=action,
+            offset=offset,
+            error=_format_error(exc.detail)
+            or "That value cannot be revealed from this page.",
+            status=403,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _render_audit_page(
+        action=action,
         offset=offset,
-        page_size=_AUDIT_PAGE_SIZE,
-        actions=_AUDIT_ACTIONS,
-        current_year=dt.date.today().year,
+        revealed_id=str(revealed.get("id") or audit_id),
+        revealed_details=revealed.get("details"),
     )
 
 

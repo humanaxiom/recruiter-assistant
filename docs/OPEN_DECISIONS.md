@@ -1,21 +1,35 @@
 # Open decisions — memos, not notes
 
-**One product decision remains open.** D2 was answered by the product owner on 2026-08-19 (D2 = option B,
-implemented on branch `feat/d2-close-unscoped-reads`); see the amendment in [ADR-034](adr/034-auth-boundary-fails-open.md).
+## ✅ NOTHING IS OPEN. Both decisions are answered AND shipped (2026-08-20).
 
-D1 has also been answered by the product owner on 2026-08-19 (D1 = option C) and is being implemented on a separate
-branch; it is updated below with that decision noted.
+**Do not read the memo below as a question.** It is kept as the record of the options *not* taken — which
+is what makes the shipped choice reviewable later — and [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
+D1 amendment links here for exactly that. Adding a new decision to this file means adding it above this
+line, not editing the memo below.
 
-Each remaining memo is decidable in one sitting. Reply with a letter per decision, or say "take the default".
+| | Decision | Answered | Shipped |
+|---|---|---|---|
+| **D2** | Close unscoped keyed reads → **option B** | 2026-08-19 | PR #95 · [ADR-034](adr/034-auth-boundary-fails-open.md) amendment |
+| **D1** | Auditor access to withdrawal reasons → **option C** | 2026-08-19 | 2026-08-20 · [ADR-036](adr/036-auditor-audit-log-viewer.md) amendment |
 
-**How to answer:** pick an option, and an agent implements it. Nothing here is implemented already — the
-status quo in the remaining case is option A, which is a real choice with real costs, not a neutral waiting state.
+Both were the recommended defaults, and **the coupling was respected**: D2 removed `reveal_service`'s
+`actor = "api"` fallback, so D1=C's audited reveal carries a real principal rather than an unattributable
+one. D2 answered first is what made D1 worth building.
+
+**The process lesson worth more than either answer.** These two sat as bare "blocked" lines for five
+sessions, each of which re-noted the block and moved on. What unstuck them was writing the options down
+with a recommended default — after which both were answered in a day, both as the default. See CLAUDE.md's
+economy rule 3: "blocked on a human" is not a terminal state, and the block is the work.
+
+---
+
+## The memo, as written before either was answered
 
 ---
 
 ## D1 — Should an auditor be able to read résumé withdrawal reasons?
 
-**Owner:** whoever owns privacy policy for the pilot. **Status: ANSWERED 2026-08-19 — D1 = option C. NOT YET IMPLEMENTED** (D2 was implemented first, deliberately: see the coupling note below). This memo is kept until the implementation lands. **Blocks:** [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
+**Owner:** whoever owns privacy policy for the pilot. **Status: ANSWERED 2026-08-19 (D1 = option C) and SHIPPED 2026-08-20** — see [ADR-036](adr/036-auditor-audit-log-viewer.md)'s D1 amendment for what was built, the two defects the work surfaced, and its own accepted residuals. **Formerly blocked:** [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
 named residual; the auditor role is otherwise complete and usable.
 
 ### What the code does today
@@ -84,7 +98,14 @@ not `actor='api'`.
 When D1=C is implemented: the reveal will be logged with the user who requested it, on the audit trail that
 is being read. Closure is complete.
 
-## Implementation
+## Implementation — done
 
-D1 and D2 are implemented on separate branches. D2 is already done. When D1 = option C ships, update
-[ADR-036](adr/036-auditor-audit-log-viewer.md) with its decision.
+D1 and D2 shipped on separate branches: D2 in PR #95 (2026-08-19), D1 on
+`feat/d1-audited-reason-reveal` (2026-08-20). Both ADRs carry their amendments.
+
+**One thing this memo got wrong, and it is worth keeping visible.** The memo priced option C at "moderate
+— one route + audit action". The route was indeed that. What it missed is that **the withdraw form never
+collected a reason at all**, so C as scoped would have shipped a control with nothing to reveal, forever —
+all five withdrawals in the live database have a NULL `details`. That was found by running the product,
+not by the test suite, and it is now part of the same branch. A memo that reasons about the disclosure of
+a field should check that the field is ever populated.

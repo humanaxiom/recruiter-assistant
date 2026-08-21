@@ -1098,3 +1098,170 @@ def test_withdraw_token_does_not_validate_the_reveal_route_and_vice_versa(
         f"/resumes/{resume_id}/withdraw", data={"csrf_token": withdraw_token}
     )
     assert resp4.status_code == 302
+
+
+# ── D1 = option C follow-on: the form must actually COLLECT a reason ──────
+#
+# Found by running the product, not by the suite. `resume_withdraw` reads
+# `request.form.get("reason")` and `test_resume_withdraw_route_forwards_the_
+# reason_field` above proves it forwards one — by POSTing the field directly.
+# No rendered form ever contained it. So in the real application every
+# withdrawal recorded `reason = None`: all five withdrawals in the live dev
+# database have a NULL `audit_log.details`, and that is structural, not
+# incidental.
+#
+# That makes the audited-reveal control shipped in this branch dead on
+# arrival — a button to disclose a value the product cannot record. The
+# decision the owner answered (D1 = C) is about a field the UI never offered.
+#
+# This is the ROADMAP A7 shape one layer out, and the same class as the
+# `polling` defect in ADR-043: the plumbing was proved end to end and the
+# screen was never asked.
+
+
+def test_the_withdraw_form_actually_collects_a_reason(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The gap between "the route forwards a reason" and "a person can type
+    one". Only the second makes the reveal control mean anything."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    start = body.index("/withdraw")
+    form = body[start : body.index("</form>", start)]
+    assert 'name="reason"' in form, (
+        "the withdraw form has no reason field, so every withdrawal records "
+        "None and the audited reveal has nothing to reveal"
+    )
+
+
+def test_the_reason_field_is_capped_at_the_backends_own_limit(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``WithdrawRequest.reason`` is ``max_length=500``. A form that lets
+    someone type 900 characters and then 422s on submit loses the note they
+    wrote — and a withdrawal note is written once, at the moment of a decision
+    someone may later be asked to justify."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    start = body.index("/withdraw")
+    form = body[start : body.index("</form>", start)]
+    assert 'maxlength="500"' in form
+
+
+def test_the_form_says_the_note_can_be_disclosed_to_an_auditor(
+    monkeypatch: Any, client: Any
+) -> None:
+    """**The privacy point, and it is the reason this is on THIS branch.**
+
+    D1's memo turns on an asymmetry: prose already in ``audit_log`` was typed
+    under a withheld expectation, and disclosing it later changes the status of
+    data already collected. Option C keeps existing rows closed and opens new
+    ones deliberately — which only holds if the person typing a NEW note is
+    told it can be revealed. Without that line, C quietly reproduces the
+    retroactive problem it was chosen to avoid, one row at a time.
+    """
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True, withdrawn_at=None)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True).lower()
+    assert "auditor" in body
+
+
+# ── withdrawing from a shortlist card must return to the shortlist ────────
+#
+# Reported from the live product, 2026-08-20: "withdraw candidate doesn't work
+# as expected — candidate still shows", on the SHORTLIST screen.
+#
+# The withdrawal itself always worked (the row is written, and every shortlist
+# read filters it out). What did not work is where the user ended up. The card's
+# form has posted `context=shortlist` since FU-8 — and
+# `test_shortlist_card_withdraw_form_carries_context_shortlist` has pinned that
+# it does — but `resume_withdraw` never READ it, redirecting unconditionally to
+# the résumé-detail page.
+#
+# So: click Withdraw on the shortlist, get thrown to a different page, press
+# Back, and the browser serves the CACHED shortlist with the candidate still on
+# it. Withdrawal looks like it did nothing.
+#
+# The signal was designed and nothing consumed it — the same shape as the three
+# other defects found by running the product today.
+
+
+def test_withdraw_from_a_shortlist_card_returns_to_that_shortlist(
+    monkeypatch: Any, client: Any
+) -> None:
+    resume_id = uuid4()
+    job_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token, "context": "shortlist", "job_id": str(job_id)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/jobs/{job_id}/shortlist"), (
+        "withdrawing from a shortlist card dumped the user on the résumé page; "
+        "pressing Back then shows a cached list with the candidate still on it"
+    )
+
+
+def test_withdraw_from_the_resume_page_still_returns_there(
+    monkeypatch: Any, client: Any
+) -> None:
+    """No regression for the other caller, which sends no context at all."""
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")
+
+
+@pytest.mark.parametrize("job_id", ["", "not-a-uuid", "../../etc/passwd"])
+def test_a_missing_or_junk_job_id_falls_back_to_the_resume_page(
+    monkeypatch: Any, client: Any, job_id: str
+) -> None:
+    """The return address is attacker-controllable form input, so it is parsed
+    as a UUID and the URL is built server-side from it — never echoed into a
+    Location header. Anything unparseable degrades to the résumé page rather
+    than 500ing or redirecting somewhere chosen by the request."""
+    resume_id = uuid4()
+    token = _mint_withdraw_lifecycle_tokens(monkeypatch, client, resume_id)
+    monkeypatch.setattr(
+        api_client,
+        "withdraw_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=True)),
+    )
+    resp = client.post(
+        f"/resumes/{resume_id}/withdraw",
+        data={"csrf_token": token, "context": "shortlist", "job_id": job_id},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/resumes/{resume_id}")

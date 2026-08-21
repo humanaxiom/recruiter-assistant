@@ -28,6 +28,18 @@
         <td>{{ resume.original_filename }}</td>
         <td>
           <span class="pill pill-{{ resume.status }}">{{ resume.status }}</span>
+          {%- if resume.withdrawn_at %}
+          {# ADR-026/FU-8. `status` is the PARSE status, so a withdrawn
+             candidate rendered here as plain `parsed` — byte-identical to an
+             active one — and withdrawal looked like it had done nothing on the
+             page a recruiter lands on. `withdrawn_at` has been on
+             `ResumeListItem` since FU-8; this table simply never read it.
+
+             MARKED, not hidden: ADR-026's decision is "exclude and RETAIN".
+             Hiding the row would lose the record and strand Reinstate, which
+             is only reachable through this table. #}
+          <span class="pill pill-withdrawn" title="Withdrawn — retained for audit, and excluded from every shortlist. Open the candidate to reinstate.">withdrawn</span>
+          {%- endif %}
           {%- if resume.degraded %}
           {# FU-7 §4 / ADR-030: skills extraction fell back to keyword scan;
              this résumé is excluded from shortlists until re-parsed. #}

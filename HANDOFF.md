@@ -2,7 +2,113 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-20: THE BLOCKED DECISIONS MOVED, AND THE PILOT IS NOW THE ONLY THING LEFT
+### ⚠️⚠️ READ FIRST — 2026-08-20 (later session): D1 SHIPPED. **NOTHING IS BLOCKED ON A HUMAN DECISION ANY MORE.**
+
+> Branch `feat/d1-audited-reason-reveal`, three commits (`red` → `green` → `fix`). **`git fetch` and check
+> `gh pr list` before trusting any line here** — two Claude sessions have raced on this repo before.
+> The banner below this one is the earlier session's and is now history.
+
+#### What shipped
+
+**D1 = option C — the separately-audited reveal of a withheld withdrawal reason.** `POST
+/audit/log/{audit_id}/reveal`, session-gated admin + auditor, ordering **read → gate → audit → return**,
+with a "Reveal note" control on the access-record page. Full write-up in
+[ADR-036](docs/adr/036-auditor-audit-log-viewer.md)'s D1 amendment.
+
+With D2 (PR #95) already merged, **both carried decisions are now answered AND implemented.** The
+`docs/OPEN_DECISIONS.md` memo is kept only as the record of the options not taken, and now says so at the
+top.
+
+Gates: **offline 5448 passed, coverage 94.35%; integration 541 passed.** Both run via `./scripts/verify.sh`.
+
+#### 🔴 The finding that matters more than the feature
+
+**The withdraw form never collected a reason.** The route has always read `request.form.get("reason")`, the
+backend has always accepted one, and a test has always proved the forwarding worked — **by POSTing the
+field itself**. No rendered form contained the input. All five withdrawals in the live dev database have a
+NULL `audit_log.details`, and that is structural, not incidental.
+
+So D1 = option C — a decision five sessions in the making, about the disclosure of a specific field —
+would have shipped as **a button to reveal a value the product could not record**. It is fixed on this
+branch (`resume_detail.html`), with the backend's own 500-char cap mirrored on the input and a line telling
+the person typing that an auditor can ask to see the note.
+
+That last part is not UI polish. D1's memo turns on the asymmetry that prose already recorded was typed
+under a *withheld* expectation; C keeps existing rows closed and opens new ones deliberately — which only
+holds if new notes are written with notice.
+
+**How it was found: by clicking, not by testing.** This is A7 instance (18) and a genuinely new variant —
+every prior instance was reachable by mutating code and watching what failed to complain, but there is
+nothing to mutate when the defect is an *absent input*. Call it **the test that plays both parts**: a test
+that supplies the input a user was supposed to supply can never notice that no user can. **Fifth defect in
+two sessions found only by running the product.**
+
+A second, ordinary defect came out of the same work: both audit reads called `json.loads` on the raw
+`jsonb` column, so **one malformed row would have 500'd the entire access-record page** — the first page an
+auditor opens. `redact_audit_details` has promised "an audit read must degrade, never 500" since Phase 1.4;
+the promise was enforced one layer below where it needed to hold. That is A7 instance (19).
+
+#### ✅ Verified live, end to end — not merely green
+
+The stack was rebuilt (the previously-running containers were 7 days old and predated PRs #93/#94/#95) and
+the whole chain was exercised through the real UI on `localhost:29500`:
+
+1. withdrew a résumé **with a reason** → `audit_log.details` recorded it (the first non-NULL one in this
+   database's history);
+2. the access record showed **withheld** with a **Reveal note** button beside it;
+3. clicking it returned the prose, and wrote a `reveal_audit_detail` row whose `subject_id` points at the
+   withdrawal row;
+4. reloading the page **re-masked** the value;
+5. the résumé was **reinstated**, so it is back in its original active state.
+
+#### 🟡 One residual to know before issuing auditor accounts
+
+**With CAS disabled, a reveal is recorded as `service:dev-anonymous`, not a named person** (ADR-019 §10b —
+the sentinel is not a `users` row and cannot be `actor_kind='user'` without violating the FK). The live
+probe above recorded exactly that. This is correct behaviour, and it means **the attributability that
+justifies option C only materialises with CAS on.** One more reason the pilot must run authenticated.
+
+#### ⚠️ 2026-08-20, later: THREE MORE DEFECTS FROM THE FIRST REAL CLICK-THROUGH
+
+The first authenticated session found three things no gate had:
+
+1. **A withdrawn candidate looked identical to an active one** on the job page —
+   `resumes_table.html` rendered the PARSE status and never read `withdrawn_at`.
+   Fixed (`8cf4977`).
+2. **Withdrawing from a shortlist card threw the user off the shortlist.** The
+   card has posted `context=shortlist` since FU-8 and the route never read it,
+   so you landed on the résumé page; pressing Back served a CACHED shortlist
+   with the candidate still on it. The withdrawal had always worked. Fixed
+   (`818bf14`).
+3. **Skill chips rendered salted hashes** (`h:2431ff17…`) instead of names.
+   ADR-032/PR #66 fixed this on 2026-08-07 — and had **never applied to a single
+   row**, because the newest job was parsed 2026-08-02 and the write only fires
+   on job projection. Regenerate could not fix it: it re-ranks the same edges.
+   **Fixed in the DATA** by a two-pass backfill (172/172 edges now labelled);
+   see ROADMAP A7 (20), "the fix that never ran".
+
+**After a label backfill each job must be REGENERATED** —
+`shortlist_entries.score_breakdown` caches the rendered label, so the graph fix
+is invisible until the shortlist is rebuilt.
+
+#### 🔴 What is left — and it is now ONLY physical
+
+1. **Run the product as a signed-in user.** `scripts/quickstart.ps1` under **`pwsh` (PowerShell 7 — 5.1
+   cannot parse it and `powershell.exe` still exits 0 on the parse failure)**, CAS on, and click through.
+   The stack is currently up and current with this branch, but running **CAS-disabled**.
+2. **Phase 3.3 slice 2 — the job side of the skill classifier.** Where the 45.2% tail actually lives. This
+   is now the only substantive feature work outstanding.
+3. **Open the PR for this branch.** Not yet opened.
+
+#### Recorded, not fixed (see `docs/ROADMAP.md` A7)
+
+- The **shortlist card's quick withdraw still collects no reason** (`shortlist_cards.html:151-158`) — same
+  shape as (18), left deliberately: a text input on every card in a grid is poor UX. Withdrawals from
+  cards still record `None`.
+- **Reveals are not rate-limited.** An auditor can reach option B's disclosure one click at a time, with a
+  trail behind them. The trail is the control, but nothing alerts on the pattern.
+
+#### (history) ⚠️⚠️ 2026-08-20 (earlier session): THE BLOCKED DECISIONS MOVED — D1 was still unimplemented at the time this was written
 
 > **Four PRs merged in this session: #92, #93, #94 and this one (#95).** **`git fetch` and check
 > `gh pr list` before trusting any line here** — two Claude sessions have raced on this repo before.

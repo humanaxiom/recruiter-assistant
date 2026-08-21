@@ -100,10 +100,33 @@
   </div>
   {% elif is_writer %}
   <div class="withdraw-block">
+    {# D1 = option C follow-on. The route has always read a `reason` form
+       field and the backend has always accepted one (`WithdrawRequest.reason`,
+       max_length=500) — but no form ever rendered the input, so every
+       withdrawal in the live database recorded `None`. The audited-reveal
+       control this branch adds would have had nothing to reveal, ever.
+
+       `maxlength` mirrors the backend cap deliberately: a note is written once,
+       at the moment of a decision someone may later be asked to justify, and
+       losing it to a 422 on submit is not recoverable by retrying.
+
+       The disclosure line is not decoration. D1's memo turns on the asymmetry
+       that prose already recorded was typed under a withheld expectation;
+       option C stays closed for those rows and opens new ones deliberately,
+       which only holds if the person typing a NEW note is told an auditor can
+       ask to see it. #}
     <form method="post"
-          action="{{ url_for('resume_withdraw', resume_id=resume.id) }}"
-          style="display:inline">
+          action="{{ url_for('resume_withdraw', resume_id=resume.id) }}">
       <input type="hidden" name="csrf_token" value="{{ withdraw_csrf_token }}">
+      <label class="label" for="withdraw-reason">Reason (optional)</label>
+      <input class="input" type="text" id="withdraw-reason" name="reason"
+             maxlength="500"
+             placeholder="e.g. candidate asked to be removed">
+      <p class="hint">
+        Recorded against this withdrawal. It is not shown in the access record
+        by default, but an auditor can ask to see it — and that request is
+        logged under their name.
+      </p>
       <button type="submit" class="btn btn-danger btn-sm">Withdraw candidate</button>
     </form>
   </div>

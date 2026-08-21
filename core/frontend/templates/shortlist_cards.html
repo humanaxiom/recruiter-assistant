@@ -152,6 +152,12 @@
             action="{{ url_for('resume_withdraw', resume_id=entry.resume_id) }}"
             style="display:inline">
         <input type="hidden" name="context" value="shortlist">
+        {# The return address. `context` says what KIND of page to go back to;
+           this says which one. Without it `resume_withdraw` cannot build the
+           shortlist URL, and until 2026-08-20 it dropped the user on the
+           résumé page instead — pressing Back then showed a cached list with
+           the withdrawn candidate still on it. #}
+        <input type="hidden" name="job_id" value="{{ entry.job_id }}">
         <input type="hidden" name="csrf_token"
                value="{{ (withdraw_csrf_tokens or {}).get(entry.resume_id|string, '') }}">
         <button type="submit" class="btn btn-danger btn-sm">Withdraw candidate</button>

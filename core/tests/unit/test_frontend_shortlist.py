@@ -2466,3 +2466,24 @@ def test_sibling_disclosure_requires_literal_false_not_merely_falsy_junk(
         f"{field_name}={junk_value!r} is falsy but not `is False` -- the "
         "disclosure must require identity, not truthiness"
     )
+
+
+def test_shortlist_card_withdraw_form_carries_its_job_id(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The return address. ``context=shortlist`` says *which kind* of page to
+    go back to; the job id says *which one*. Without it the route cannot build
+    the shortlist URL and has no choice but to dump the user on the résumé
+    page — which is exactly what it did."""
+    job_id = uuid4()
+    entry = _full_entry(uuid4())
+    entry["resume_id"] = str(uuid4())
+    entry["job_id"] = str(job_id)
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+    form_re = re.compile(
+        r'<form[^>]*action="[^"]*/withdraw[^"]*"[^>]*>(.*?)</form>', re.DOTALL
+    )
+    match = form_re.search(body)
+    assert match is not None, "expected a withdraw <form> on the shortlist card"
+    assert str(job_id) in match.group(1)

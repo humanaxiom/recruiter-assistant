@@ -302,6 +302,18 @@ select.input {
   color: #b91c1c;
 }
 
+/* Withdrawn (ADR-026/FU-8) — excluded from every shortlist, retained for
+   audit. Deliberately NOT red like `.pill-failed`: nothing went wrong, a
+   person made a decision. Slate reads as "set aside", and is distinct enough
+   from the green `.pill-parsed` beside it that the row no longer looks
+   identical to an active candidate. Used by both `resumes_table.html` and
+   `resume_detail.html`, which carried the class with no rule behind it. */
+.pill-withdrawn {
+  background: #e2e8f0;
+  color: #334155;
+  text-decoration: line-through;
+}
+
 /* skill pills */
 .pill-skill {
   background: #eef2ff;

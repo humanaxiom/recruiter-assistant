@@ -62,4 +62,23 @@ class AuditLogItem(BaseModel):
     occurred_at: dt.datetime
 
 
-__all__ = ["RevealAuditItem", "AuditLogItem"]
+class AuditDetail(BaseModel):
+    """One ``audit_log`` row's ``details``, **un-redacted** — the response of
+    the separately-audited reveal (D1 = option C, ADR-036 §1).
+
+    Deliberately NOT a superset of :class:`AuditLogItem`. It carries the three
+    fields the reveal needs and nothing else: the row's ``id`` (so the viewer
+    can attach the value to the right row), the ``action`` whose payload this is
+    (which is what makes the disclosure interpretable), and ``details``. Adding
+    actor or subject fields here would mean a second, un-redacted rendering of
+    the same row travelling a path that exists to disclose one value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    action: str
+    details: Any
+
+
+__all__ = ["RevealAuditItem", "AuditLogItem", "AuditDetail"]
