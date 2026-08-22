@@ -64,7 +64,9 @@ def _ctx(rows: list[_Row]) -> tuple[dict[str, Any], MagicMock, MagicMock]:
     pool.acquire = MagicMock(return_value=acq)
     arq = MagicMock(name="arq")
     arq.enqueue_job = AsyncMock(return_value=MagicMock())
-    return ({"pg_pool": pool, "arq": arq}, conn, arq)
+    # Keyed by the SAME constant the implementation reads, so this fixture can
+    # never again describe a ctx the worker does not build.
+    return ({"pg_pool": pool, reconcile._QUEUE_CTX_KEY: arq}, conn, arq)
 
 
 async def test_a_stranded_resume_is_re_enqueued() -> None:
@@ -169,3 +171,37 @@ async def test_a_failing_tick_never_takes_the_worker_down(boom: Exception) -> No
     ctx, _conn, arq = _ctx([_stalled()])
     arq.enqueue_job = AsyncMock(side_effect=boom)
     await reconcile.reconcile_stalled_parses(ctx)
+
+
+# ── the contract must match the REAL worker, not one the test invented ───
+#
+# This file originally built its ctx as {"pg_pool": ..., "arq": ...} and every
+# test passed. The worker sets ctx["redis"], never ctx["arq"], so the reconciler
+# returned "skipped" on every tick from the moment it was deployed and did
+# nothing at all — green tests, inert feature.
+#
+# That is ROADMAP A7 instance (18), "the test that plays both parts", committed
+# by the same session that named it: a test which supplies the input the system
+# was supposed to supply can never notice that the system does not.
+#
+# So the key is pinned against `worker/main.py`'s ACTUAL startup, by reading it.
+
+
+def test_the_queue_ctx_key_is_one_the_worker_actually_sets() -> None:
+    from pathlib import Path
+
+    startup = (
+        Path(__file__).resolve().parents[2] / "src" / "worker" / "main.py"
+    ).read_text(encoding="utf-8")
+    assert f'ctx["{reconcile._QUEUE_CTX_KEY}"] =' in startup, (
+        f'reconcile reads ctx["{reconcile._QUEUE_CTX_KEY}"] but worker/main.py '
+        "never assigns it — the cron will silently no-op forever"
+    )
+
+
+async def test_a_missing_queue_dependency_is_loud_not_silent() -> None:
+    """Returning a bland "skipped" is how this went unnoticed. A cron that
+    cannot do its job must say so in a word an operator would grep for."""
+    ctx, _conn, _arq = _ctx([_stalled()])
+    del ctx[reconcile._QUEUE_CTX_KEY]
+    assert await reconcile.reconcile_stalled_parses(ctx) == "unavailable"

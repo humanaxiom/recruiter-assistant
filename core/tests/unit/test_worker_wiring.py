@@ -72,6 +72,11 @@ async def test_startup_parks_a_blob_store_on_ctx(tmp_path: Path) -> None:
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         await startup(ctx)
 
@@ -100,6 +105,11 @@ async def test_startup_blob_store_is_rooted_at_storage_dir(tmp_path: Path) -> No
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         await startup(ctx)
 
@@ -157,6 +167,11 @@ async def test_startup_raises_when_pii_key_is_empty(tmp_path: Path) -> None:
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         with pytest.raises(RuntimeError):
             await startup(ctx)
@@ -189,6 +204,11 @@ async def test_startup_does_not_raise_when_pii_key_is_configured(
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         await startup(ctx)  # must not raise
 
@@ -221,6 +241,11 @@ async def test_startup_raises_when_skill_hash_salt_is_empty(tmp_path: Path) -> N
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         with pytest.raises(RuntimeError):
             await startup(ctx)
@@ -251,6 +276,11 @@ async def test_startup_does_not_raise_when_skill_hash_salt_is_configured(
             return_value=_fake_driver(),
         ),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),
+        # `startup` now opens a dedicated ArqRedis for the reconcile cron to
+        # enqueue with — see the ctx["arq"] comment in main.py. Mocked here for
+        # the same reason asyncpg and Neo4j are: these tests assert WIRING, and
+        # must not need a live broker.
+        patch("src.worker.main.create_pool", AsyncMock()),
     ):
         await startup(ctx)  # must not raise
 

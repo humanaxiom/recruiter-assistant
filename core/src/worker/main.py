@@ -12,6 +12,7 @@ per-process singletons the parse tasks resolve off ``ctx``:
 ``blob_store``       ``src.storage.blob_store.BlobStore`` (no MinIO anywhere)
 ``llm``              ``src.pipeline.llm.LLMClient`` (local Ollama, /v1)
 ``redis``            ``redis.asyncio.Redis`` — backs the embedding cache
+``arq``              ``arq.ArqRedis`` — enqueue OTHER jobs (the reconcile cron)
 ``embedder``         ``src.pipeline.llm.CachedEmbedder``
 ===================  =========================================================
 
@@ -34,7 +35,7 @@ from typing import Any
 import asyncpg
 import redis.asyncio as aioredis
 from arq import cron
-from arq.connections import RedisSettings
+from arq.connections import RedisSettings, create_pool
 from neo4j import AsyncGraphDatabase
 
 from src.models.ddl import init_schema
@@ -112,9 +113,24 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     ctx["llm"] = llm
 
+    # ⚠️ This OVERWRITES arq's own ``ctx["redis"]``, which is an ``ArqRedis``
+    # (the thing with ``enqueue_job``), replacing it with a plain client used
+    # for the embedding cache. Anything that later expects arq's documented
+    # ctx["redis"] gets an object without ``enqueue_job`` — which is exactly how
+    # `reconcile_stalled_parses` shipped inert, then crashed on
+    # ``'Redis' object has no attribute 'enqueue_job'`` once its silent guard
+    # was made loud. Left in place (the cache genuinely wants a plain client)
+    # but the queue now gets its OWN key below rather than fighting over this
+    # one.
+    #
     # Same Redis instance as the arq broker, different key space (``emb:v1:*``).
     redis_client: aioredis.Redis[bytes] = aioredis.from_url(s.redis_url)
     ctx["redis"] = redis_client
+
+    # The queue client tasks use to enqueue OTHER jobs (the reconcile cron).
+    # Distinct key, so it cannot be clobbered by the cache client above and a
+    # reader cannot get the wrong type depending on startup ordering.
+    ctx["arq"] = await create_pool(RedisSettings.from_dsn(s.redis_url))
     ctx["embedder"] = CachedEmbedder(
         llm,
         redis_client,
@@ -132,6 +148,9 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     redis_client = ctx.get("redis")
     if redis_client is not None:
         await redis_client.aclose()
+    arq_pool = ctx.get("arq")
+    if arq_pool is not None:
+        await arq_pool.aclose()
     driver = ctx.get("neo4j")
     if driver is not None:
         await driver.close()

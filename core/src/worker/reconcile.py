@@ -31,6 +31,18 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+#: The ctx key holding the arq queue client. `worker/main.py::startup` sets
+#: a dedicated ``ctx["arq"]``. The first version of this module read that key
+#: before `main.py` set it: it found nothing, returned a bland "skipped", and did
+#: precisely nothing on every tick from the moment it was deployed, while its
+#: unit tests passed because they built the ctx the implementation expected
+#: rather than the one the worker produces. That is ROADMAP A7 (18), "the test
+#: that plays both parts", committed by the very session that named it.
+#:
+#: Named as a constant so the tests can pin it against main.py's real startup
+#: instead of inventing it a second time.
+_QUEUE_CTX_KEY = "arq"
+
 #: How long a résumé may sit non-terminal before it is considered stranded
 #: rather than busy. Generous on purpose: a real parse on a contended peer can
 #: take many minutes, and a reconciler that fires while the original job is
@@ -83,9 +95,18 @@ async def reconcile_stalled_parses(ctx: dict[str, Any]) -> str:
     worker down is worse than no reconciler.
     """
     pool = ctx.get("pg_pool")
-    arq = ctx.get("arq")
-    if pool is None or arq is None:  # pragma: no cover - worker wiring guard
-        return "skipped"
+    arq = ctx.get(_QUEUE_CTX_KEY)
+    if pool is None or arq is None:
+        # LOUD, not a bland "skipped". The silent version of this line hid a
+        # completely inert cron for hours.
+        log.warning(
+            "reconcile_stalled_parses.unavailable pg_pool=%s %s=%s — the cron "
+            "cannot run and stranded résumés will NOT be recovered",
+            pool is not None,
+            _QUEUE_CTX_KEY,
+            arq is not None,
+        )
+        return "unavailable"
 
     requeued = 0
     abandoned = 0
