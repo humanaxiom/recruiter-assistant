@@ -2,7 +2,148 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### ⚠️⚠️ READ FIRST — 2026-08-20 (later session): D1 SHIPPED. **NOTHING IS BLOCKED ON A HUMAN DECISION ANY MORE.**
+### 🔴🔴 READ FIRST — 2026-08-22: **UNRESOLVED PII EXPOSURE ON A PUBLIC REPO**
+
+> **This is the first thing to deal with. Nothing else in this file matters more.**
+
+**What happened.** Commit `349aadd` used `git add -A` and swept the entire
+`fixtures/` directory into the branch — **99MB across 117 files**: real candidate
+résumé PDFs, cover letters, and multi-MB bundle zips. It was pushed to `origin`.
+**`humanaxiom/recruiter-assistant` is a PUBLIC repository.**
+
+This is third-party personal information — names, contact details, employment
+history — in a product whose whole design exists to protect exactly that:
+encrypted PII columns, blind review, audited de-anonymisation, an allowlisted
+audit viewer. The raw corpus sitting in a public git history contradicts every
+one of those controls.
+
+**What is already done:**
+
+- `fixtures/` is gitignored and untracked (`d7b43b3`). The files remain ON DISK —
+  `scripts/smoke.sh` and `scripts/model-check.sh` both read them.
+- **This does NOT remove the blobs from history.** They remain reachable in this
+  branch's earlier commits.
+
+**Established, not assumed:** `349aadd` was pushed AFTER PR #96 merged, so the
+blobs are **not** attached to that PR's commit list, and `fixtures/` is **not** in
+`origin/main` (`git ls-tree origin/main | grep fixtures` returns nothing). They
+are reachable only through the branch ref `origin/feat/d1-audited-reason-reveal`.
+
+**What still needs a HUMAN decision and action:**
+
+1. **Delete the remote branch** — `git push origin --delete feat/d1-audited-reason-reveal`.
+   Immediate and reversible (every commit exists locally). An agent attempt was
+   blocked by the permission classifier, so a human must run it.
+2. **Rewrite history** to drop `fixtures/` from all commits, then force-push a
+   clean branch. `git filter-repo --path fixtures --invert-paths` is the modern
+   tool.
+3. **Decide whether this repo should be public at all.** It is an HR product
+   handling candidate PII; the public setting is what turned a routine mistake
+   into a disclosure.
+4. **Consider asking GitHub Support to purge** the unreachable objects — they can
+   remain fetchable by SHA after a force push until garbage collection.
+5. **Assess disclosure obligations.** If these are real SFU applicants,
+   PIPEDA/FIPPA may require notification. That is a judgement for whoever owns
+   privacy for the pilot — the same person who answered D1.
+
+**The process lesson, and it is not subtle.** Every `git add -A` in this session
+was a latent version of this. The repo's own memory note (`gate-write-pass-scoping`)
+already says to commit with explicit pathspecs; the guidance existed and was not
+followed. **Use explicit paths. Never `git add -A` in a repo with untracked data
+directories.**
+
+---
+
+### ⚠️ 2026-08-22: THE PIPELINE WORKS END TO END — AND THREE NEW TOOLS EXIST
+
+**PR #96 IS MERGED** (squash `809e306`). Everything after it — 21 commits — sits on
+`feat/d1-audited-reason-reveal` and is **not yet in a PR**. `git fetch` first:
+local `main` went stale by a whole merge during this session.
+
+#### The headline: smoke passes, on the real product
+
+`./scripts/smoke.sh` → **10 passed**. A real JD `.docx` extracted and parsed;
+three real résumé PDFs uploaded through the Flask UI and parsed with genuine LLM
+extraction (56 / 48 / 33 skills, none degraded); ranked into a shortlist; and
+every UI assertion exercised — no raw ADR-008 hashes in skill chips, the withdraw
+form's return address, the withdrawn marker, Regenerate's `hx-trigger`, and the
+audited reveal returning real prose and recording itself.
+
+That is the first end-to-end proof this product works, after three sessions of
+being unable to claim it.
+
+#### Three tools now exist, and each earned its place immediately
+
+| Tool | Proves | What it found |
+|---|---|---|
+| `scripts/verify.sh` | the CODE | (the existing gate) |
+| `scripts/doctor.sh` | the DATA in the live deployment | 20 stranded résumés; an auth-disabled stack serving `/audit` with no login |
+| `scripts/smoke.sh` | the SCREEN | ranking silently dropping an unprojected candidate |
+| `scripts/model-check.sh` | the MODEL | `resume_skills_v2` needs 8192 tokens, not 4096 |
+
+[ADR-045](docs/adr/045-model-acceptance.md) records the architecture: the model is
+a dependency with an acceptance test, its profile is committed to
+`docs/model-profiles/`, and `LLM_TIMEOUT_S` is DERIVED from measurement rather
+than declared. **Run `model-check.sh` before pointing at any new model** — that is
+the answer to "how do we avoid rediscovering this on the ADA6000 boxes".
+
+#### 🔴 Two settings the running stack needs that `.env` does not have
+
+1. **`LLM_TIMEOUT_S=900`** — `.env` says `120`. At 120s every parse dies at ~360s
+   (three attempts), the circuit breaker opens, and parsing stops entirely. The
+   current stack runs on a SHELL OVERRIDE that will not survive a plain
+   `docker compose up`. `doctor.sh` fails loudly if it regresses.
+2. **`CAS_ENABLED=true`** — currently off, because smoke cannot complete a CAS
+   handshake. While off, `/audit` is reachable with no login. `quickstart.ps1`
+   now writes this key, but only into a `.env` that does not already have it.
+
+#### Six defects fixed this session, and who found them
+
+- résumé skill extraction needed 8192 tokens, not 4096 — **model-check**
+- ranking silently dropped a candidate the graph had not projected — **smoke**
+- 20 résumés stranded since July; `/audit` open unauthenticated — **doctor**
+- `.env` never reached containers (compose named `CAS_ENABLED` only in a comment)
+  and `quickstart.ps1` never wrote it — investigation
+- the reconcile cron was completely inert (it read `ctx["arq"]`; the worker sets
+  `ctx["redis"]`) — **making its own guard loud**
+- `startup` clobbers arq's `ctx["redis"]` with a plain cache client — the above
+
+**Three of those were introduced during this session and caught by the new
+tooling**, including a correct fix wrongly retracted after measuring on a
+contended GPU. That is the strongest evidence the approach works: it catches the
+engineer, not just the codebase.
+
+#### 🔴 Next session, in order
+
+1. **Resolve the PII exposure above.** Everything else waits.
+2. **Open a PR** for the 21 commits — but not until history is clean, or the PR
+   will re-attach the blobs.
+3. **Pair-test with CAS on.** Set both `.env` values, recreate `api worker
+   frontend`, sign in at `localhost:29500`, and walk the paths smoke structurally
+   cannot reach: the auditor role, a reveal attributed to a NAMED account rather
+   than `service:dev-anonymous`, and hiring-manager row scoping.
+4. **Close ADR-045's named gap:** `model-check.sh` probes Ollama's NATIVE
+   transport while the app runs the OpenAI-compat one, so the profile certifies a
+   path the product does not use. It works — smoke proves it — but measurement and
+   runtime should be the same path before the vLLM move.
+5. **`skills_graph.py:443` still calls the model with `max_tokens=128`**, far below
+   the measured floor. It has a deterministic fallback, so it degrades quietly —
+   meaning skill resolution may have been silently falling back for a long time.
+   Recorded in ROADMAP, not fixed. Measure it.
+
+#### Environment facts worth not rediscovering
+
+- Two identical lab GPU boxes, both on Tailscale, both shared with other systems:
+  **aria-gb10 `100.88.247.106`** and **aria-spark1 `100.114.185.88`** (the latter
+  does not resolve by name from the Windows host — pin the IP). Final production
+  is ADA6000 + vLLM, not ready yet.
+- **Never diagnose model behaviour on a contended peer.** Check `GET /api/ps`
+  first: a 70GB `gpt-oss:120b` resident alongside the 20b made every call time out
+  regardless of token budget, and that noise produced a confidently wrong
+  retraction of a correct fix.
+- Postgres: `psql -U app -d recruiter` — there is no `postgres` role.
+
+#### (history) ⚠️ 2026-08-20: D1 SHIPPED — merged as PR #96. Its "nothing is blocked" claim was true of DECISIONS only; the pilot was still blocked on a broken pipeline, which 2026-08-22 fixed.
 
 > Branch `feat/d1-audited-reason-reveal`, three commits (`red` → `green` → `fix`). **`git fetch` and check
 > `gh pr list` before trusting any line here** — two Claude sessions have raced on this repo before.
