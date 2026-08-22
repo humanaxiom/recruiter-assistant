@@ -213,7 +213,13 @@ async def main(args: argparse.Namespace) -> int:
         endpoint=endpoint,
         model=model,
         max_jobs=max_jobs,
-        transport="native" if settings.llm_ollama_native else "openai-compat",
+        # What was actually PROBED, not what the app is configured to use.
+        # `_one_call` always uses Ollama's native /api/chat, so reporting the
+        # application's transport here would certify a path this run never
+        # touched — the precise class of false confidence this tool exists to
+        # remove. The gap between the two is recorded in ADR-045 as the next
+        # slice: the harness should probe the transport the app actually runs.
+        transport="ollama-native",
         fixtures=args.fixtures,
     )
     print("\n" + render(profile))

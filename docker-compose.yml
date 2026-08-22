@@ -80,7 +80,19 @@ services:
       LLM_MODEL_GENERATION: ${LLM_MODEL_GENERATION:-gpt-oss:20b}
       LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
       LLM_EMBEDDING_DIM: "768"
-      LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-120}"
+      # 900, from MEASUREMENT, not judgement. `scripts/model-check.sh` probed
+      # every real prompt against gpt-oss:20b on an idle peer at the worker's own
+      # concurrency (4) and recorded a slowest call of 419s, giving a derived
+      # recommendation of 838s — see docs/model-profiles/gpt-oss-20b.json.
+      #
+      # The old default was 120s. With `llm_max_retries = 2` that is three
+      # attempts per call, so a parse died after ~360s, the circuit breaker
+      # opened, and parsing stopped entirely (2026-08-21). This value and
+      # REASONING_JSON_MIN_TOKENS are COUPLED: raising the token budget without
+      # raising this converts empty responses into timeouts. `doctor.sh` now
+      # fails when this drops below the profile's recommendation, so the two
+      # cannot drift apart again.
+      LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-900}"
       STORAGE_DIR: /data
       PII_KEY: ${PII_KEY:?PII_KEY must be set — 32 random bytes, base64}
       # ADR-008: required — an empty salt would key every non-vocab Skill

@@ -34,6 +34,7 @@ sees every call, including ones that do not exist yet.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -42,6 +43,7 @@ import pytest
 from src.pipeline.llm.client import REASONING_JSON_MIN_TOKENS
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
+_PROFILE_DIR = Path(__file__).resolve().parents[3] / "docs" / "model-profiles"
 
 #: The extraction paths whose output the product cannot work without. A short
 #: response is not the point — the reasoning trace is charged first regardless
@@ -74,10 +76,39 @@ def _call_sites() -> list[tuple[str, int, int]]:
     return found
 
 
-def test_the_floor_is_the_value_proven_live_not_a_guess() -> None:
-    """4096 is not a round number someone liked. It is the value ADR-044
-    measured against the real model, where 1024 produced nothing at all."""
-    assert REASONING_JSON_MIN_TOKENS == 4096
+def test_the_floor_covers_every_accepted_model_profile() -> None:
+    """**This assertion used to read ``== 4096``, and that was the bug.**
+
+    4096 came from ADR-044, measured against ONE prompt (the classifier). On
+    2026-08-22 `scripts/model-check.sh` probed every real prompt on an idle peer
+    and found `resume_skills_v2` — the extraction the whole product depends on —
+    managed only 2 of 4 concurrent calls at 4096, and 4 of 4 at 8192. A constant
+    pinned to a number measured elsewhere was still too low for the call that
+    mattered, and a test asserting that exact number made it *harder* to
+    correct, not easier.
+
+    So the floor is now tied to the MEASUREMENTS rather than to a literal: it
+    must cover the largest ``recommended_max_tokens`` of every accepted profile
+    in ``docs/model-profiles/``. Point the stack at a hungrier model, run
+    `model-check.sh`, commit its profile, and this fails until the floor is
+    raised to match — which is the coupling ADR-045 exists to enforce.
+    """
+    profiles = sorted(_PROFILE_DIR.glob("*.json"))
+    assert profiles, (
+        "no committed model profiles — run scripts/model-check.sh and commit "
+        "what it writes; the floor is meaningless without a measurement"
+    )
+    for path in profiles:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not data.get("accepted"):
+            continue
+        needed = int(data.get("recommended_max_tokens") or 0)
+        assert REASONING_JSON_MIN_TOKENS >= needed, (
+            f"{path.name} measured a need for {needed} tokens but the shared "
+            f"floor is {REASONING_JSON_MIN_TOKENS}. Raise the floor: a budget "
+            "below the measured requirement does not truncate the answer, it "
+            "returns an empty one."
+        )
 
 
 @pytest.mark.parametrize("module", _MUST_CLEAR_FLOOR)

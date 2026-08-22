@@ -71,14 +71,18 @@ class LLMOutputInvalidError(RuntimeError):
 #: either the OpenAI-compat or the native path. A value below this does not
 #: truncate the answer — it returns an EMPTY one.
 #:
-#: 4096 is measured, not chosen: ADR-044 probed the live tailnet model and found
-#: 1024 classified 0 of 6 skills while 4096 classified 6 of 6. That lesson was
-#: then recorded against one call site while four others kept their own smaller
-#: literals — and on 2026-08-21 one of those (résumé skills, at 1536) returned
-#: empty content for every résumé uploaded, degrading them all and emptying the
-#: shortlist entirely. Hence one shared constant, enforced by
-#: ``tests/unit/test_reasoning_token_floor.py`` rather than by a comment.
-REASONING_JSON_MIN_TOKENS = 4096
+#: 8192 is MEASURED, not chosen, and it moved once already. ADR-044 probed 4096
+#: against the classifier prompt; on 2026-08-22 `scripts/model-check.sh` probed
+#: every real prompt on an idle peer and found `resume_skills_v2` managed only
+#: 2 of 4 concurrent calls at 4096 and 4 of 4 at 8192 — while 1536 returned
+#: nothing at all for any prompt. A value tuned against ONE prompt was still too
+#: low for the prompt the whole product depends on.
+#:
+#: That is why the number now comes from `docs/model-profiles/<model>.json`'s
+#: `recommended_max_tokens` rather than from anyone's judgement, and why
+#: `tests/unit/test_reasoning_token_floor.py` enforces it by scanning the
+#: source instead of trusting a comment.
+REASONING_JSON_MIN_TOKENS = 8192
 
 
 def _empty_content_message(reasoning_present: bool) -> str:
