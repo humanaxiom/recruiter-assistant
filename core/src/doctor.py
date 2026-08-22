@@ -43,6 +43,7 @@ Run it with ``scripts/doctor.sh`` (which executes it inside the stack, the way
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 from dataclasses import dataclass
@@ -435,14 +436,16 @@ def render(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
-async def main() -> int:
+async def main(profile_dir: Path) -> int:
     s = get_settings()
     pg = await asyncpg.create_pool(dsn=s.postgres_dsn, min_size=1, max_size=2)
     driver = AsyncGraphDatabase.driver(
         s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password)
     )
     try:
-        findings = await run_checks(pg=pg, neo4j=driver, settings=s)  # noqa: E501
+        findings = await run_checks(
+            pg=pg, neo4j=driver, settings=s, profile_dir=profile_dir
+        )  # noqa: E501
     finally:
         await driver.close()
         if pg is not None:
@@ -451,5 +454,19 @@ async def main() -> int:
     return exit_code(findings)
 
 
+def _parse_args() -> argparse.Namespace:
+    """CLI arguments, not env vars — CLAUDE.md forbids `os.environ` outside
+    settings.py and a meta-test enforces it.
+
+    ``--profiles`` exists because the default (repo-root-relative) resolves to
+    `/docs/model-profiles` inside the api container, which mounts only `core/`
+    at `/app`. The doctor then reported every model as UNPROFILED while a
+    perfectly good profile sat committed on the host — a tool built to detect
+    missing measurements, unable to see the measurements."""
+    p = argparse.ArgumentParser(description="Check the live deployment's invariants.")
+    p.add_argument("--profiles", type=Path, default=_DEFAULT_PROFILE_DIR)
+    return p.parse_args()
+
+
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(main(_parse_args().profiles)))
