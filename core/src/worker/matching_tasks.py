@@ -70,6 +70,84 @@ _RESUME_STATUS_SQL = "SELECT status, withdrawn_at FROM resumes WHERE id = $1"
 _PARSED_JOB_IDS_SQL = "SELECT id FROM jobs WHERE description_parsed IS NOT NULL"
 
 
+_ELIGIBLE_SQL = """
+SELECT count(*) FROM resumes
+WHERE job_id = $1 AND status = 'parsed' AND withdrawn_at IS NULL
+"""
+
+_PROJECTED_CYPHER = "MATCH (r:Resume {job_id: $jid}) RETURN count(r) AS n"
+
+
+async def ensure_projection_caught_up(
+    conn: Any,
+    neo4j: Any,
+    *,
+    job_id: UUID,
+    job_try: int,
+    max_tries: int,
+    defer_s: float,
+) -> None:
+    """Defer ranking while the graph is behind Postgres. Found by smoke, 2026-08-22.
+
+    ``resumes.status`` becomes ``parsed`` the instant the LLM pipeline finishes,
+    but ranking reads Neo4j and projection is an async cron. In that window a
+    résumé is *parsed* and *unrankable*: Stage 1 recall (``MATCH (r:Resume
+    {job_id: $jid})``) does not see it, so it is dropped from the shortlist with
+    no error and no trace. Three résumés parsed; two were ranked; the third —
+    the one with the most skills — reappeared on a re-run minutes later with
+    nothing else changed.
+
+    **Only a graph BEHIND the eligible set defers.** Projection legitimately
+    retains nodes Postgres no longer counts (a withdrawn résumé keeps its node),
+    and deferring on that direction would wedge ranking permanently.
+
+    **Bounded, because a failed projection is never coming.** Past
+    ``max_tries`` the run proceeds and logs that it did: ranking a subset is the
+    status quo, and doing it *silently* is the defect. Turning one broken row
+    into a job that can never be ranked would be worse than the bug.
+
+    **Fails OPEN on an unreadable graph**, uniquely in this repo. If Neo4j
+    cannot be counted, the ranking immediately after will fail on its own and
+    report properly; converting an unreadable count into an infinite defer would
+    replace a loud failure with a silent one.
+    """
+    try:
+        eligible = int(await conn.fetchval(_ELIGIBLE_SQL, job_id) or 0)
+        if eligible == 0:
+            return
+        async with neo4j.session() as session:
+            record = await (
+                await session.run(_PROJECTED_CYPHER, jid=str(job_id))
+            ).single()
+        projected = int((record or {}).get("n") or 0)
+    except Exception as exc:  # noqa: BLE001 - see "fails OPEN" above
+        log.warning(
+            "shortlist_job.projection_check_failed job_id=%s exc=%s", job_id, exc
+        )
+        return
+
+    if projected >= eligible:
+        return
+    if job_try < max_tries:
+        log.info(
+            "shortlist_job.awaiting_projection job_id=%s projected=%d "
+            "eligible=%d try=%d",
+            job_id,
+            projected,
+            eligible,
+            job_try,
+        )
+        raise Retry(defer=defer_s)
+    log.warning(
+        "shortlist_job.ranking_incomplete job_id=%s projected=%d eligible=%d "
+        "— ranking a SUBSET after %d tries; a projection is stuck",
+        job_id,
+        projected,
+        eligible,
+        job_try,
+    )
+
+
 async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
     """Generate + persist the shortlist for one job."""
     pool = ctx["pg_pool"]
@@ -111,6 +189,19 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
                 await clear_shortlist_state(conn, job_id)
                 log.info("shortlist_job.not_parsed job_id=%s", job_id_str)
                 return "not_parsed"
+
+            # Found by scripts/smoke.sh, 2026-08-22: three résumés parsed, two
+            # were ranked. Graph projection is an async cron, so a résumé can be
+            # `parsed` in Postgres and invisible to Stage 1 recall. Deferring
+            # here costs seconds; not deferring silently drops a candidate.
+            await ensure_projection_caught_up(
+                conn,
+                ctx["neo4j"],
+                job_id=job_id,
+                job_try=ctx.get("job_try", 1),
+                max_tries=settings.shortlist_max_tries,
+                defer_s=settings.shortlist_retry_defer_s,
+            )
 
             mc = matching_context_from_settings(
                 settings,
