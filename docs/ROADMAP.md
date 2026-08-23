@@ -985,3 +985,19 @@ left out of that branch's theme.
   doctor exists precisely to catch state the code gates cannot see, and this
   state sat invisible to it for 24 hours until a human noticed a spinner.
   A `pg.jobs_stuck` check is the natural sibling.
+
+- **One JD fails re-parse on model OUTPUT, not infrastructure** —
+  `306c573c` ("20260626 00101838 JDFN CUPE 202605", 9,523 chars of JD) came
+  back `llm output invalid: title: missing` after the 2026-08-23 recovery run
+  re-parsed the other 19 successfully. A different failure class from the 20
+  `LLMUnavailableError` rows the re-parse route was built for: the call
+  reached the model, the model answered, and the answer failed `JDExtracted`
+  validation on a missing `title`.
+
+  `chat_json` already retries once with the validator error appended for
+  self-correction and it still failed, and generation is `temperature=0`, so
+  clicking Re-parse again is likely to reproduce it deterministically rather
+  than roll a better answer. Worth measuring before treating it as a prompt
+  bug: this is the LONGEST JD in the corpus, and `jd_extract_v1`'s measured
+  floor (4096) came from a shorter fixture — the same per-prompt-not-per-model
+  lesson recorded above for the tiebreaker, in the opposite direction.
