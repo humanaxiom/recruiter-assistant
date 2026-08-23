@@ -912,13 +912,42 @@ behaviour**, which only a live call can show.
 
 ### Recorded, not fixed (2026-08-21)
 
-- **`skills_graph.py:443`'s vocabulary tiebreaker still calls the model with
-  `max_tokens=128`** — far below the proven floor, so on a reasoning model it
-  almost certainly returns empty content too. NOT fixed here on purpose: it asks
-  for a single token, it HAS a deterministic fallback (so it degrades resolution
-  rather than emptying a shortlist), and raising it changes canonical-key
-  resolution, which is a scoring-path change that does not belong in an incident
-  fix. It is listed in `_RECORDED_EXCEPTIONS` in the enforcing test, so it is a
-  decision with a reason attached rather than an oversight the scan tolerates
-  silently. Worth measuring: if the tiebreaker has been silently inert, some
-  share of skill resolutions have been falling back for a long time.
+- **`skills_graph.py:443`'s vocabulary tiebreaker — MEASURED 2026-08-22, and the
+  hypothesis was wrong.** It was recorded here on the assumption that
+  `max_tokens=128` was "far below the proven floor, so on a reasoning model it
+  almost certainly returns empty content too", and that some share of skill
+  resolutions had been silently falling back. Measured against the live
+  `gpt-oss:20b` on an IDLE aria-gb10 (`/api/ps` empty), through
+  `LLMClient.chat_json` on the OpenAI-compat transport the app actually runs
+  (`llm_ollama_native=False`) — NOT the native schema-constrained path
+  `scripts/model-check.sh` probes:
+
+  | case | `max_tokens=128` | `max_tokens=8192` |
+  |---|---|---|
+  | `"postgresql"` vs {postgres, mysql, sql} | `"postgres"` 3/3, 4.3-4.8s | `"postgres"` 3/3, 4.1-4.6s |
+  | `"react native"` vs {react, react router, javascript}, concurrency 4 | `null` 4/4, 5.7-6.4s | `null` 4/4, 5.6-6.3s |
+
+  128 returns schema-valid JSON on **every** call at the worker's own
+  concurrency and gives the **same answers** as 8192, including matching when a
+  match genuinely exists. Nothing has been falling back. The 8192 floor is a
+  property of the PROMPT, not of the model — résumé extraction feeds thousands
+  of input tokens and burns ~15k chars of reasoning trace before emitting a
+  byte, while this prompt is three lines. The committed profile already records
+  that per-prompt (4096 / 8192 / 4096). **Disposition: no source change.**
+  Raising it would be a 64x budget increase the measurement says changes no
+  answer.
+
+  Two things WERE wrong, and both are fixed:
+
+  - The reason recorded above — "raising it changes canonical-key resolution,
+    which is a scoring-path change" — was **stale**. Per F1 the tiebreaker is
+    enrichment-only: it may add an alias to a near-matched node and may never
+    change the key `_resolve_one` returns, so it cannot move a score. The
+    deferral was justified by a risk that no longer existed.
+  - `_RECORDED_EXCEPTIONS` was a bare set of PATHS, so it excused the *file*
+    rather than the *value* — `max_tokens` could have been dropped to 8 and the
+    suite stayed green. Mutation-probed and confirmed: `128 -> 64` **survived**
+    the suite as it stood. It is now a path->measured-budget mapping pinned by
+    `test_a_recorded_exception_may_not_drift_below_what_was_measured`, which
+    kills that mutant. This is the A7 shape one level up — the exception that
+    licenses a below-floor number was itself unenforced prose.

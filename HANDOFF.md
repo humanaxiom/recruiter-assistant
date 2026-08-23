@@ -146,10 +146,18 @@ engineer, not just the codebase.
    transport while the app runs the OpenAI-compat one, so the profile certifies a
    path the product does not use. It works — smoke proves it — but measurement and
    runtime should be the same path before the vLLM move.
-5. **`skills_graph.py:443` still calls the model with `max_tokens=128`**, far below
-   the measured floor. It has a deterministic fallback, so it degrades quietly —
-   meaning skill resolution may have been silently falling back for a long time.
-   Recorded in ROADMAP, not fixed. Measure it.
+5. ~~**`skills_graph.py:443` `max_tokens=128`**~~ — **DONE (measured, no fix
+   needed).** The hypothesis was wrong. Against the live `gpt-oss:20b` on an idle
+   aria-gb10, through the app's own OpenAI-compat transport: 128 returns
+   schema-valid JSON on every call at the worker's concurrency and gives the
+   *same answers* as 8192, including matching when a match exists
+   (`"postgresql"` -> `"postgres"` 3/3 at both budgets). Nothing was falling
+   back. The 8192 floor is a property of the PROMPT — a résumé burns ~15k chars
+   of reasoning trace, this prompt is three lines. Full table in `docs/ROADMAP.md`.
+   What WAS wrong: the deferral's stated reason ("changes canonical-key
+   resolution") was stale (F1 made the tiebreaker enrichment-only, so it cannot
+   move a score), and `_RECORDED_EXCEPTIONS` excused the *file* not the *value* —
+   mutation-probed, `128 -> 64` survived. Now pinned to the measured budget.
 
 #### Environment facts worth not rediscovering
 

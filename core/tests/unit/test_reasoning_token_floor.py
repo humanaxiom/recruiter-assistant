@@ -54,14 +54,38 @@ _MUST_CLEAR_FLOOR = (
     "pipeline/skill_classifier.py",
 )
 
-#: Known below-floor call site, deliberately NOT fixed on this branch and
-#: recorded in docs/ROADMAP.md instead. `skills_graph`'s vocabulary tiebreaker
-#: asks for a single token and HAS a deterministic fallback, so an empty
-#: response degrades resolution rather than emptying a shortlist. Raising it
-#: changes canonical-key resolution, which is a scoring-path change and does not
-#: belong in an incident fix. Listed here so it is a DECISION with a reason
-#: attached, not an oversight this file silently tolerates.
-_RECORDED_EXCEPTIONS = {"pipeline/skills_graph.py"}
+#: Below-floor call sites that a MEASUREMENT says are safe, mapped to the exact
+#: budget that was measured. A path alone is not enough: the previous version of
+#: this was a bare set, which permitted ANY value below the floor at that path —
+#: someone could have dropped the tiebreaker to 8 tokens and this file would
+#: still have gone green. The recorded decision now has to match what was
+#: actually measured, or the test fails.
+#:
+#: `pipeline/skills_graph.py` — the vocabulary tiebreaker, measured 2026-08-22 on
+#: an IDLE aria-gb10 (`/api/ps` empty) against `gpt-oss:20b`, through
+#: `LLMClient.chat_json` on the OpenAI-compat transport the app actually runs
+#: (`llm_ollama_native=False`), NOT the native schema-constrained path
+#: `scripts/model-check.sh` probes:
+#:
+#:     candidate "postgresql" vs {postgres, mysql, sql}
+#:       max_tokens=128  -> "postgres" 3/3, 4.3-4.8s
+#:       max_tokens=8192 -> "postgres" 3/3, 4.1-4.6s
+#:     candidate "react native" vs {react, react router, javascript}
+#:       max_tokens=128  -> null 4/4 at concurrency 4, 5.7-6.4s
+#:       max_tokens=8192 -> null 4/4 at concurrency 4, 5.6-6.3s
+#:
+#: 128 returns schema-valid JSON on every call at the worker's own concurrency
+#: and gives the SAME answers as 8192, including matching when a match exists.
+#: The 8192 floor is a property of the PROMPT, not of the model: résumé
+#: extraction feeds thousands of input tokens and burns ~15k chars of reasoning
+#: trace before emitting anything, while this prompt is three lines. The
+#: committed profile already records that per-prompt (4096 / 8192 / 4096).
+#:
+#: The reason recorded here previously — "raising it changes canonical-key
+#: resolution, which is a scoring-path change" — was STALE. Per F1 the
+#: tiebreaker is enrichment-only: it may add an alias to a near-matched node and
+#: may never change the key `_resolve_one` returns. It cannot move a score.
+_RECORDED_EXCEPTIONS = {"pipeline/skills_graph.py": 128}
 
 
 def _call_sites() -> list[tuple[str, int, int]]:
@@ -141,3 +165,36 @@ def test_every_below_floor_call_site_is_a_recorded_decision() -> None:
         f"new below-floor LLM call sites appeared: {sorted(offenders)}. Either "
         "raise them to REASONING_JSON_MIN_TOKENS or record why they are safe."
     )
+
+
+def test_a_recorded_exception_may_not_drift_below_what_was_measured() -> None:
+    """An exception is only as good as the measurement behind it.
+
+    The previous ``_RECORDED_EXCEPTIONS`` was a bare set of paths, so it
+    excused the *file* rather than the *value*. Any literal below the floor at
+    that path passed — 128, or 8. That is the same shape as the defect this
+    whole file exists to prevent: a real, hard-won number living somewhere with
+    nothing enforcing it. The budget recorded above was measured against the
+    live model on the transport the app actually uses; this pins the source to
+    it, so lowering the call site is a RED test rather than a silent
+    degradation with a stale comment still vouching for it.
+
+    Raising it is equally a failure, and deliberately so — a value above what
+    was measured is no longer the recorded decision either, and 8192 here would
+    be a 64x budget increase that the measurement says changes no answer.
+    """
+    for path, measured in _RECORDED_EXCEPTIONS.items():
+        found = [(line, n) for p, line, n in _call_sites() if p == path]
+        assert found, (
+            f"{path} is listed as a recorded below-floor exception but has no "
+            "max_tokens call site at all. Delete the entry: an exception with "
+            "nothing to excuse is stale documentation that will mislead the "
+            "next reader."
+        )
+        wrong = [(line, n) for line, n in found if n != measured]
+        assert not wrong, (
+            f"{path} has max_tokens values {wrong} but the recorded, MEASURED "
+            f"budget is {measured}. Either restore it, or re-measure against "
+            "the live model on the app's own transport and update both the "
+            "number and the evidence block above — never just the number."
+        )
