@@ -275,3 +275,85 @@ async def test_an_authenticated_stack_is_not_reported() -> None:
         settings=settings,
     )
     assert not [f for f in findings if f.check == "deploy.auth_disabled"]
+
+
+# ── the model a swap points at must have been measured ───────────────────
+#
+# The data-centre move will swap gpt-oss:20b for something larger. Every
+# model-shaped constant in this repo was measured against gpt-oss:20b and will
+# be wrong at that moment, silently — which is how 2026-08-21 went, within a
+# single model. `src.model_probe` produces the measurement; these checks make
+# NOT having one, or having one the config contradicts, a loud failure.
+
+
+async def test_a_model_with_no_accepted_profile_is_reported(tmp_path: Any) -> None:
+    settings = MagicMock(
+        cas_enabled=True, llm_model_generation="brand-new-model:70b", llm_timeout_s=900
+    )
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=1, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+        profile_dir=tmp_path,
+    )
+    unmeasured = next(f for f in findings if f.check == "deploy.model_unprofiled")
+    assert unmeasured.severity == "fail"
+    assert "brand-new-model:70b" in unmeasured.detail
+
+
+async def test_a_timeout_below_the_measured_recommendation_is_reported(
+    tmp_path: Any,
+) -> None:
+    """The exact 2026-08-21 shape: the budget moved, the timeout did not, and
+    every call timed out. Here the measurement disagrees with the config and
+    says so instead of waiting for a retry storm."""
+    (tmp_path / "measured-model.json").write_text(
+        json.dumps(
+            {
+                "model": "measured-model",
+                "recommended_timeout_s": 900,
+                "accepted": True,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = MagicMock(
+        cas_enabled=True, llm_model_generation="measured-model", llm_timeout_s=300
+    )
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=1, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+        profile_dir=tmp_path,
+    )
+    tight = next(f for f in findings if f.check == "deploy.timeout_below_profile")
+    assert tight.severity == "fail"
+    assert "900" in tight.detail and "300" in tight.detail
+
+
+async def test_a_measured_model_with_a_matching_timeout_is_quiet(
+    tmp_path: Any,
+) -> None:
+    (tmp_path / "measured-model.json").write_text(
+        json.dumps(
+            {
+                "model": "measured-model",
+                "recommended_timeout_s": 900,
+                "accepted": True,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = MagicMock(
+        cas_enabled=True, llm_model_generation="measured-model", llm_timeout_s=900
+    )
+    findings = await doctor.run_checks(
+        pg=_pg(jobs=1, stale=0, stuck=0, undecodable=0, unattributable=0),
+        neo4j=_neo([{"n": 0}, {"n": 0}]),
+        settings=settings,
+        profile_dir=tmp_path,
+    )
+    assert not [f for f in findings if f.check.startswith("deploy.model")]
+    assert not [f for f in findings if f.check == "deploy.timeout_below_profile"]

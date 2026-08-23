@@ -12,6 +12,7 @@ per-process singletons the parse tasks resolve off ``ctx``:
 ``blob_store``       ``src.storage.blob_store.BlobStore`` (no MinIO anywhere)
 ``llm``              ``src.pipeline.llm.LLMClient`` (local Ollama, /v1)
 ``redis``            ``redis.asyncio.Redis`` — backs the embedding cache
+``arq``              ``arq.ArqRedis`` — enqueue OTHER jobs (the reconcile cron)
 ``embedder``         ``src.pipeline.llm.CachedEmbedder``
 ===================  =========================================================
 
@@ -34,7 +35,7 @@ from typing import Any
 import asyncpg
 import redis.asyncio as aioredis
 from arq import cron
-from arq.connections import RedisSettings
+from arq.connections import RedisSettings, create_pool
 from neo4j import AsyncGraphDatabase
 
 from src.models.ddl import init_schema
@@ -44,6 +45,7 @@ from src.storage.blob_store import BlobStore
 from src.worker.graph_tasks import project_to_graph
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
+from src.worker.reconcile import reconcile_stalled_parses
 from src.worker.resume_tasks import parse_resume
 from src.worker.tasks import parse_job
 
@@ -111,9 +113,24 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     ctx["llm"] = llm
 
+    # ⚠️ This OVERWRITES arq's own ``ctx["redis"]``, which is an ``ArqRedis``
+    # (the thing with ``enqueue_job``), replacing it with a plain client used
+    # for the embedding cache. Anything that later expects arq's documented
+    # ctx["redis"] gets an object without ``enqueue_job`` — which is exactly how
+    # `reconcile_stalled_parses` shipped inert, then crashed on
+    # ``'Redis' object has no attribute 'enqueue_job'`` once its silent guard
+    # was made loud. Left in place (the cache genuinely wants a plain client)
+    # but the queue now gets its OWN key below rather than fighting over this
+    # one.
+    #
     # Same Redis instance as the arq broker, different key space (``emb:v1:*``).
     redis_client: aioredis.Redis[bytes] = aioredis.from_url(s.redis_url)
     ctx["redis"] = redis_client
+
+    # The queue client tasks use to enqueue OTHER jobs (the reconcile cron).
+    # Distinct key, so it cannot be clobbered by the cache client above and a
+    # reader cannot get the wrong type depending on startup ordering.
+    ctx["arq"] = await create_pool(RedisSettings.from_dsn(s.redis_url))
     ctx["embedder"] = CachedEmbedder(
         llm,
         redis_client,
@@ -131,6 +148,9 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     redis_client = ctx.get("redis")
     if redis_client is not None:
         await redis_client.aclose()
+    arq_pool = ctx.get("arq")
+    if arq_pool is not None:
+        await arq_pool.aclose()
     driver = ctx.get("neo4j")
     if driver is not None:
         await driver.close()
@@ -148,7 +168,20 @@ class WorkerSettings:
     # Phase 4b: the graph-projection drainer runs on its own schedule, not by
     # enqueue — every ~5s, matching decision 3's rationale (skill resolution
     # must be cheap enough to finish well inside one cron tick).
-    cron_jobs = [cron(project_to_graph, second=set(range(0, 60, 5)))]
+    # `reconcile_stalled_parses` runs once a minute. A résumé row is the source
+    # of truth for "this candidate needs parsing", but the WORK ITEM lives only
+    # in Redis — lose the queue and the row is stranded non-terminal forever
+    # with nothing to retry it. That is not hypothetical: doctor.sh found 20
+    # résumés stuck since July. It also matters more here than in most systems,
+    # because the GPU peer is shared and its capacity comes and goes, so work
+    # must survive the windows where the model is unavailable.
+    #
+    # A cron entry, not a `functions` entry, for the same reason
+    # `project_to_graph` is: nothing enqueues it by name.
+    cron_jobs = [
+        cron(project_to_graph, second=set(range(0, 60, 5))),
+        cron(reconcile_stalled_parses, second={7}),
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

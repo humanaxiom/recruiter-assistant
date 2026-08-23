@@ -28,7 +28,12 @@ from uuid import UUID
 from neo4j import AsyncDriver
 
 from src.pipeline import skills_graph
-from src.pipeline.llm import CachedEmbedder, LLMClient, LLMOutputInvalidError
+from src.pipeline.llm import (
+    REASONING_JSON_MIN_TOKENS,
+    CachedEmbedder,
+    LLMClient,
+    LLMOutputInvalidError,
+)
 from src.pipeline.skills import build_summary_text
 from src.prompts import load_prompt
 from src.schemas import JDExtracted
@@ -76,7 +81,10 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
         try:
             prompt = load_prompt("jd_extract_v1", jd_text=row["description_raw"])
             extracted = await llm.chat_json(
-                prompt.messages, JDExtracted, max_tokens=2048, max_retries=1
+                prompt.messages,
+                JDExtracted,
+                max_tokens=REASONING_JSON_MIN_TOKENS,
+                max_retries=1,
             )
         except LLMOutputInvalidError as exc:
             log.error("parse_job.llm_invalid job_id=%s error=%s", job_id_str, exc)

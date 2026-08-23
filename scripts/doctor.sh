@@ -25,6 +25,29 @@ if [[ -z "$CONTAINER" ]]; then
   exit 1
 fi
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST_ROOT="$REPO_ROOT"
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL='*'
+  HOST_ROOT="$(cd "$REPO_ROOT" && pwd -W 2>/dev/null || echo "$REPO_ROOT")"
+fi
+
 echo "▶ doctor: checking the live deployment via the '$SERVICE' container"
 echo
-docker exec "$CONTAINER" python -m src.doctor
+
+# The committed model profiles have to be COPIED IN. The container mounts only
+# core/ at /app, so the repo-root-relative default resolves to /docs and finds
+# nothing — the doctor then reports every model as UNPROFILED while a perfectly
+# good profile sits committed on the host. A tool built to detect missing
+# measurements, blind to the measurements.
+if [[ -d "$REPO_ROOT/docs/model-profiles" ]]; then
+  docker exec "$CONTAINER" rm -rf /tmp/model-profiles >/dev/null 2>&1 || true
+  docker cp "${HOST_ROOT}/docs/model-profiles" "${CONTAINER}:/tmp/model-profiles" \
+    >/dev/null 2>&1 || true
+fi
+
+status=0
+docker exec "$CONTAINER" python -m src.doctor --profiles /tmp/model-profiles || status=$?
+docker exec "$CONTAINER" rm -rf /tmp/model-profiles >/dev/null 2>&1 || true
+exit "$status"

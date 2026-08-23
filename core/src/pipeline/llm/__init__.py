@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from src.pipeline.llm.cache import CachedEmbedder
 from src.pipeline.llm.client import (
+    REASONING_JSON_MIN_TOKENS,
     LLMClient,
     LLMOutputInvalidError,
     LLMUnavailableError,
@@ -16,6 +17,7 @@ from src.pipeline.llm.client import (
 )
 
 __all__ = [
+    "REASONING_JSON_MIN_TOKENS",
     "CachedEmbedder",
     "LLMClient",
     "LLMOutputInvalidError",
