@@ -2,55 +2,75 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### 🔴🔴 READ FIRST — 2026-08-22: **UNRESOLVED PII EXPOSURE ON A PUBLIC REPO**
-
-> **This is the first thing to deal with. Nothing else in this file matters more.**
+### 🔴 READ FIRST — 2026-08-22 (session 2): **PII EXPOSURE — CONTAINED; ONE HUMAN STEP LEFT**
 
 **What happened.** Commit `349aadd` used `git add -A` and swept the entire
-`fixtures/` directory into the branch — **99MB across 117 files**: real candidate
-résumé PDFs, cover letters, and multi-MB bundle zips. It was pushed to `origin`.
-**`humanaxiom/recruiter-assistant` is a PUBLIC repository.**
+`fixtures/` directory into the branch — **117 files, 99.0 MiB**: real candidate
+résumé PDFs, cover letters, JD `.docx` files and multi-MB bundle zips. It was
+pushed to `origin`. **`humanaxiom/recruiter-assistant` is a PUBLIC repository.**
 
 This is third-party personal information — names, contact details, employment
 history — in a product whose whole design exists to protect exactly that:
 encrypted PII columns, blind review, audited de-anonymisation, an allowlisted
-audit viewer. The raw corpus sitting in a public git history contradicts every
-one of those controls.
+audit viewer. The raw corpus in a public git history contradicts every one of
+those controls.
 
-**What is already done:**
+#### ✅ Done this session — verified, not assumed
 
-- `fixtures/` is gitignored and untracked (`d7b43b3`). The files remain ON DISK —
-  `scripts/smoke.sh` and `scripts/model-check.sh` both read them.
-- **This does NOT remove the blobs from history.** They remain reachable in this
-  branch's earlier commits.
+1. **The public branch ref is deleted.** `git push origin --delete
+   feat/d1-audited-reason-reveal` succeeded. `git ls-remote --heads origin` no
+   longer lists it. The blobs are reachable from **no ref** on either remote.
+2. **History is rewritten.** `git filter-branch --index-filter 'git rm -r
+   --cached --ignore-unmatch fixtures'` over `origin/main..HEAD`. All **22
+   commits are preserved** (none pruned) and the result is **content-identical
+   outside `fixtures/`** — `git diff <pre-rewrite> HEAD --name-only` filtered of
+   `fixtures/` was **empty**. Verified: zero `fixtures/` paths in the branch's
+   history, and **no local ref of any kind** still contains them (swept every
+   `for-each-ref`).
+3. **The ignore rule is actually committed** (`c6df51e`). It was not before:
+   `d7b43b3`'s message claimed `fixtures/` was gitignored, but the `.gitignore`
+   edit sat **unstaged in the working tree, in no commit**. A fresh clone, or the
+   next `git add -A` on this machine, had nothing stopping a repeat. That is this
+   repo's signature defect — an invariant in prose with nothing enforcing it —
+   landing on the remediation for a disclosure.
+4. **The files remain on disk and the harnesses still fail loudly without them.**
+   `core/tests/smoke/conftest.py:79` and `scripts/model-check.sh:55` both hard-fail
+   on a missing `fixtures/`, so an unprovisioned clone cannot report a green run
+   that exercised nothing.
 
-**Established, not assumed:** `349aadd` was pushed AFTER PR #96 merged, so the
-blobs are **not** attached to that PR's commit list, and `fixtures/` is **not** in
-`origin/main` (`git ls-tree origin/main | grep fixtures` returns nothing). They
-are reachable only through the branch ref `origin/feat/d1-audited-reason-reveal`.
+#### 🔴 Still open — needs a human
 
-**What still needs a HUMAN decision and action:**
-
-1. **Delete the remote branch** — `git push origin --delete feat/d1-audited-reason-reveal`.
-   Immediate and reversible (every commit exists locally). An agent attempt was
-   blocked by the permission classifier, so a human must run it.
-2. **Rewrite history** to drop `fixtures/` from all commits, then force-push a
-   clean branch. `git filter-repo --path fixtures --invert-paths` is the modern
-   tool.
-3. **Decide whether this repo should be public at all.** It is an HR product
-   handling candidate PII; the public setting is what turned a routine mistake
-   into a disclosure.
-4. **Consider asking GitHub Support to purge** the unreachable objects — they can
-   remain fetchable by SHA after a force push until garbage collection.
-5. **Assess disclosure obligations.** If these are real SFU applicants,
+1. **Ask GitHub Support to purge the unreachable objects. This is not optional
+   and it is not theoretical — it was tested.** After the branch delete,
+   `GET /repos/humanaxiom/recruiter-assistant/contents/fixtures?ref=349aadd...`
+   **still returned the tree**. Deleting a ref does not un-serve the objects;
+   GitHub keeps them until its own GC. Until Support purges them, anyone holding
+   the SHA `349aaddca4cae4ff9cd8ddeecacf2704a39f35f3` can still fetch the corpus
+   from a public repo.
+2. **Decide whether this repo should be public at all.** Deferred to the owner
+   this session. It is an HR product handling candidate PII; the public setting is
+   what turned a routine mistake into a disclosure. **Both** `humanaxiom/` and
+   `sfu-aria/recruiter-assistant` are PUBLIC (`sfu-aria` has only `main` and is
+   clean of fixtures).
+3. **Assess disclosure obligations.** If these are real SFU applicants,
    PIPEDA/FIPPA may require notification. That is a judgement for whoever owns
    privacy for the pilot — the same person who answered D1.
+4. *(optional, local hygiene)* `git reflog expire --expire=now --all && git gc
+   --prune=now` to drop the now-unreferenced blobs from `.git`. The permission
+   classifier blocked the agent from running it. Low risk either way: no ref
+   points at them, so an ordinary push cannot resurrect them.
 
-**The process lesson, and it is not subtle.** Every `git add -A` in this session
-was a latent version of this. The repo's own memory note (`gate-write-pass-scoping`)
-already says to commit with explicit pathspecs; the guidance existed and was not
-followed. **Use explicit paths. Never `git add -A` in a repo with untracked data
-directories.**
+#### Provisioning `fixtures/` on a fresh clone
+
+It is no longer in git, by design. `smoke.sh` and `model-check.sh` need
+`fixtures/JDs/*.docx` and `fixtures/resumes/*_resume.pdf`. Copy the corpus in
+out-of-band; do not add it back to the repository under any circumstances.
+
+**The process lesson, and it is not subtle.** Every `git add -A` in that session
+was a latent version of this. The repo's own memory note
+(`gate-write-pass-scoping`) already says to commit with explicit pathspecs; the
+guidance existed and was not followed. **Use explicit paths. Never `git add -A`
+in a repo with untracked data directories.**
 
 ---
 
