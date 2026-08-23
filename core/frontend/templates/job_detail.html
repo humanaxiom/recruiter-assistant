@@ -10,8 +10,18 @@
   <div class="card-header">
     <h1 style="margin:0">{{ job.title }}</h1>
     <span class="pill pill-{{ job.status }}">{{ job.status }}</span>
+    {#
+      Tri-state, not two. Deriving this from `parsed_at` alone made a JD that
+      died yesterday pixel-identical to one that started five seconds ago, which
+      is how twenty dead JDs went unnoticed for a day and why the user who
+      found them reported them as "stuck on parsing".
+    #}
     {% if job.status == 'draft' and job.parsed_at is none %}
+      {% if job.failure_reason %}
+    <span class="badge-failed">parse failed</span>
+      {% else %}
     <span class="badge-parsing">parsing…</span>
+      {% endif %}
     {% endif %}
   </div>
   <p class="muted">
@@ -38,7 +48,6 @@
   #}
   {% if is_writer and job.failure_reason %}
   <div class="parse-failed">
-    <p class="error">Parsing failed: {{ job.failure_reason }}</p>
     <form action="{{ url_for('reparse_job', job_id=job.id) }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
       <button class="btn btn-secondary btn-sm" type="submit">Re-parse JD</button>
@@ -56,15 +65,29 @@
       <input type="hidden" name="to" value="{{ to }}">
       <button class="btn btn-secondary btn-sm" type="submit"
         {%- if to == 'open' and job.parsed_at is none %} disabled
-        title="Wait for the LLM to finish parsing the JD."{% endif %}>
+        {%- if job.failure_reason %}
+        title="Parsing failed — re-parse the JD before opening for applicants."
+        {%- else %}
+        title="Wait for the LLM to finish parsing the JD."
+        {%- endif %}{% endif %}>
         {{ transition_labels.get(to, to) }}
       </button>
     </form>
     {% endfor %}
   </div>
+  {#
+    Still blocked on a parse either way — but "wait" is only true advice while
+    something is actually running. For a failed JD it is advice to wait forever,
+    which is precisely what the reporter of the 2026-08-21 incident did.
+  #}
   {% if 'open' in next_states and job.parsed_at is none %}
+    {% if job.failure_reason %}
+  <p class="hint">Parsing failed, so this job cannot be opened for applicants
+    yet. Re-parse the JD above to try again.</p>
+    {% else %}
   <p class="hint">Wait for the LLM to finish parsing the JD before opening for
     applicants.</p>
+    {% endif %}
   {% endif %}
 
   <h3>Blind review</h3>
