@@ -951,3 +951,51 @@ behaviour**, which only a live call can show.
     `test_a_recorded_exception_may_not_drift_below_what_was_measured`, which
     kills that mutant. This is the A7 shape one level up — the exception that
     licenses a below-floor number was itself unenforced prose.
+
+### The JD re-parse branch (2026-08-22/23, session 3) — two fixed, one recorded
+
+Found while diagnosing 20 JDs a user reported as "stuck on parsing since
+yesterday". None were parsing; all 20 had FAILED a day earlier. The re-parse
+route closed the RECOVERY gap and a follow-up commit closed the DISPLAY gap;
+the doctor gap is still open.
+
+- **✅ FIXED — a failed JD rendered as `parsing…` forever.**
+  `job_detail.html` gated the badge on `parsed_at is none` and never consulted
+  `failure_reason`, so a JD that died 24 hours earlier was pixel-identical to
+  one that started five seconds earlier. This is WHY twenty dead JDs went
+  unnoticed for a day, and why the reporter described them as stuck. Now
+  tri-state (parsed / failed / in-flight), with the failure reason rendered and
+  the "Wait for the LLM…" hint replaced on the failed branch — it was advice to
+  wait forever.
+
+- **✅ FIXED — the HTMX poll never stopped for a failed JD.**
+  `parse_status.html` kept `hx-trigger="every 3s"` whenever `parsed_at` was
+  null, with no failure branch, so every open tab polled a row that would never
+  change, indefinitely. Its own comment claimed it "DROPS the trigger, so
+  polling stops" — true only for the success path it was written against. The
+  trigger is now kept only while a parse is genuinely in flight. Tests pin both
+  directions so this cannot be "fixed" by never showing progress at all.
+
+- **🔴 STILL OPEN — `doctor.sh` has `pg.resumes_stuck` and no jobs equivalent.**
+  `core/src/doctor.py` checks stranded résumés but nothing checks
+  `jobs.failure_reason IS NOT NULL` or draft jobs with no `parsed_at`. The
+  doctor exists precisely to catch state the code gates cannot see, and this
+  state sat invisible to it for 24 hours until a human noticed a spinner. A
+  `pg.jobs_stuck` check is the natural sibling, and is the remaining piece of
+  this incident.
+
+- **One JD fails re-parse on model OUTPUT, not infrastructure** —
+  `306c573c` ("20260626 00101838 JDFN CUPE 202605", 9,523 chars of JD) came
+  back `llm output invalid: title: missing` after the 2026-08-23 recovery run
+  re-parsed the other 19 successfully. A different failure class from the 20
+  `LLMUnavailableError` rows the re-parse route was built for: the call
+  reached the model, the model answered, and the answer failed `JDExtracted`
+  validation on a missing `title`.
+
+  `chat_json` already retries once with the validator error appended for
+  self-correction and it still failed, and generation is `temperature=0`, so
+  clicking Re-parse again is likely to reproduce it deterministically rather
+  than roll a better answer. Worth measuring before treating it as a prompt
+  bug: this is the LONGEST JD in the corpus, and `jd_extract_v1`'s measured
+  floor (4096) came from a shorter fixture — the same per-prompt-not-per-model
+  lesson recorded above for the tiebreaker, in the opposite direction.

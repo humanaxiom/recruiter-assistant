@@ -397,6 +397,20 @@ details.newjob summary {
   color: #b45309;
 }
 
+/* Deliberately RED rather than the amber of `badge-parsing`: the two states
+   sit in the same slot on the same page, and a failed parse that merely looks
+   like a slightly different shade of "working on it" is the defect this class
+   was added to end, not a fix for it. */
+.badge-failed {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 /* ── shortlist candidate cards ───────────────────────────────────────── */
 
 .candidate-card .rank {

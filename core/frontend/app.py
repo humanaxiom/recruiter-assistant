@@ -783,6 +783,30 @@ def transition_status(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+@app.post("/jobs/<uuid:job_id>/reparse")
+def reparse_job(job_id: UUID) -> Any:
+    """Re-queue a JD parse that failed or was stranded.
+
+    Mirrors ``transition_status``'s error handling exactly, including the
+    ``BadRequest``/403 branch: ADR-033 made every write route 403 a non-writer
+    CAS session, and a view that leaves that uncaught turns a hiring manager's
+    click into an unhandled 500.
+    """
+    try:
+        api_client.reparse_job(job_id)
+    except api_client.Conflict as exc:
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
 @app.post("/jobs/<uuid:job_id>/blind-review")
 def blind_review(job_id: UUID) -> Any:
     desired = (request.form.get("blind_review") or "").strip().lower() in (

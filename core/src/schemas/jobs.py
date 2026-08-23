@@ -136,6 +136,21 @@ class JobOut(BaseModel):
     closed_at: dt.datetime | None
 
 
+class JobReparseOut(BaseModel):
+    """POST /api/v1/jobs/{id}/reparse — the retry was accepted onto the queue.
+
+    Deliberately NOT a ``JobOut``: the row is unchanged apart from a cleared
+    ``failure_reason``, and returning the full job would invite a caller to
+    read ``parsed_at`` from it as if the retry had already run. 202 plus this
+    two-field acknowledgement says what actually happened — queued, not done.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    status: Literal["queued"]
+
+
 class JobDeleteOut(BaseModel):
     """DELETE /api/v1/jobs/{id} — confirmation of a cascade delete.
 
