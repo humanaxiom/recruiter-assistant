@@ -951,3 +951,37 @@ behaviour**, which only a live call can show.
     `test_a_recorded_exception_may_not_drift_below_what_was_measured`, which
     kills that mutant. This is the A7 shape one level up — the exception that
     licenses a below-floor number was itself unenforced prose.
+
+### Recorded, not fixed (2026-08-22, session 3) — the JD re-parse branch
+
+Found while diagnosing 20 JDs a user reported as "stuck on parsing since
+yesterday". The re-parse route (`feat/jd-reparse-control`) fixes the RECOVERY
+gap; these two are the DISPLAY half of the same incident and were deliberately
+left out of that branch's theme.
+
+- **A failed JD renders as `parsing…` forever.**
+  `core/frontend/templates/job_detail.html:13` gates the badge on
+  `job.status == 'draft' and job.parsed_at is none` — it never consults
+  `failure_reason`, which is already on `JobOut` and already reaches the
+  template. So a JD that died 24 hours ago is pixel-identical to one that
+  started five seconds ago. Lines 36 and 43 compound it, telling the user to
+  "Wait for the LLM to finish parsing the JD" for a job that will never parse.
+  This is why twenty dead JDs went unnoticed for a day. The re-parse branch
+  surfaces `failure_reason` next to its own control, so the failure is now
+  visible SOMEWHERE on the page — but the badge itself still lies.
+
+- **The HTMX poll never stops for a failed JD — an unbounded 3s loop.**
+  `core/frontend/templates/parse_status.html` keeps its
+  `hx-trigger="every 3s"` whenever `parsed_at is none`, with no failure
+  branch. Every open tab on a failed job polls `GET /jobs/<id>/parse-status`
+  every three seconds, indefinitely. With 20 failed jobs that is a standing
+  background load produced entirely by rows that will never change. The
+  fragment's own docstring says it "DROPS the trigger, so polling stops" —
+  true only for the success path it was written against.
+
+- **`doctor.sh` has `pg.resumes_stuck` and no jobs equivalent.**
+  `core/src/doctor.py` checks stranded résumés but nothing checks
+  `jobs.failure_reason IS NOT NULL` or draft jobs with no `parsed_at`. The
+  doctor exists precisely to catch state the code gates cannot see, and this
+  state sat invisible to it for 24 hours until a human noticed a spinner.
+  A `pg.jobs_stuck` check is the natural sibling.
