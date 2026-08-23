@@ -82,6 +82,7 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/jobs/bulk"),
     ("PATCH", "/jobs/{job_id}"),
     ("PATCH", "/jobs/{job_id}/status"),
+    ("POST", "/jobs/{job_id}/reparse"),
     ("POST", "/jobs/{job_id}/resumes"),
     ("POST", "/resumes/{resume_id}/reveal"),
     ("POST", "/resumes/{resume_id}/withdraw"),

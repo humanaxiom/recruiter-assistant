@@ -107,6 +107,30 @@ async def record_parse_failure(conn: DbConn, job_id: UUID, reason: str) -> None:
     logger.warning("job.parse_failed job_id=%s reason=%s", job_id, reason[:200])
 
 
+_CLEAR_FAILURE_SQL = """
+UPDATE jobs SET
+    failure_reason = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'draft'
+"""
+
+
+async def clear_parse_failure(conn: DbConn, job_id: UUID) -> None:
+    """Wipe a stale ``failure_reason`` so a queued retry reads as in-flight.
+
+    Called by ``POST /jobs/{id}/reparse`` BEFORE it enqueues, never after. The
+    reverse order races a fast worker: it could finish, write its own fresh
+    ``failure_reason``, and then have this clear it — leaving a row that failed
+    with nothing at all to show for it, which is the silently-stranded shape
+    the re-parse route exists to end rather than create.
+
+    Deliberately not merged into ``record_parsed``'s own ``failure_reason =
+    NULL``: that one fires on SUCCESS, whereas this fires on INTENT, and the
+    two must stay independently truthful.
+    """
+    await conn.execute(_CLEAR_FAILURE_SQL, job_id)
+
+
 # ── CRUD / status state machine (Phase 6) ───────────────────────────────────
 
 _JOB_COLS = (

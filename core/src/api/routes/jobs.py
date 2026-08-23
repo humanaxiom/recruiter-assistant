@@ -40,6 +40,7 @@ from src.schemas.jobs import (
     JobCreate,
     JobListItem,
     JobOut,
+    JobReparseOut,
     JobStatus,
     JobTransition,
     JobUpdate,
@@ -311,6 +312,53 @@ async def patch_job_status(job_id: UUID, payload: JobTransition, db: Db) -> JobO
         return await job_service.transition_status(db, job_id, payload.to)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/jobs/{job_id}/reparse",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_role(*_JOB_WRITERS)),
+        Depends(require_session_role(*_JOB_WRITERS)),
+    ],
+)
+async def reparse_job(
+    job_id: UUID, db: Db, arq: Annotated[ArqRedis, Depends(get_arq)]
+) -> JobReparseOut:
+    """Re-enqueue ``parse_job`` for a JD still sitting in 'draft'.
+
+    **Why this exists.** ``job_service``'s module docstring has always said a
+    failed parse "stays in 'draft' for a retry", and ``_RECORD_PARSED_SQL``
+    nulls ``failure_reason`` on success so that retry lands clean. The retry
+    was designed; nothing ever called it. On 2026-08-21 a bulk upload of 20
+    JDs died against ``LLM_TIMEOUT_S=120`` — four on ``ReadTimeout``, which
+    opened the circuit breaker, then sixteen more instantly on ``circuit
+    breaker open`` without reaching the model. The timeout was fixed the next
+    day and all twenty rows were still dead, because a config fix does not
+    reach rows that already failed (ROADMAP A7 (20), "the fix that never ran").
+
+    **Gated on 'draft', not on ``failure_reason``.** A worker that dies
+    mid-parse leaves no failure text at all, and that silently-stranded row is
+    the harder one to notice and just as recoverable. Both shapes are exactly
+    the rows still in 'draft'. Past 'draft', ``parse_job`` would return
+    "stale" and drop the work, so enqueueing would report success for work
+    that will never happen — 409 instead.
+
+    Clearing the stale reason happens BEFORE the enqueue, deliberately: the
+    reverse order races a fast worker into wiping its own fresh failure.
+    """
+    job = await job_service.get_job(db, job_id)
+    if job.status != "draft":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {job_id} is '{job.status}', not 'draft' — only a draft "
+                "job can be re-parsed"
+            ),
+        )
+    await job_service.clear_parse_failure(db, job_id)
+    await arq.enqueue_job("parse_job", str(job_id))
+    return JobReparseOut(id=job_id, status="queued")
 
 
 __all__ = ["router"]

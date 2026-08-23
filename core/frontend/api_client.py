@@ -281,6 +281,16 @@ def patch_job(
     return response.json()
 
 
+def reparse_job(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /jobs/{id}/reparse — re-queue a failed or stranded JD parse.
+
+    A backend 409 (the job has left 'draft', so ``parse_job`` would drop the
+    work as stale) surfaces as ``Conflict`` so the route can say that plainly
+    rather than redirecting as though it had queued something."""
+    response = _request("POST", f"/jobs/{job_id}/reparse", client=client)
+    return response.json()
+
+
 def list_resumes(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     response = _request("GET", f"/jobs/{job_id}/resumes", client=client)
     return response.json()

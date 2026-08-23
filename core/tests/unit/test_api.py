@@ -131,6 +131,7 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         "/jobs/bulk",
         "/jobs/{job_id}",
         "/jobs/{job_id}/status",
+        "/jobs/{job_id}/reparse",
         "/jobs/{job_id}/resumes",
         "/resumes/{resume_id}",
         "/resumes/{resume_id}/reveal",

@@ -23,6 +23,29 @@
   <h3>Parsed requirements</h3>
   {% include "parse_status.html" %}
 
+  {#
+    The recovery path for a JD parse that died. Gated on `failure_reason`
+    rather than on `parsed_at`, because a healthy in-flight parse must NOT
+    offer a retry: clicking it would queue a second run of work already
+    underway. The reason itself is rendered because "it failed" is not
+    actionable and "the circuit breaker was open" is — and because until this
+    existed, twenty JDs killed by a since-fixed LLM timeout sat indefinitely
+    with nothing on the page to say so.
+
+    Deliberately OUTSIDE the polled `#parse-status` fragment above: that
+    fragment is swapped wholesale every 3s, which would tear out a form the
+    user is mid-click on.
+  #}
+  {% if is_writer and job.failure_reason %}
+  <div class="parse-failed">
+    <p class="error">Parsing failed: {{ job.failure_reason }}</p>
+    <form action="{{ url_for('reparse_job', job_id=job.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <button class="btn btn-secondary btn-sm" type="submit">Re-parse JD</button>
+    </form>
+  </div>
+  {% endif %}
+
   {% if is_writer %}
   <h3>Status</h3>
   <div class="filter-row">
