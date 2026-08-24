@@ -120,10 +120,40 @@ When gates fail, read the failure output, fix ONLY what failed, re-run `make gat
 
 ## Economy — the rules that stop this repo gold-plating itself
 
+### 0. The destination outranks every rule below — see [docs/RESET.md](docs/RESET.md)
+
+**A real recruiter, signed in as themselves, ranks a real requisition against real
+applicants and says whether the shortlist is sensible.** Nothing that does not move
+that forward gets built. Not a test, not an ADR, not a roadmap entry.
+
+This rule exists because the four below were not enough. They were written on
+2026-08-14 against a measured problem — *"85 commits after the v1 scope was
+complete, 35 of them `docs`/`chore` against 26 `feat`/`fix`, twelve ADRs, and the
+highest-value P0 sat blocked for a week"* — and **ten days later every ratio was
+worse**: 94 commits, 32 ADRs against 12 for the entire original build, test code
+outweighing source 5.1:1, and still zero recruiters. A rule that says "do less of
+this" loses to a process that generates work faster than the rule can veto it.
+A destination does not.
+
+Concretely, and these are the reflexes that actually cost the time:
+
+- **An ADR is roughly a monthly event**, not a per-branch one. It is for a
+  decision with live alternatives and long consequences.
+- **Do not hunt A7 instances.** Twenty-one are catalogued and the taxonomy became
+  a generator — naming the pattern made finding more instances feel like progress.
+  Fix defects users hit; stop auditing for defects nobody has hit.
+- **`HANDOFF.md` is capped at 150 lines.** History goes to `docs/archive/`.
+- **Do not run the full gate on a docs-only commit.** Gate code; let CI cover docs.
+- **A finding nobody will action gets deleted, not recorded.** Every recorded
+  finding is re-read and re-litigated by future sessions; filing has a cost.
+
+The gates themselves stay exactly as they are. What changes is what gets *built*
+between them, not how it is verified.
+
+### The four rules that remain
+
 This repo's rigour is real and worth keeping. Its failure mode is the opposite of
-sloppiness: **85 commits after the v1 scope was complete, 35 of them `docs`/`chore`
-against 26 `feat`/`fix`, twelve ADRs, and the highest-value P0 sat blocked for a
-week while adjacent work was polished.** These four rules exist to prevent that.
+sloppiness — gold-plating a product nobody has run. These four rules narrow that.
 
 ### 1. Finding disposition — not every finding is a fix
 

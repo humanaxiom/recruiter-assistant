@@ -1,5 +1,22 @@
 # Roadmap — HR pilot readiness, then next-gen features
 
+> ## 🔴 2026-08-24 — **SUPERSEDED BY [docs/RESET.md](RESET.md) FOR PRIORITY.**
+>
+> This file describes pilot *readiness*. `RESET.md` describes the *pilot*, and it
+> outranks everything here.
+>
+> **Why:** the Plan of Record completed 2026-07-17. In the 38 days since, this
+> repository produced 94 commits, 32 ADRs and **zero recruiters using the
+> product** — against 12 ADRs for the entire original build. Test code outweighs
+> source 5.1:1. The 2026-08-14 note below diagnosed this correctly and every
+> ratio got worse afterwards, which is why the fix is now a destination rather
+> than another rule.
+>
+> **Read this file as a reference, not a queue.** Nothing in it is picked up
+> unless it moves a real recruiter closer to ranking a real requisition. Items
+> here are guesses about what a user will need; one watched session replaces most
+> of them.
+
 > **⚠️ 2026-08-07 — this file now leads with PILOT READINESS.** An HR demo and pilot are imminent. The
 > "wow features" menu is intact further down and remains the post-pilot plan, but **none of it should be
 > built before the P0 items below.** Every finding here was verified against the working tree with file:line
