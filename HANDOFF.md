@@ -2,7 +2,181 @@
 
 Read this first if you're resuming cold. It captures state, environment quirks, and the exact next step. The full plan is [docs/EXTRACTION_PLAN.md](docs/EXTRACTION_PLAN.md) — this file is the orientation layer.
 
-### 🔴 READ FIRST — 2026-08-22 (session 2): **PII EXPOSURE — CONTAINED; ONE HUMAN STEP LEFT**
+### 🔴 READ FIRST — 2026-08-23 (session 3): **PR #97 AND #98 MERGED. START AT `pg.jobs_stuck`.**
+
+`main` is `b9859df`. Working tree clean. Two PRs merged this session; nothing is
+in flight. `git fetch` before trusting any of this — two Claude sessions have
+raced on this repo before.
+
+#### What the session was actually about
+
+A user opened a job page and saw `parsing…` on a JD that had been dead for a
+day. That one screenshot unwound into the whole session, and the shape is worth
+carrying forward: **the product was lying about state, and every automated check
+agreed with the lie.**
+
+- 20 JDs showed `parsing…`. **None were parsing.** All 20 had FAILED on
+  2026-08-21 17:55 — 4 on `ReadTimeout` against the then-current
+  `LLM_TIMEOUT_S=120`, which opened the circuit breaker, then 16 more instantly
+  on `circuit breaker open` without ever reaching the model.
+- The timeout was fixed the next day. **All 20 rows were still dead**, because a
+  config fix does not reach rows that already failed. ROADMAP **A7 (20), "the
+  fix that never ran"**, on a table it had not been seen on before.
+- `job_service`'s own module docstring said a failed parse *"stays in 'draft'
+  for a retry"*, and `_RECORD_PARSED_SQL` nulls `failure_reason` on success
+  precisely so that retry lands clean. **The retry was designed. Nothing ever
+  called it.**
+
+#### Merged: PR #97 (`8832372`) and PR #98 (`b9859df`)
+
+**#97** — D1 audited reveal, the first end-to-end proof the pipeline works
+(`smoke.sh` 10 passed on real résumés), three new verification tools
+(`doctor.sh` / `smoke.sh` / `model-check.sh`, ADR-045), six defects, and the PII
+containment below.
+
+**#98** — `POST /jobs/{id}/reparse` + a Re-parse JD control, and the display fix:
+
+- **Gated on `'draft'`, not on `failure_reason`.** A worker that dies mid-parse
+  leaves NO failure text — the silently-stranded shape. Both it and an
+  explicitly-failed row are exactly the rows still in 'draft'. Gating on the
+  failure text would have fixed the loud case and left the silent one dead.
+- **Clears the stale reason BEFORE enqueueing**, or a fast worker's own fresh
+  failure gets wiped by the clear — manufacturing the silent row the route
+  exists to end.
+- **Badge and poll are now tri-state** (parsed / failed / in-flight). Both
+  derived everything from `parsed_at`, so a JD dead 24 hours looked identical to
+  one 5 seconds old — *that is why nobody noticed for a day.* It also killed an
+  unbounded poll: `parse_status.html` kept `hx-trigger="every 3s"` forever on a
+  failed job while its own comment claimed polling stops.
+- Tests pin **both directions** of each pair on purpose — a failed job must not
+  say `parsing…` AND an in-flight one still must. Without the second half this
+  is "passable" by never showing progress at all.
+
+**Recovery run: 24 parsed / 1 failed, from 5 / 20.** Driven through the real
+browser path (cookie + CSRF page token), canary first, on a verified-idle gb10.
+
+#### 🔴 Next session, in order
+
+1. **`pg.jobs_stuck` in `core/src/doctor.py`** — the one genuinely unfixed piece
+   of this incident, and *the reason it reached a human instead of the tooling.*
+   `doctor.py` has `pg.resumes_stuck` and no jobs equivalent, so 20 dead JDs
+   were invisible to the doctor for 24 hours. Check
+   `jobs.failure_reason IS NOT NULL` and draft jobs with no `parsed_at`. Small,
+   and it closes the loop.
+2. **`306c573c` fails on model OUTPUT, not infrastructure** —
+   `llm output invalid: title: missing` on the longest JD in the corpus (9,523
+   chars). Different class from the 20. `jd_extract_v1`'s measured floor (4096)
+   came from a shorter fixture, and generation is `temperature=0` with a
+   self-correction retry that already failed, so Re-parse will likely reproduce
+   it deterministically. **Measure before treating it as a prompt bug.**
+3. **ADR-045's transport gap — still UNMEASURED.** See below; two probe runs
+   were destroyed by GPU contention and produced nothing usable.
+4. **Pair-test with CAS on** — needs four `.env` values first (below).
+5. **PII: the GitHub Support purge** (below) — the owner deferred it.
+
+#### 🔴 `.env` is STALE, and CAS will not work until it is fixed
+
+Established by reading the live containers, not assumed:
+
+```
+cas_enabled           = False
+cas_service_base_url  = 'http://localhost:8000'   ← container-internal port
+cas_frontend_base_url = ''                        ← empty
+```
+
+The frontend builds its login link as `{cas_service_base_url}/auth/cas/login`
+(`frontend/app.py:156`), sending the browser **straight to the API origin**.
+Nothing serves `localhost:8000` on the host — the API is published on **29800**.
+**Login breaks on the first click.** And with `cas_frontend_base_url` empty,
+`_landing_url` (`api/routes/auth.py:123`) returns a bare relative path that
+resolves against the API origin, so even a successful login never lands on the
+UI at 29500.
+
+`.env.example` already has the right values. Copy these four into `.env`:
+
+```
+CAS_ENABLED=true
+CAS_SERVICE_BASE_URL=http://localhost:29800
+CAS_FRONTEND_BASE_URL=http://localhost:29500
+LLM_TIMEOUT_S=900
+```
+
+`LLM_TIMEOUT_S` matters independently: the running stack has 900 only as a SHELL
+OVERRIDE that will not survive a plain `docker compose up`. `auth_enabled` is
+already `True`, so flipping CAS on will NOT trip the "CAS enabled with zero role
+keys" boot refusal. Both `api` and `frontend` use `env_file: [.env]`.
+
+Unknown until tried: SFU CAS may reject a `localhost` service URL if it keeps a
+service-registry allowlist.
+
+#### ⚠️ NEVER diagnose the model on a contended peer — it cost two full runs
+
+This is already in CLAUDE.md and it still bit twice in one session. Both
+attempts to measure ADR-045's transport gap were **destroyed mid-flight**:
+
+- gb10 was verified idle immediately before the run; a foreign 70GB
+  `gpt-oss:120b` was loaded onto it by another system partway through, after
+  which every call timed out regardless of budget.
+- The re-run moved to spark1, which then rebooted.
+
+**Checking `/api/ps` once before starting is not enough on a shared box.** The
+throwaway `probe3.py` used at the end (scratchpad, not committed) takes an
+endpoint argument and checks `/api/ps` around EVERY row, marking tainted rows
+rather than reporting them as results. That guard is the reusable part.
+
+The gap itself is sharper than "transport", and is three-way:
+
+| | transport | JSON constraint |
+|---|---|---|
+| app, `llm_ollama_native=False` (**current**) | openai-compat `/v1` | `response_format: json_object` |
+| app, `llm_ollama_native=True` | native `/api/chat` | `format: "json"` |
+| `model-check.sh` | native `/api/chat` | `format: <full pydantic schema>` |
+
+The harness runs a **third** configuration neither app setting reaches, and
+schema-constrained decoding is exactly what its own docstring credits with
+removing the empty-content failure mode. Production never gets that guarantee —
+`chat_json` HOLDS the pydantic schema at every call site and never sends it. The
+owner chose the direction: **give the app schema-constrained decoding**, which
+is portable to vLLM (`guided_json`). Nothing has been measured to support it
+yet, so treat the direction as chosen and the numbers as absent.
+
+#### PII exposure — contained; one deferred human step
+
+`fixtures/` (117 files, 99 MiB of real candidate résumés) was swept into a
+branch by a `git add -A` and pushed to a PUBLIC repo. Done: the branch ref is
+deleted, history rewritten (all commits preserved, content-identical outside
+`fixtures/`, verified by an empty filtered diff), and the `.gitignore` guard is
+now actually committed — it previously sat unstaged while its commit message
+claimed otherwise.
+
+**Deferred by the owner, still true:** deleting the branch did NOT stop GitHub
+serving the data. Tested, not assumed — after the delete,
+`gh api .../contents/fixtures?ref=349aadd...` still returned the tree. Only a
+GitHub Support purge removes it. Both `humanaxiom/` and `sfu-aria/` are PUBLIC.
+
+`fixtures/` is untracked by design; provision it out-of-band. Both harnesses
+hard-fail rather than skip without it (`tests/smoke/conftest.py:79`,
+`model-check.sh:55`), so an unprovisioned clone cannot report a green run that
+tested nothing.
+
+**Never `git add -A` in this repo.** Use explicit pathspecs.
+
+#### The token floor is per-PROMPT, not per-model
+
+`REASONING_JSON_MIN_TOKENS = 8192` is the floor for the big extraction prompts,
+not a universal constant. Measured against live `gpt-oss:20b` on an idle box
+through the app's own transport, the `skills_graph` tiebreaker at
+`max_tokens=128` returns schema-valid JSON at concurrency 4 and gives
+**identical answers to 8192** (`"postgresql"` → `"postgres"` 3/3 at both). The
+ROADMAP hypothesis that it had been silently falling back was **wrong**. The
+reasoning trace scales with INPUT complexity: a résumé burns ~15k chars of
+thinking, a three-line prompt does not.
+
+Do not "fix" a small below-floor `max_tokens` on sight — measure it first.
+
+---
+
+### (history) 2026-08-22 (session 2): **PII EXPOSURE — CONTAINED; ONE HUMAN STEP LEFT**
 
 **What happened.** Commit `349aadd` used `git add -A` and swept the entire
 `fixtures/` directory into the branch — **117 files, 99.0 MiB**: real candidate
@@ -74,7 +248,7 @@ in a repo with untracked data directories.**
 
 ---
 
-### ⚠️ 2026-08-22: THE PIPELINE WORKS END TO END — AND THREE NEW TOOLS EXIST
+### (history) 2026-08-22: THE PIPELINE WORKS END TO END — AND THREE NEW TOOLS EXIST
 
 **PR #96 IS MERGED** (squash `809e306`). Everything after it — 21 commits — sits on
 `feat/d1-audited-reason-reveal` and is **not yet in a PR**. `git fetch` first:
