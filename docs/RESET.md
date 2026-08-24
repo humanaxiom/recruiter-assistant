@@ -53,6 +53,53 @@ stop it. Ten days later every ratio was worse. A guardrail was written and the
 work continued straight through it — which is why this document sets a
 destination rather than another rule.
 
+## How it got here
+
+| Date | What happened |
+|---|---|
+| **07-10 → 07-17** | **The whole product gets built in eight days.** Phases 0–7: storage, schemas, ingest and parse, the four-stage ranking engine, persistence and redaction, the API, the viewer. Twelve ADRs. This pace was real and it was fine. |
+| **07-18** | **The scope ends and nothing declares it finished.** No pilot date, no user, no definition of done past the last phase. Work continues on the only material available — the code that already exists. |
+| **07-18 → 08-14** | **Eight follow-up workstreams and a defect taxonomy.** FU-1 … FU-8, an authorization rebuild, a vocabulary merge, and the naming of an internal defect pattern ("A7") which reaches 21 catalogued instances. Each instance is genuine. Each also produces an ADR, a test file, and roadmap prose. |
+| **08-14** | **The repo correctly diagnoses itself — and keeps going.** ROADMAP records "85 commits … twelve ADRs, on a product nobody has yet used end to end", and `CLAUDE.md` gains an Economy section to stop it. Ten days later the ratios are worse. |
+| **08-22** | **The product runs end to end for the first time.** A smoke suite crossing the browser seam finds, on its first run, that ranking silently dropped candidates. Three verification harnesses are built the same week. |
+| **08-23** | **A human opens the product and finds 20 dead jobs.** They had failed a day earlier and the page said `parsing…`. One screenshot found more than the preceding week of introspection. |
+
+## On the comparison with other projects
+
+Two more complex systems shipped elsewhere in the same window. The difference is
+not model capability and it is not the code. It is that **this repository's
+process makes shipping the expensive path and inspection the cheap one.**
+
+Every gate is merge-blocking. Every finding must be dispositioned. Every
+architectural change wants an ADR. Six thousand tests must stay green. Three
+subagent gates must approve. None of that is wrong in isolation — it is why the
+code is genuinely good — but the sum has no exit condition and no counterweight
+pulling toward a user.
+
+The harness-level version of this analysis, written for the maintainer of the
+seed template, is in
+[docs/process/HARNESS_FIELD_NOTES.md](process/HARNESS_FIELD_NOTES.md). Its central
+finding: the seed's `docs/DOD.md` can tell a *change* is done nine different ways
+and cannot tell a *product* is done at all.
+
+## What is actually true of the product
+
+Being fair to the work — this is a strong system.
+
+| Capability | State | Evidence |
+|---|---|---|
+| Upload, parse, rank, shortlist | **Works** | Smoke: 10 passed on real résumés, real LLM extraction, 56/48/33 skills |
+| JD ingest and requirement extraction | **Works** | 24 of 25 real SFU postings parsed |
+| Blind review, PII encryption, audited reveal | **Works** | Exercised live end to end, incl. withdraw → withhold → reveal |
+| Authorization, CSRF, audit viewer | **Built** | ADR-033/034/035/036; never exercised by a signed-in human |
+| Authenticated operation (CAS) | **Blocked** | Four stale `.env` values; login breaks on first click |
+| Ranking quality vs. real postings | **Unproven** | Vocabulary covers 54.8% of real qualification statements |
+| Used by a recruiter | **Never** | — |
+
+The honest summary: **the engine is good and the cockpit has never been flown.**
+Everything genuinely unknown about this product is downstream of that, and none
+of it can be resolved by more inspection.
+
 ## Definition of done
 
 > **A real recruiter, signed in as themselves, ranks a real requisition against

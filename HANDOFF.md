@@ -4,6 +4,8 @@
 delete it. The 3,251-line predecessor is archived at
 [docs/archive/HANDOFF-2026-07-10-to-08-23.md](docs/archive/HANDOFF-2026-07-10-to-08-23.md);
 it is history, not required reading. Plan of record: [docs/RESET.md](docs/RESET.md).
+Harness lessons for the seed maintainer:
+[docs/process/HARNESS_FIELD_NOTES.md](docs/process/HARNESS_FIELD_NOTES.md).
 
 ---
 
