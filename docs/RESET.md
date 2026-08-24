@@ -90,22 +90,34 @@ Three known items survive the cut, all small, all found by *running* the product
 
 ## What stops
 
-"Be more efficient" has already failed once, so these are explicit.
+"Be more efficient" has already failed once, so these are explicit thresholds,
+not exhortations. All are enforced in `CLAUDE.md` §Economy 0/0a/0b.
 
-- **Stop writing ADRs by default.** An ADR is for a decision with live
-  alternatives and long consequences — roughly one a month, not three a week.
-- **Stop hunting A7 instances.** Twenty-one catalogued. The taxonomy became a
-  generator: naming the pattern made finding more instances feel like progress.
-  Fix defects users hit; stop auditing for defects nobody has hit.
-- **Stop growing `HANDOFF.md`.** Capped at 150 lines: current state, next action,
-  live environment quirks. History goes to `docs/archive/`.
-- **Stop full-gate runs on documentation commits.** Nine minutes to verify a
-  Markdown edit is pure friction. Gate code; let CI cover docs.
-- **Stop mutation-probing new guards.** Already capped at one pass and still the
-  default reflex. Skip unless the invariant protects money, PII or authorization.
-- **Stop treating "recorded in ROADMAP" as free.** Every recorded finding is
-  read, re-read and re-litigated by future sessions. A finding nobody will action
-  should be deleted, not filed.
+**ADRs — 32 were written about a finished product.** One is now an exceptional,
+roughly monthly act, and needs **all three** of: live alternatives a competent
+engineer would have chosen between; expensive to reverse (schema, wire format,
+auth model, storage layout, cross-cutting invariant); and irrecoverable from the
+code, tests and commit message six months out. Fails any one → the reasoning goes
+in the **commit message**, which nobody has to maintain or reconcile later. Never
+write one to record a bug fix, restate a test, document a measured number, or
+memorialise a decision *not* to change something. Amend an existing ADR rather
+than adding a sibling.
+
+**PRs — four were opened in one session**, one purely to update a handoff the
+next PR then rewrote. Each costs a ~9-minute CI run, a review, a merge and a
+`main` sync. One PR per coherent *change*, not per commit; push to the open PR
+instead of opening another. Docs-only changes ride along with the next code PR or
+wait. Never open a PR just to record state. Branch-per-task and never-commit-to-
+`main` both stand — what changes is how much a branch carries before it earns a PR.
+
+**`HANDOFF.md` — capped at eight items**, not a line count. A ninth means one is
+no longer relevant; delete it. History goes to `docs/archive/`, never inline.
+
+**Also stopping:** hunting A7 instances (21 catalogued; the taxonomy became a
+generator — fix defects users hit, stop auditing for ones nobody has hit);
+full-gate runs on documentation commits; mutation-probing new guards unless the
+invariant protects money, PII or authorization; and treating "recorded in
+ROADMAP" as free — a finding nobody will action gets deleted, not filed.
 
 ## What this does not change
 
