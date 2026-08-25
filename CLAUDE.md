@@ -120,10 +120,80 @@ When gates fail, read the failure output, fix ONLY what failed, re-run `make gat
 
 ## Economy — the rules that stop this repo gold-plating itself
 
+### 0. The destination outranks every rule below — see [docs/RESET.md](docs/RESET.md)
+
+**A real recruiter, signed in as themselves, ranks a real requisition against real
+applicants and says whether the shortlist is sensible.** Nothing that does not move
+that forward gets built. Not a test, not an ADR, not a roadmap entry.
+
+This rule exists because the four below were not enough. They were written on
+2026-08-14 against a measured problem — *"85 commits after the v1 scope was
+complete, 35 of them `docs`/`chore` against 26 `feat`/`fix`, twelve ADRs, and the
+highest-value P0 sat blocked for a week"* — and **ten days later every ratio was
+worse**: 94 commits, 32 ADRs against 12 for the entire original build, test code
+outweighing source 5.1:1, and still zero recruiters. A rule that says "do less of
+this" loses to a process that generates work faster than the rule can veto it.
+A destination does not.
+
+Concretely, and these are the reflexes that actually cost the time:
+
+- **Do not hunt A7 instances.** Twenty-one are catalogued and the taxonomy became
+  a generator — naming the pattern made finding more instances feel like progress.
+  Fix defects users hit; stop auditing for defects nobody has hit.
+- **`HANDOFF.md` is capped at EIGHT ITEMS.** A ninth means one is no longer
+  relevant — delete it. History goes to `docs/archive/`, never inline.
+- **A finding nobody will action gets deleted, not recorded.** Every recorded
+  finding is re-read and re-litigated by future sessions; filing has a cost.
+
+The gates themselves stay exactly as they are. What changes is what gets *built*
+between them, not how it is verified.
+
+### 0a. The ADR bar — 32 were written about a finished product
+
+Twelve ADRs carried Phases 0–7, the entire build. Thirty-two more followed it.
+An ADR is now an **exceptional** act, roughly monthly. Write one only when
+**all three** hold:
+
+1. There were **live alternatives** a competent engineer would have chosen
+   between — not a single obvious implementation written up after the fact.
+2. The decision is **expensive to reverse** later: schema, wire format, auth
+   model, storage layout, a cross-cutting invariant.
+3. Someone **six months out cannot recover the reasoning** from the code, its
+   tests and the commit message.
+
+Fails any one of them → the reasoning goes in the **commit message**, which is
+already where this repo writes its best explanations, and which nobody has to
+maintain, re-read, or reconcile with a later change.
+
+**Never** write an ADR to: record a bug fix; restate what a test already
+enforces; document a number that was measured (that belongs in
+`docs/model-profiles/` or the test that pins it); or memorialise a decision not
+to change something. **Amend an existing ADR** rather than adding a sibling —
+ADR-036 and ADR-045 both took amendments correctly.
+
+### 0b. The PR bar — batch, don't stream
+
+Four PRs were opened in a single session, one of them purely to update a handoff
+that the next PR then rewrote. Every PR costs a full CI run (~9 min), a review
+pass, a merge, and a `main` sync.
+
+- **One PR per coherent change, not per commit.** If two pieces of work share a
+  theme, they share a branch. Push to the open PR instead of opening another.
+- **Docs-only changes do not get their own PR.** They ride along with the next
+  code PR, or wait. The only exception is a doc that is itself the deliverable
+  (a reset plan, a circulated explainer).
+- **Do not run the full local gate on a docs-only commit.** Nine minutes to
+  verify a Markdown edit is pure friction — gate code, let CI cover docs.
+- **Do not open a PR to record state.** State goes in `HANDOFF.md` on the branch
+  that changed it.
+
+The branch-per-task rule and "never commit to `main`" both stand. What changes
+is how much work a branch is expected to carry before it earns a PR.
+
+### The four rules that remain
+
 This repo's rigour is real and worth keeping. Its failure mode is the opposite of
-sloppiness: **85 commits after the v1 scope was complete, 35 of them `docs`/`chore`
-against 26 `feat`/`fix`, twelve ADRs, and the highest-value P0 sat blocked for a
-week while adjacent work was polished.** These four rules exist to prevent that.
+sloppiness — gold-plating a product nobody has run. These four rules narrow that.
 
 ### 1. Finding disposition — not every finding is a fix
 
