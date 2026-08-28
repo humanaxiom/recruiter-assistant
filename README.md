@@ -286,14 +286,26 @@ feature — the ranking engine and every other Phase 6 route are byte-unchanged.
 
 **Not built:** a reverse-match trigger on the résumé-detail page — the backend endpoints
 (`POST /resumes/{id}/match-jobs`, `GET /resumes/{id}/match-results`) already exist and the old
-`match_results.html` view remains wired; only the trigger button is missing (a scoped follow-up, see
-[HANDOFF.md](HANDOFF.md)).
+`match_results.html` view remains wired; only the trigger button is missing (a scoped follow-up — not
+currently queued, since no pilot user has asked for it).
 
 Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 
 ---
 
 ## Status & roadmap
+
+> **2026-08-27 — the product is deployed and in use.** It was demoed to the CIO and HR, both approved,
+> and it runs on a dedicated box where **four people are using it**. Since the build history below was
+> written, authorization was completed (CAS identity, session-role enforcement on every write, CSRF on
+> all 12 browser write routes, an auditor log viewer — ADR-019/033/034/035/036), five fallback sub-scores
+> and the evidence cliff were **disclosed on screen** rather than left to read as measurements
+> (ADR-037/039/040/041), the skill vocabulary went from 15.6% to 54.8% coverage of real SFU
+> qualification statements (ADR-042/044), and three verification harnesses were added
+> (`smoke.sh` · `doctor.sh` · `model-check.sh`).
+>
+> **Current state:** [HANDOFF.md](HANDOFF.md). **What to build next:** [docs/ROADMAP.md](docs/ROADMAP.md).
+> The rest of this section is build history, and accurate as such.
 
 **Phases 0–7 are ALL merged to `main`, CI green — the locked v1 extraction-plan scope is complete.** All four Phase-4 sub-phases (4a evals corpus, 4b graph projection, 4c matching engine, 4d shortlist/reverse-match write path), Phase 5 (persist + anonymize + export, PR #14), Phase 6 (API routes, PR #15), and Phase 7 (evals + minimal Flask viewer, PR #16, squash merge `1039e5c`, 2026-07-17) are all merged. There is no Phase 8.
 
@@ -330,11 +342,15 @@ Full decisions + residuals: [ADR-014](docs/adr/014-workflow-ui.md).
 
 **Still open (ADR-021 decision 1, not yet scheduled):** an ordered multi-provider chain with per-provider circuit breakers and failover on availability errors.
 
-**"Why this rank?" defense pack (`docs/ROADMAP.md` card #1), slice 1** — branch `feat/why-this-rank-defense-pack`, PR pending, [ADR-031](docs/adr/031-why-this-rank-defense-pack.md). A deterministic score-composition + verified-evidence panel on the shortlist entry detail page (`GET /shortlist/{id}`, both API and Flask UI) — no LLM, no DDL, no scoring-math change; every number was already persisted in `score_breakdown`/`evidence`/`pipeline_meta`. Weights shown are the ones recorded in `pipeline_meta` at generation time, never current settings — a missing or malformed stamp renders "weights unavailable" rather than a substituted default, and an unrecorded sub-score renders "not recorded" rather than an affirmative "0%". Forward-shortlist only (reverse-match's `score_final` scale isn't comparable, ADR-009). Slice 2 (optional grounded-LLM narrative + decision-rationale export) is deferred.
+**"Why this rank?" defense pack (`docs/ROADMAP.md` card #1), slice 1 — shipped**, [ADR-031](docs/adr/031-why-this-rank-defense-pack.md). A deterministic score-composition + verified-evidence panel on the shortlist entry detail page (`GET /shortlist/{id}`, both API and Flask UI) — no LLM, no DDL, no scoring-math change; every number was already persisted in `score_breakdown`/`evidence`/`pipeline_meta`. Weights shown are the ones recorded in `pipeline_meta` at generation time, never current settings — a missing or malformed stamp renders "weights unavailable" rather than a substituted default, and an unrecorded sub-score renders "not recorded" rather than an affirmative "0%". Forward-shortlist only (reverse-match's `score_final` scale isn't comparable, ADR-009). Slice 2 (optional grounded-LLM narrative + decision-rationale export) is deferred.
 
-A plain-language explainer of the scoring model, written for HR and compliance review — including the seventeen policy decisions currently encoded as configuration defaults — is at [docs/process/ranking-metrics-explainer.html](docs/process/ranking-metrics-explainer.html).
+A plain-language explainer of the scoring model, written for HR and compliance review — organised as *what it does · how to use it well · what you must decide*, with the policy knobs presented as **17 decisions** to ratify rather than a defect ledger — is at [docs/process/ranking-metrics-explainer.md](docs/process/ranking-metrics-explainer.md) (HTML twin alongside it). It is a **circulated artifact**: every change to authorization, skill matching, the evals gate or the evidence verifier must update both files.
 
-What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the job/résumé/shortlist/reverse-match/reveal/bulk HTTP routes, and **the Flask Workflow UI** — a full job → résumé → shortlist recruiter workflow with audited reveal and bulk ingest, blind-only by construction — are all wired and merged. A live end-to-end eval against a real Ollama-backed stack has been run and passed (see [ADR-013](docs/adr/013-phase7-evals-viewer.md) §5); this is a manual/local harness, not part of CI. On top of that, FU-6's per-job assignment scoping is live too (merged to `origin/main`), and the four local-`main`-only features in the table above are live on top of it: SFU CAS login (enabled via `compose.cas.yml`), the `/my/jobs` hiring-manager default view, configurable shortlist size, and the `/admin/users` role-administration page — with new users landing role-less (no access) until an admin grants a role.
+What is live on `main` today: `docker compose up` brings up the stack, Postgres + Neo4j schema come up idempotently on boot, and the ingest/parse pipeline, the Neo4j skill graph, the 4-stage matching engine, the shortlist/reverse-match write path, the persist/anonymize/export read layer, the job/résumé/shortlist/reverse-match/reveal/bulk HTTP routes, and **the Flask Workflow UI** — a full job → résumé → shortlist recruiter workflow with audited reveal and bulk ingest, blind-only by construction — are all wired and merged. On top of that: SFU CAS login (on by default via `compose.cas.yml`), per-job assignment scoping, the `/my/jobs` hiring-manager view, configurable shortlist size, the `/admin/users` role-administration page — new users land role-less until an admin grants a role — and the `/audit` log viewer with an audited reveal of withheld withdrawal reasons.
+
+The pipeline has been proven end to end against a real Ollama-backed stack, both by a manual eval harness ([ADR-013](docs/adr/013-phase7-evals-viewer.md) §5) and by `./scripts/smoke.sh`, which drives the running product over HTTP with real fixtures and asserts on rendered HTML. Neither is part of CI: ~6,000 tests exist and **not one crosses the browser → Flask → API seam**, which is why the smoke suite exists and why its first run found ranking silently dropping every candidate.
+
+**Build history — the v1 phase table, closed since 2026-07-17:**
 
 | Phase | Deliverable | State |
 |---|---|---|

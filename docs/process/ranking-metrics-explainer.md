@@ -265,7 +265,7 @@ something. Turning blind review off for a whole job is also recorded.
 
 ## Decisions we need from you
 
-*Fifteen choices currently encoded as numbers in the software. None of them are facts — each is hiring
+*Seventeen choices currently encoded as numbers in the software. None of them are facts — each is hiring
 policy, and each needs an owner who confirms it reflects ours.*
 
 The question for each is not "is this working?" It is **"is this what we intend?"** Every one of these is
@@ -328,11 +328,17 @@ role, who withdrew or reinstated a file, and when. Correcting an earlier version
 was not only that the screen was missing. The service had **no way to read its own access record at all**,
 so producing one meant an engineer querying the database by hand. That is now a page.
 
-**One thing is deliberately not shown there.** When a candidate's file is withdrawn, whoever did it can
-record a free-text reason, and that text can name the candidate or describe their circumstances. Those
-reasons are recorded but **withheld** on the screen — the auditor sees that a reason exists, not what it
-says. Whether an auditor should be able to read them is a decision for you, not for us; ask an
-administrator if a specific one is needed for a review.
+**One thing is withheld by default, and revealed on request.** When a candidate's file is withdrawn,
+whoever did it can record a free-text reason, and that text can name the candidate or describe their
+circumstances. Those reasons are **withheld** on the screen by default — the auditor sees that a reason
+exists, not what it says. **This was an open question on an earlier version of this page and it has since
+been settled:** an auditor who needs a specific reason for a review can now reveal it themselves, and each
+reveal is separately recorded against their name. Purpose-limited and logged, rather than either a blanket
+grant or a dead end that needs an engineer. No administrator is in the loop any more.
+
+Worth knowing, because it affects what is there to read: until 20 August the withdrawal screen **never
+asked for a reason at all**, so every withdrawal before then has none recorded. Withdrawals performed from
+the shortlist cards still record no reason — only the full résumé screen asks.
 
 **Retention is recorded but not automatic.** Each job carries a retention period, but nothing deletes
 anything when it expires — removal is currently a manual process. If our retention schedule is a commitment

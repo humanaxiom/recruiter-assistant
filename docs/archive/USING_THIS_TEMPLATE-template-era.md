@@ -1,8 +1,25 @@
+> **ARCHIVED 2026-08-27 — this is the SEED TEMPLATE's own guide, not this
+> product's.** Inherited at `git clone` and never trimmed. It opens by claiming to
+> be "the source of truth for how the template works today" and to **supersede
+> `README.md` wherever they disagree** — which is wrong in this repository and has
+> been since Phase 0. It contradicts `CLAUDE.md` directly on inference (it says
+> Ollama runs on `host.docker.internal`; here that is only a fallback — the real
+> host is `aria-gb10` over the tailnet) and describes a six-subagent template
+> pipeline rather than this repo's gates.
+>
+> Its own closing advice was *"don't let three documents drift apart again."* They
+> did; this is the correction. **Source of truth for this product:**
+> [CLAUDE.md](../../CLAUDE.md) for the contract, [README.md](../../README.md) for
+> architecture and quick start, [HANDOFF.md](../../HANDOFF.md) for state,
+> [docs/ROADMAP.md](../ROADMAP.md) for the plan.
+
+---
+
 # Using This Template
 
 > **Golden template** — an offline-first Python agent harness (FastAPI · Neo4j · Postgres · Redis · arq · Flask) driven by **Claude Code** subagents. Frozen in a known-green state. Start every new project from here.
 
-This document is the **source of truth for how the template works today**. It supersedes the historical framing in [README.md](README.md) and [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) wherever they disagree — those describe the original multi-harness design; the sections below record how it has since diverged. When in doubt, trust this file.
+This document is the **source of truth for how the template works today**. It supersedes the historical framing in [README.md](../../README.md) and [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE-template-era.md) wherever they disagree — those describe the original multi-harness design; the sections below record how it has since diverged. When in doubt, trust this file.
 
 ---
 
@@ -41,7 +58,7 @@ The stack is **offline-first**: all model calls go to Ollama on the host (`host.
 
 ## 3. How this template diverges from the original guide
 
-The original [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) and [README.md](README.md) described a three-harness monorepo (Claude Code / Codex / Copilot) with Alembic migrations and a single combined gate command. This template has moved on:
+The original [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE-template-era.md) and [README.md](../../README.md) described a three-harness monorepo (Claude Code / Codex / Copilot) with Alembic migrations and a single combined gate command. This template has moved on:
 
 | Area | Original guide | This template |
 |---|---|---|
@@ -111,7 +128,7 @@ Slash commands (`.claude/commands/`): `/gates`, `/review-loop <task>`, `/memory-
 
 These are conscious omissions, not oversights — revisit them when the real project needs them:
 
-- **No migration framework.** Tables/index are created on startup. Add Alembic once you have a schema-change history worth versioning (see [ADR-002](docs/adr/002-neo4j-memory-postgres-ledger.md)).
+- **No migration framework.** Tables/index are created on startup. Add Alembic once you have a schema-change history worth versioning (see [ADR-002](../adr/002-neo4j-memory-postgres-ledger.md)).
 - **The integration gate needs Docker** and is not part of `make gates`; it runs in CI and via `make gates-integration`.
 - **No end-to-end LLM run is baked in.** The pipeline is unit-tested with the model client mocked; exercising it against a live Ollama is a first-task activity, not a template guarantee.
 - **The Flask dashboard is minimal** — it enqueues tasks and shows lineage; there is no `/tasks` list endpoint yet.
