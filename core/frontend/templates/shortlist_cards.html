@@ -118,9 +118,23 @@
   {% if entries %}
   {% for entry in entries %}
   {% set sb = entry.score_breakdown or {} %}
-  <div class="card candidate-card">
+  {# SPONSOR 2026-09-02 §O2 / answer 4 — "Last but visible. All candidates
+     listed and marked. All other metrics are invalidated though, if candidate
+     has no permit."
+
+     `voided` is read from the entry, never re-derived from work_authorization
+     here: the DTO computes it in one place (a model validator that discards
+     any supplied value) so the template, the CSV export and the API can never
+     disagree about whether a candidate's numbers stand. Do NOT replace this
+     with `entry.work_authorization == 'not_eligible'` — that is a second copy
+     of the rule, and two copies drift. #}
+  {% set voided = entry.metrics_invalidated %}
+  <div class="card candidate-card{% if voided %} candidate-card-voided{% endif %}">
     <div class="card-header">
-      <span class="rank">#{{ entry.rank }}</span>
+      {# The rank is itself a metric, so an ineligible candidate does not get
+         one. Showing "#3" beside "no work permit" states a merit position the
+         product is simultaneously saying does not apply. #}
+      <span class="rank">{% if voided %}—{% else %}#{{ entry.rank }}{% endif %}</span>
       <h3 style="margin:0">
         {# Label links to the (blind) résumé detail. The shortlist read itself
            stays blind — no PII in the list. #}
@@ -163,16 +177,41 @@
         <button type="submit" class="btn btn-danger btn-sm">Withdraw candidate</button>
       </form>
       {% endif %}
-      <span class="score-final">{{ ((entry.score_final or 0) * 100)|round|int }}</span>
+      <span class="score-final">
+        {%- if voided %}n/a{% else %}{{ ((entry.score_final or 0) * 100)|round|int }}
+        {%- endif -%}
+      </span>
     </div>
+
+    {% if voided %}
+    {# The band must EXPLAIN itself. A candidate silently parked at the bottom
+       with dashes where numbers were is an unexplained adverse outcome — the
+       reviewer cannot tell a screening decision from a parsing failure, and
+       cannot tell that it is theirs to correct. Both facts go on the card. #}
+    <p class="banner banner-voided">
+      <strong>Ranked last: no Canadian work authorization.</strong>
+      This candidate is recorded as not eligible to work in Canada, so the
+      scores below are <strong>not applied</strong> and no rank is assigned.
+      Nothing has been deleted — the full evidence is still on the candidate
+      page. If this is wrong, correct the declaration there.
+    </p>
+    {% elif entry.work_authorization == 'unknown' %}
+    {# Deliberately NOT a warning, and deliberately not styled like the band
+       above. "Nobody has recorded this yet" is the default state of every
+       candidate and carries no adverse meaning whatsoever; dressing it as a
+       problem is how an undeclared candidate starts getting treated like an
+       ineligible one. #}
+    <p class="muted small">Work authorization not recorded.</p>
+    {% endif %}
 
     <div class="tiles">
       {% for key in ['skill', 'experience', 'education', 'seniority', 'vector'] %}
       {% set v = sb.get(key) %}
-      <div class="tile">
+      <div class="tile{% if voided %} tile-voided{% endif %}">
         <span class="tile-label">{{ key }}</span>
         <span class="tile-value">
-          {%- if v is not none %}{{ (v * 100)|round|int }}{% else %}—{% endif -%}
+          {%- if voided %}n/a
+          {%- elif v is not none %}{{ (v * 100)|round|int }}{% else %}—{% endif -%}
         </span>
       </div>
       {% endfor %}

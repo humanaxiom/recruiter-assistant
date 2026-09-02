@@ -1,3 +1,13 @@
+> **ARCHIVED 2026-08-27 — the demo happened and it landed.** Written before the
+> HR/CIO session; the product was presented, both approved, and four users now
+> have it on a dedicated box. Two of its cautions are also out of date: the
+> ranking-metrics explainer was rewritten twice and *is* circulatable, and the
+> "synthetic candidates only" rule was for the demo, not for the pilot that
+> followed. Kept as the record of how the product was framed to HR — the
+> "decision-support, not automated decision" framing is still the right one.
+
+---
+
 # HR Demonstration Script
 
 **Suggested duration:** 12–15 minutes  

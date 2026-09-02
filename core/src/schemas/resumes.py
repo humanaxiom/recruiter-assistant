@@ -165,6 +165,41 @@ class ResumeSkill(BaseModel):
 
 CoverLetterSentiment = Literal["positive", "neutral", "negative"]
 
+# SPONSOR 2026-09-02 §O2 — eligibility to work in Canada.
+#
+# THREE states, and the third one is the entire point. A boolean would collapse
+# "the candidate did not tell us" into "the candidate is not eligible", which
+# is an adverse automated decision made from silence, on an attribute adjacent
+# to national origin and immigration status (protected grounds under the BC
+# Human Rights Code). ``unknown`` is the default for every row and must never
+# band a candidate last.
+#
+# DECLARED, never inferred. There is deliberately no code path that asks the
+# model to guess this from résumé text: the signal is usually absent, and a
+# guess here is a fabricated finding on a protected ground. v1 takes it from
+# the recruiter; the candidate's own Taleo prescreen declaration replaces that
+# as the primary source once the CSV shape is settled (sponsor answer 1).
+WorkAuthorization = Literal["eligible", "not_eligible", "unknown"]
+
+
+def metrics_invalidated_for(status: object) -> bool:
+    """Do this candidate's ranking metrics still stand? (sponsor answer 4)
+
+    THE single definition of that rule. It is a one-line comparison, which is
+    exactly why it wants a home: it is needed by ``ShortlistEntry`` (for the
+    screen and the API), by the CSV export, and by anything added later, and
+    the failure mode of inlining it is not a crash but a DISAGREEMENT — a
+    candidate shown as banded on the page and un-banded in the file mailed to
+    the hiring committee, or the reverse. This repo has shipped that shape
+    before (``shortlist_entries.score_breakdown`` caching a rendered label
+    that then went stale, ROADMAP §5).
+
+    Note what it does NOT do: ``unknown`` and ``eligible`` both return False.
+    Only an explicit ``not_eligible`` invalidates. Anything that treats a
+    falsy/missing value as invalidating would band candidates on silence.
+    """
+    return status == "not_eligible"
+
 
 class CoverLetterParsed(BaseModel):
     """LLM output for cover_letter_v1 (Feature 1). Stored in
@@ -454,6 +489,11 @@ class ResumeListItem(BaseModel):
     # résumé that has never been withdrawn. NOT PII — no redaction applies.
     withdrawn_at: dt.datetime | None = None
     withdrawal_reason: str | None = None
+    # SPONSOR §O2. Defaults to ``unknown`` so every pre-feature row reads back
+    # as undeclared rather than ineligible. NOT PII in the blind sense — it is
+    # a screening attribute, not an identifier, and it must stay visible under
+    # blind review for the band to be explainable.
+    work_authorization: WorkAuthorization = "unknown"
     # FU-7 §4 / ADR-030: True when this résumé's skills extraction fell back to
     # the keyword scan. Read from the `resumes.parsed` jsonb
     # (`COALESCE((parsed->>'degraded')::bool, false)`). Surfaces the incident's
@@ -498,6 +538,30 @@ class ResumeOut(BaseModel):
     # résumé that has never been withdrawn. NOT PII — no redaction applies.
     withdrawn_at: dt.datetime | None = None
     withdrawal_reason: str | None = None
+    # SPONSOR §O2 — see ``ResumeListItem.work_authorization``.
+    work_authorization: WorkAuthorization = "unknown"
+
+
+class WorkAuthorizationRequest(BaseModel):
+    """POST /resumes/{id}/work-authorization body (sponsor 2026-09-02 §O2).
+
+    A recruiter DECLARING what the candidate stated — not the system inferring
+    it. ``status`` is required and has no default on purpose: setting this is a
+    deliberate act with a consequence for the candidate, so the caller must
+    name the value rather than fall into one.
+
+    Setting it back to ``unknown`` is a legitimate correction and must always
+    be available; a mis-set ``not_eligible`` is exactly the mistake a human
+    needs to be able to undo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: WorkAuthorization
+    # Capped like ``WithdrawRequest.reason`` and ``JobAssigneeCreate.note`` —
+    # it rides verbatim into the audit row's ``details`` JSONB, so an unbounded
+    # value is an at-rest storage-growth vector.
+    note: str | None = Field(default=None, max_length=500)
 
 
 class WithdrawRequest(BaseModel):

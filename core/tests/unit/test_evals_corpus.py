@@ -948,6 +948,11 @@ _THRESHOLD_KEYS: list[tuple[str, str]] = [
     ("pii", "structured_fields_surface"),
     ("pii", "embedding_input_pii_free"),
     ("pii", "exported_output_pii_free"),
+    # SPONSOR 2026-09-02 §O3 -- the inverted motivation pair. See
+    # thresholds.toml's [cover_letter_neutrality] block.
+    ("cover_letter_neutrality", "enforce"),
+    ("cover_letter_neutrality", "with_cover_letter_id"),
+    ("cover_letter_neutrality", "without_cover_letter_id"),
     ("determinism", "temperature"),
     ("determinism", "max_rank_delta"),
     ("determinism", "max_score_delta"),
@@ -2883,10 +2888,65 @@ def test_negative_evidence_quote_cannot_verify_against_its_cited_chunk(
 _EXPECTED_ORDERING_CONTROL_DIMENSIONS = {
     "education",
     "overqual",
-    "motivation",
+    # "motivation" WAS HERE until 2026-09-02. It did not lapse — it INVERTED.
+    # The sponsor requires a cover letter to be identified but not to rank
+    # (§O3), so a control asserting that a cover letter RAISES a candidate now
+    # asserts against the product. The r04/r16 pair moved to
+    # ``cover_letter_neutrality`` in both thresholds.toml and labels.json,
+    # where it asserts EXACT score equality instead — a strictly stronger
+    # claim, and one no tie-break can satisfy by luck. See
+    # ``test_cover_letter_neutrality_replaced_the_motivation_pair`` below.
     "skill_missing_must",
     "recency",
 }
+
+
+def test_cover_letter_neutrality_replaced_the_motivation_pair() -> None:
+    """SPONSOR 2026-09-02 §O3 — the motivation pair INVERTED, not dropped.
+
+    Two things have to stay true together, and this test exists because the
+    obvious "cleanup" breaks exactly one of them:
+
+    * the r04/r16 twins are no longer an *ordering* control (a cover letter
+      must not raise a candidate any more), and
+    * they ARE still gated — as an exact-equality neutrality control.
+
+    Delete the pair outright and both files still parse, every other test
+    still passes, and the sponsor's requirement is enforced by nothing at all.
+    That is this repo's characteristic defect, and it would be reintroduced in
+    the very change that set out to honour the requirement.
+
+    The two fixture ids are pinned here as well as in both consumer files,
+    because a neutrality gate pointed at the wrong pair proves nothing: r16
+    must be the twin with NO cover letter, and r04 the one that carries a real
+    one.
+    """
+    toml_block = _load_thresholds()["cover_letter_neutrality"]
+    labels_block = _load_labels()["cover_letter_neutrality"]
+
+    assert toml_block["enforce"] is True, (
+        "cover_letter_neutrality must be enforced — an unenforced block is the "
+        "prose-with-nothing-behind-it shape this gate exists to avoid"
+    )
+    for block in (toml_block, labels_block):
+        assert block["with_cover_letter_id"] == "r04_morgan_lee"
+        assert block["without_cover_letter_id"] == "r16_rowan_castillo"
+
+    dims = {c["dimension"] for c in _ordering_controls()}
+    assert "motivation" not in dims, (
+        "the motivation ordering control asserts that a cover letter RAISES a "
+        "candidate, which sponsor requirement §O3 forbids — it belongs in "
+        "cover_letter_neutrality, inverted"
+    )
+
+
+def test_the_cover_letter_twin_still_carries_a_cover_letter() -> None:
+    """A neutrality gate over two résumés that BOTH lack a cover letter passes
+    trivially and proves nothing. r04 must keep real ``cover_letter_chunks``,
+    and r16 must keep none — that asymmetry is the whole experiment."""
+    resumes = _load_labels()["resumes"]
+    assert "r04_morgan_lee" in resumes
+    assert "r16_rowan_castillo" in resumes
 
 
 def test_labels_manifest_has_ordering_controls_for_each_gated_dimension() -> None:

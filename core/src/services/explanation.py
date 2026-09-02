@@ -103,11 +103,16 @@ class ShortlistExplanation(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # Top level: 0.6*structured + 0.3*evidence + 0.1*motivation, at the
-    # weights this row was generated with.
+    # Top level: structured + evidence + motivation + manager_prompt, at the
+    # weights this row was generated with. ``motivation`` weighs 0 by default
+    # since 2026-09-02 (sponsor §O3) and ``manager_prompt`` carries the 10%
+    # it used to; both rows are still rendered, because a row generated BEFORE
+    # that change must still explain itself with the weights it actually ran
+    # under.
     structured: ContributionRow
     evidence: ContributionRow
     motivation: ContributionRow
+    manager_prompt: ContributionRow
     # The structured sub-scores, which compose score_breakdown.structured.
     skill: ContributionRow
     experience: ContributionRow
@@ -172,6 +177,7 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
     w_structured = weights.structured if weights is not None else None
     w_evidence = weights.evidence if weights is not None else None
     w_motivation = weights.motivation if weights is not None else None
+    w_manager_prompt = weights.manager_prompt if weights is not None else None
     w_skill = weights.skill if weights is not None else None
     w_experience = weights.experience if weights is not None else None
     w_education = weights.education if weights is not None else None
@@ -186,6 +192,7 @@ def shortlist_entry_explanation(entry: ShortlistEntry) -> ShortlistExplanation:
         structured=_row(entry.score_structured, w_structured),
         evidence=_row(entry.score_evidence, w_evidence),
         motivation=_row(breakdown.motivation, w_motivation),
+        manager_prompt=_row(breakdown.manager_prompt, w_manager_prompt),
         skill=_row(breakdown.skill, w_skill),
         experience=_row(breakdown.experience, w_experience),
         education=_row(breakdown.education, w_education),

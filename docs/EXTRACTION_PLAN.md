@@ -1,9 +1,15 @@
 # Resume-Ranking Extraction — Plan of Record
 
-Extract the **resume-ranking feature** from `C:\repos\hris` into a bare-essentials, local-first app built on the [golden template](../USING_THIS_TEMPLATE.md). No review workflow, no JD-Harmonizer. Keep anonymization, evidence-backed ranking, shortlists, and exports.
+Extract the **resume-ranking feature** from `C:\repos\hris` into a bare-essentials, local-first app built on the [golden template](archive/USING_THIS_TEMPLATE-template-era.md). No review workflow, no JD-Harmonizer. Keep anonymization, evidence-backed ranking, shortlists, and exports.
 
-> **This is the frozen v1 plan (Phases 0–7, all shipped).** For what to build NEXT — the flagship "wow"
-> feature candidates seeded 2026-08-04 — see **[`docs/ROADMAP.md`](ROADMAP.md)** and the HANDOFF Next-session menu.
+> **This is the frozen v1 plan (Phases 0–7, all shipped 2026-07-17). It is history, not a queue** — it is
+> kept in place because 44 ADRs link to it. For what to build NEXT, see **[`docs/ROADMAP.md`](ROADMAP.md)**;
+> for current state, [`HANDOFF.md`](../HANDOFF.md).
+>
+> **Its in-body pointers to `HANDOFF.md`'s "Next session" / "Queued next work" sections are dangling** —
+> those sections belonged to the 3,251-line handoff archived at
+> [`docs/archive/HANDOFF-2026-07-10-to-08-23.md`](archive/HANDOFF-2026-07-10-to-08-23.md). Read them as
+> references to that file, not to the live handoff.
 
 ## Decisions (locked)
 

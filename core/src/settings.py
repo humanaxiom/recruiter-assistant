@@ -168,7 +168,15 @@ class Settings(BaseSettings):
     # ~1.0 (the MatchWeights validator enforces it on build).
     match_structured: float = 0.6
     match_evidence: float = 0.3
-    match_motivation: float = 0.1
+    # SPONSOR 2026-09-02 §O3 — "Identify whether a coverletter was included.
+    # But not affect ranking." Moved 0.1 -> 0.0 on that instruction; the 0.1 it
+    # carried is now ``match_manager_prompt`` below. A deployment that wants
+    # cover-letter motivation back sets both in ``.env`` (they must still sum
+    # to 1.0 with structured+evidence, which the validator enforces on build).
+    match_motivation: float = 0.0
+    # SPONSOR §I4 — how well the candidate answers the hiring manager's own
+    # stated requirements. "Assign the 10% CL mark to this instead."
+    match_manager_prompt: float = 0.10
     match_skill: float = 0.40
     match_experience: float = 0.25
     match_education: float = 0.10
@@ -393,7 +401,8 @@ def weights_from_settings(settings: Settings) -> MatchWeights:
 
     Kept IN ``src/settings.py`` (not a sibling ``matching/config.py`` the way
     hris splits it) per CLAUDE.md's "config only via src/settings.py". The
-    ``MatchWeights`` validator enforces that ``structured+evidence+motivation``
+    ``MatchWeights`` validator enforces that
+    ``structured+evidence+motivation+manager_prompt``
     and the five sub-weights each sum to ~1.0, so a misconfigured ``.env`` fails
     fast (ValueError) at the start of a matching run rather than silently
     skewing ranks.
@@ -402,6 +411,7 @@ def weights_from_settings(settings: Settings) -> MatchWeights:
         structured=settings.match_structured,
         evidence=settings.match_evidence,
         motivation=settings.match_motivation,
+        manager_prompt=settings.match_manager_prompt,
         skill=settings.match_skill,
         experience=settings.match_experience,
         education=settings.match_education,

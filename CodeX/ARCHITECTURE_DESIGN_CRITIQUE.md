@@ -1,3 +1,20 @@
+> **STATUS AS OF 2026-08-27 — read this before acting on anything below.** This is
+> an outside review dated **2026-08-07**, kept because an external perspective is
+> worth more than a self-assessment. It is **not a queue**; live tracking is
+> [docs/ROADMAP.md](../docs/ROADMAP.md). Its two *Critical* findings are closed and
+> two of its *High* findings are now the most urgent items in the repo:
+>
+> | Finding | State 2026-08-27 |
+> |---|---|
+> | Critical — human/service authorization not safely composed | **Closed.** `require_session_role` intersects the human's CAS role with the key-derived role on all 13 write routes; a valid key alone is never sufficient (ADR-033/034). CSRF covers all 12 browser write routes (ADR-035) |
+> | Critical — evidence cutoff changes the meaning of the score | **Disclosed, not removed** (ADR-040). Below-cutoff candidates now render *"not assessed"* and the page states the score is not comparable. The arithmetic is unchanged — the recommendation here still stands as feature work |
+> | High — default runtime is a privileged dev environment | **🔴 OPEN and now urgent.** `FLASK_SECRET_KEY: dev-only-change-me` is committed and four people are using a live deployment. ROADMAP open item 1 |
+> | High — inference privacy boundary is ambiguous | **Partly addressed.** README no longer claims data never leaves the machine; there is still no approved-host allowlist |
+> | Documentation assessment | **Acted on 2026-08-27.** History archived, `HANDOFF.md` capped at eight items, the HR explainer rewritten twice and circulatable |
+> | Retention, migrations, observability, backups, decision workflow | **Open**, carried into ROADMAP open item 1 and the feature menu |
+
+---
+
 # Recruiter Assistant: Architecture and Design Critique
 
 **Review date:** 2026-08-07  

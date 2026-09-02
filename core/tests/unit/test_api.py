@@ -186,6 +186,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         "/resumes/{resume_id}/withdraw",
         "/resumes/{resume_id}/reinstate",
         "/jobs/{job_id}/resume-status",
+        # SPONSOR 2026-09-02 §O2 -- the recruiter's work-authorization
+        # declaration (admin+recruiter, audited, idempotent).
+        "/resumes/{resume_id}/work-authorization",
     }
 )
 

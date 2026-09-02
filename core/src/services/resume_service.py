@@ -40,6 +40,7 @@ from src.schemas.resumes import (
     ResumeParsed,
     ResumeStatusBreakdown,
     ResumeUploadResult,
+    WorkAuthorization,
 )
 from src.services import DbConn, audit_service, outbox_service
 from src.services import pii as pii_service
@@ -446,7 +447,12 @@ _LIST_SQL_BASE = (
     # FU-7 §4 / ADR-030: the degraded flag, read from the parsed jsonb. A
     # pre-feature / never-parsed row (parsed IS NULL or no key) COALESCEs to
     # false. NOT PII — surfaces in the list even under blind review.
-    "COALESCE((parsed->>'degraded')::bool, false) AS degraded "
+    "COALESCE((parsed->>'degraded')::bool, false) AS degraded, "
+    # SPONSOR §O2 — the screening declaration. NOT PII (it is an attribute, not
+    # an identifier) and NOT redacted: it must stay visible under blind review,
+    # or the trailing band on the shortlist has no explanation the reviewer can
+    # see. NOT NULL DEFAULT 'unknown' in the DDL, so no COALESCE is needed.
+    "work_authorization "
     "FROM resumes WHERE job_id = $1"
 )
 
@@ -468,7 +474,12 @@ SELECT id, job_id, original_filename, mime_type, file_size_bytes, sha256,
     cover_letter_parsed,
     candidate_email_hash, parsed, status, uploaded_by, uploaded_at,
     parsed_at, failure_reason, consent_acknowledged,
-    withdrawn_at, withdrawal_reason
+    withdrawn_at, withdrawal_reason,
+    -- SPONSOR 2026-09-02 §O2. NOT PII (an attribute, not an identifier) and
+    -- deliberately NOT redacted on the blind path below: hiding it would make
+    -- the shortlist's trailing band unexplainable to the very reviewer who has
+    -- to be able to correct it.
+    work_authorization
 FROM resumes WHERE id = $1
 """
 
@@ -533,6 +544,11 @@ async def list_for_job(
             # a live row; ``bool(...)`` also folds a ``None`` (a pre-feature
             # row / a mocked Record without the key) to ``False``.
             degraded=bool(r["degraded"]),
+            # SPONSOR §O2. Falls back to "unknown" for a mocked Record without
+            # the key — never to "not_eligible". Absence of a declaration is
+            # not a negative declaration, and this default is the last place
+            # that rule can be broken before it reaches a screen.
+            work_authorization=r["work_authorization"] or "unknown",
         )
         for r in rows
     ]
@@ -610,6 +626,9 @@ async def get_one(
             # ADR-026 (FU-8): withdrawal state is not PII — surfaced under blind.
             withdrawn_at=row["withdrawn_at"],
             withdrawal_reason=row["withdrawal_reason"],
+            # SPONSOR §O2 -- surfaced on the BLIND path too: it is screening
+            # state, not identity, and the band it drives has to be explainable.
+            work_authorization=row["work_authorization"] or "unknown",
         )
 
     return ResumeOut(
@@ -637,6 +656,7 @@ async def get_one(
         cover_letter_parsed=cover_parsed,
         withdrawn_at=row["withdrawn_at"],
         withdrawal_reason=row["withdrawal_reason"],
+        work_authorization=row["work_authorization"] or "unknown",
     )
 
 
@@ -736,6 +756,22 @@ _WITHDRAW_SQL = (
 _REINSTATE_SQL = (
     "UPDATE resumes SET withdrawn_at = NULL, withdrawal_reason = NULL "
     "WHERE id = $1 AND withdrawn_at IS NOT NULL"
+)
+
+# SPONSOR 2026-09-02 §O2 — the work-authorization declaration.
+#
+# Guarded on ``work_authorization IS DISTINCT FROM $2`` so re-declaring the
+# SAME state matches zero rows and writes no audit entry. ``IS DISTINCT FROM``
+# rather than ``<>`` is deliberate even though the column is NOT NULL: it
+# survives the column ever being made nullable, and ``<>`` would silently
+# start matching zero rows for every NULL if that happened.
+#
+# The trail must record DECISIONS, not clicks — without the guard, a recruiter
+# reopening a form manufactures audit rows for a decision nobody re-made, and
+# an audit log padded with non-events is one nobody reads.
+_SET_WORK_AUTHORIZATION_SQL = (
+    "UPDATE resumes SET work_authorization = $2 "
+    "WHERE id = $1 AND work_authorization IS DISTINCT FROM $2"
 )
 
 # The last DELIVERED ``resume.parsed`` payload for this résumé — the exact
@@ -864,6 +900,70 @@ async def reinstate_resume(
                 event_type="resume.parsed",
                 payload=payload,
             )
+    return True
+
+
+async def set_work_authorization(
+    conn: DbConn,
+    resume_id: UUID,
+    *,
+    status: WorkAuthorization,
+    note: str | None,
+    actor_kind: str,
+    actor_user_id: UUID | None,
+    actor_service: str | None,
+) -> bool:
+    """Record the candidate's Canadian work-authorization declaration.
+
+    SPONSOR 2026-09-02 §O2. A recruiter DECLARING what the candidate stated —
+    the system never infers this. There is deliberately no LLM path here: the
+    signal is absent from most résumés, and a guess on a ground adjacent to
+    national origin and immigration status is a fabricated adverse finding.
+
+    Shaped exactly like ``withdraw_resume`` (ADR-026) because it is the same
+    kind of act: an audited, reversible, human decision with a consequence for
+    a real person.
+
+    * **Idempotent.** The guarded UPDATE applies to at most one row;
+      re-declaring the same state is a quiet no-op success — no second audit
+      row, no error.
+    * **Audited on every APPLIED change, including the correction back to
+      ``unknown``.** Undoing an adverse decision is exactly as much a decision
+      as making one; a trail that records only the accusation is not a trail.
+    * **No outbox event.** Unlike a withdrawal, this changes nothing the graph
+      knows about — eligibility is a screening attribute, not a ranking input,
+      and the band is applied at read time. Enqueuing here would trigger a
+      pointless re-projection AND imply to a future reader that eligibility
+      feeds the graph. It must not.
+
+    Raises ``NotFoundError`` for a résumé id that does not exist at all.
+    Returns whether the declaration actually changed anything.
+    """
+    exists = await conn.fetchval(_RESUME_EXISTS_SQL, resume_id)
+    if exists is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+
+    async with conn.transaction():
+        result = await conn.execute(_SET_WORK_AUTHORIZATION_SQL, resume_id, status)
+        if not result.endswith(" 1"):
+            return False
+        # ``status`` is always recorded; ``note`` only when the recruiter gave
+        # one. The status is the decision and must never be absent from the
+        # trail, which is why it is not folded into the same optional dict the
+        # withdrawal reason uses.
+        details: dict[str, Any] = {"status": status}
+        if note:
+            details["note"] = note
+        await audit_service.record_audit(
+            conn,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="set_work_authorization",
+            subject_type="resume",
+            subject_id=resume_id,
+            details=details,
+        )
     return True
 
 

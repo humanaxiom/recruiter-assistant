@@ -57,6 +57,7 @@ from src.pipeline.llm import (
     LLMUnavailableError,
 )
 from src.pipeline.matching.stages import (
+    _combine_final,
     _CombineInput,
     _evidence_completeness,
     _motivation_score,
@@ -281,8 +282,13 @@ _EVIDENCE_K = 15
 # blocker #10). Production callers pass settings.match_reverse_evidence_k.
 _REVERSE_EVIDENCE_K = 10
 # Combine weights for reverse match when evidence is skipped: rank purely on the
-# structured score. Validator requires the top three to sum to 1.0.
-_STRUCTURED_ONLY_WEIGHTS = MatchWeights(structured=1.0, evidence=0.0, motivation=0.0)
+# structured score. The validator requires the top-level blend to sum to 1.0,
+# and ``manager_prompt`` (sponsor 2026-09-02 §I4) is part of that sum — it is
+# pinned to 0.0 here for the same reason ``evidence`` and ``motivation`` are:
+# this is the "structured only" blend by definition.
+_STRUCTURED_ONLY_WEIGHTS = MatchWeights(
+    structured=1.0, evidence=0.0, motivation=0.0, manager_prompt=0.0
+)
 
 
 # ---------------- job loader ----------------
@@ -1176,6 +1182,9 @@ class RankInput:
     structured: float
     breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
+    # SPONSOR 2026-09-02 §I4 -- see ``_CombineInput.manager_prompt``. ``None``
+    # means the job carried no prompt and the term is renormalised away.
+    manager_prompt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1200,12 +1209,23 @@ def run_match(
     for c in inputs:
         completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)
-        final = (
-            weights.structured * c.structured
-            + weights.evidence * completeness
-            + weights.motivation * motivation
+        # SAME blend helper as ``stage4_combine`` -- not a second copy of the
+        # arithmetic. The two formulas drifting is exactly how a weight goes
+        # unapplied on one path only.
+        final = _combine_final(
+            structured=c.structured,
+            evidence_completeness=completeness,
+            motivation=motivation,
+            manager_prompt=c.manager_prompt,
+            weights=weights,
         )
-        breakdown = c.breakdown.model_copy(update={"motivation": motivation})
+        breakdown = c.breakdown.model_copy(
+            update={
+                "motivation": motivation,
+                "manager_prompt": c.manager_prompt or 0.0,
+                "manager_prompt_measured": c.manager_prompt is not None,
+            }
+        )
         scored.append(
             RankedMatch(
                 resume_id=c.resume_id,

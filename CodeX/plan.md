@@ -1,3 +1,19 @@
+> **STATUS AS OF 2026-08-27.** An outside enhancement plan written before the HR
+> demo. Kept for its sequencing and its owner/approval columns, which are better
+> than anything this repo wrote for itself. **Its "Pilot blockers" horizon is
+> spent:** initiative 1 (unify identity and authorization) shipped as
+> ADR-019/033/034/035, and the score cliff in initiative 2 is *disclosed* rather
+> than removed (ADR-040). The pilot happened — CIO and HR approved, four users are
+> live on a dedicated box.
+>
+> Still live and now more urgent than when written: **4** (retention, erasure,
+> backups), **5** (hardened runtime, observability), **6** (versioned migrations),
+> and **7** (human decision record), which is cross-listed on the ROADMAP feature
+> menu. Live tracking: [docs/ROADMAP.md](../docs/ROADMAP.md). This file is
+> reference, not a queue.
+
+---
+
 # High-Value Enhancement Plan
 
 The seven initiatives below are ordered by risk reduction and value to an HR pilot. Security, policy, and lifecycle work comes before “wow” features.

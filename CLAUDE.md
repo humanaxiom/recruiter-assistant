@@ -120,11 +120,20 @@ When gates fail, read the failure output, fix ONLY what failed, re-run `make gat
 
 ## Economy — the rules that stop this repo gold-plating itself
 
-### 0. The destination outranks every rule below — see [docs/RESET.md](docs/RESET.md)
+### 0. The destination outranks every rule below
 
-**A real recruiter, signed in as themselves, ranks a real requisition against real
-applicants and says whether the shortlist is sensible.** Nothing that does not move
-that forward gets built. Not a test, not an ADR, not a roadmap entry.
+**The four people on the pilot box can do their real hiring work in it, and what
+they hit gets fixed before anything they haven't hit gets built.**
+
+**User-sourced work outranks self-sourced work.** A defect a pilot user hit, a
+feature a pilot user needs, and an operational duty a live deployment creates are
+all real work. Auditing code nobody has complained about is not, however
+defensible each individual finding is.
+
+**Updated 2026-08-27.** The previous destination — *"a real recruiter, signed in
+as themselves, ranks a real requisition"* — is **met**: the product was demoed to
+the CIO and HR, both approved, and it is deployed on a dedicated box with four
+users. The build phase is open again, and new features are wanted.
 
 This rule exists because the four below were not enough. They were written on
 2026-08-14 against a measured problem — *"85 commits after the v1 scope was
@@ -133,7 +142,10 @@ highest-value P0 sat blocked for a week"* — and **ten days later every ratio w
 worse**: 94 commits, 32 ADRs against 12 for the entire original build, test code
 outweighing source 5.1:1, and still zero recruiters. A rule that says "do less of
 this" loses to a process that generates work faster than the rule can veto it.
-A destination does not.
+A destination does not. The full diagnosis is archived at
+[docs/archive/RESET-2026-08-24.md](docs/archive/RESET-2026-08-24.md) — read it if
+you are about to argue that some piece of inspection is worth doing. Live plan of
+record: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Concretely, and these are the reflexes that actually cost the time:
 
@@ -193,7 +205,8 @@ is how much work a branch is expected to carry before it earns a PR.
 ### The four rules that remain
 
 This repo's rigour is real and worth keeping. Its failure mode is the opposite of
-sloppiness — gold-plating a product nobody has run. These four rules narrow that.
+sloppiness — polishing the parts of the product nobody has complained about.
+These four rules narrow that.
 
 ### 1. Finding disposition — not every finding is a fix
 
@@ -236,7 +249,12 @@ Before setting it down:
 
 If an item that changes what the product can *do* and an item that hardens
 something already correct are both unblocked, take the capability item. Hardening
-work on a feature nobody has run yet is speculative by definition.
+a path no user has exercised is speculative by definition.
+
+**One exception, added 2026-08-27:** a duty that a *live deployment* creates —
+a published session secret, unenforced retention on real candidate data, a
+missing state check — is not speculative hardening. Four people are using this
+product. Those outrank a capability item; everything else in this rule stands.
 
 ## Code rules
 

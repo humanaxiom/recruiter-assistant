@@ -382,6 +382,13 @@ def test_shortlist_csv_header_excludes_cut_review_columns() -> None:
         "resume_file",
         "job_title",
         "job_department",
+        # SPONSOR 2026-09-02 §O2 -- the screening band, beside the score it
+        # qualifies, so a reader who re-sorts the file by score_final can still
+        # see which rows the product says do not stand.
+        "work_authorization",
+        "metrics_invalidated",
+        # SPONSOR §O3 -- identified, never ranked.
+        "has_cover_letter",
         "score_final",
         "must_have_missing",
         "skills_missing",

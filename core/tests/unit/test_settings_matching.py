@@ -44,7 +44,9 @@ def test_match_top_blend_defaults() -> None:
     s = Settings()
     assert s.match_structured == 0.6
     assert s.match_evidence == 0.3
-    assert s.match_motivation == 0.1
+    # SPONSOR 2026-09-02 §O3/§I4 -- the 10% moved off the cover letter.
+    assert s.match_motivation == 0.0
+    assert s.match_manager_prompt == 0.10
 
 
 def test_match_sub_weight_defaults() -> None:
@@ -234,7 +236,12 @@ def test_weights_from_settings_passes_its_own_sums_to_one_validator() -> None:
     # construction; if weights_from_settings mis-maps a field this raises
     # instead of silently producing a skewed ranking.
     weights = weights_from_settings(Settings())
-    top = weights.structured + weights.evidence + weights.motivation
+    top = (
+        weights.structured
+        + weights.evidence
+        + weights.motivation
+        + weights.manager_prompt
+    )
     sub = (
         weights.skill
         + weights.experience
@@ -291,11 +298,19 @@ def test_match_reverse_evidence_k_default_is_positive() -> None:
 
 
 def test_constructor_override_of_top_blend_flows_through() -> None:
+    # The top blend now has FOUR terms (sponsor 2026-09-02 §I4), so an override
+    # that moves one has to rebalance against all of them -- which is the
+    # validator doing its job, not an obstacle to route around.
     weights = weights_from_settings(
-        Settings(match_structured=0.7, match_motivation=0.0)
+        Settings(
+            match_structured=0.7,
+            match_motivation=0.0,
+            match_manager_prompt=0.0,
+        )
     )
     assert weights.structured == 0.7
     assert weights.motivation == 0.0
+    assert weights.manager_prompt == 0.0
     assert weights.evidence == 0.3
 
 

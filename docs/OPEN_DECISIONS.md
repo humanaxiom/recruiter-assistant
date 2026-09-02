@@ -1,111 +1,47 @@
-# Open decisions — memos, not notes
+# Open decisions
 
-## ✅ NOTHING IS OPEN. Both decisions are answered AND shipped (2026-08-20).
+## Nothing is open.
 
-**Do not read the memo below as a question.** It is kept as the record of the options *not* taken — which
-is what makes the shipped choice reviewable later — and [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
-D1 amendment links here for exactly that. Adding a new decision to this file means adding it above this
-line, not editing the memo below.
+Both decisions this file was created for were answered on 2026-08-19 and shipped
+by 2026-08-20. **Adding a new decision means adding it above this line.**
 
 | | Decision | Answered | Shipped |
 |---|---|---|---|
 | **D2** | Close unscoped keyed reads → **option B** | 2026-08-19 | PR #95 · [ADR-034](adr/034-auth-boundary-fails-open.md) amendment |
-| **D1** | Auditor access to withdrawal reasons → **option C** | 2026-08-19 | 2026-08-20 · [ADR-036](adr/036-auditor-audit-log-viewer.md) amendment |
+| **D1** | Auditor access to withdrawal reasons → **option C** (reveal on request, separately audited) | 2026-08-19 | 2026-08-20 · [ADR-036](adr/036-auditor-audit-log-viewer.md) amendment |
 
-Both were the recommended defaults, and **the coupling was respected**: D2 removed `reveal_service`'s
-`actor = "api"` fallback, so D1=C's audited reveal carries a real principal rather than an unattributable
-one. D2 answered first is what made D1 worth building.
+Both were the recommended defaults, and **the coupling was respected**: D2 removed
+`reveal_service`'s `actor = "api"` fallback, so D1=C's audited reveal carries a
+real principal rather than an unattributable one. D2 answering first is what made
+D1 worth building.
 
-**The process lesson worth more than either answer.** These two sat as bare "blocked" lines for five
-sessions, each of which re-noted the block and moved on. What unstuck them was writing the options down
-with a recommended default — after which both were answered in a day, both as the default. See CLAUDE.md's
-economy rule 3: "blocked on a human" is not a terminal state, and the block is the work.
+The full memo — the options not taken, the PIPEDA/FIPPA reasoning, and the
+retroactivity asymmetry that drove the answer — is archived at
+[OPEN_DECISIONS-d1-d2-memo.md](archive/OPEN_DECISIONS-d1-d2-memo.md).
 
----
+## Two lessons worth more than either answer
 
-## The memo, as written before either was answered
+**"Blocked on a human" is not a terminal state.** These sat as bare *blocked*
+lines for five sessions, each of which re-noted the block and moved on. What
+unstuck them was writing the options down with a **recommended default** — after
+which both were answered in a day, both as the default. See `CLAUDE.md` §Economy 3.
 
----
+**A memo that reasons about disclosing a field should check the field is ever
+populated.** The memo priced option C at "moderate — one route plus an audit
+action". The route was indeed that. What it missed is that **the withdraw form
+never collected a reason at all**, so C as scoped would have shipped a control
+with nothing to reveal, forever — all five withdrawals in the live database had a
+NULL `details`. Found by running the product, not by 5,448 tests.
 
-## D1 — Should an auditor be able to read résumé withdrawal reasons?
+## Decisions that are open elsewhere
 
-**Owner:** whoever owns privacy policy for the pilot. **Status: ANSWERED 2026-08-19 (D1 = option C) and SHIPPED 2026-08-20** — see [ADR-036](adr/036-auditor-audit-log-viewer.md)'s D1 amendment for what was built, the two defects the work surfaced, and its own accepted residuals. **Formerly blocked:** [ADR-036](adr/036-auditor-audit-log-viewer.md)'s
-named residual; the auditor role is otherwise complete and usable.
+Two live product decisions are tracked in [ROADMAP.md](ROADMAP.md), not here,
+because each is attached to work rather than standing alone:
 
-### What the code does today
-
-`audit_log.details` is the only free-text column in the table. Two writers populate it, and
-`redact_audit_details` is an **allowlist scoped by action**, so anything unclassified is withheld by default:
-
-| Action | Payload | Today |
-|---|---|---|
-| `role_changed` | `{"old_role", "new_role"}` | Disclosed — enum-shaped, non-PII |
-| `withdraw_resume` | `{"reason": <operator prose>}` | **Withheld** |
-
-Withheld is not dropped: the auditor is told a value *exists* and is not shown it, so they can tell "no
-reason recorded" from "a reason I may not see."
-
-### Why it is genuinely contested
-
-A withdrawal reason is free text a staff member typed about a **named, identifiable candidate** — an opinion
-about an identifiable individual, which is personal information under PIPEDA/FIPPA. Blanket disclosure widens
-the readership of unstructured PII to a role that exists to audit *access*.
-
-Against that: an auditor investigating a wrongful-withdrawal complaint cannot do the job without it. Telling
-an auditor a reason exists and refusing to show it is exactly the "implies a capability that does not exist"
-problem ADR-036 was written to avoid.
-
-### The asymmetry that should drive the answer
-
-**This choice is retroactive, and only in one direction.** Operator prose already sitting in `audit_log` was
-typed under today's withheld expectation. Choosing to disclose later changes the disclosure status of data
-already collected — you cannot re-obtain the context in which it was written. Choosing to withhold after
-disclosing does not un-see anything either. So the cheap, reversible move is to stay closed for existing rows
-and open deliberately for new ones.
-
-### Options
-
-| | Option | Cost | Consequence |
-|---|---|---|---|
-| **A** | Keep withheld (status quo) | none | Auditor cannot investigate a withdrawal complaint without an engineer running SQL — the exact unaudited-read problem ADR-036 closed elsewhere |
-| **B** | Disclose to auditors | ~1 line in the allowlist | Every reason ever typed, including pre-decision rows, becomes auditor-readable forever. Retroactive |
-| **C** ⭐ | Reveal on request, separately audited | moderate — one route + audit action, mirroring the existing PII reveal | Auditor gets the reason when they need it; each read is attributable and logged. Purpose-limited rather than blanket |
-| **D** | Structured reason codes; free text separate | write-path change + backfill | Best long-term hygiene; largest change; does nothing for existing rows |
-
-### Recommended default: C
-
-The codebase **already has this exact pattern** for this exact class of data — candidate PII behind an
-audited reveal (`reveal_service`). C reuses a mechanism the product already defends, keeps the auditor's
-remit intact, and produces the record that makes the access defensible under PIPEDA/FIPPA: purpose-limited
-and logged, rather than a standing grant.
-
-**If you pick A instead:** no code change; keep the UI's "withheld" label; accept that a withdrawal complaint
-escalates to an engineer. Reasonable if the pilot is short and no complaint is likely.
-**If you pick B:** cheapest, but decide explicitly whether it applies to rows written before today — the
-honest implementation would disclose only rows written after the policy changed, which is most of C's work
-anyway.
-**If you pick D:** worth it only if withdrawal reasons are expected to be analysed in aggregate later.
-
-
-## Coupling now resolved
-
-D1's option C — reveal on request, separately audited — rests on the reveal being **attributable**. Before
-2026-08-19, `reveal_service` sourced its actor from the CAS session identity and fell back to the literal
-`"api"` when no identity resolved. D2 = option B (2026-08-19) closes that fallback case — every read now
-requires a real principal — so D1=C's audited reveal will carry a real actor `(actor_kind='user', actor_id=...)`,
-not `actor='api'`.
-
-When D1=C is implemented: the reveal will be logged with the user who requested it, on the audit trail that
-is being read. Closure is complete.
-
-## Implementation — done
-
-D1 and D2 shipped on separate branches: D2 in PR #95 (2026-08-19), D1 on
-`feat/d1-audited-reason-reveal` (2026-08-20). Both ADRs carry their amendments.
-
-**One thing this memo got wrong, and it is worth keeping visible.** The memo priced option C at "moderate
-— one route + audit action". The route was indeed that. What it missed is that **the withdraw form never
-collected a reason at all**, so C as scoped would have shipped a control with nothing to reveal, forever —
-all five withdrawals in the live database have a NULL `details`. That was found by running the product,
-not by the test suite, and it is now part of the same branch. A memo that reasons about the disclosure of
-a field should check that the field is ever populated.
+- **Competency scoring** (ROADMAP open item 3) — `years × recency ×
+  ontology_weight` is a semantically odd model for "three years of interpersonal
+  skills, last used 2024". Owner: corpus owner + HR. It was deferred pending
+  pilot data; **there is now pilot data**, so the deferral has expired.
+- **Revoke-and-purge semantics** (ROADMAP open item 1, ADR-026 §4) — the repo's
+  first destructive PII operation. Needs an HR decision *and* its own security
+  review before any code.

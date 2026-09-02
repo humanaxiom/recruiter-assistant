@@ -1,3 +1,21 @@
+> **ARCHIVED 2026-08-27 — this describes the SEED TEMPLATE, not this product.**
+> It was inherited at `git clone` on 2026-07-10 and never rewritten. Do not follow
+> it. Its walkthrough uses the template's demo app: `POST /tasks`, task lineage,
+> `POST /gates/run`, a graph-memory dashboard, `GET /memory/similar` — **all of
+> which were deleted in Phase 0** (`CLAUDE.md` says so explicitly, and
+> `test_api.py`'s `DEMO_ROUTES` asserts their absence). It also names the wrong
+> model (`qwen2.5-coder:14b`), the wrong vector index (`artifact_embeddings`), and
+> stock ports (`:8000`, `:5000`, `:7474`) this repo deliberately does not publish.
+>
+> **Where to actually go:** [README.md](../../README.md) §"Quick start (fresh box)"
+> for bootstrap and the real `29xxx` ports, [CLAUDE.md](../../CLAUDE.md) for the
+> stack contract and gates, [HANDOFF.md](../../HANDOFF.md) for current state, and
+> `./scripts/verify.sh` for the gate suite. The 2026-08-07 outside review flagged
+> this file for exactly this reason ("retains template-era credentials, routes,
+> components, and ports").
+
+---
+
 # Developer Guide — Agent Harness v2
 
 > From `git clone` to your first agent-built feature merged to `main`. Offline-first Python stack (FastAPI · Neo4j · Postgres · Redis · arq · Flask) driven by AI subagents through Claude Code.
