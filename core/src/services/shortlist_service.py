@@ -59,7 +59,7 @@ from src.schemas.matching import (
     ShortlistEntry,
     ShortlistStateOut,
 )
-from src.schemas.resumes import ResumeParsed
+from src.schemas.resumes import ResumeParsed, metrics_invalidated_for
 from src.services import DbConn
 from src.services.pii import set_pii_key
 from src.services.redaction import (
@@ -400,12 +400,51 @@ _NOT_WITHDRAWN_SQL = (
     "NOT EXISTS (SELECT 1 FROM resumes r WHERE r.id = shortlist_entries.resume_id "
     "AND r.withdrawn_at IS NOT NULL)"
 )
+# SPONSOR 2026-09-02 §O2 / answer 4 — "Last but visible."
+#
+# Read-time, NEVER persisted onto the entry. A recruiter correcting a mis-set
+# declaration must see the list re-band on the next page load rather than after
+# a multi-minute regenerate, and the declaration keeps exactly one home so no
+# stale copy can disagree with it. (Contrast ``score_breakdown``, which caches
+# a rendered label and stays stale until the job is regenerated — ROADMAP §5.)
+#
+# The band is the PRIMARY sort key and merit rank the secondary one, IN THE
+# QUERY. Applying it in Python after the fetch would be wrong the moment
+# ``shortlist_top_percent`` caps the list: ineligible rows have to sink before
+# the cap applies, or the cap evicts eligible candidates to make room for
+# ineligible ones.
+#
+# ``FALSE`` sorts before ``TRUE`` in Postgres, so the plain boolean puts the
+# eligible/unknown rows first with no CASE needed.
+#
+# A CORRELATED SUBQUERY, deliberately, and NOT a join. The first attempt joined
+# ``resumes`` into this query and every integration test against a real
+# Postgres failed with ``AmbiguousColumnError: column reference "id" is
+# ambiguous`` — ``_ENTRY_COLS`` selects bare ``id``/``job_id``, and ``resumes``
+# has columns of both names. Qualifying them would not have been enough either:
+# the ``WHERE job_id = $1`` anchor is itself ambiguous under a join, and
+# ``list_for_job`` finds that exact substring by ``.replace`` to insert FU-6
+# row-scoping, so rewriting it would have broken the scoping silently.
+#
+# Adding no table to the FROM clause keeps every existing name unambiguous and
+# every anchor byte-identical. The subquery text is a single Python constant
+# used twice (projection + ordering) so the two can never disagree.
+#
+# The unit suite could not see this: it asserts on the SQL as a STRING. Only
+# ``verify.sh all`` against a real Postgres executes it.
+_WORK_AUTH_SUBQUERY = (
+    "(SELECT wa.work_authorization FROM resumes wa "
+    "WHERE wa.id = shortlist_entries.resume_id)"
+)
 _LIST_QUERY = (
-    f"SELECT {_ENTRY_COLS} FROM shortlist_entries "
-    f"WHERE job_id = $1 AND {_NOT_WITHDRAWN_SQL} ORDER BY rank ASC"
+    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization "
+    f"FROM shortlist_entries "
+    f"WHERE job_id = $1 AND {_NOT_WITHDRAWN_SQL} "
+    f"ORDER BY ({_WORK_AUTH_SUBQUERY} = 'not_eligible') ASC, rank ASC"
 )
 _GET_QUERY = (
-    f"SELECT {_ENTRY_COLS} FROM shortlist_entries "
+    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization "
+    f"FROM shortlist_entries "
     f"WHERE id = $1 AND {_NOT_WITHDRAWN_SQL}"
 )
 
@@ -424,7 +463,13 @@ _BLIND_COLS = (
     "AS _c_email, "
     "pgp_sym_decrypt(r.candidate_phone, current_setting('app.pii_key')) "
     "AS _c_phone, "
-    "r.parsed AS _c_parsed"
+    "r.parsed AS _c_parsed, "
+    # SPONSOR §O2 — deliberately NOT a `_c_` column. The `_c_` prefix marks
+    # fields popped before the response is built because they carry identity;
+    # this one is a screening attribute that must REACH the client, blind or
+    # not. A "Candidate C" banded last with no visible reason is exactly the
+    # unexplainable output answer 4 rules out.
+    "r.work_authorization"
 )
 # ADR-026 residual fix (FU-8 withdrawal) — these already JOIN resumes, so a plain
 # `r.withdrawn_at IS NULL` predicate suffices. Appended AFTER the
@@ -434,7 +479,11 @@ _BLIND_COLS = (
 _BLIND_LIST_QUERY = (
     f"SELECT {_BLIND_COLS} FROM shortlist_entries se "
     "JOIN resumes r ON r.id = se.resume_id "
-    "WHERE se.job_id = $1 AND r.withdrawn_at IS NULL ORDER BY se.rank ASC"
+    "WHERE se.job_id = $1 AND r.withdrawn_at IS NULL "
+    # SPONSOR §O2 — same band as the plain read; this path already joins
+    # resumes, so it reads `r` directly. Blind review hides IDENTITY, not
+    # screening state, so the band applies identically on a blind job.
+    "ORDER BY (r.work_authorization = 'not_eligible') ASC, se.rank ASC"
 )
 _BLIND_GET_QUERY = (
     f"SELECT {_BLIND_COLS} FROM shortlist_entries se "
@@ -914,12 +963,23 @@ SELECT
         AS candidate_email,
     pgp_sym_decrypt(r.candidate_phone, current_setting('app.pii_key'))
         AS candidate_phone,
-    r.parsed AS candidate_parsed
+    r.parsed AS candidate_parsed,
+    r.work_authorization,
+    -- SPONSOR §O3 -- "Identify whether a coverletter was included." Informational
+    -- only: it appears as a column and moves NO ordering. Same expression the
+    -- résumé list uses, and the partial index resumes_has_cover_idx covers it.
+    (r.cover_letter_blob_key IS NOT NULL OR r.cover_letter_text IS NOT NULL)
+        AS has_cover_letter
 FROM shortlist_entries s
 JOIN jobs j ON j.id = s.job_id
 JOIN resumes r ON r.id = s.resume_id
 WHERE s.job_id = $1 AND r.withdrawn_at IS NULL
-ORDER BY s.rank ASC
+-- SPONSOR §O2 -- the export is a shortlist view too, so it carries the SAME
+-- band as the on-screen list. A CSV that orders candidates differently from
+-- the page it was exported from is worse than no CSV: it is the artifact that
+-- gets mailed to the hiring committee, detached from the screen that would
+-- have corrected it.
+ORDER BY (r.work_authorization = 'not_eligible') ASC, s.rank ASC
 """
 # ADR-026 residual fix (FU-8 withdrawal) — the export is a shortlist view too,
 # so it must hide withdrawn candidates like list_for_job/get_one. The clause is
@@ -1200,6 +1260,13 @@ _CSV_FIELDS = [
     "resume_file",
     "job_title",
     "job_department",
+    # SPONSOR 2026-09-02 §O2 -- beside the score, because it QUALIFIES the
+    # score. A reader who sorts this CSV by score_final must still be able to
+    # see which rows the product says do not stand.
+    "work_authorization",
+    "metrics_invalidated",
+    # SPONSOR §O3 -- identified, never ranked. Informational only.
+    "has_cover_letter",
     "score_final",
     # Skill gap — the confidence headline, kept beside the score.
     "must_have_missing",
@@ -1255,6 +1322,16 @@ def shortlist_csv(rows: list[dict[str, Any]]) -> str:
                     "resume_file": r["original_filename"] or "",
                     "job_title": r["job_title"] or "",
                     "job_department": r["job_department"] or "",
+                    # SPONSOR §O2/§O3. ``or "unknown"`` never falls back to
+                    # "not_eligible" — silence is not an adverse declaration,
+                    # and this is the last boundary where that rule can break.
+                    "work_authorization": r.get("work_authorization") or "unknown",
+                    "metrics_invalidated": (
+                        "yes"
+                        if metrics_invalidated_for(r.get("work_authorization"))
+                        else "no"
+                    ),
+                    "has_cover_letter": "yes" if r.get("has_cover_letter") else "no",
                     "score_final": round(float(r["score_final"]), 4),
                     "must_have_missing": skills["must_have_missing"],
                     "skills_missing": skills["skills_missing"],
