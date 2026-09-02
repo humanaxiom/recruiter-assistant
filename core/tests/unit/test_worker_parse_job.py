@@ -109,7 +109,13 @@ async def test_missing_job_row_returns_missing() -> None:
 async def test_non_draft_status_returns_stale_and_llm_never_called(
     status: str,
 ) -> None:
-    conn = _make_conn({"description_raw": "Build things.", "status": status})
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": status,
+        }
+    )
     llm = MagicMock(chat_json=AsyncMock())
     embedder = MagicMock(embed=AsyncMock())
     ctx = _make_ctx(conn, llm, embedder)
@@ -126,7 +132,13 @@ async def test_non_draft_status_returns_stale_and_llm_never_called(
 @pytest.mark.asyncio
 async def test_llm_output_invalid_records_failure_and_enqueues_no_outbox_row() -> None:
     job_id = uuid4()
-    conn = _make_conn({"description_raw": "Build things.", "status": "draft"})
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
     llm = MagicMock(chat_json=AsyncMock(side_effect=LLMOutputInvalidError("bad json")))
     embedder = MagicMock(embed=AsyncMock())
     ctx = _make_ctx(conn, llm, embedder)
@@ -156,7 +168,11 @@ async def test_llm_output_invalid_records_failure_and_enqueues_no_outbox_row() -
 async def test_happy_path_records_parsed_with_the_extracted_jd() -> None:
     job_id = uuid4()
     conn = _make_conn(
-        {"description_raw": "Build the ranking pipeline.", "status": "draft"}
+        {
+            "description_raw": "Build the ranking pipeline.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
     )
     extracted = JDExtracted(
         title="Senior Backend Engineer",
@@ -192,7 +208,11 @@ async def test_happy_path_records_parsed_with_the_extracted_jd() -> None:
 async def test_happy_path_embeds_the_summary_text_exactly_once() -> None:
     job_id = uuid4()
     conn = _make_conn(
-        {"description_raw": "Build the ranking pipeline.", "status": "draft"}
+        {
+            "description_raw": "Build the ranking pipeline.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
     )
     extracted = JDExtracted(title="Senior Backend Engineer")
     llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
@@ -221,7 +241,11 @@ async def test_happy_path_embeds_the_summary_text_exactly_once() -> None:
 async def test_happy_path_outbox_payload_carries_job_parsed_event() -> None:
     job_id = uuid4()
     conn = _make_conn(
-        {"description_raw": "Build the ranking pipeline.", "status": "draft"}
+        {
+            "description_raw": "Build the ranking pipeline.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
     )
     extracted = JDExtracted(title="Senior Backend Engineer")
     embedding = [0.42] * 8
@@ -266,7 +290,11 @@ async def test_race_guard_stale_write_returns_stale_and_enqueues_no_outbox_row()
     happened — that would corrupt Phase 4's projection."""
     job_id = uuid4()
     conn = _make_conn(
-        {"description_raw": "Build the ranking pipeline.", "status": "draft"}
+        {
+            "description_raw": "Build the ranking pipeline.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
     )
     extracted = JDExtracted(title="Senior Backend Engineer")
     llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
@@ -306,7 +334,13 @@ async def test_summary_embed_permanent_failure_records_failure_and_returns_faile
     None
 ):
     job_id = uuid4()
-    conn = _make_conn({"description_raw": "Build things.", "status": "draft"})
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
     extracted = JDExtracted(title="Senior Backend Engineer")
     llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
     embedder = MagicMock(
@@ -338,7 +372,13 @@ async def test_summary_embed_permanent_failure_records_failure_and_returns_faile
 @pytest.mark.asyncio
 async def test_summary_embed_transient_failure_escapes_uncaught_for_arq_retry() -> None:
     job_id = uuid4()
-    conn = _make_conn({"description_raw": "Build things.", "status": "draft"})
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
     extracted = JDExtracted(title="Senior Backend Engineer")
     llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
     embedder = MagicMock(

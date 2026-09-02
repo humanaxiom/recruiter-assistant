@@ -34,6 +34,7 @@ from src.pipeline.llm import (
     LLMClient,
     LLMOutputInvalidError,
 )
+from src.pipeline.parsing import extract_manager_requirements
 from src.pipeline.skills import build_summary_text
 from src.prompts import load_prompt
 from src.schemas import JDExtracted
@@ -43,7 +44,12 @@ log = logging.getLogger(__name__)
 
 _MAX_REASON_CHARS = 1000
 
-_JOB_META_SQL = "SELECT description_raw, status FROM jobs WHERE id = $1"
+# SPONSOR 2026-09-02 §I4 -- the manager note rides along with the JD read. A
+# column the task never SELECTs is a column the extraction can never see, which
+# is the "written, stored, and read by nothing" shape this repo keeps shipping.
+_JOB_META_SQL = (
+    "SELECT description_raw, additional_requirements, status FROM jobs " "WHERE id = $1"
+)
 
 
 async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
@@ -103,6 +109,23 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
             )
             return "failed"
 
+        # SPONSOR §I4 — the manager's own additional requirements, extracted in
+        # a SECOND pass after the JD.
+        #
+        # After the JD extraction and before the embed, deliberately: it must
+        # not delay or endanger the JD, which is the job of record. The helper
+        # swallows an unparseable note (returning None, so the job still
+        # finishes) but lets a genuine model outage escape to arq's retry —
+        # "this note will not parse" and "the model is down" are different
+        # claims and must not share an outcome.
+        #
+        # None here means the requisition carried no usable note, which the
+        # ranking combine reads as "nobody asked" rather than "matched
+        # nothing". The distinction is the whole point of the field.
+        manager_requirements = await extract_manager_requirements(
+            llm, row["additional_requirements"]
+        )
+
         # The summary embed has the same failure split as the core LLM call:
         # a PERMANENT LLMOutputInvalidError (dim/count mismatch) is recorded on
         # the row and returns "failed" with NO outbox row — otherwise it escapes
@@ -129,6 +152,7 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
                 job_id=job_id,
                 extracted=extracted,
                 parsed_at=dt.datetime.now(dt.UTC),
+                manager_requirements=manager_requirements,
             )
             if not applied:
                 log.info(

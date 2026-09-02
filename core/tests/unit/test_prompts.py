@@ -30,6 +30,9 @@ _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "src" / "prompts" / "temp
 EXPECTED_PROMPT_NAMES: tuple[str, ...] = (
     "cover_letter_v1",
     "jd_extract_v1",
+    # SPONSOR 2026-09-02 §I4 -- the hiring manager's additional-requirements note,
+    # extracted as a SECOND pass so editing it never re-runs the JD parse.
+    "manager_prompt_v1",
     "resume_core_v1",
     "resume_skills_v2",
     "shortlist_evidence_v1",

@@ -43,6 +43,7 @@ from src.schemas.jobs import (
     JobListItem,
     JobOut,
     JobUpdate,
+    ManagerRequirements,
 )
 from src.services import DbConn, audit_service
 from src.services.bulk_ingest_service import (
@@ -64,6 +65,7 @@ _RECORD_PARSED_SQL = """
 UPDATE jobs SET
     description_parsed = $2::jsonb,
     parsed_at = $3,
+    additional_requirements_parsed = $4::jsonb,
     failure_reason = NULL,
     updated_at = now()
 WHERE id = $1 AND status = 'draft'
@@ -82,18 +84,33 @@ async def record_parsed(
     job_id: UUID,
     extracted: JDExtracted,
     parsed_at: dt.datetime,
+    manager_requirements: ManagerRequirements | None = None,
 ) -> bool:
     """Write the LLM extraction back onto the job row.
 
     Returns ``True`` when the UPDATE applied (the job was still 'draft'), and
     ``False`` when a concurrent transition already moved it — the worker treats
     ``False`` as "drop it on the floor, do not retry, do not enqueue".
+
+    SPONSOR §I4 — ``manager_requirements`` is the manager's own additional
+    requirements, written in the SAME statement as the JD extraction so the two
+    halves of one parse can never half-commit. It defaults to ``None`` so every
+    existing caller is untouched, and ``None`` writes SQL NULL: "this
+    requisition carried no usable note", which the ranking combine reads as
+    *nobody asked* rather than *asked and matched nothing*. Writing an empty
+    object instead would assert the manager listed nothing, which is a
+    different and false claim.
     """
     result = await conn.execute(
         _RECORD_PARSED_SQL,
         job_id,
         json.dumps(extracted.model_dump()),
         parsed_at,
+        (
+            json.dumps(manager_requirements.model_dump())
+            if manager_requirements is not None
+            else None
+        ),
     )
     applied = result.endswith(" 1")
     if not applied:
@@ -138,15 +155,19 @@ _JOB_COLS = (
     "description_raw, description_parsed, status, retention_days, "
     "shortlist_top_percent, "
     "blind_review, failure_reason, created_by, created_at, updated_at, "
-    "parsed_at, closed_at"
+    "parsed_at, closed_at, "
+    # SPONSOR 2026-09-02 §I4 -- both halves of the manager note. Reading back
+    # only the extraction would leave a human unable to check it against what
+    # was actually typed.
+    "additional_requirements, additional_requirements_parsed"
 )
 
 _INSERT_JOB_SQL = f"""
 INSERT INTO jobs (
     title, department, location, employment_type, seniority, min_years,
     description_raw, retention_days, shortlist_top_percent, blind_review,
-    created_by, description_sha256
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    created_by, description_sha256, additional_requirements
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING {_JOB_COLS}
 """
 
@@ -184,6 +205,7 @@ async def _insert_job(
         payload.blind_review,
         created_by,
         description_sha256,
+        payload.additional_requirements,
     )
 
 
