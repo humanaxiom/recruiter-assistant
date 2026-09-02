@@ -22,6 +22,8 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from src.schemas.resumes import WorkAuthorization
+
 EvidenceStatus = Literal["met", "partial", "missing"]
 
 # ADR-022 follow-up #2 — C0 controls (plus DEL) that must never reach the
@@ -197,7 +199,21 @@ class MatchWeights(BaseModel):
 
     structured: float = Field(default=0.6, ge=0, le=1)
     evidence: float = Field(default=0.3, ge=0, le=1)
-    motivation: float = Field(default=0.1, ge=0, le=1)
+    # SPONSOR 2026-09-02 §O3: "Identify whether a coverletter was included. But
+    # not affect ranking." This default moved 0.1 -> 0.0 on that instruction.
+    #
+    # The term is KEPT rather than deleted, and that is deliberate. Two reasons:
+    # every already-persisted ``score_breakdown`` jsonb on the pilot box carries
+    # a real motivation score, and deleting the field would orphan them; and a
+    # future requisition may legitimately want cover-letter motivation back, so
+    # this stays a per-job DEFAULT rather than a capability removal.
+    motivation: float = Field(default=0.0, ge=0, le=1)
+    # SPONSOR §I4, and the other half of the same instruction: the 10% taken off
+    # the cover letter is reassigned to how well the candidate answers the
+    # hiring manager's OWN stated requirements (``jobs.additional_requirements``).
+    #
+    # Sponsor's words: "Assign the 10% CL mark to this instead."
+    manager_prompt: float = Field(default=0.10, ge=0, le=1)
     skill: float = Field(default=0.40, ge=0, le=1)
     experience: float = Field(default=0.25, ge=0, le=1)
     education: float = Field(default=0.10, ge=0, le=1)
@@ -244,15 +260,51 @@ class MatchWeights(BaseModel):
     evidence_min_quote_chars: int = Field(default=16, ge=0)
     motivation_min_confidence: float = Field(default=0.7, ge=0, le=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_stamp_has_no_manager_prompt(cls, data: Any) -> Any:
+        """A weights stamp written before 2026-09-02 had NO manager-prompt term.
+
+        ``pipeline_meta.weights`` is a historical reproducibility stamp, read
+        back verbatim off a persisted ``shortlist_entries`` row and never
+        re-derived from current settings — explaining a historical score with
+        today's weights would be dishonest (see ``ShortlistEntry.pipeline_meta``).
+
+        Every such stamp on the live deployment reads
+        ``{structured: 0.6, evidence: 0.3, motivation: 0.1}`` with no
+        ``manager_prompt`` key at all. Give that payload the new field's 0.10
+        default and it sums to 1.10, the validator below rejects it, and the
+        API read path — which validates UNCAUGHT — 500s on every shortlist page
+        for every job ranked before this change. The unit suite caught this;
+        the pilot box would have caught it louder.
+
+        So: an input that names ``motivation`` but not ``manager_prompt`` is a
+        pre-feature payload, and its manager-prompt weight was genuinely zero.
+        That is a statement of fact about the stamp, not a fudge to get past a
+        validator. A caller writing NEW code that wants motivation weighted
+        must name both fields explicitly — which is what makes the two cases
+        distinguishable at all.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "motivation" in data and "manager_prompt" not in data:
+            return {**data, "manager_prompt": 0.0}
+        return data
+
     @model_validator(mode="after")
     def _sums_close_to_one(self) -> MatchWeights:
-        top = self.structured + self.evidence + self.motivation
+        # ``manager_prompt`` is inside this sum, not beside it. A weight that
+        # the sum validator does not count is a weight that can silently stop
+        # contributing — which is precisely the class of defect this repo keeps
+        # shipping behind a green suite.
+        top = self.structured + self.evidence + self.motivation + self.manager_prompt
         sub = (
             self.skill + self.experience + self.education + self.seniority + self.vector
         )
         if abs(top - 1.0) > 0.01:
             raise ValueError(
-                f"structured+evidence+motivation must sum to 1.0 (got {top:.3f})"
+                "structured+evidence+motivation+manager_prompt must sum to 1.0 "
+                f"(got {top:.3f})"
             )
         if abs(sub - 1.0) > 0.01:
             raise ValueError(
@@ -299,6 +351,22 @@ class ScoreBreakdown(BaseModel):
     vector: float = Field(ge=0, le=1)
     structured: float = Field(ge=0, le=1)
     motivation: float = Field(default=0.0, ge=0, le=1)
+    # SPONSOR §I4 — how well this candidate answers the hiring manager's own
+    # stated requirements, scored separately from the JD's. Defaults to 0.0 so
+    # every row persisted before this feature still validates.
+    manager_prompt: float = Field(default=0.0, ge=0, le=1)
+    # ADR-041's three-state measurement marker, applied to the new sub-score:
+    #
+    #   True  — the job carried a manager prompt and this candidate was scored
+    #           against it. A 0.0 is then a real measurement.
+    #   False — the job carried NO manager prompt, so the stored 0.0 came from
+    #           the absence of a question, not from a failure to answer it.
+    #   None  — the row predates this marker. Assert neither.
+    #
+    # Without it, "the manager asked for nothing" and "the candidate matched
+    # none of what the manager asked for" are the same stored number — the
+    # fabricated zero this repo has already shipped twice (ADR-040, ADR-041).
+    manager_prompt_measured: bool | None = None
     implied_experience: bool = False
     skill_contributions: list[SkillContribution] = Field(default_factory=list)
     # ROADMAP A6 (D1/D2). THREE states each, mirroring ``evidence_evaluated``
@@ -600,6 +668,40 @@ class ShortlistEntry(BaseModel):
     generated_at: dt.datetime
     blinded: bool = False
     display_label: str | None = None
+    # SPONSOR 2026-09-02 §O2 / answer 4 — "Last but visible. All candidates
+    # listed and marked. All other metrics are invalidated though, if candidate
+    # has no permit."
+    #
+    # Read from ``resumes.work_authorization`` at READ time by a join, NEVER
+    # folded into the persisted ``score_breakdown``. That is the load-bearing
+    # choice here: a recruiter correcting a mis-set flag must see the shortlist
+    # re-band immediately, not after a multi-minute regenerate. It also means
+    # the declaration has exactly one home, so a stale copy cannot disagree
+    # with it.
+    #
+    # Defaults to ``unknown`` — never ``not_eligible``. Absence of a
+    # declaration is not a negative declaration; reading it as one is what
+    # turns a lawful bona-fide screen into a decision on a protected ground.
+    work_authorization: WorkAuthorization = "unknown"
+    # DERIVED from ``work_authorization``, never accepted from a caller — see
+    # the validator below. Two fields that are permitted to disagree is how a
+    # candidate ends up displayed as "no work permit" beside an authoritative
+    # 78%, which is a number this product cannot stand behind.
+    metrics_invalidated: bool = False
+
+    @model_validator(mode="after")
+    def _derive_metrics_invalidated(self) -> ShortlistEntry:
+        """Force ``metrics_invalidated`` to track the declaration.
+
+        ``model_config`` is not frozen here, so this recomputes in place. Any
+        value a caller supplied is DISCARDED rather than validated against —
+        the flag is a projection of the declaration, and the only way to make
+        it impossible for the two to drift is to refuse to read the input.
+        """
+        object.__setattr__(
+            self, "metrics_invalidated", self.work_authorization == "not_eligible"
+        )
+        return self
 
 
 class JobMatchEntry(BaseModel):

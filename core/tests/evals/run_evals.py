@@ -162,6 +162,30 @@ Computes, against `fixtures/` + `thresholds.toml` -- EVERY key, none optional:
                                    instead; see fixtures/labels.json's
                                    skill_missing_must rationale and
                                    core/tests/evals/README_4c_twins.md.
+  [cover_letter_neutrality]
+    enforce = true              -- SPONSOR 2026-09-02 §O3: "Identify whether a
+    with_cover_letter_id           coverletter was included. But not affect
+    without_cover_letter_id        ranking." score_final(r04_morgan_lee) must
+                                   equal score_final(r16_rowan_castillo)
+                                   EXACTLY -- not within an epsilon. This is the
+                                   old [ordering_controls] `motivation` pair
+                                   INVERTED: it used to assert the cover letter
+                                   RAISES rank, which the sponsor now forbids,
+                                   so it was re-aimed rather than deleted (else
+                                   the new requirement would be gated by
+                                   nothing). Exact equality is the honest
+                                   assertion because round-6 finding F5 measured
+                                   these twins' embedding input as
+                                   BYTE-IDENTICAL (_build_summary_text reads no
+                                   cover_letter_chunks) and a motivation-blind
+                                   engine at exactly +0.000e+00 -- there is no
+                                   residual to tolerate. It is also strictly
+                                   stronger than the control it replaces, whose
+                                   rank-only half was satisfiable by tie-break
+                                   luck. A failure means a cover letter has
+                                   re-acquired ranking influence: motivation off
+                                   0.0, a new term reading the cover letter, or
+                                   _build_summary_text growing one.
   [pii]
     leak_check = true           -- no fixture's candidate name/email/phone may
                                    appear in embedding input or exported output.
@@ -486,6 +510,7 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
     # ── the gold anchor TEXT itself, through the real verifier ─────────────
     _assert_gold_anchor_text_survives_the_verifier(corpus, verify_fuzz)
 
+    # ── cover-letter neutrality is asserted after ordering_controls ────────
     # ── ordering_controls ──────────────────────────────────────────────────
     if thresholds["ordering_controls"]["enforce"]:
         min_gap = float(thresholds["ordering_controls"]["min_score_gap"])
@@ -501,6 +526,9 @@ def _run_corpus(corpus: Corpus, thresholds: dict[str, Any]) -> None:
                 f"ordering_controls[{pair['dimension']}]: gap {gap:.6e} < "
                 f"min_score_gap {min_gap:.6e}"
             )
+
+    # ── cover-letter NEUTRALITY (sponsor 2026-09-02 §O3) ───────────────────
+    _assert_cover_letter_does_not_move_the_score(by_id, thresholds)
 
     # ── must_have_miss_penalty is WIRED (review obligation on r18 alone) ───
     _assert_must_have_penalty_fires_on_r18(corpus, weights)
@@ -1274,6 +1302,50 @@ def _assert_bait_ranks_below_every_strong(
             f"keyword overlap over real evidence. Strong ranks: "
             f"{sorted(strong_ranks.values())}"
         )
+
+
+def _assert_cover_letter_does_not_move_the_score(
+    by_id: dict[str, Any], thresholds: dict[str, Any]
+) -> None:
+    """SPONSOR 2026-09-02 §O3 — "Identify whether a coverletter was included.
+    But not affect ranking."
+
+    This gate is the ``motivation`` ordering-control pair INVERTED, and the
+    inversion is the point. Until 2026-09-02 the corpus asserted that r04
+    (cover letter) must out-rank r16 (no cover letter) by >= min_score_gap.
+    The sponsor has since required the opposite, so an assertion that a cover
+    letter RAISES a score is now an assertion against the product's stated
+    behaviour. Deleting it would have left the new requirement ungated —
+    exactly the "invariant in prose with nothing enforcing it" this repo keeps
+    shipping. So it is re-aimed rather than removed.
+
+    The pair is uniquely suited to it. Round-6 finding F5 measured these twins'
+    embedding input as BYTE-IDENTICAL (``_build_summary_text`` embeds summary /
+    skills / experience / education and NOT ``cover_letter_chunks``), so their
+    vector sub-scores agree to the last bit and there is no residual to muddy
+    the comparison. A motivation-blind engine was measured at exactly
+    ``+0.000e+00`` on this pair. That makes EXACT equality — not "within some
+    epsilon" — the honest assertion, and an exact-equality gate cannot be
+    satisfied by luck the way the old ``rank(hi) < rank(lo)`` half could be
+    satisfied by a tie-break.
+
+    A non-zero difference here means a cover letter has re-acquired ranking
+    influence somewhere — through ``weights.motivation``, through a new term,
+    or through the embedding input growing a cover-letter field.
+    """
+    if not thresholds.get("cover_letter_neutrality", {}).get("enforce"):
+        return
+    hi = thresholds["cover_letter_neutrality"]["with_cover_letter_id"]
+    lo = thresholds["cover_letter_neutrality"]["without_cover_letter_id"]
+    with_cl, without_cl = by_id[hi], by_id[lo]
+    delta = with_cl.score_final - without_cl.score_final
+    assert delta == 0.0, (
+        f"cover_letter_neutrality: {hi} (cover letter) and {lo} (none) differ "
+        f"by {delta:.6e}. These twins are byte-identical apart from the cover "
+        "letter, so ANY difference means a cover letter is moving the ranking "
+        "— which sponsor requirement §O3 forbids. Check weights.motivation and "
+        "whether the embedding input has grown a cover-letter field."
+    )
 
 
 def _assert_must_have_penalty_fires_on_r18(corpus: Corpus, weights: Any) -> None:

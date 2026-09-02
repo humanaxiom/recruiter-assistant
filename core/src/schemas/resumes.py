@@ -165,6 +165,22 @@ class ResumeSkill(BaseModel):
 
 CoverLetterSentiment = Literal["positive", "neutral", "negative"]
 
+# SPONSOR 2026-09-02 §O2 — eligibility to work in Canada.
+#
+# THREE states, and the third one is the entire point. A boolean would collapse
+# "the candidate did not tell us" into "the candidate is not eligible", which
+# is an adverse automated decision made from silence, on an attribute adjacent
+# to national origin and immigration status (protected grounds under the BC
+# Human Rights Code). ``unknown`` is the default for every row and must never
+# band a candidate last.
+#
+# DECLARED, never inferred. There is deliberately no code path that asks the
+# model to guess this from résumé text: the signal is usually absent, and a
+# guess here is a fabricated finding on a protected ground. v1 takes it from
+# the recruiter; the candidate's own Taleo prescreen declaration replaces that
+# as the primary source once the CSV shape is settled (sponsor answer 1).
+WorkAuthorization = Literal["eligible", "not_eligible", "unknown"]
+
 
 class CoverLetterParsed(BaseModel):
     """LLM output for cover_letter_v1 (Feature 1). Stored in
@@ -454,6 +470,11 @@ class ResumeListItem(BaseModel):
     # résumé that has never been withdrawn. NOT PII — no redaction applies.
     withdrawn_at: dt.datetime | None = None
     withdrawal_reason: str | None = None
+    # SPONSOR §O2. Defaults to ``unknown`` so every pre-feature row reads back
+    # as undeclared rather than ineligible. NOT PII in the blind sense — it is
+    # a screening attribute, not an identifier, and it must stay visible under
+    # blind review for the band to be explainable.
+    work_authorization: WorkAuthorization = "unknown"
     # FU-7 §4 / ADR-030: True when this résumé's skills extraction fell back to
     # the keyword scan. Read from the `resumes.parsed` jsonb
     # (`COALESCE((parsed->>'degraded')::bool, false)`). Surfaces the incident's
@@ -498,6 +519,30 @@ class ResumeOut(BaseModel):
     # résumé that has never been withdrawn. NOT PII — no redaction applies.
     withdrawn_at: dt.datetime | None = None
     withdrawal_reason: str | None = None
+    # SPONSOR §O2 — see ``ResumeListItem.work_authorization``.
+    work_authorization: WorkAuthorization = "unknown"
+
+
+class WorkAuthorizationRequest(BaseModel):
+    """POST /resumes/{id}/work-authorization body (sponsor 2026-09-02 §O2).
+
+    A recruiter DECLARING what the candidate stated — not the system inferring
+    it. ``status`` is required and has no default on purpose: setting this is a
+    deliberate act with a consequence for the candidate, so the caller must
+    name the value rather than fall into one.
+
+    Setting it back to ``unknown`` is a legitimate correction and must always
+    be available; a mis-set ``not_eligible`` is exactly the mistake a human
+    needs to be able to undo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: WorkAuthorization
+    # Capped like ``WithdrawRequest.reason`` and ``JobAssigneeCreate.note`` —
+    # it rides verbatim into the audit row's ``details`` JSONB, so an unbounded
+    # value is an at-rest storage-growth vector.
+    note: str | None = Field(default=None, max_length=500)
 
 
 class WithdrawRequest(BaseModel):

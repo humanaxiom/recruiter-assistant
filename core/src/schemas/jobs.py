@@ -54,6 +54,20 @@ class JobCreate(BaseModel):
     # DEVIATION: hris defaulted this False; flipped to True to match the Phase 0
     # DDL default (blind-by-default, decision 4).
     blind_review: bool = True
+    # Sponsor 2026-09-02 §I4: the hiring manager's own special skills /
+    # experience, which "might or might not be in the job posting".
+    #
+    # Its OWN field, never folded into ``description_raw``. That field is the
+    # JD of record — the text of the posting as published — and a shortlist
+    # that cannot separate "the posting said this" from "the manager asked for
+    # this" cannot answer the question the defense pack exists to answer.
+    #
+    # Capped like every other free-text job field. 4000 chars is roughly a full
+    # screen of typed requirements and keeps the extraction prompt inside a
+    # measured budget; the ceiling is a token-budget hazard as much as a
+    # storage one. NOTE the budget is per-PROMPT — see the model profile, and
+    # do not inherit a literal from another call site.
+    additional_requirements: str | None = Field(default=None, max_length=4000)
 
 
 class JobUpdate(BaseModel):
@@ -74,6 +88,11 @@ class JobUpdate(BaseModel):
     # DEVIATION: dropped hris ``approval_required_2nd_review`` — review workflow cut.
     # A PATCH omit (None) means "unchanged".
     blind_review: bool | None = None
+    # Sponsor §I4. PATCH omit ⇒ "unchanged", same convention as every sibling.
+    # Editing this re-extracts ONLY the manager prompt — it must never re-run
+    # the JD parse, which can change the extracted requirements underneath a
+    # shortlist the recruiter is already reading.
+    additional_requirements: str | None = Field(default=None, max_length=4000)
 
 
 class JobTransition(BaseModel):
@@ -134,6 +153,13 @@ class JobOut(BaseModel):
     updated_at: dt.datetime
     parsed_at: dt.datetime | None
     closed_at: dt.datetime | None
+    # Sponsor §I4. Both default to None so a row written before this feature —
+    # every row on the pilot box today — reads back without the caller having
+    # to supply them. ``additional_requirements_parsed`` is None both for "no
+    # prompt was given" and "the prompt has not been extracted yet"; the two
+    # are distinguished by whether ``additional_requirements`` itself is set.
+    additional_requirements: str | None = None
+    additional_requirements_parsed: ManagerRequirements | None = None
 
 
 class JobReparseOut(BaseModel):
@@ -245,6 +271,38 @@ class Education(BaseModel):
     # Capped like every other LLM-emitted list on this shape: an uncapped list
     # is the same unbounded-JSONB hole as an uncapped string.
     fields: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ManagerRequirements(BaseModel):
+    """Strict schema the LLM must return for the hiring manager's own
+    "additional requirements" prompt (sponsor 2026-09-02 §I4).
+
+    Stored verbatim in ``jobs.additional_requirements_parsed`` (JSONB).
+
+    Deliberately reuses ``Skill`` — the SAME shape ``JDExtracted`` emits — so
+    the ranking engine never learns a second requirement representation. What
+    distinguishes a manager requirement from a JD requirement is not its shape
+    but its PROVENANCE, which is carried by which field it was extracted into
+    rather than by a flag on the skill itself.
+
+    ``must_have_skills`` is first and is where the extractor is told to put
+    anything unqualified: "special skills I am looking for" is a statement of
+    requirement, not of preference. The caps mirror ``JDExtracted``'s exactly —
+    an uncapped LLM-emitted list is the same unbounded-JSONB hole as an
+    uncapped string.
+
+    ``other_requirements`` holds statements that are not skills at all
+    ("willing to travel to Burnaby weekly", "must hold a Class 5 licence").
+    They are surfaced to the recruiter and ride into the evidence prompt, but
+    they are NOT scored as skills — a free-text condition has no ontology
+    weight and inventing one would be a fabricated number.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    must_have_skills: list[Skill] = Field(default_factory=list, max_length=50)
+    nice_to_have_skills: list[Skill] = Field(default_factory=list, max_length=50)
+    other_requirements: list[str] = Field(default_factory=list, max_length=20)
 
 
 class JDExtracted(BaseModel):

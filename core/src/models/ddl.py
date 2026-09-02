@@ -134,6 +134,8 @@ _STATEMENTS: tuple[str, ...] = (
         shortlist_top_percent INTEGER NOT NULL DEFAULT 100
                           CHECK (shortlist_top_percent BETWEEN 1 AND 100),
         blind_review      BOOLEAN NOT NULL DEFAULT TRUE,
+        additional_requirements        TEXT,
+        additional_requirements_parsed JSONB,
         failure_reason    TEXT,
         created_by        TEXT,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -184,6 +186,22 @@ _STATEMENTS: tuple[str, ...] = (
     # "no state" the instant the ALTER lands. The 1-value CHECK rides inline on
     # the ADD COLUMN (no ``ADD CONSTRAINT IF NOT EXISTS`` pre-15) — the whole
     # clause is skipped once the column exists, keeping it safely re-runnable.
+    # SPONSOR 2026-09-02 §I4 — the hiring manager's own "additional
+    # requirements" prompt, plus its extraction. Both nullable with NO default,
+    # so every pre-existing row reads back "no prompt was given" the instant
+    # the ALTER lands rather than an empty-string prompt that was never typed.
+    #
+    # The raw text is kept BESIDE its extraction, never instead of it: the
+    # extraction is what the engine scores, and the raw text is what a human
+    # reads when asking whether the extraction was faithful. Storing only the
+    # parse would make that question unanswerable.
+    #
+    # Deliberately NOT appended to ``description_raw``. That column is the JD
+    # of record — the posting as published — and a shortlist that cannot
+    # separate "the posting required this" from "the manager asked for this"
+    # cannot answer the question the defense pack exists to answer.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements_parsed JSONB",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state TEXT "
     "CHECK (shortlist_state IN ('awaiting_llm'))",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_reason TEXT",
@@ -266,6 +284,9 @@ _STATEMENTS: tuple[str, ...] = (
         cover_letter_text    BYTEA,
         cover_letter_parsed  JSONB,
         cover_letter_sha256  TEXT,
+        work_authorization   TEXT NOT NULL DEFAULT 'unknown'
+                             CHECK (work_authorization IN
+                                    ('eligible', 'not_eligible', 'unknown')),
         UNIQUE (job_id, sha256)
     )
     """,
@@ -291,6 +312,33 @@ _STATEMENTS: tuple[str, ...] = (
     # ``withdrawn_at IS NULL`` (not withdrawn) the instant the ALTER lands.
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawn_at TIMESTAMPTZ",
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS withdrawal_reason TEXT",
+    # SPONSOR 2026-09-02 §O2 — eligibility to work in Canada.
+    #
+    # ``NOT NULL DEFAULT 'unknown'`` rather than nullable, and that is the
+    # load-bearing choice: the default BACK-FILLS every existing row to
+    # ``unknown`` the instant the ALTER lands. A nullable column would leave
+    # ~200 live rows reading NULL, and every consumer would then have to
+    # remember that NULL means "undeclared" — one that forgot, and coerced
+    # falsy to "not eligible", would band real candidates last on a protected
+    # ground. The database refuses to represent that state at all.
+    #
+    # The three-value CHECK rides inline on the ADD COLUMN clause (there is no
+    # ``ADD CONSTRAINT IF NOT EXISTS`` pre-Postgres-15); the whole clause is
+    # skipped once the column exists, keeping the statement re-runnable. It is
+    # the enforcement that stops a typo'd fourth state from ever reaching a
+    # row — this repo's characteristic defect is an invariant stated in prose
+    # with nothing enforcing it, and a screening decision is not a place to
+    # repeat it.
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS work_authorization TEXT "
+    "NOT NULL DEFAULT 'unknown' CHECK (work_authorization IN "
+    "('eligible', 'not_eligible', 'unknown'))",
+    # The shortlist read bands on this column for every entry of a job, so the
+    # sort has to reach it without a heap scan per row.
+    """
+    CREATE INDEX IF NOT EXISTS resumes_work_authorization_idx
+        ON resumes (job_id, work_authorization)
+        WHERE work_authorization <> 'unknown'
+    """,
     # How many times `worker.reconcile.reconcile_stalled_parses` has re-queued
     # this row. Nullable with NO default so every pre-existing row reads back as
     # NULL and is COALESCEd to 0 — a row stranded since July gets a full quota

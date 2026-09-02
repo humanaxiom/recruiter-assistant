@@ -30,6 +30,7 @@ from src.schemas.jobs import (
     JobStatus,
     JobTransition,
     JobUpdate,
+    ManagerRequirements,
     RemotePolicy,
     Seniority,
     Skill,
@@ -71,6 +72,8 @@ from src.schemas.resumes import (
     ResumeStatusBreakdown,
     ResumeUploadResult,
     WithdrawRequest,
+    WorkAuthorization,
+    WorkAuthorizationRequest,
 )
 
 __all__ = [
@@ -93,6 +96,7 @@ __all__ = [
     "JobStatus",
     "JobTransition",
     "JobUpdate",
+    "ManagerRequirements",
     "RemotePolicy",
     "Seniority",
     "Skill",
@@ -117,6 +121,8 @@ __all__ = [
     "ResumeStatusBreakdown",
     "ResumeUploadResult",
     "WithdrawRequest",
+    "WorkAuthorization",
+    "WorkAuthorizationRequest",
     # matching
     "CoverLetterEvidence",
     "CoverLetterTheme",

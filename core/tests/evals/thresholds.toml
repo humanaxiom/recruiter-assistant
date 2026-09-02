@@ -398,7 +398,12 @@ enforce = true
 pairs = [
   { dimension = "education", higher_id = "r14_devon_ashworth", lower_id = "r11_skyler_brooks" },
   { dimension = "overqual", higher_id = "r15_cameron_whitfield", lower_id = "r13_quinn_delgado" },
-  { dimension = "motivation", higher_id = "r04_morgan_lee", lower_id = "r16_rowan_castillo" },
+  # REMOVED 2026-09-02 (sponsor §O3): { dimension = "motivation",
+  # higher_id = "r04_morgan_lee", lower_id = "r16_rowan_castillo" }.
+  # The sponsor requires a cover letter to be IDENTIFIED but not to rank, so an
+  # assertion that it raises a score now asserts against the product. The pair
+  # is not dropped — it moved to [cover_letter_neutrality] below, INVERTED, and
+  # gates the new requirement instead of the old one. See that block.
   { dimension = "skill_missing_must", higher_id = "r01_casey_rivera", lower_id = "r18_casey_rivera_missing_must_have" },
   { dimension = "recency", higher_id = "r19_jamie_okafor_recency_twin", lower_id = "r10_jamie_okafor" },
 ]
@@ -476,3 +481,36 @@ max_score_delta = 1e-9
 # Placeholder -- added in Phase 4d once match_resume_to_jobs / reverse_match_job
 # land. Will gate JobMatchEntry ranking quality the same way precision_at_k
 # gates ShortlistEntry ranking quality.
+
+[cover_letter_neutrality]
+# SPONSOR REQUIREMENT 2026-09-02 §O3, verbatim: "Identify whether a coverletter
+# was included. But not affect ranking."
+#
+# This block is the old [ordering_controls] `motivation` pair, INVERTED. It used
+# to assert that r04 (cover letter) out-ranks r16 (none) by >= min_score_gap;
+# the sponsor now requires exactly the opposite, so the pair was re-aimed rather
+# than deleted. Deleting it would have left the NEW requirement gated by
+# nothing, which is this repo's characteristic defect (an invariant stated in
+# prose with nothing enforcing it) reintroduced on the way to fixing something
+# else.
+#
+# WHY EXACT EQUALITY AND NOT AN EPSILON. Round-6 finding F5 measured these two
+# twins' embedding input as BYTE-IDENTICAL: `_build_summary_text`
+# (core/src/worker/resume_tasks.py) embeds summary / skills / experience /
+# education and NOT `cover_letter_chunks`, which is the only field they differ
+# in. Their vector sub-scores are therefore equal to the last bit, and the same
+# finding measured a motivation-blind engine on this pair at exactly
+# +0.000e+00. There is no residual to tolerate, so tolerating one would only
+# create room for a real regression to hide in.
+#
+# It is also strictly stronger than the control it replaces. The old pair's
+# `rank(hi) < rank(lo)` half was satisfiable by tie-break luck (F5's whole
+# finding); an exact-equality assertion is not satisfiable by any tie-break.
+#
+# WHAT A FAILURE MEANS. A cover letter has re-acquired ranking influence: either
+# `weights.motivation` moved off 0.0, or a new scoring term reads the cover
+# letter, or `_build_summary_text` grew a cover-letter field and the twins are
+# no longer byte-identical. All three are real defects against §O3.
+enforce = true
+with_cover_letter_id = "r04_morgan_lee"
+without_cover_letter_id = "r16_rowan_castillo"

@@ -281,8 +281,13 @@ _EVIDENCE_K = 15
 # blocker #10). Production callers pass settings.match_reverse_evidence_k.
 _REVERSE_EVIDENCE_K = 10
 # Combine weights for reverse match when evidence is skipped: rank purely on the
-# structured score. Validator requires the top three to sum to 1.0.
-_STRUCTURED_ONLY_WEIGHTS = MatchWeights(structured=1.0, evidence=0.0, motivation=0.0)
+# structured score. The validator requires the top-level blend to sum to 1.0,
+# and ``manager_prompt`` (sponsor 2026-09-02 §I4) is part of that sum — it is
+# pinned to 0.0 here for the same reason ``evidence`` and ``motivation`` are:
+# this is the "structured only" blend by definition.
+_STRUCTURED_ONLY_WEIGHTS = MatchWeights(
+    structured=1.0, evidence=0.0, motivation=0.0, manager_prompt=0.0
+)
 
 
 # ---------------- job loader ----------------

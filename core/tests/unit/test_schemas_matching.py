@@ -79,7 +79,12 @@ CUT_MATCHING: tuple[str, ...] = (
 EXPECTED_DEFAULTS: tuple[tuple[str, float], ...] = (
     ("structured", 0.6),
     ("evidence", 0.3),
-    ("motivation", 0.1),
+    # SPONSOR 2026-09-02 §O3: a cover letter is identified but must NOT rank,
+    # so this default moved 0.1 -> 0.0 and the 10% it carried moved to
+    # ``manager_prompt`` (§I4). The old pin was correct for the old product
+    # decision; the decision changed, not the test.
+    ("motivation", 0.0),
+    ("manager_prompt", 0.10),
     ("skill", 0.40),
     ("experience", 0.25),
     ("education", 0.10),
@@ -221,7 +226,12 @@ def test_matchweights_education_field_fuzz_does_not_break_sums_to_one_validator(
     still construct cleanly and the sums must be untouched."""
     weights = MatchWeights(education_field_fuzz=0.99)
     assert weights.education_field_fuzz == 0.99
-    top = weights.structured + weights.evidence + weights.motivation
+    top = (
+        weights.structured
+        + weights.evidence
+        + weights.motivation
+        + weights.manager_prompt
+    )
     sub = (
         weights.skill
         + weights.experience
