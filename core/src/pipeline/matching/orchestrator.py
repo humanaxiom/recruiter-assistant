@@ -57,6 +57,7 @@ from src.pipeline.llm import (
     LLMUnavailableError,
 )
 from src.pipeline.matching.stages import (
+    _combine_final,
     _CombineInput,
     _evidence_completeness,
     _motivation_score,
@@ -1181,6 +1182,9 @@ class RankInput:
     structured: float
     breakdown: ScoreBreakdown
     evidence: EvidenceObject | None
+    # SPONSOR 2026-09-02 §I4 -- see ``_CombineInput.manager_prompt``. ``None``
+    # means the job carried no prompt and the term is renormalised away.
+    manager_prompt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1205,12 +1209,23 @@ def run_match(
     for c in inputs:
         completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)
-        final = (
-            weights.structured * c.structured
-            + weights.evidence * completeness
-            + weights.motivation * motivation
+        # SAME blend helper as ``stage4_combine`` -- not a second copy of the
+        # arithmetic. The two formulas drifting is exactly how a weight goes
+        # unapplied on one path only.
+        final = _combine_final(
+            structured=c.structured,
+            evidence_completeness=completeness,
+            motivation=motivation,
+            manager_prompt=c.manager_prompt,
+            weights=weights,
         )
-        breakdown = c.breakdown.model_copy(update={"motivation": motivation})
+        breakdown = c.breakdown.model_copy(
+            update={
+                "motivation": motivation,
+                "manager_prompt": c.manager_prompt or 0.0,
+                "manager_prompt_measured": c.manager_prompt is not None,
+            }
+        )
         scored.append(
             RankedMatch(
                 resume_id=c.resume_id,

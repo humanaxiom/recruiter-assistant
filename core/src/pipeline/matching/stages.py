@@ -588,6 +588,16 @@ class _CombineInput(Generic[_E]):
     structured: float
     breakdown: ScoreBreakdown
     evidence: _E | None
+    # SPONSOR 2026-09-02 §I4 — how well this candidate answers the hiring
+    # manager's own stated requirements, in [0, 1].
+    #
+    # ``None`` means the JOB CARRIED NO PROMPT, which is a different fact from
+    # a measured 0.0 and must not cost the candidate anything. When it is
+    # ``None`` the term is renormalised away (see ``_combine_final``) rather
+    # than multiplied by zero — otherwise every candidate on a requisition
+    # whose manager typed nothing would silently lose the 10% this weight
+    # carries, for a question nobody asked.
+    manager_prompt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -601,6 +611,55 @@ class _CombineEntry(Generic[_E]):
     evidence: _E | None
 
 
+def _combine_final(
+    *,
+    structured: float,
+    evidence_completeness: float,
+    motivation: float,
+    manager_prompt: float | None,
+    weights: MatchWeights,
+) -> float:
+    """The top-level blend, in ONE place.
+
+    Every weight ``MatchWeights`` declares in its sums-to-1.0 validator is
+    multiplied in here. That coupling used to be implicit, and it broke the
+    moment a weight was added: ``manager_prompt`` was declared, validated and
+    surfaced, and the combine never read it — so every ``score_final`` came out
+    uniformly 10% low. Uniform deflation moves no candidate relative to another,
+    so the ordering-based eval gate stayed green.
+    ``tests/unit/test_top_blend_is_fully_applied.py`` now asserts a perfect
+    candidate scores exactly 1.0, which fails on any unapplied term.
+
+    **An unasked question scores 0.0 and is DISCLOSED, not renormalised away.**
+    ``manager_prompt is None`` means the requisition carried no prompt, so the
+    term contributes nothing and every candidate on that job is uniformly 10%
+    below a theoretical 1.0. That is deliberate, and it is the conservative
+    choice of two:
+
+    * It reproduces EXACTLY the behaviour that shipped before this term
+      existed. ``motivation`` previously held this 0.10 and a candidate with no
+      cover letter scored 0.0 on it, so a job with no prompt now scores
+      byte-identically to the same job last week. No live shortlist moves.
+    * Renormalising the surviving weights is the *better* answer and it is
+      **not ours to make**. ROADMAP §5 records it as open and owned by HR —
+      "renormalising the remaining sub-weights when a dimension is unmeasurable
+      is open, and needs the same HR decision". Quietly settling it inside a
+      change about something else is how a hiring policy gets rewritten by an
+      implementation detail.
+
+    The fabricated zero is therefore not fixed here — it is **disclosed**, via
+    ``ScoreBreakdown.manager_prompt_measured = False``. That is precisely the
+    ADR-040/ADR-041 pattern: when a number came from the absence of a question
+    rather than from merit, say so on screen rather than silently adjust it.
+    """
+    return (
+        weights.structured * structured
+        + weights.evidence * evidence_completeness
+        + weights.motivation * motivation
+        + weights.manager_prompt * (manager_prompt or 0.0)
+    )
+
+
 def stage4_combine(
     candidates: Iterable[_CombineInput[_E]], weights: MatchWeights
 ) -> list[_CombineEntry[_E]]:
@@ -609,15 +668,25 @@ def stage4_combine(
     for c in candidates:
         evidence_completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)
-        final = (
-            weights.structured * c.structured
-            + weights.evidence * evidence_completeness
-            + weights.motivation * motivation
+        final = _combine_final(
+            structured=c.structured,
+            evidence_completeness=evidence_completeness,
+            motivation=motivation,
+            manager_prompt=c.manager_prompt,
+            weights=weights,
         )
         # Surface the deterministic motivation sub-score in the breakdown so the
         # cover-letter contribution is auditable (0.0 when no cover letter /
-        # weight off — leaves the rank unchanged).
-        breakdown = c.breakdown.model_copy(update={"motivation": motivation})
+        # weight off — leaves the rank unchanged). ``manager_prompt`` rides
+        # alongside it with ADR-041's three-state marker: False says the stored
+        # 0.0 came from the absence of a question, not from a failure to answer.
+        breakdown = c.breakdown.model_copy(
+            update={
+                "motivation": motivation,
+                "manager_prompt": c.manager_prompt or 0.0,
+                "manager_prompt_measured": c.manager_prompt is not None,
+            }
+        )
         entries.append(
             _CombineEntry(
                 resume_id=c.resume_id,
