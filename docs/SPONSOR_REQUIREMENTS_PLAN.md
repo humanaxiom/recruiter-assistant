@@ -40,6 +40,29 @@ session should expect rather than because they were interesting:
 
 - **The 10% move nearly broke every existing shortlist page.** `pipeline_meta.weights` is a historical stamp read back verbatim off each ranked row, and the read path validates *uncaught*. Every stamp on the pilot box carries `motivation: 0.1` and no `manager_prompt` key; the new field's 0.10 default made those sum to 1.10 → a 500 on every shortlist page for every job ranked before the change. Handled by a `mode="before"` validator that reads "names `motivation`, does not name `manager_prompt`" as a pre-feature stamp whose manager-prompt weight was genuinely zero. A payload naming both gets no forgiveness.
 - **The eval corpus asserted the opposite of §O3.** An ordering control required that the cover-letter twin out-rank its twin. It went red, correctly. It was **inverted, not deleted** — the pair now asserts the two scores are *exactly* equal, which is strictly stronger than the control it replaced (whose rank-only half a prior finding had already shown was satisfiable by tie-break luck).
+- **The new weight was declared, validated, and applied by nothing.** `manager_prompt = 0.10` passed its sums-to-1.0 validator and was surfaced on the breakdown, but neither combine site multiplied it in — so the blend actually applied summed to 0.9 and every `score_final` came out uniformly 10% low. **No gate could see it:** the deflation is uniform, so it reorders nobody, and `ranking-evals` is an ordering gate. Fixed, with a guard that drives every sub-score to 1.0 and asserts `score_final == 1.0` — shaped to catch the *next* unapplied weight without anyone remembering to update it.
+
+### ⚠️ One decision taken by default that the sponsor may want to overturn
+
+**A job with no manager prompt scores 0.0 on that term, so its candidates sit
+10% below a theoretical 1.0.** The alternative is to renormalise the surviving
+weights back to 1.0.
+
+Renormalising is arguably the better answer, and it was deliberately *not*
+taken, for two reasons:
+
+1. **It is a recorded open decision owned by HR**, not by this change. ROADMAP §5: *"Renormalising the remaining sub-weights when a dimension is unmeasurable is open, and needs the same HR decision as item 3."* Settling it inside a change about something else is how a hiring policy gets rewritten by an implementation detail.
+2. **Leaving it reproduces exactly what shipped before.** `motivation` held this same 0.10, and a candidate with no cover letter scored 0.0 on it — so a job with no prompt now scores byte-identically to the same job last week. **No live shortlist moves.** The pre-existing weighted-sum test passing unchanged is the evidence.
+
+The mitigation is disclosure rather than adjustment, per ADR-040/041:
+`manager_prompt_measured = False` marks the zero as "nobody asked" rather than
+"the candidate matched nothing", so the explanation panel can say so. The
+deflation is also pinned as ordering-neutral by test.
+
+**If the sponsor wants the numbers to read as percentages of an achievable
+maximum**, renormalisation is a small change in one function — but it moves
+every displayed score on every job without a prompt, and that is a decision to
+take deliberately.
 
 ---
 

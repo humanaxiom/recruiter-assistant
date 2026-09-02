@@ -82,19 +82,25 @@ Still open alongside it, and neither is superseded:
 are in, the prompt and worker are not) → the hris Taleo port (§2.3 of the plan)
 → `FLASK_SECRET_KEY` (gates the document-links slice) → notifications.
 
-**Three things a future session must not rediscover the hard way:**
+**Four things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
    pre-existing stamp fail its sum validator — a 500 on every shortlist page for
    every job ranked before the change. There is now a `mode="before"` shim and a
    regression test; do not remove either.
-2. **The eval corpus had a control asserting a cover letter RAISES rank.** It
+2. **A new weight can be declared, validated, and applied by nothing.**
+   `manager_prompt` passed its sums-to-1.0 validator and neither combine site
+   multiplied it in -- every score came out 10% low, and no gate could see it
+   because uniform deflation reorders nobody while `ranking-evals` is an
+   ORDERING gate. `test_top_blend_is_fully_applied.py` now asserts a perfect
+   candidate scores exactly 1.0. Do not delete it to "simplify".
+3. **The eval corpus had a control asserting a cover letter RAISES rank.** It
    was inverted into `[cover_letter_neutrality]` (exact score equality), not
    deleted. The threshold key set is a **three-way contract** —
    `thresholds.toml`, `run_evals.py`, `.claude/agents/ranking-evals.md` — plus
    `labels.json` and `_THRESHOLD_KEYS`. All five move together.
-3. **Do not JOIN `resumes` into the shortlist read.** `_ENTRY_COLS` selects bare
+4. **Do not JOIN `resumes` into the shortlist read.** `_ENTRY_COLS` selects bare
    `id`/`job_id`, which `resumes` also has, so a join makes them ambiguous and
    every non-blind integration test fails; `WHERE job_id = $1` is also the
    `.replace` anchor `list_for_job` uses for FU-6 row scoping. The band uses a
