@@ -132,6 +132,63 @@
   </div>
   {% endif %}
 
+  {% if is_writer %}
+  {# SPONSOR 2026-09-02 §O2 — the work-authorization declaration.
+
+     This control is the whole reason the field is usable. The roadmap records
+     a defect class the gates are structurally blind to: "an ABSENCE — a form
+     input that was never rendered, which no mutation of existing code can make
+     appear." The withdraw REASON was exactly that for months (the route read
+     it, the backend accepted it, no form ever collected it, every live row
+     recorded None). A screening column with no way for a recruiter to set it
+     would be the same bug, on a field that decides whether a real person is
+     ranked at all.
+
+     Rendered ALONGSIDE the withdraw/reinstate block, not inside it — a
+     candidate's eligibility is orthogonal to whether they have withdrawn, and
+     nesting it would hide the control exactly when a withdrawn candidate needs
+     correcting. Hence its own CSRF slot (`action="work_auth"`).
+
+     The three radios are deliberately equal-weight, with "Not recorded" FIRST
+     and pre-selected when nothing has been declared. A UI that defaults to, or
+     visually privileges, "not eligible" would nudge a recruiter toward an
+     adverse finding on a protected-adjacent ground. #}
+  <div class="work-auth-block">
+    <form method="post"
+          action="{{ url_for('resume_work_authorization', resume_id=resume.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ work_auth_csrf_token }}">
+      <fieldset class="work-auth-fieldset">
+        <legend class="label">Eligible to work in Canada</legend>
+        {% set current = resume.work_authorization or 'unknown' %}
+        {% for value, caption in [
+             ('unknown', 'Not recorded'),
+             ('eligible', 'Eligible'),
+             ('not_eligible', 'Not eligible'),
+           ] %}
+        <label class="work-auth-option">
+          <input type="radio" name="status" value="{{ value }}"
+                 {% if current == value %}checked{% endif %}>
+          {{ caption }}
+        </label>
+        {% endfor %}
+        <label class="label" for="work-auth-note">Note (optional)</label>
+        <input class="input" type="text" id="work-auth-note" name="note"
+               maxlength="500"
+               placeholder="e.g. confirmed on the application form">
+        <p class="hint">
+          Record what the <strong>candidate declared</strong> — this is never
+          inferred from their résumé. A candidate marked <em>not eligible</em>
+          is ranked last and their scores are shown as not applicable; nothing
+          is deleted and this can be changed back at any time. Every change is
+          recorded against your name.
+        </p>
+        <button type="submit" class="btn btn-secondary btn-sm">
+          Save declaration</button>
+      </fieldset>
+    </form>
+  </div>
+  {% endif %}
+
   {% if parsed and parsed.summary %}
   <p class="muted">{{ parsed.summary }}</p>
   {% endif %}

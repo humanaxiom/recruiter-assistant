@@ -182,6 +182,25 @@ CoverLetterSentiment = Literal["positive", "neutral", "negative"]
 WorkAuthorization = Literal["eligible", "not_eligible", "unknown"]
 
 
+def metrics_invalidated_for(status: object) -> bool:
+    """Do this candidate's ranking metrics still stand? (sponsor answer 4)
+
+    THE single definition of that rule. It is a one-line comparison, which is
+    exactly why it wants a home: it is needed by ``ShortlistEntry`` (for the
+    screen and the API), by the CSV export, and by anything added later, and
+    the failure mode of inlining it is not a crash but a DISAGREEMENT — a
+    candidate shown as banded on the page and un-banded in the file mailed to
+    the hiring committee, or the reverse. This repo has shipped that shape
+    before (``shortlist_entries.score_breakdown`` caching a rendered label
+    that then went stale, ROADMAP §5).
+
+    Note what it does NOT do: ``unknown`` and ``eligible`` both return False.
+    Only an explicit ``not_eligible`` invalidates. Anything that treats a
+    falsy/missing value as invalidating would band candidates on silence.
+    """
+    return status == "not_eligible"
+
+
 class CoverLetterParsed(BaseModel):
     """LLM output for cover_letter_v1 (Feature 1). Stored in
     resumes.cover_letter_parsed (jsonb). Lightweight: the raw text plus

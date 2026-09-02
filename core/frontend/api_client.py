@@ -515,6 +515,31 @@ def withdraw_resume(
     return response.json()
 
 
+def set_work_authorization(
+    resume_id: UUID,
+    *,
+    status: str,
+    note: str | None = None,
+    client: httpx.Client | None = None,
+) -> Any:
+    """AUDITED. ``POST /resumes/{id}/work-authorization`` (sponsor 2026-09-02
+    §O2) — records the candidate's Canadian work-authorization declaration and
+    returns the updated ``ResumeOut``. Same shape as :func:`withdraw_resume`:
+    a dedicated per-résumé POST, the same typed error mapping.
+
+    ``status`` is passed through verbatim rather than validated here; the
+    backend's ``WorkAuthorizationRequest`` is the one place the legal values
+    live, and duplicating the enum in the frontend is how the two drift.
+    """
+    response = _request(
+        "POST",
+        f"/resumes/{resume_id}/work-authorization",
+        json={"status": status, "note": note},
+        client=client,
+    )
+    return response.json()
+
+
 def reinstate_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     """AUDITED. ``POST /resumes/{id}/reinstate`` (ADR-026/FU-8) — clears the
     withdrawal, returning the résumé to shortlist eligibility, and returns the

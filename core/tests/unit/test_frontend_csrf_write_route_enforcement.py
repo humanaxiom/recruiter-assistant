@@ -174,7 +174,7 @@ def test_hook_protected_route_accepts_a_valid_header_token(
     )
 
 
-def test_the_hook_exemption_set_is_exactly_the_three_one_shot_routes() -> None:
+def test_the_hook_exemption_set_is_exactly_the_one_shot_routes() -> None:
     """The exemption list is the natural place for this control to rot.
 
     Adding an endpoint here is a one-line change that silently disables the
@@ -186,20 +186,43 @@ def test_the_hook_exemption_set_is_exactly_the_three_one_shot_routes() -> None:
     from frontend import app as app_module
 
     assert app_module._CSRF_HOOK_EXEMPT_ENDPOINTS == frozenset(
-        {"resume_reveal", "resume_withdraw", "resume_reinstate"}
+        {
+            "resume_reveal",
+            "resume_withdraw",
+            "resume_reinstate",
+            # SPONSOR 2026-09-02 §O2 -- added deliberately, and it belongs here
+            # only because it mints its OWN per-résumé one-shot token in a
+            # dedicated action slot. An endpoint without that stronger control
+            # must never be added to this set.
+            "resume_work_authorization",
+        }
     ), (
         "the CSRF hook's exemption set changed. Every exemption is a route "
         "the hook does NOT protect: justify it here, or remove it."
     )
 
 
+# (endpoint, url path). The path is spelled out rather than derived from the
+# endpoint name: the previous `endpoint.removeprefix("resume_")` trick produced
+# "/work_authorization" for a route served at "/work-authorization", and the
+# resulting 404 would read as "not a 403" -- i.e. this guard would report a
+# DOWNGRADE where the real fault was a typo in the test. Pairing them keeps the
+# assertion pointed at the thing it is meant to measure.
 @pytest.mark.parametrize(
-    "endpoint", ["resume_reveal", "resume_withdraw", "resume_reinstate"]
+    "endpoint,path",
+    [
+        ("resume_reveal", "reveal"),
+        ("resume_withdraw", "withdraw"),
+        ("resume_reinstate", "reinstate"),
+        ("resume_work_authorization", "work-authorization"),
+    ],
 )
-def test_exempt_routes_still_reject_a_page_token(client: Any, endpoint: str) -> None:
+def test_exempt_routes_still_reject_a_page_token(
+    client: Any, endpoint: str, path: str
+) -> None:
     """The exemption must not become a downgrade.
 
-    These three are skipped by the hook because their own one-shot token is
+    These are skipped by the hook because their own one-shot token is
     stronger. If the hook's weaker page token were ALSO accepted by them, the
     exemption would have quietly replaced a per-résumé one-shot control with a
     session-wide reusable one — a downgrade wearing the costume of an
@@ -207,7 +230,7 @@ def test_exempt_routes_still_reject_a_page_token(client: Any, endpoint: str) -> 
     """
     resume_id = uuid4()
     token = _page_token(client)
-    url = f"/resumes/{resume_id}/{endpoint.removeprefix('resume_')}"
+    url = f"/resumes/{resume_id}/{path}"
     with patch("frontend.app.api_client") as mock_api:
         mock_api.BackendUnavailable = Exception
         mock_api.NotFound = Exception

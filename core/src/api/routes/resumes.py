@@ -49,6 +49,7 @@ from src.schemas.resumes import (
     ResumeStatusBreakdown,
     ResumeUploadResult,
     WithdrawRequest,
+    WorkAuthorizationRequest,
 )
 from src.services import (
     audit_service,
@@ -448,6 +449,47 @@ async def reinstate_resume(
     await resume_service.reinstate_resume(
         db,
         resume_id,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
+    return await resume_service.get_one(db, resume_id)
+
+
+@router.post(
+    "/resumes/{resume_id}/work-authorization",
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
+)
+async def set_resume_work_authorization(
+    resume_id: UUID,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+    body: WorkAuthorizationRequest,
+) -> ResumeOut:
+    """Record the candidate's Canadian work-authorization declaration
+    (sponsor 2026-09-02 §O2).
+
+    POST, writer-only and session-role enforced — the same guards
+    ``withdraw`` carries, because it is the same kind of act: an audited,
+    reversible, adverse decision about a real person. Idempotent (the service
+    guards on the current value); a nonexistent id 404s via the service's
+    ``NotFoundError``. The response goes back through ``resume_service.get_one``
+    — the same redaction boundary every other read uses (ADR-006 §4) — never a
+    raw re-query.
+
+    Setting ``unknown`` is a first-class correction, not a degenerate case: a
+    mis-set ``not_eligible`` is precisely the mistake a human has to be able to
+    undo, and it is audited like any other declaration.
+    """
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    await resume_service.set_work_authorization(
+        db,
+        resume_id,
+        status=body.status,
+        note=body.note,
         actor_kind=actor_kind,
         actor_user_id=actor_user_id,
         actor_service=actor_service,

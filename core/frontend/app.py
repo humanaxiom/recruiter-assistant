@@ -176,7 +176,18 @@ def _cas_auth_gate() -> Any:
 #: An exemption is not a downgrade: the same test file proves a page token does
 #: NOT open a reveal, so these routes accept only their own one-shot tokens.
 _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
-    {"resume_reveal", "resume_withdraw", "resume_reinstate"}
+    {
+        "resume_reveal",
+        "resume_withdraw",
+        "resume_reinstate",
+        # SPONSOR 2026-09-02 §O2. Exempt for the SAME reason as the three above
+        # and no other: it carries a per-résumé, per-action, ONE-SHOT token
+        # (action="work_auth"), which is strictly stronger than the
+        # session-wide reusable page token this hook checks. Double-guarding it
+        # would buy nothing; accepting the page token INSTEAD would be a
+        # downgrade, which test_exempt_routes_still_reject_a_page_token pins.
+        "resume_work_authorization",
+    }
 )
 
 _STATE_CHANGING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
@@ -1056,6 +1067,12 @@ def resume_detail(resume_id: UUID) -> Any:
         # id, distinct action, so minting it never disturbs the reveal token
         # above.
         withdraw_csrf_token=csrf.issue_token(resume_id, action="withdraw"),
+        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
+        # (which are mutually exclusive on the page, so they can share one),
+        # the work-authorization control renders ALONGSIDE whichever of those
+        # is shown — sharing a slot would mean using one control silently
+        # invalidated the other's token.
+        work_auth_csrf_token=csrf.issue_token(resume_id, action="work_auth"),
     )
 
 
@@ -1135,6 +1152,56 @@ def resume_withdraw(resume_id: UUID) -> Any:
     except api_client.BadRequest as exc:
         # See the F4 comment on transition_status above.
         abort(exc.status_code)
+    if (request.form.get("context") or "").strip() == "shortlist":
+        try:
+            job_id = UUID((request.form.get("job_id") or "").strip())
+        except ValueError:
+            pass
+        else:
+            return redirect(url_for("job_shortlist", job_id=job_id))
+    return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/resumes/<uuid:resume_id>/work-authorization")
+def resume_work_authorization(resume_id: UUID) -> Any:
+    """AUDITED. Records the candidate's Canadian work-authorization
+    declaration (sponsor 2026-09-02 §O2).
+
+    Same guard shape as ``resume_withdraw`` — same-origin check first, then a
+    one-shot CSRF token in its OWN ``action="work_auth"`` slot, both evaluated
+    before anything reaches the backend, so a rejected forgery can never imply
+    a declaration audit row. Its own slot rather than sharing withdraw's:
+    the résumé page renders both controls at the same time, so sharing would
+    make using one invalidate the other.
+
+    The status is NOT validated here beyond being non-empty — the backend's
+    ``WorkAuthorizationRequest`` is the single place the legal values live, and
+    a bad value comes back as a 422 that this route surfaces. A second copy of
+    the enum in the frontend is exactly how the two silently diverge.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="work_auth"
+    ):
+        abort(403)
+    status = (request.form.get("status") or "").strip()
+    if not status:
+        abort(400)
+    note = (request.form.get("note") or "").strip() or None
+    try:
+        api_client.set_work_authorization(resume_id, status=status, note=note)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # See the F4 comment on transition_status above.
+        abort(exc.status_code)
+    # Return the user to the page they acted on — the same lesson
+    # ``resume_withdraw`` learned from the live product on 2026-08-20. ``job_id``
+    # is attacker-controllable form input, so it is parsed as a UUID and the URL
+    # is built server-side with ``url_for``, never echoed into a Location header.
     if (request.form.get("context") or "").strip() == "shortlist":
         try:
             job_id = UUID((request.form.get("job_id") or "").strip())

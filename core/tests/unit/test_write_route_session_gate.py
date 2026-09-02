@@ -87,6 +87,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/resumes/{resume_id}/reveal"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),
+    # SPONSOR 2026-09-02 §O2. A WRITE that records an adverse screening
+    # decision about a real person, so it carries the same session-role gate
+    # as withdraw -- never a bare field edit.
+    ("POST", "/resumes/{resume_id}/work-authorization"),
     ("POST", "/resumes/{resume_id}/match-jobs"),
     ("POST", "/jobs/{job_id}/shortlist"),
     ("POST", "/jobs/{job_id}/assignees"),

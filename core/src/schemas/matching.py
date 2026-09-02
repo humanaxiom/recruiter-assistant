@@ -22,7 +22,7 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from src.schemas.resumes import WorkAuthorization
+from src.schemas.resumes import WorkAuthorization, metrics_invalidated_for
 
 EvidenceStatus = Literal["met", "partial", "missing"]
 
@@ -699,7 +699,9 @@ class ShortlistEntry(BaseModel):
         it impossible for the two to drift is to refuse to read the input.
         """
         object.__setattr__(
-            self, "metrics_invalidated", self.work_authorization == "not_eligible"
+            self,
+            "metrics_invalidated",
+            metrics_invalidated_for(self.work_authorization),
         )
         return self
 
