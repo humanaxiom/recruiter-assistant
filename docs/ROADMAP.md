@@ -176,10 +176,38 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 
 ---
 
-# The next feature — three candidates, none committed
+# The next feature — ANSWERED 2026-09-02, and it is none of these three
 
-All three remain **framed, not chosen.** Pick one when [open item 2](#2-capture-what-the-four-users-hit)
-tells you which. Each honours the non-negotiables: **offline-only** (inference on
+> ## 🔴 The sponsor picked, so this menu is no longer the question.
+>
+> The DTO/CIO sent a requirements set on **2026-09-02** and answered all four of
+> its open decisions the same day. The plan of record for what gets built next
+> is **[SPONSOR_REQUIREMENTS_PLAN.md](SPONSOR_REQUIREMENTS_PLAN.md)**; work is in
+> flight on `feat/sponsor-requirements`.
+>
+> This is exactly what [open item 2](#2-capture-what-the-four-users-hit) said
+> would decide it — *"let the feedback channel pick"* — arriving from the person
+> who owns the pilot rather than from a session's own judgement. Under
+> `CLAUDE.md` §Economy 0 that outranks everything self-sourced.
+>
+> **What the sponsor asked for that none of these cards covers:** multi-candidate
+> PDF splitting in-app, a candidate CSV roster, JD-by-URL (answered: port the
+> Taleo import from `C:\repos\hris`), a hiring-manager requirements prompt,
+> Canadian work-authorization screening, links to the source PDFs, and a
+> notification when a long run finishes.
+>
+> Two of the sponsor's answers **changed shipped behaviour**, so they are not
+> additive and are recorded here rather than only in the plan:
+>
+> * **A cover letter must no longer affect ranking** (§O3). `motivation` went
+>   0.1 → 0.0 and the 10% moved to the manager's own requirements. The eval
+>   corpus's `motivation` ordering control asserted the opposite and has been
+>   **inverted** into `[cover_letter_neutrality]` (exact score equality).
+> * **Ineligible candidates rank last with their metrics invalidated** (§O2) —
+>   not hidden, not deleted, and never inferred from résumé text.
+
+The three cards below stay **framed, not chosen**, as a menu for after the
+sponsor's set. Each honours the non-negotiables: **offline-only** (inference on
 `aria-gb10` over Tailscale — no cloud, ever), **evidence-backed** (never a number
 without a cited source), **privacy-first** (PIPEDA/FIPPA; PII never embedded;
 blind-by-default).

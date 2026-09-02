@@ -46,7 +46,15 @@ The local dev stack is still up on `:29500` UI · `:29800` API · `:29432` pg ·
 stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 `.env.example` (`:29800` API, `:29500` frontend, `LLM_TIMEOUT_S=900`).
 
-### 3. Then, in order
+### 3. The sponsor picked the next feature — and it is none of the three cards
+
+The DTO/CIO sent a requirements set on 2026-09-02 and answered all four open
+decisions the same day. Plan of record:
+[docs/SPONSOR_REQUIREMENTS_PLAN.md](docs/SPONSOR_REQUIREMENTS_PLAN.md); read its
+§0 first, because **three of the four answers went against the recommended
+default.** Work in flight on `feat/sponsor-requirements`.
+
+Still open alongside it, and neither is superseded:
 
 1. **Open a channel from the four users back into this repo.** There isn't one.
    Every pilot defect so far arrived by someone mentioning it in conversation, and
@@ -55,24 +63,62 @@ stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 2. **Close ROADMAP open item 1** — the committed secret, `pg.jobs_stuck` in
    `doctor.py`, retention enforcement. A live deployment demands these; a dev
    stack did not.
-3. **Then pick a feature.** Three cards are framed and **none is committed**:
-   "Why this rank?" slice 2 (lowest risk, extends what HR just saw), "Ask the
-   pool" NL search (highest demo impact), Policy Studio (answers "who owns this
-   decision?"). Let the feedback channel pick.
+
+#### What has landed, and what is next
+
+**Landed on `feat/sponsor-requirements`** (gates green, offline + integration):
+
+- **Work authorization (§O2) end to end.** `resumes.work_authorization`, three
+  states, `NOT NULL DEFAULT 'unknown'`; audited idempotent write; recruiter
+  control on the résumé page; read-time band; card + CSV. The sponsor's answer
+  was *"Last but visible … all other metrics are invalidated"*, so an ineligible
+  candidate keeps its card but shows `—` for rank and `n/a` for every sub-score,
+  with the reason on screen.
+- **The 10% moved off the cover letter onto the manager prompt (§O3/§I4).**
+  `MatchWeights.manager_prompt = 0.10`, `motivation = 0.0`, schema + DDL for
+  `jobs.additional_requirements`.
+
+**Next, in order:** the manager-prompt extraction pass + UI (schema and weight
+are in, the prompt and worker are not) → the hris Taleo port (§2.3 of the plan)
+→ `FLASK_SECRET_KEY` (gates the document-links slice) → notifications.
+
+**Three things a future session must not rediscover the hard way:**
+
+1. **`pipeline_meta.weights` is a historical stamp and the read path validates
+   it UNCAUGHT.** Adding a weight field with a non-zero default makes every
+   pre-existing stamp fail its sum validator — a 500 on every shortlist page for
+   every job ranked before the change. There is now a `mode="before"` shim and a
+   regression test; do not remove either.
+2. **The eval corpus had a control asserting a cover letter RAISES rank.** It
+   was inverted into `[cover_letter_neutrality]` (exact score equality), not
+   deleted. The threshold key set is a **three-way contract** —
+   `thresholds.toml`, `run_evals.py`, `.claude/agents/ranking-evals.md` — plus
+   `labels.json` and `_THRESHOLD_KEYS`. All five move together.
+3. **Do not JOIN `resumes` into the shortlist read.** `_ENTRY_COLS` selects bare
+   `id`/`job_id`, which `resumes` also has, so a join makes them ambiguous and
+   every non-blind integration test fails; `WHERE job_id = $1` is also the
+   `.replace` anchor `list_for_job` uses for FU-6 row scoping. The band uses a
+   correlated subquery for exactly this reason. **The unit suite cannot see
+   this** — it asserts on the SQL as a string.
 
 ### 4. Current state
 
 | | |
 |---|---|
 | `main` | `ec2f2d2` |
-| Gates, last recorded | 5,545 unit · 541 integration · 93.02% coverage — measured at `b9859df`; **re-run, do not cite** |
+| Branch in flight | `feat/sponsor-requirements` — sponsor §I4/§O2/§O3 |
+| Gates, this branch | 5,611 unit · 93% coverage · integration green — **re-run, do not cite** |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
 | LLM hosts | gb10 `100.88.247.106` · spark1 `100.114.185.88` — **both shared** |
 
 Working end to end: upload → parse → rank → shortlist; JD ingest; blind review,
 PII encryption, audited reveal; CAS identity, session role enforcement, CSRF,
-auditor viewer.
+auditor viewer; work-authorization screening.
+
+**Not yet run against this branch:** `smoke.sh` (the browser→Flask→API seam) and
+`doctor.sh` (the data). The work-authorization control renders and its round trip
+is unit-tested, but nobody has clicked it in the running product.
 
 ### 5. Never diagnose the model on a contended peer
 
