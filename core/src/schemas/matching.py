@@ -236,6 +236,22 @@ class MatchWeights(BaseModel):
     # A THRESHOLD, not a weight — deliberately NOT part of either sum the
     # ``_sums_close_to_one`` validator enforces (sibling to evidence_verify_fuzz).
     education_field_fuzz: float = Field(default=0.85, ge=0, le=1)
+    # SPONSOR 2026-09-02 §I4 — how much a SOFTENED manager requirement counts
+    # relative to a plain one. "Anything you state plainly is required; write
+    # 'nice to have' to soften it" is the contract the create-job form states,
+    # and this decimal is what that sentence is worth.
+    #
+    # A THRESHOLD, not a weight — deliberately NOT part of either sum the
+    # ``_sums_close_to_one`` validator enforces (sibling to
+    # ``education_field_fuzz`` and ``evidence_verify_fuzz``). It redistributes
+    # emphasis WITHIN the manager-prompt sub-score; it does not change what
+    # that sub-score is worth overall, which is ``manager_prompt``.
+    #
+    # On ``MatchWeights`` rather than as a literal in the scorer because it is
+    # a hiring-policy decimal: it decides how much a manager's preference
+    # counts against another candidate's requirement, and that belongs
+    # somewhere ratifiable.
+    manager_prompt_nice_weight: float = Field(default=0.25, ge=0, le=1)
     seniority_floor: float = Field(default=0.5, ge=0, lt=1)
     implied_seniority_factor: float = Field(default=1.5, ge=1)
     implied_min_coverage: float = Field(default=0.5, ge=0, le=1)
@@ -369,6 +385,17 @@ class ScoreBreakdown(BaseModel):
     manager_prompt_measured: bool | None = None
     implied_experience: bool = False
     skill_contributions: list[SkillContribution] = Field(default_factory=list)
+    # SPONSOR 2026-09-02 §I4 -- provenance for the manager-prompt sub-score:
+    # which of the hiring manager's OWN requirements this candidate met.
+    #
+    # A SEPARATE list from ``skill_contributions`` above, deliberately. The two
+    # answer different questions -- what the POSTING required versus what the
+    # MANAGER added -- and merged, a reviewer could not tell which is which.
+    # That distinction is the entire reason the note is kept out of
+    # ``description_raw``, so collapsing it here would give the field away at
+    # the last step. Empty for a job with no note, and for every row persisted
+    # before this field existed.
+    manager_prompt_contributions: list[SkillContribution] = Field(default_factory=list)
     # ROADMAP A6 (D1/D2). THREE states each, mirroring ``evidence_evaluated``
     # above:
     #

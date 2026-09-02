@@ -34,6 +34,8 @@ from uuid import UUID
 
 from rapidfuzz import fuzz
 
+from src.pipeline.skills import canonicalize_skill_names
+from src.schemas.jobs import ManagerRequirements, Skill
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
     SCRUBBED_CONFIDENCE_CAP,
@@ -609,6 +611,99 @@ class _CombineEntry(Generic[_E]):
     score_evidence: float
     breakdown: ScoreBreakdown
     evidence: _E | None
+
+
+def score_manager_prompt(
+    candidate_skill_names: Iterable[str],
+    requirements: ManagerRequirements | None,
+    *,
+    weights: MatchWeights,
+) -> tuple[float | None, list[SkillContribution]]:
+    """Score a candidate against the hiring manager's own stated requirements.
+
+    SPONSOR 2026-09-02 §I4/§O1. Returns ``(score, contributions)`` where the
+    score is in [0, 1], or ``(None, [])`` when there is nothing to measure.
+
+    **Deterministic, not an LLM call.** The manager named specific things;
+    deciding whether a candidate lists them is a name comparison, not a
+    judgement. That keeps the sub-score explainable in a review without
+    re-running a model, costs nothing, and keeps it outside stage 3's
+    fail-closed path — a model outage must not silently blank 10% of the score.
+
+    **``None`` means the question was never asked**, and is returned for two
+    distinct cases that share that meaning: no note at all, and a note that
+    named no skills (a manager who wrote only "willing to travel" has asked
+    nothing this scorer can answer). Both must stay distinct from a measured
+    0.0, which says the manager asked and this candidate matched none of it.
+    Scoring the unasked question as 0.0 would dock every candidate on the job
+    the full 10% — the fabricated zero, arriving by a different route.
+
+    **Matching runs through ``_basic_normalise``**, the same canonicalisation
+    the rest of the engine uses, which matters more here than anywhere else in
+    the pipeline. This field exists for the requirements the posting missed,
+    and the curated vocabulary recognises only ~55% of real SFU qualification
+    statements (ROADMAP open item 3) — so the terms a manager types here are
+    *disproportionately likely to be out of vocabulary*. ``_basic_normalise``
+    returns an unresolved name unchanged, so vocab terms alias-resolve
+    ("Postgres" ≡ "PostgreSQL") and non-vocab terms match on their normalised
+    form. It is exact-after-normalisation, never fuzzy: "MEG" and "EEG" are
+    different techniques and one does not answer the other.
+
+    **Contributions cite every requirement the manager named**, matched or
+    missed, carrying the manager's OWN wording rather than the canonical form
+    used internally — the same JD-authored-cleartext rule the skill labels
+    follow. A 10% share of a hiring decision must be able to say which
+    requirement it is about.
+
+    Deliberately NOT scored here: years, recency, or ontology family credit.
+    The manager named a thing; this answers whether the candidate lists it.
+    Inventing a years-weighted curve over a free-text note would be a number
+    with no source behind it.
+    """
+    if requirements is None:
+        return None, []
+    must = list(requirements.must_have_skills)
+    nice = list(requirements.nice_to_have_skills)
+    if not must and not nice:
+        return None, []
+
+    held = {n for n in canonicalize_skill_names(candidate_skill_names) if n}
+
+    def _rows(skills: list[Skill], *, is_must: bool) -> list[SkillContribution]:
+        rows: list[SkillContribution] = []
+        for s in skills:
+            [canonical] = canonicalize_skill_names([s.name]) or [""]
+            matched = bool(canonical) and canonical in held
+            rows.append(
+                SkillContribution(
+                    # The manager's own wording, not ``canonical`` — this label
+                    # is read back to the person who typed it.
+                    skill=s.name,
+                    score=1.0 if matched else 0.0,
+                    is_must_have=is_must,
+                    reason=None if matched else "missing",
+                )
+            )
+        return rows
+
+    must_rows = _rows(must, is_must=True)
+    nice_rows = _rows(nice, is_must=False)
+
+    def _coverage(rows: list[SkillContribution]) -> float:
+        return sum(r.score for r in rows) / len(rows) if rows else 0.0
+
+    nice_w = weights.manager_prompt_nice_weight
+    if must_rows and nice_rows:
+        # Normalised so that matching EVERYTHING still scores exactly 1.0 —
+        # the weight redistributes emphasis between the two groups, it must
+        # not cap the ceiling below a full match.
+        score = (_coverage(must_rows) + nice_w * _coverage(nice_rows)) / (1.0 + nice_w)
+    elif must_rows:
+        score = _coverage(must_rows)
+    else:
+        score = _coverage(nice_rows)
+
+    return score, [*must_rows, *nice_rows]
 
 
 def _combine_final(
