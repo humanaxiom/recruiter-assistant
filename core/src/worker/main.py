@@ -47,6 +47,7 @@ from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 from src.worker.reconcile import reconcile_stalled_parses
 from src.worker.resume_tasks import parse_resume
+from src.worker.taleo_sync_task import sync_taleo_jobs
 from src.worker.tasks import parse_job
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,18 @@ class WorkerSettings:
     # Phase 4d ADDS the ranking write-path tasks (shortlist_job /
     # reverse_match_job) to the SAME registry — the outbox drainer
     # (project_to_graph) stays a cron_jobs entry, never enqueued by name.
-    functions: list[Any] = [parse_job, parse_resume, shortlist_job, reverse_match_job]
+    #
+    # ADR-046 adds ``sync_taleo_jobs``, which IS enqueued by name (the admin
+    # trigger route posts it), so it belongs in ``functions`` as well as having
+    # a cron entry below. It is the only task here that can egress, and it
+    # short-circuits on ``TALEO_ENABLED=false`` before constructing a client.
+    functions: list[Any] = [
+        parse_job,
+        parse_resume,
+        shortlist_job,
+        reverse_match_job,
+        sync_taleo_jobs,
+    ]
     # Phase 4b: the graph-projection drainer runs on its own schedule, not by
     # enqueue — every ~5s, matching decision 3's rationale (skill resolution
     # must be cheap enough to finish well inside one cron tick).
@@ -181,6 +193,13 @@ class WorkerSettings:
     cron_jobs = [
         cron(project_to_graph, second=set(range(0, 60, 5))),
         cron(reconcile_stalled_parses, second={7}),
+        # ADR-046 -- daily at 03:00 UTC, after retention work and well away from
+        # business hours in Vancouver. Once a day is the whole cadence: these
+        # are job postings, and the politeness budget against a university's
+        # public careers site matters more than freshness. A deployment with
+        # TALEO_ENABLED=false still fires this tick; the task returns
+        # "skipped" without opening a socket.
+        cron(sync_taleo_jobs, hour={3}, minute={0}),
     ]
     on_startup = startup
     on_shutdown = shutdown

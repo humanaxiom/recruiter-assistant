@@ -189,6 +189,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # SPONSOR 2026-09-02 §O2 -- the recruiter's work-authorization
         # declaration (admin+recruiter, audited, idempotent).
         "/resumes/{resume_id}/work-authorization",
+        # ADR-046 -- the admin-only manual trigger for the Taleo sync. The only
+        # route in the product that can cause an outbound request.
+        "/admin/jobs/sync",
     }
 )
 

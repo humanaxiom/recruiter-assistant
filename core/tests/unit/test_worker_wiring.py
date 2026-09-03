@@ -38,6 +38,7 @@ from src.storage.blob_store import BlobStore
 from src.worker.main import WorkerSettings, startup
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.resume_tasks import parse_resume
+from src.worker.taleo_sync_task import sync_taleo_jobs
 from src.worker.tasks import parse_job
 
 
@@ -138,6 +139,10 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         parse_resume,
         shortlist_job,
         reverse_match_job,
+        # ADR-046. Unlike ``project_to_graph``, this one IS enqueued by name --
+        # the admin trigger route posts it -- so it belongs here as well as in
+        # ``cron_jobs``.
+        sync_taleo_jobs,
     ]
 
 
