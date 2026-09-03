@@ -229,6 +229,34 @@
       {% endfor %}
     </div>
 
+    {# SPONSOR 2026-09-02 §I4 — the manager's OWN requirements, kept visually
+       and structurally separate from the posting's chips above.
+
+       This separation is the feature, not decoration. The note is deliberately
+       kept out of `description_raw` so the posting's requirements and the
+       manager's stay distinguishable; rendering both in one undifferentiated
+       chip row would destroy that at the last step, and the manager could no
+       longer tell whether the thing they asked for was even considered.
+
+       Rendered only when the job actually carried a note. Most jobs do not,
+       and a stray empty heading on every card is how a feature that helps a
+       few people annoys everyone. #}
+    {% set manager_chips = sb.get('manager_prompt_contributions') or [] %}
+    {% if manager_chips %}
+    <div class="chips chips-manager">
+      <span class="chips-label">Added by you:</span>
+      {% for c in manager_chips %}
+      {% if c.get('reason') == 'missing' %}
+      <span class="chip chip-manager chip-manager-missing">{{ c.skill }} —
+        missing{% if c.is_must_have %} · required{% endif %}</span>
+      {% else %}
+      <span class="chip chip-manager">{{ c.skill }}{% if c.is_must_have %}
+        · required{% endif %}</span>
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+
     {% set ev = entry.evidence %}
     <details class="evidence">
       <summary>Evidence</summary>
