@@ -54,6 +54,35 @@
                 required minlength="50"
                 placeholder="Paste the job description (min 50 characters)…">{{ form.get('description_raw', '') }}</textarea>
     </div>
+    {# SPONSOR 2026-09-02 §I4 — "a prompt allow the hiring manager to list out
+       special skills, experience they are looking for. These might or might
+       not be in the job posting."
+
+       Its OWN box, deliberately separate from Description. `description_raw`
+       is the JD of record — the posting as published — and folding the
+       manager's note into it would make the two indistinguishable forever
+       afterwards, which is precisely what the shortlist has to be able to tell
+       apart when it explains a rank.
+
+       The hint states the two things a manager cannot infer from the box
+       itself: that these count as required unless softened, and that this is
+       where a requirement the posting missed actually belongs. #}
+    <div class="form-group">
+      <label class="label" for="additional_requirements">
+        Additional requirements (optional)</label>
+      <textarea class="textarea" id="additional_requirements"
+                name="additional_requirements" maxlength="4000"
+                style="min-height:90px"
+                placeholder="e.g. Must have MEG analysis experience. Kafka in production is a bonus. Willing to travel to Burnaby weekly."
+                >{{ form.get('additional_requirements', '') }}</textarea>
+      <p class="hint">
+        Special skills or experience you are looking for, whether or not the
+        posting mentions them. Anything you state plainly is treated as
+        <strong>required</strong>; write "nice to have", "bonus" or "ideally"
+        to soften one. These are scored separately from the posting, so the
+        shortlist can show which requirements came from you.
+      </p>
+    </div>
     <div class="form-group checkbox-row">
       <input type="checkbox" id="blind_review" name="blind_review"
              {% if (not show_form) or form.get('blind_review') %}checked{% endif %}>

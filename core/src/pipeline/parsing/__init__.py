@@ -19,6 +19,10 @@ from src.pipeline.parsing.extract import (
     UnsupportedMimeError,
     extract_text,
 )
+from src.pipeline.parsing.manager_prompt import (
+    MANAGER_PROMPT_MAX_TOKENS,
+    extract_manager_requirements,
+)
 
 __all__ = [
     "MIME_DOCX",
@@ -29,7 +33,9 @@ __all__ = [
     "ExtractedText",
     "InputTooLargeError",
     "UnsupportedMimeError",
+    "MANAGER_PROMPT_MAX_TOKENS",
     "chunk_resume",
+    "extract_manager_requirements",
     "extract_text",
     "scrub_invalid_chunk_refs",
 ]

@@ -432,6 +432,16 @@ def _job_create_payload(form: Any) -> dict[str, Any]:
         "location": (form.get("location") or "").strip() or None,
         "min_years": min_years,
         "description_raw": form.get("description_raw") or "",
+        # SPONSOR 2026-09-02 §I4 -- the hiring manager's own special skills/
+        # experience, which "might or might not be in the job posting". Its OWN
+        # field, never appended to description_raw: that column is the JD of
+        # record and a shortlist that cannot separate "the posting required
+        # this" from "the manager asked for this" cannot explain itself.
+        # Empty string -> None so an untouched box is "no note given" rather
+        # than a note that says nothing -- the distinction the ranking combine
+        # reads as "nobody asked".
+        "additional_requirements": (form.get("additional_requirements") or "").strip()
+        or None,
         "blind_review": "blind_review" in form,
         "shortlist_top_percent": shortlist_top_percent,
     }

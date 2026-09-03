@@ -49,6 +49,7 @@ from uuid import UUID
 
 import asyncpg
 from neo4j import AsyncDriver
+from pydantic import ValidationError
 
 from src.pipeline.llm import (
     CachedEmbedder,
@@ -69,12 +70,14 @@ from src.pipeline.matching.stages import (
     normalise_vector_scores,
     score_education,
     score_experience,
+    score_manager_prompt,
     score_skill_breakdown,
     stage4_combine,
     vector_pool_is_degenerate,
     verify_evidence,
 )
 from src.prompts import load_prompt
+from src.schemas.jobs import ManagerRequirements
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
     EvidenceObject,
@@ -106,6 +109,11 @@ class JobView:
     education_fields: tuple[str, ...]
     required_skills: tuple[str, ...]
     nice_to_have_skills: tuple[str, ...]
+    # SPONSOR 2026-09-02 §I4 -- the hiring manager's own requirements, read from
+    # ``jobs.additional_requirements_parsed``. ``None`` means the requisition
+    # carried no usable note, which the combine reads as "nobody asked" rather
+    # than "matched nothing" -- never default this to an empty object.
+    manager_requirements: ManagerRequirements | None = None
 
 
 # Default tuning knobs (ADR 0021). Production callers populate the matching
@@ -200,6 +208,9 @@ class Stage2Candidate:
     vec_score: float
     structured: float
     breakdown: ScoreBreakdown
+    # SPONSOR §I4. Optional, and ``None`` must survive to the combine -- see
+    # ``_CombineInput.manager_prompt``.
+    manager_prompt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -297,7 +308,9 @@ _STRUCTURED_ONLY_WEIGHTS = MatchWeights(
 async def load_job_view(db: asyncpg.Connection, job_id: UUID) -> JobView | None:
     """Materialise the JD into the small struct stages need."""
     row = await db.fetchrow(
-        "SELECT title, min_years, description_parsed FROM jobs WHERE id = $1", job_id
+        "SELECT title, min_years, description_parsed, additional_requirements_parsed "
+        "FROM jobs WHERE id = $1",
+        job_id,
     )
     if row is None:
         return None
@@ -306,6 +319,27 @@ async def load_job_view(db: asyncpg.Connection, job_id: UUID) -> JobView | None:
         parsed = json.loads(parsed)
     parsed = parsed or {}
     edu = parsed.get("education") or {}
+
+    # SPONSOR 2026-09-02 §I4 — the manager's own requirements, kept SEPARATE
+    # from the JD's throughout. Merging them into ``required_skills`` here
+    # would be the easy shortcut and would destroy the provenance the whole
+    # field exists to preserve: the shortlist could no longer say which
+    # requirements came from the posting and which from the manager, and the
+    # 10% the sponsor moved onto this term would silently double-count inside
+    # the 40% skill sub-score instead.
+    #
+    # A malformed stored payload degrades to None (no manager requirements)
+    # rather than failing the whole ranking run — the JD is the job of record,
+    # and this is an extra.
+    raw_manager = row["additional_requirements_parsed"]
+    if isinstance(raw_manager, str):
+        raw_manager = json.loads(raw_manager)
+    manager_requirements: ManagerRequirements | None = None
+    if raw_manager:
+        try:
+            manager_requirements = ManagerRequirements.model_validate(raw_manager)
+        except ValidationError:
+            log.warning("job_view.manager_requirements_invalid job_id=%s", job_id)
     return JobView(
         id=job_id,
         title=row["title"],
@@ -324,6 +358,7 @@ async def load_job_view(db: asyncpg.Connection, job_id: UUID) -> JobView | None:
             for s in parsed.get("nice_to_have_skills", [])
             if s.get("name")
         ),
+        manager_requirements=manager_requirements,
     )
 
 
@@ -581,6 +616,20 @@ async def _stage2_per_candidate(
         seniority = 0.0
         seniority_measured = False
 
+    # SPONSOR 2026-09-02 §I4 — the manager's own requirements, scored off the
+    # SAME ``parsed`` row already fetched at the top of this function, so it
+    # costs no extra query and no LLM call. Deterministic by design: the sub-
+    # score stays outside stage 3's fail-closed path, so a model outage cannot
+    # silently blank 10% of every candidate's score.
+    #
+    # ``None`` when the job carried no note (or one naming no skills) — the
+    # combine renders that as unmeasured rather than as a matched-nothing zero.
+    manager_prompt, manager_contribs = score_manager_prompt(
+        [s.get("name", "") for s in (parsed.get("skills") or []) if s.get("name")],
+        job.manager_requirements,
+        weights=weights,
+    )
+
     breakdown = ScoreBreakdown(
         skill=skill_overall,
         experience=exp,
@@ -610,12 +659,19 @@ async def _stage2_per_candidate(
         experience_bar_stated=experience_bar_stated,
         education_bar_stated=education_bar_stated,
         education_readable=education_readable,
+        # SPONSOR §I4 -- provenance. A SEPARATE list from ``skill_contributions``
+        # because the two answer different questions: what the POSTING required
+        # versus what the MANAGER added. Merged, a reviewer could not tell which
+        # is which, and that distinction is the entire reason the note is not
+        # simply appended to the JD.
+        manager_prompt_contributions=manager_contribs,
     )
     return Stage2Candidate(
         resume_id=candidate.resume_id,
         vec_score=candidate.vec_score,
         structured=breakdown.structured,
         breakdown=breakdown,
+        manager_prompt=manager_prompt,
     )
 
 
@@ -921,6 +977,10 @@ async def generate_shortlist(
             structured=c.structured,
             breakdown=c.breakdown,
             evidence=evidence_by_id.get(c.resume_id),
+            # SPONSOR §I4 -- carry the stage-2 sub-score into the blend. Omitting
+            # this is how the weight came to be applied by nothing the first
+            # time; ``test_manager_prompt_pipeline_wiring`` pins it.
+            manager_prompt=c.manager_prompt,
         )
         for c in candidates_s2
     ]
