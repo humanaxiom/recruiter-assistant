@@ -272,6 +272,31 @@ class Settings(BaseSettings):
     # but sizing this purely off ``job_timeout`` under-covers a busy queue.
     shortlist_ranking_stale_after_s: float = 3600.0
 
+    # ── Taleo job source (ADR-046) ───────────────────────────────────────────
+    # THE ONLY EGRESS CARVE-OUT IN THIS SYSTEM, and the only setting here that
+    # can cause an outbound request. Read ADR-046 before changing any of it.
+    #
+    # `taleo_enabled` DEFAULTS FALSE and that is the load-bearing part: a fresh
+    # checkout, a CI run, the test suite and any deployment that chose to stay
+    # airgapped never touch the network for jobs. Turning it on in production
+    # has obligations the code cannot discharge — an enumerated firewall rule
+    # for `taleo_base_url`'s host, counsel and privacy-officer sign-off, and a
+    # named owner who can revoke it.
+    taleo_enabled: bool = False
+    # The host `TaleoClient` will accept, and the ONLY one it will fetch: the
+    # client compares parsed hostnames against this before every request, so
+    # widening it widens the carve-out. It must match the firewall rule.
+    taleo_base_url: str = "https://tre.tbe.taleo.net"
+    taleo_org: str = "SIMOFRAS"
+    taleo_cws: str = "37"
+    # Politeness, per ADR-046: one request per second against a university's
+    # public careers site, never a burst.
+    taleo_request_delay_s: float = 1.0
+    taleo_timeout_s: float = 20.0
+    # Runaway bound, not a capacity estimate. SFU runs ~40 postings (~2 pages);
+    # 20 is headroom against a template that always renders a "next" link.
+    taleo_max_pages: int = 20
+
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"

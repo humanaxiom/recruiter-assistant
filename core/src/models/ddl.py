@@ -136,6 +136,11 @@ _STATEMENTS: tuple[str, ...] = (
         blind_review      BOOLEAN NOT NULL DEFAULT TRUE,
         additional_requirements        TEXT,
         additional_requirements_parsed JSONB,
+        source            TEXT NOT NULL DEFAULT 'manual'
+                          CHECK (source IN ('manual', 'taleo')),
+        external_id       TEXT,
+        external_url      TEXT,
+        external_last_seen_at TIMESTAMPTZ,
         failure_reason    TEXT,
         created_by        TEXT,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -202,6 +207,38 @@ _STATEMENTS: tuple[str, ...] = (
     # cannot answer the question the defense pack exists to answer.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements_parsed JSONB",
+    # ── External job sources (ADR-046) ──────────────────────────────────────
+    # Where a job CAME FROM. Every existing row is 'manual', which the DEFAULT
+    # back-fills the instant the ALTER lands — the same reasoning as
+    # ``work_authorization``: a nullable column would leave live rows reading
+    # NULL and make every consumer remember what that means.
+    #
+    # The CHECK rides inline on the ADD COLUMN clause (no ``ADD CONSTRAINT IF
+    # NOT EXISTS`` pre-Postgres-15), so the whole clause is skipped once the
+    # column exists and the statement stays re-runnable.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source TEXT "
+    "NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'taleo'))",
+    # The ATS-side identifier (Taleo's ``rid=NNNN``). NULL for manual jobs.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS external_id TEXT",
+    # The public ATS URL. Kept so an operator can click through and check a
+    # synced job against the source of truth — the provenance half of §I3,
+    # useful even for jobs the sync never touches.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS external_url TEXT",
+    # The last sync run that OBSERVED this posting upstream. The archive sweep
+    # keys off it: a taleo-sourced job not seen by the current run has been
+    # taken down, and is archived rather than deleted.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS external_last_seen_at TIMESTAMPTZ",
+    # The upsert key. PARTIAL, so the ~25 existing manual rows (external_id
+    # NULL) do not collide with each other — a plain UNIQUE would reject the
+    # second manual job outright, since NULLs compare distinct only under
+    # NULLS DISTINCT and the pair (source, external_id) is not covered by that
+    # for the non-null half. It also gives ``ON CONFLICT (source, external_id)``
+    # something to match, which is what makes the sync idempotent.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS jobs_source_external_id_idx
+        ON jobs (source, external_id)
+        WHERE external_id IS NOT NULL
+    """,
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state TEXT "
     "CHECK (shortlist_state IN ('awaiting_llm'))",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_state_reason TEXT",
