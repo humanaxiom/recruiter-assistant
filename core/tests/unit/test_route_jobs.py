@@ -343,6 +343,31 @@ async def test_get_job_is_readable_by_every_role(role: Role) -> None:
 
 # ── GET /jobs (list) ────────────────────────────────────────────────────
 
+# The list route's wire shape, spelled out rather than derived from
+# ``JobListItem.model_fields`` — deriving it would make the assertion
+# tautological (the route's response_model IS ``JobListItem``), and what is
+# worth pinning is the negative: the list must not serialize a whole
+# ``JobOut`` — ``description_raw``, ``created_by``, ``retention_days``,
+# ``blind_review`` — onto a page that renders forty rows of it.
+#
+# 2026-09-03 — four keys added. ``location`` because the template had been
+# rendering ``job.location`` against a DTO with no such field since Phase 7;
+# ``source``/``external_url`` and ``updated_at`` because the sponsor asked
+# for provenance-as-a-link and last-updated in the list itself (ADR-046).
+_TRIMMED_LIST_KEYS: set[str] = {
+    "id",
+    "title",
+    "department",
+    "location",
+    "status",
+    "created_at",
+    "updated_at",
+    "parsed_at",
+    "source",
+    "external_url",
+    "resume_count",
+}
+
 
 @pytest.mark.asyncio
 async def test_list_jobs_returns_the_trimmed_joblistitem_shape() -> None:
@@ -353,8 +378,7 @@ async def test_list_jobs_returns_the_trimmed_joblistitem_shape() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 2
-    expected_keys = {"id", "title", "department", "status", "created_at", "parsed_at"}
-    assert set(body[0].keys()) == expected_keys
+    assert set(body[0].keys()) == _TRIMMED_LIST_KEYS
 
 
 @pytest.mark.parametrize("role", _ALL_ROLES)
@@ -1342,8 +1366,7 @@ async def test_my_jobs_route_exists_and_returns_the_trimmed_joblistitem_shape() 
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 2
-    expected_keys = {"id", "title", "department", "status", "created_at", "parsed_at"}
-    assert set(body[0].keys()) == expected_keys
+    assert set(body[0].keys()) == _TRIMMED_LIST_KEYS
 
 
 @pytest.mark.asyncio

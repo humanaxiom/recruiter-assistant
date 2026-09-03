@@ -107,6 +107,22 @@ def test_every_selected_column_reaches_the_dto() -> None:
         "nobody. Map it, or drop it from _JOB_COLS."
     )
 
+    # THE OTHER DIRECTION, and it caught a live one the moment it was added.
+    # ``source``/``external_*`` were read by _row_to_jobout via ``raw.get`` but
+    # never SELECTed, so JobOut.source read "manual" on every real query while
+    # every unit test passed — the tests hand in dicts that already contain the
+    # keys. One-directional guards only catch the mistake you were thinking of.
+    unfetched = sorted(
+        f
+        for f in dto_fields
+        if (f'raw["{f}"]' in source or f'raw.get("{f}"' in source) and f not in selected
+    )
+    assert not unfetched, (
+        f"{unfetched} are read by _row_to_jobout but never SELECTed by "
+        "_JOB_COLS — they will read as their default on every real query, "
+        "while unit tests that pass a dict directly stay green."
+    )
+
 
 # ---------------------------------------------------- the two that were dropped
 

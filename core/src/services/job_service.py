@@ -159,7 +159,12 @@ _JOB_COLS = (
     # SPONSOR 2026-09-02 §I4 -- both halves of the manager note. Reading back
     # only the extraction would leave a human unable to check it against what
     # was actually typed.
-    "additional_requirements, additional_requirements_parsed"
+    "additional_requirements, additional_requirements_parsed, "
+    # ADR-046 provenance. Omitting these here while _row_to_jobout reads them
+    # would make JobOut.source read "manual" on every real query -- the guard
+    # below only caught SELECTed-but-unmapped, not the reverse, until
+    # test_jobout_carries_every_column.py was made bidirectional.
+    "source, external_id, external_url, external_last_seen_at"
 )
 
 _INSERT_JOB_SQL = f"""
@@ -211,8 +216,20 @@ async def _insert_job(
 
 _GET_JOB_SQL = f"SELECT {_JOB_COLS} FROM jobs WHERE id = $1"
 
+# The list read. EVERY field on ``JobListItem`` must appear here -- a field the
+# SELECT omits reads None on every row forever, which is how the Location
+# column printed an em-dash for every job since Phase 7.
+# ``test_jobs_table_columns.py`` compares the two and fails on a mismatch.
+# A correlated subquery rather than a LEFT JOIN + GROUP BY: the WHERE clause
+# this query is assembled with (status filter, and FU-6's ``EXISTS`` against
+# ``job_assignees``) is appended verbatim after ``FROM jobs``, and a GROUP BY
+# would have to land after it. ``resumes (job_id, status)`` is already
+# indexed, and the row count here is bounded by LIMIT.
 _LIST_JOBS_BASE_SQL = (
-    "SELECT id, title, department, status, created_at, parsed_at FROM jobs"
+    "SELECT id, title, department, location, status, created_at, updated_at, "
+    "parsed_at, source, external_url, "
+    "(SELECT count(*) FROM resumes WHERE resumes.job_id = jobs.id) "
+    "AS resume_count FROM jobs"
 )
 
 _UPDATE_STATUS_SQL = f"""
@@ -553,18 +570,24 @@ async def list_jobs(
     args.append(offset)
     query += f" OFFSET ${len(args)}"
     rows = await conn.fetch(query, *args)
-    # Explicit field-by-field projection (not `dict(r)`) — the real SQL only
-    # selects these six columns, but a test double (or a future query that
-    # widens its SELECT) may hand back a row carrying extra keys; JobListItem
-    # is extra="forbid", so trusting the row's own key set would be fragile.
+    # Explicit field-by-field projection (not `dict(r)`) — a test double (or a
+    # future query that widens its SELECT) may hand back a row carrying extra
+    # keys, and JobListItem is extra="forbid", so trusting the row's own key
+    # set would be fragile. ``.get`` on the columns added after the doubles
+    # were written keeps those doubles valid.
     return [
         JobListItem(
             id=r["id"],
             title=r["title"],
             department=r["department"],
+            location=r.get("location"),
             status=r["status"],
             created_at=r["created_at"],
+            updated_at=r.get("updated_at"),
             parsed_at=r["parsed_at"],
+            source=r.get("source") or "manual",
+            external_url=r.get("external_url"),
+            resume_count=r.get("resume_count") or 0,
         )
         for r in rows
     ]

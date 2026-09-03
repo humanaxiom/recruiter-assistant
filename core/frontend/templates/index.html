@@ -155,7 +155,7 @@
   <thead>
     <tr>
       <th>Title</th><th>Department</th><th>Location</th>
-      <th>Status</th><th>Résumés</th>
+      <th>Source</th><th>Status</th><th>Updated</th><th>Résumés</th>
     </tr>
   </thead>
   <tbody>
@@ -164,11 +164,36 @@
       <td><a href="{{ url_for('job_detail', job_id=job.id) }}">{{ job.title }}</a></td>
       <td>{{ job.department or '—' }}</td>
       <td>{{ job.location or '—' }}</td>
+      {# ADR-046 / sponsor §I3 — the LINK, not a label. "Where did this come
+         from" is answered by getting back to the posting, and asking that on
+         the detail page costs one click per job across a 40-row list.
+
+         Only a NON-manual source renders. Twenty-six rows reading "manual"
+         is a column that informs nobody, and the em-dash already says "a
+         human made this". #}
+      <td>
+        {%- if job.source and job.source != 'manual' -%}
+        {%- if job.external_url -%}
+        <a href="{{ job.external_url }}" target="_blank" rel="noopener noreferrer"
+           title="Open the original {{ job.source }} posting">{{ job.source }}</a>
+        {%- else -%}{{ job.source }}{%- endif -%}
+        {%- else -%}—{%- endif -%}
+      </td>
       <td><span class="pill pill-{{ job.status }}">{{ job.status }}</span></td>
-      <td>{{ job.resume_count if job.resume_count is not none else 0 }}</td>
+      {# `created_at` alone cannot tell a job re-synced this morning from one
+         untouched since June — the question a daily sync makes worth asking.
+         Date only: the time of day is noise in a list scanned for recency. #}
+      <td class="muted">
+        {{ job.updated_at.strftime('%Y-%m-%d') if job.updated_at else '—' }}
+      </td>
+      {# Counted by the list query itself. The `is not none` guard this cell
+         used to carry is what hid the bug for three months: `resume_count`
+         was never a JobListItem field, and a Jinja Undefined is *not* None,
+         so the guard passed and the cell rendered blank. It is an int now. #}
+      <td>{{ job.resume_count }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">No jobs yet.</td></tr>
+    <tr><td colspan="7" class="muted">No jobs yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>

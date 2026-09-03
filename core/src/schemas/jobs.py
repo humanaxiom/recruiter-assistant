@@ -213,12 +213,38 @@ class JobListItem(BaseModel):
     id: UUID
     title: str
     department: str | None
+    # REPORTED FROM THE RUNNING PRODUCT, 2026-09-03: the jobs table has
+    # rendered a Location column since Phase 7 against a DTO with no such
+    # field, so every row printed an em-dash — permanently, for every job.
+    # Nothing caught it because a null location renders identically, so the
+    # bug and the empty-data case were indistinguishable on screen.
+    location: str | None = None
     status: JobStatus
     created_at: dt.datetime
-    parsed_at: dt.datetime | None
-    # DEVIATION: dropped hris ``comment_count`` (JD comments / Feature 3),
-    # ``source`` and ``external_last_seen_at`` (Taleo ingest provenance) —
-    # both features are cut and the Phase 0 DDL has none of these columns.
+    # Requested after seeing the list: ``created_at`` alone cannot tell a job
+    # re-synced this morning from one untouched since June — which is exactly
+    # the question a daily Taleo sync makes worth asking.
+    updated_at: dt.datetime | None = None
+    parsed_at: dt.datetime | None = None
+    # ADR-046 / sponsor §I3 — provenance where the question is actually asked.
+    # ``source`` is NOT NULL in the DDL with a 'manual' default; ``external_url``
+    # is the link back to the live posting, and it is the link the sponsor asked
+    # for rather than the label.
+    #
+    # DEVIATION from hris: ``comment_count`` (JD comments / Feature 3) stays
+    # dropped — that feature is cut, not deferred.
+    source: str = "manual"
+    external_url: str | None = None
+    # The SAME defect as ``location``, found alongside it and worse. The table
+    # has rendered ``job.resume_count`` since Phase 7; the only DTO carrying
+    # that name was ``JobDeleteOut``. Because the cell guarded with
+    # ``is not none`` and a Jinja Undefined is *not* None, it rendered EMPTY —
+    # not even the intended 0. It is the column that matters most on this
+    # page: the sponsor's premise is postings "receiving large numbers of
+    # applications", and this is the number that says which ones those are.
+    # Zero, never null: ``count(*)`` cannot return NULL, and a blank cell
+    # would again be indistinguishable from "we don't know".
+    resume_count: int = 0
 
 
 class JDExtractText(BaseModel):
