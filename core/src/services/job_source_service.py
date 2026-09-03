@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from src.campus import canonicalise_location
 from src.services import DbConn, audit_service
 
 logger = logging.getLogger(__name__)
@@ -116,9 +117,17 @@ upserted AS (
     ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL
     DO UPDATE SET
         title           = EXCLUDED.title,
-        department      = EXCLUDED.department,
-        location        = EXCLUDED.location,
-        employment_type = EXCLUDED.employment_type,
+        -- COALESCE, not a bare assignment (2026-09-03). The ATS owns these
+        -- fields for a job it owns, so a value it SUPPLIES still wins over a
+        -- local edit — but a listing that carries no department or campus must
+        -- not wipe one that a recruiter filled in by hand. Before this, a
+        -- posting whose accordion omitted the location silently blanked the
+        -- column on every nightly sync, which makes the UI's override field a
+        -- promise the product does not keep.
+        department      = COALESCE(EXCLUDED.department, jobs.department),
+        location        = COALESCE(EXCLUDED.location, jobs.location),
+        employment_type = COALESCE(EXCLUDED.employment_type,
+                                   jobs.employment_type),
         description_raw = EXCLUDED.description_raw,
         description_sha256 = EXCLUDED.description_sha256,
         external_url    = EXCLUDED.external_url,
@@ -168,7 +177,10 @@ async def upsert_external_job(conn: DbConn, payload: ExternalJobUpsert) -> Upser
         _UPSERT_SQL,
         payload.title,
         payload.department,
-        payload.location,
+        # Taleo is the third campus source, so it gets the same canonicalisation
+        # as the JD parse and the UI: "Burnaby, BC" from a listing cell must not
+        # sit beside "Burnaby" from a form in the same column.
+        canonicalise_location(payload.location),
         payload.employment_type,
         payload.description_raw,
         hashlib.sha256(payload.description_raw.encode("utf-8")).hexdigest(),

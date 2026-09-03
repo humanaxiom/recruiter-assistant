@@ -22,6 +22,13 @@ Ported near-verbatim from hris
 ``shortlist_evidence_v1`` (and ``shortlist_evidence_v2``, the cover-letter
 variant), copied verbatim from hris — the matching orchestrator's stage-3
 per-requirement evidence prompt.
+
+**``jd_extract_v2`` (2026-09-03) is what the worker loads.** It adds
+``department`` and turns ``location`` into the SFU campus the sponsor asked
+for. v1 stays on disk deliberately, not as clutter: ``prompt_version`` is
+written into the Neo4j job projection, so every job parsed before this date
+carries ``jd_extract_v1`` and deleting the file would make that stamp
+unresolvable. Prompts are append-only here for exactly that reason.
 """
 
 from __future__ import annotations

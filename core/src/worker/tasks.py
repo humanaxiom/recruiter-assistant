@@ -85,7 +85,7 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
         # record the failure on the row and return "failed" — and neither
         # enqueues an outbox row, because nothing was written to project.
         try:
-            prompt = load_prompt("jd_extract_v1", jd_text=row["description_raw"])
+            prompt = load_prompt("jd_extract_v2", jd_text=row["description_raw"])
             extracted = await llm.chat_json(
                 prompt.messages,
                 JDExtracted,
