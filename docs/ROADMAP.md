@@ -166,6 +166,9 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - Renormalising the remaining sub-weights when a dimension is unmeasurable is open, and needs the same HR decision as item 3: is "no work history at all" neutral-weighted, or does it genuinely mean no seniority?
 - Reverse match fails **open** at stage 3 and is **unwrapped at stage 2** (`orchestrator.py:955-970`), so a stage-3-only fix leaves half the problem.
 
+**Data quality**
+- **`department` is free text and will not group.** Measured on three real SFU JDs through `jd_extract_v2`: the same unit came back as "School of Medicine", "Stephen's Family School of Medicine" and "Stephens Family School of Medicine" — three spellings, two differing only in an apostrophe. The extraction itself is good; there is no controlled vocabulary for it to land on, and Campus has one only because SFU has exactly three. **The cheap mitigation is a datalist of the departments already in use** on the create/edit forms ([job_detail.html](../core/frontend/templates/job_detail.html)), so the second person to type a unit picks the existing spelling rather than inventing one — no HR list required. A real vocabulary is HR's decision, not a guess.
+
 **Operational**
 - **Nothing detects "the fix that never ran."** No check reports job edges missing `display_name`, so the next projection-shaped fix will be inert for exactly as long before someone happens to look at a screen. A startup or health-check count of unlabelled edges would have caught the last one in a day.
 - **No way to re-project a job without re-parsing it.** `parse_job` re-runs the LLM and can change the extracted requirements, so it is not a safe "refresh the projection" control. A JD re-parse route exists ([jobs.py:318](../core/src/api/routes/jobs.py#L318)); a re-*project* control does not.
