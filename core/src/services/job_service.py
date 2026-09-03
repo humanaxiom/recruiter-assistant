@@ -257,6 +257,17 @@ def _row_to_jobout(row: Any) -> JobOut:
     ``False`` (fail-OPEN) if a builder ever omits it — this function MUST
     read ``row["blind_review"]`` explicitly, never rely on the pydantic
     default.
+
+    **The cost of that explicitness, and the trap it sets.** Because every
+    field is named here, adding a column to ``_JOB_COLS`` does NOT add it to
+    the API — the column is SELECTed and dropped on the floor, silently, with
+    ``JobOut``'s default standing in for it. Both columns added on
+    2026-09-02/03 hit exactly that: ``additional_requirements`` (the manager's
+    own note, stored and scored and never returned) and the ADR-046 provenance
+    four. No test failed, because ``extra="forbid"`` rejects UNKNOWN keys and
+    says nothing about known ones being skipped.
+    ``tests/unit/test_jobout_carries_every_column.py`` now compares the SELECT
+    list against the DTO and fails on the next one.
     """
     raw = dict(row)
     desc_parsed_raw = raw["description_parsed"]
@@ -287,7 +298,49 @@ def _row_to_jobout(row: Any) -> JobOut:
         updated_at=raw["updated_at"],
         parsed_at=raw["parsed_at"],
         closed_at=raw["closed_at"],
+        # SPONSOR §I4 — the manager's note AND its extraction. Returning only
+        # the extraction would leave a manager unable to see what they typed,
+        # and nobody able to check the parse against it.
+        # ``.get`` for the ADDITIVE columns, unlike the required fields above.
+        # Not laziness: these arrived after several hundred tests were written
+        # against partial mock rows, and a narrower SELECT is a legitimate
+        # caller. The ADR-006 argument for reading ``blind_review`` explicitly
+        # does not transfer — its default is fail-OPEN (un-blinded), whereas
+        # every default here is the absence of an optional extra.
+        additional_requirements=raw.get("additional_requirements"),
+        additional_requirements_parsed=_manager_requirements(
+            raw.get("additional_requirements_parsed")
+        ),
+        # ADR-046 provenance. ``source`` is NOT NULL with a 'manual' default in
+        # the DDL, so the fallback only covers a row that did not select it.
+        source=raw.get("source") or "manual",
+        external_id=raw.get("external_id"),
+        external_url=raw.get("external_url"),
+        external_last_seen_at=raw.get("external_last_seen_at"),
     )
+
+
+def _manager_requirements(value: Any) -> ManagerRequirements | None:
+    """Parse the stored manager-requirements jsonb, tolerantly.
+
+    A malformed payload degrades to ``None`` rather than 500ing the job read:
+    the extraction is an EXTRA on a requisition whose JD is the record, and one
+    bad jsonb blob must not make the job unreadable. Mirrors
+    ``load_job_view``'s handling on the ranking side.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            logger.warning("job.additional_requirements_parsed_unreadable")
+            return None
+    try:
+        return ManagerRequirements.model_validate(value)
+    except ValidationError:
+        logger.warning("job.additional_requirements_parsed_invalid")
+        return None
 
 
 async def create_job(

@@ -193,6 +193,10 @@ _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
         # would buy nothing; accepting the page token INSTEAD would be a
         # downgrade, which test_exempt_routes_still_reject_a_page_token pins.
         "resume_work_authorization",
+        # SPONSOR §O4 -- same reason as the three above: its own per-résumé
+        # one-shot token (action="document"), strictly stronger than the
+        # session-wide page token this hook checks.
+        "resume_document",
     }
 )
 
@@ -270,6 +274,11 @@ def inject_current_user() -> dict[str, Any]:
     return {
         "current_user": current_user,
         "is_writer": is_writer,
+        # ADR-046 -- only an admin SESSION can trigger the Taleo sync, so only an
+        # admin sees the control. Same compensating-UX-control caveat as
+        # ``is_writer`` above: the backend gate is the real boundary, this just
+        # avoids showing a button that would 403.
+        "is_admin": current_user is None or current_user.get("role") == "admin",
         "logout_url": f"{base}/auth/cas/logout",
         "login_url": f"{base}/auth/cas/login?next=/",
         # Phase 1.3: minted here rather than per-route so EVERY render carries
@@ -1089,6 +1098,11 @@ def resume_detail(resume_id: UUID) -> Any:
         # is shown — sharing a slot would mean using one control silently
         # invalidated the other's token.
         work_auth_csrf_token=csrf.issue_token(resume_id, action="work_auth"),
+        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
+        # reveal, withdraw and work-authorization controls, so every one of them
+        # needs its own one-shot token: sharing a slot would mean using one
+        # silently invalidated the others.
+        document_csrf_token=csrf.issue_token(resume_id, action="document"),
     )
 
 
@@ -1176,6 +1190,87 @@ def resume_withdraw(resume_id: UUID) -> Any:
         else:
             return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/admin/jobs/sync")
+def admin_taleo_sync() -> Any:
+    """Trigger the Taleo job import by hand (ADR-046).
+
+    Guarded by the page CSRF token via the global ``_csrf_gate`` hook — this
+    route is deliberately NOT in the exemption set, because unlike reveal and
+    download it acts on no particular résumé, so there is no per-subject
+    one-shot token to mint. The session-wide page token is the right control
+    for a session-wide action.
+
+    The backend decides everything that matters: admin-session-only, and
+    whether ``TALEO_ENABLED`` permits a run at all. This hop adds no second
+    copy of either rule — it only reports what happened, since a button that
+    silently does nothing when the flag is off is indistinguishable from a
+    broken one.
+    """
+    try:
+        api_client.trigger_taleo_sync()
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    flash(
+        "Taleo sync queued. If the source is disabled (TALEO_ENABLED=false, "
+        "the default) the run will record 'skipped' and make no outbound "
+        "request — see ADR-046."
+    )
+    return redirect(url_for("index"))
+
+
+@app.post("/resumes/<uuid:resume_id>/document")
+def resume_document(resume_id: UUID) -> Any:
+    """AUDITED. Streams the candidate's source résumé or cover letter back to
+    the browser as a download (sponsor 2026-09-02 §O4).
+
+    Same guard shape as ``resume_reveal`` and for the same reason: fetching
+    the file discloses identity outright, so it is a reveal by another route.
+    Same-origin check first, then a one-shot CSRF token in its own
+    ``action="document"`` slot — both before anything reaches the backend, so
+    a rejected forgery can never produce the audit row OR the disclosure.
+
+    **POST, so it cannot be an ``href``.** That is the whole point: a link is
+    prefetchable, and a speculative fetch by a browser, link scanner or mail
+    client would write an audit row naming somebody who never clicked and pull
+    candidate PII into a cache. The template renders a submit button instead.
+
+    Headers are passed through from the backend rather than re-derived here.
+    The backend already chose the filename (from the résumé id, never the
+    candidate-supplied one) and the media type; a second opinion at this hop
+    could disagree with the audit row that justified the download.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="document"
+    ):
+        abort(403)
+    kind = (request.form.get("kind") or "resume").strip()
+    if kind not in ("resume", "cover_letter"):
+        abort(400)
+    try:
+        body, media_type, disposition = api_client.download_document(
+            resume_id, kind=kind
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return Response(
+        body,
+        mimetype=media_type,
+        headers={
+            "Content-Disposition": disposition
+            or f'attachment; filename="{kind}-{resume_id}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/resumes/<uuid:resume_id>/work-authorization")

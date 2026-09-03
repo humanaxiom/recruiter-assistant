@@ -10,6 +10,12 @@
   <div class="card-header">
     <h1 style="margin:0">{{ job.title }}</h1>
     <span class="pill pill-{{ job.status }}">{{ job.status }}</span>
+    {# ADR-046 — provenance. Shown ONLY for a synced job: 'manual' is what
+       every human-created requisition carries, and badging those "manual"
+       would put a label on every job in the system to inform nobody. #}
+    {% if job.source and job.source != 'manual' %}
+    <span class="pill pill-sourced">{{ job.source }}</span>
+    {% endif %}
     {#
       Tri-state, not two. Deriving this from `parsed_at` alone made a JD that
       died yesterday pixel-identical to one that started five seconds ago, which
@@ -29,6 +35,52 @@
     {% if job.location %} · {{ job.location }}{% endif %}
     {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
   </p>
+
+  {# ADR-046 / sponsor §I3 — the link back to the live posting.
+
+     This is the provenance the sponsor asked for. The sync captures the
+     inline summary only and deliberately does NOT fetch the linked "Full Job
+     Description" PDF (ADR-046 alternative E), so for a thin posting THIS LINK
+     IS THE ONLY ROUTE to the real job description. `rel="noopener"` because
+     it opens a third-party origin. #}
+  {% if job.external_url %}
+  <p class="hint">
+    Imported from {{ job.source }} ·
+    <a href="{{ job.external_url }}" target="_blank" rel="noopener noreferrer"
+       >View the original posting</a>
+    {% if job.external_last_seen_at %}
+    · last seen upstream {{ job.external_last_seen_at }}
+    {% endif %}
+  </p>
+  {% endif %}
+
+  {# SPONSOR §I4 — the manager's own additional requirements, read back.
+
+     Shown to the person who typed them, verbatim. Until this branch the note
+     was stored, extracted and scored but never returned by the API at all, so
+     a manager had no way to see what they had asked for — the shortlist chips
+     showed the EXTRACTION, and nothing showed the input it came from. #}
+  {% if job.additional_requirements %}
+  <div class="manager-note">
+    <h3 style="margin-top:0">Your additional requirements</h3>
+    <p class="muted">{{ job.additional_requirements }}</p>
+    {% if job.additional_requirements_parsed %}
+    <p class="hint">
+      Scored as:
+      {% for s in job.additional_requirements_parsed.must_have_skills %}
+      <span class="chip chip-manager">{{ s.name }} · required</span>
+      {% endfor %}
+      {% for s in job.additional_requirements_parsed.nice_to_have_skills %}
+      <span class="chip chip-manager">{{ s.name }}</span>
+      {% endfor %}
+      {% if job.additional_requirements_parsed.other_requirements %}
+      <br>Not scored as skills (shown to reviewers only):
+      {{ job.additional_requirements_parsed.other_requirements | join('; ') }}
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
 
   <h3>Parsed requirements</h3>
   {% include "parse_status.html" %}

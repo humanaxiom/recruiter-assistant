@@ -160,6 +160,17 @@ class JobOut(BaseModel):
     # are distinguished by whether ``additional_requirements`` itself is set.
     additional_requirements: str | None = None
     additional_requirements_parsed: ManagerRequirements | None = None
+    # ADR-046 — where this job came from. ``"manual"`` for every human-created
+    # requisition (the column default), ``"taleo"`` for one the sync produced.
+    #
+    # ``external_url`` is the provenance half of sponsor §I3: a clickable link
+    # back to the live posting, so a recruiter can check a synced job against
+    # the source of truth. It is the ONLY way to reach the original from the
+    # product, which is why it is on the DTO rather than left in the database.
+    source: str = "manual"
+    external_id: str | None = None
+    external_url: str | None = None
+    external_last_seen_at: dt.datetime | None = None
 
 
 class JobReparseOut(BaseModel):
