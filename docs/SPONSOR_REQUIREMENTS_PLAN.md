@@ -32,8 +32,9 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 |---|---|
 | **S2** manager prompt (§I4) | **Done end to end** — field + DDL, the 10% weight move, `manager_prompt_v1` extraction, deterministic scoring, the create-form box, and provenance on the shortlist. **No edit path yet** (see the slice note). |
 | **S4/S5** work authorization + cover-letter decoupling | **Done end to end** — column, audited write, API route, read-time band, résumé-page control, shortlist card, CSV export. |
-| **S0** `FLASK_SECRET_KEY` | Not started. Still gates S6. |
-| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. |
+| **S0** `FLASK_SECRET_KEY` | **Done** — generated, sourced from the environment, and refused at boot on a published default. **S6 is unblocked.** The pilot box still needs the quickstart run against it to rotate; see [ROADMAP open item 1](ROADMAP.md). |
+| **Taleo import (§I3)** | **Slice 1 of 2 done** — [ADR-046](adr/046-taleo-job-source-egress-carveout.md) (the egress carve-out, superseding ADR-012 §2's deferral) plus the pure parsers, five vendored fixtures and 16 tests. **No network code yet.** Slice 2 is the client, DDL, upsert, cron and admin route, all behind `TALEO_ENABLED=false`. |
+| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. S6 is now unblocked by S0. |
 
 Two findings from building it, both recorded because they change what a future
 session should expect rather than because they were interesting:

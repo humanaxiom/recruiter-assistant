@@ -74,13 +74,28 @@ Still open alongside it, and neither is superseded:
   was *"Last but visible … all other metrics are invalidated"*, so an ineligible
   candidate keeps its card but shows `—` for rank and `n/a` for every sub-score,
   with the reason on screen.
-- **The 10% moved off the cover letter onto the manager prompt (§O3/§I4).**
-  `MatchWeights.manager_prompt = 0.10`, `motivation = 0.0`, schema + DDL for
-  `jobs.additional_requirements`.
+- **The manager's additional requirements (§I4/§O3) end to end.** The 10% moved
+  off the cover letter (`manager_prompt = 0.10`, `motivation = 0.0`), the
+  `manager_prompt_v1` extraction as a second pass that never re-runs the JD
+  parse, deterministic scoring, the create-form box, and **"Added by you" chips
+  on the shortlist** so a manager can see whether what *they* asked for was
+  considered. Merged as #101 and #102.
+- **`FLASK_SECRET_KEY` (ROADMAP open item 1) closed.** Three layers: generated
+  by `quickstart.ps1`, sourced from the environment by both compose files, and
+  refused at boot on a published default. **The pilot box still needs the
+  quickstart run against it** — and rotating logs everyone out, so warn them.
+- **Taleo import, slice 1 of 2 (§I3).** [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md)
+  — the egress carve-out, superseding ADR-012 §2's deferral — plus the pure
+  parsers, five vendored fixtures, 16 tests. **No network code yet.**
 
-**Next, in order:** the manager-prompt extraction pass + UI (schema and weight
-are in, the prompt and worker are not) → the hris Taleo port (§2.3 of the plan)
-→ `FLASK_SECRET_KEY` (gates the document-links slice) → notifications.
+**Next, in order:** Taleo slice 2 (the client, DDL, upsert, cron and admin
+route, all behind `TALEO_ENABLED=false`) → document links (S6, unblocked now
+that S0 is done) → notifications (`mailhost.sfu.ca:25`, in-app table first) →
+the splitter and candidate CSV.
+
+**Owed and not yet written: two ADRs** from the work-authorization slice — the
+screening decision (it must record *why inference was rejected*) and an ADR-009
+amendment for the weight move.
 
 **Four things a future session must not rediscover the hard way:**
 
@@ -111,20 +126,36 @@ are in, the prompt and worker are not) → the hris Taleo port (§2.3 of the pla
 
 | | |
 |---|---|
-| `main` | `ec2f2d2` |
-| Branch in flight | `feat/sponsor-requirements` — sponsor §I4/§O2/§O3 |
-| Gates, this branch | 5,611 unit · 93% coverage · integration green — **re-run, do not cite** |
+| `main` | `b012e82` — sponsor PRs #101 + #102 merged |
+| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3 |
+| Gates, this branch | 5,693 unit · 552 integration · 92.45% coverage — **re-run, do not cite** |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
 | LLM hosts | gb10 `100.88.247.106` · spark1 `100.114.185.88` — **both shared** |
+| Egress | **ONE carve-out**, ADR-046, `TALEO_ENABLED=false` by default. Nothing else leaves. |
 
 Working end to end: upload → parse → rank → shortlist; JD ingest; blind review,
 PII encryption, audited reveal; CAS identity, session role enforcement, CSRF,
-auditor viewer; work-authorization screening.
+auditor viewer; work-authorization screening; the manager's own requirements.
 
-**Not yet run against this branch:** `smoke.sh` (the browser→Flask→API seam) and
-`doctor.sh` (the data). The work-authorization control renders and its round trip
-is unit-tested, but nobody has clicked it in the running product.
+**Verified against the RUNNING product** during this work: `smoke.sh` 10 passed
+(the browser→Flask→API seam); the work-authorization DDL confirmed live with all
+19 existing résumés back-filled to `unknown` and zero NULLs; the new route
+registered and 401ing an unauthenticated write. `doctor.sh` returns one finding —
+CAS is disabled on the **local dev stack**, which `smoke.sh` requires, so the two
+cannot both be satisfied here; it is a real finding for the pilot box, not for
+this branch.
+
+**Still not clicked by a human:** the work-authorization radio and the manager's
+requirements box render and their round trips are unit-tested, but nobody has
+used them in a browser. Authenticating from here needs a role key out of `.env`,
+which this session did not read.
+
+**The integration suite flakes.** `ERROR at setup` on `asyncpg.connect` in
+whichever file draws the short straw — seen once in this branch's history on
+`test_job_assignees_pg.py`. It is a testcontainers resource limit, not a defect.
+**Re-run to confirm rather than assuming**; a clean re-run is the evidence, and
+"known flake" is exactly the phrase that hides a real failure.
 
 ### 5. Never diagnose the model on a contended peer
 

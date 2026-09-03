@@ -54,15 +54,23 @@ engineering residuals that the pilot has made either more or less urgent.
 The pilot box is no longer a dev stack, and three things that were acceptable
 without users are not acceptable with them.
 
-- **🔴 `FLASK_SECRET_KEY: dev-only-change-me` is committed** in both
-  [docker-compose.yml:150](../docker-compose.yml#L150) and
-  [compose.cas.yml:31](../compose.cas.yml#L31). A published, guessable session
-  signing key means anyone who can reach the frontend can forge a session for any
-  role. This was a known nit while nobody was signed in; with four real sessions
-  on a box it is the highest-severity open item in this file. Generate it in
-  `quickstart.ps1` beside `PII_KEY`/`SKILL_HASH_SALT`, and refuse to boot on the
-  literal default the way `validate_startup_auth_config` already refuses a
-  CAS-on/zero-key configuration.
+- **✅ `FLASK_SECRET_KEY` — CLOSED 2026-09-03.** Was the highest-severity item in
+  this file: the literal `dev-only-change-me` was committed in both compose
+  files, so anyone who could reach the frontend could forge a session for any
+  role. Fixed in three layers, because any one alone leaves a hole —
+  `quickstart.ps1` generates it, both compose files now take it from the
+  environment (`${FLASK_SECRET_KEY:?…}`, so `.env` actually wins), and
+  `validate_startup_session_secret` refuses to boot a CAS-enabled deployment on
+  any published default or an empty value.
+
+  **Two things this leaves for an operator, not a session.** The generator
+  originally skipped values that were merely *published* rather than blank —
+  which would have skipped every `.env` created while compose hard-coded the
+  literal, i.e. exactly the deployments needing rotation. That is fixed, but it
+  means **the pilot box still needs `scripts/quickstart.ps1` run against it**
+  (needs `pwsh` 7; it does not parse under PowerShell 5.1). **Rotating
+  invalidates every live session**, so tell the four users before doing it
+  rather than letting it look like a fault.
 - **`pg.jobs_stuck` is still missing from `doctor.sh`.**
   [core/src/doctor.py:174](../core/src/doctor.py#L174) checks `pg.resumes_stuck` and
   nothing checks `jobs.failure_reason IS NOT NULL` or draft jobs with no
