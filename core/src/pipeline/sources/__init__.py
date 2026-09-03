@@ -8,6 +8,8 @@ fresh checkout, a CI run and an airgapped deployment never egress for jobs.
 from __future__ import annotations
 
 from src.pipeline.sources.taleo import (
+    TaleoClient,
+    TaleoHostNotAllowedError,
     TaleoListingRow,
     TaleoRequisition,
     parse_listing_page,
@@ -15,6 +17,8 @@ from src.pipeline.sources.taleo import (
 )
 
 __all__ = [
+    "TaleoClient",
+    "TaleoHostNotAllowedError",
     "TaleoListingRow",
     "TaleoRequisition",
     "parse_listing_page",

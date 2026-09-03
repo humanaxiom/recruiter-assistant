@@ -1,15 +1,17 @@
 """Taleo (Oracle Cloud Recruiting) HTML parsers for the SIMOFRAS org.
 
-**Pure functions only — no I/O, no network, no config.** ``parse_listing_page``
-and ``parse_requisition_page`` take HTML text and return typed records. The
-client that actually fetches those pages lands separately, behind
-``TALEO_ENABLED`` (ADR-046), and importing this module reaches nothing.
+Two halves, kept apart on purpose.
 
-That split is deliberate rather than tidy-minded: **this file holds all the
-fragility and all the tests, and none of the risk.** HTML scraping is the part
-that rots — the Taleo template has changed before — so the parsers are worth
-having under vendored-fixture test coverage independently of whether the
-egress carve-out is ever switched on in a given deployment.
+``parse_listing_page`` and ``parse_requisition_page`` are PURE -- HTML text in,
+typed records out, no I/O, no config. They hold all the fragility (HTML
+scraping is the part that rots; the Taleo template has changed before) and are
+covered by vendored fixtures, so they stay testable in the ordinary offline
+gate whether or not any deployment ever switches the source on.
+
+``TaleoClient`` is the ONLY code in this repository that egresses. It runs
+solely when ``TALEO_ENABLED`` is true -- default ``false``, so a fresh checkout,
+a CI run and every airgapped deployment never construct it -- and it refuses
+any URL outside the configured Taleo host before each request. See ADR-046.
 
 SFU publishes jobs on the legacy Taleo v2 careers UI:
 
@@ -23,12 +25,15 @@ view page yields the structured fields and the inline JD body.
 Ported from hris ``packages/pipeline/src/pipeline/sources/taleo.py``
 (see ADR-046 §Port notes). DEVIATIONS from that source:
 
-* **The ``TaleoClient`` half is not here** — only the pure parsers, per the
-  split above.
-* **``structlog`` → nothing.** hris logs through structlog; this repo uses
-  stdlib ``logging``, and the pure parsers log nothing at all. The
-  empty-listing anomaly that ADR-046 promises is logged by the *sync task*,
-  which is where the run context lives.
+* **``structlog`` -> stdlib ``logging``.** hris logs through structlog, which
+  this repo does not depend on. The pure parsers log nothing at all; the
+  empty-listing anomaly ADR-046 promises is logged by the *sync task*, where
+  the run context lives.
+* **The client refuses off-host URLs itself.** hris leaves that to the firewall.
+  ``fetch_requisition`` follows a URL parsed OUT OF HTML, so whoever influences
+  the page picks the destination -- and here that request would originate inside
+  the tailnet, beside the GPU hosts. The firewall rule is still required; this
+  is the same boundary enforced again, where a test can hold it.
 
 Two design properties worth preserving on any edit:
 
@@ -44,12 +49,17 @@ Two design properties worth preserving on any edit:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup, Tag
+
+log = logging.getLogger(__name__)
 
 # Captures the requisition id from any link href on the listing page.
 # Module-level so the pure parsers below don't reach into the client class.
@@ -90,7 +100,150 @@ class TaleoRequisition:
     pdf_url: str | None = None  # operator follow-up when the JD body is a PDF
 
 
-# ---------------- client ----------------
+# ---------------- the network half (ADR-046) ----------------
+#
+# Everything above and below this section is pure. THIS is the only code in the
+# repository that egresses, and it runs only when TALEO_ENABLED is true.
+
+
+class TaleoHostNotAllowedError(RuntimeError):
+    """A URL outside the configured Taleo host was about to be fetched.
+
+    Raised rather than skipped: an off-host URL appearing in a Taleo page means
+    either the template changed in a way the parser misread, or the page is
+    serving links it should not. Both are worth stopping the run over, and
+    neither should be silently ignored on the next 200 requisitions.
+    """
+
+
+#: Identifies this system to SFU IT in the request log. ADR-046's politeness
+#: obligation: an unattributed scraper against a university careers page is
+#: indistinguishable from an abusive one, and the person fielding the question
+#: should not have to ask around to find the owner.
+TALEO_USER_AGENT = (
+    "recruiter-assistant/1.0 (SFU job-source sync; contact SFU IT ARIA team)"
+)
+
+
+class TaleoClient:
+    """Stateful client — one per sync run.
+
+    Takes an ``httpx.AsyncClient`` so the worker reuses its own connection
+    pool.
+
+    **Every fetch is host-checked first** (:meth:`_assert_allowed`), which is a
+    deliberate deviation from the hris source. ``fetch_requisition`` follows a
+    URL that came out of PARSED HTML, so whoever influences the Taleo page
+    chooses where this worker's next request goes — and on this deployment that
+    request originates inside the tailnet, alongside the GPU hosts and the
+    app's own API. ADR-046 still requires the firewall rule; this is the same
+    boundary enforced a second time, in the repository that can test it.
+
+    **Redirects are not followed.** httpx's default, pinned by a test: a 302 is
+    an off-host fetch that the allowlist check would never see.
+    """
+
+    _LISTING_PATH = "/tre01/ats/careers/v2/searchResults"
+
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        *,
+        base_url: str,
+        org: str,
+        cws: str,
+        request_delay_s: float = 1.0,
+        max_pages: int = 20,
+    ) -> None:
+        self._http = http
+        self._base_url = base_url.rstrip("/")
+        self._allowed_host = (urlparse(self._base_url).hostname or "").lower()
+        self._org = org
+        self._cws = cws
+        self._delay = request_delay_s
+        self._max_pages = max_pages
+
+    # ---------------- public ----------------
+
+    async def fetch_listings(self) -> list[TaleoListingRow]:
+        """Walk the paginated listing pages; one row per requisition.
+
+        Two independent stopping conditions, and both matter. ``max_pages`` is
+        runaway protection against a template that always renders a "next"
+        link. The "this page added nothing new" break handles the commoner
+        case: some Taleo templates loop on the last page, which without it
+        costs the full page budget in live requests for no new rows.
+
+        An HTTP error propagates. A 503 must never read as "no jobs today" —
+        the caller's archive sweep would then retire every job in the system.
+        """
+        rows: list[TaleoListingRow] = []
+        seen_rids: set[str] = set()
+        next_url: str | None = self._listing_url(page=1)
+        page_count = 0
+
+        while next_url is not None and page_count < self._max_pages:
+            page_count += 1
+            html = await self._get_text(next_url)
+            page_rows, page_next = parse_listing_page(html, base_url=self._base_url)
+            new_this_page = 0
+            for row in page_rows:
+                if row.external_id in seen_rids:
+                    continue
+                seen_rids.add(row.external_id)
+                rows.append(row)
+                new_this_page += 1
+            log.debug(
+                "taleo.listing.parsed page=%d rows=%d new=%d",
+                page_count,
+                len(page_rows),
+                new_this_page,
+            )
+            if new_this_page == 0:
+                break
+            next_url = page_next
+            if next_url is not None:
+                await asyncio.sleep(self._delay)
+
+        log.info("taleo.listings.complete count=%d pages=%d", len(rows), page_count)
+        return rows
+
+    async def fetch_requisition(self, listing: TaleoListingRow) -> TaleoRequisition:
+        """Hydrate one listing row with its requisition detail page."""
+        await asyncio.sleep(self._delay)
+        html = await self._get_text(listing.external_url)
+        return parse_requisition_page(html, listing=listing)
+
+    # ---------------- internals ----------------
+
+    def _assert_allowed(self, url: str) -> None:
+        """Refuse anything that is not http(s) on the configured Taleo host.
+
+        Compares the parsed HOST exactly. A ``startswith(base_url)`` check —
+        the obvious shortcut — accepts ``tre.tbe.taleo.net.evil.com``, and the
+        scheme check is what keeps ``file://`` out.
+        """
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in ("http", "https") or host != self._allowed_host:
+            raise TaleoHostNotAllowedError(
+                f"refusing to fetch {parsed.scheme}://{host or '?'} — the Taleo "
+                f"source may only reach {self._allowed_host}. This URL came "
+                "from parsed HTML, so an off-host link means the template "
+                "changed or the page is serving links it should not."
+            )
+
+    def _listing_url(self, *, page: int) -> str:
+        q = {"org": self._org, "cws": self._cws}
+        if page > 1:
+            q["pageNo"] = str(page)
+        return f"{self._base_url}{self._LISTING_PATH}?{urlencode(q)}"
+
+    async def _get_text(self, url: str) -> str:
+        self._assert_allowed(url)
+        resp = await self._http.get(url, headers={"User-Agent": TALEO_USER_AGENT})
+        resp.raise_for_status()
+        return resp.text
 
 
 # ---------------- pure parsers (no I/O; unit-tested on vendored fixtures) ------

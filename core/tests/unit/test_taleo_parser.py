@@ -49,12 +49,21 @@ _SFU_CHROME_HTML = """
 </header></body></html>
 """
 
-FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "taleo"
+# Vendored Taleo markup lives under tests/vendor/, NOT tests/fixtures/, and
+# that is load-bearing rather than a naming preference: `.gitignore` carries a
+# blunt `fixtures/` rule because a `git add -A` once pushed 99MB of real
+# candidate PII to this PUBLIC repo. These pages are public job postings with
+# no PII in them at all -- but "is this file PII?" is exactly the judgement the
+# blunt rule exists to remove, so the files sit outside its namespace instead
+# of earning a negation. Put them back under fixtures/ and they silently stop
+# being committed: the suite passes locally on the untracked files and fails in
+# CI, which is precisely how this was found.
+VENDOR_DIR = Path(__file__).resolve().parents[1] / "vendor" / "taleo"
 BASE_URL = "https://tre.tbe.taleo.net"
 
 
 def _read(name: str) -> str:
-    return (FIXTURE_DIR / name).read_text(encoding="utf-8")
+    return (VENDOR_DIR / name).read_text(encoding="utf-8")
 
 
 # ---------------- listing page ----------------
@@ -293,3 +302,36 @@ def test_extract_description_strips_nav_and_breadcrumb_chrome() -> None:
     assert "Learning Technology Specialist" in out
     assert "Who We Are" in out
     assert "Login to the LMS" in out
+
+
+def test_the_vendored_pages_are_actually_tracked_by_git() -> None:
+    """The failure this file already caused once, made impossible to repeat.
+
+    ``.gitignore`` carries a blunt ``fixtures/`` rule (99MB of real candidate
+    PII was once pushed to this PUBLIC repo by a ``git add -A``). Vendored
+    Taleo markup originally landed under ``tests/fixtures/taleo/`` and was
+    therefore never committed — the suite passed locally against untracked
+    files on disk and failed in CI, which is the worst shape a test-data bug
+    can take: green where you are looking, red where you are not.
+
+    Asserting the files are TRACKED, not merely present, is what closes it.
+    A future tidy-up that moves them back under ``fixtures/`` fails here
+    rather than in someone else's CI run.
+    """
+    import subprocess
+
+    root = Path(__file__).resolve().parents[3]
+    tracked = subprocess.run(
+        ["git", "ls-files", "core/tests/vendor/taleo"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    on_disk = sorted(p.name for p in VENDOR_DIR.glob("*.html"))
+    assert on_disk, "no vendored Taleo pages on disk"
+    assert sorted(Path(t).name for t in tracked if t.endswith(".html")) == on_disk, (
+        "vendored Taleo pages exist on disk but are not tracked by git — they "
+        "are almost certainly under a path matching .gitignore's `fixtures/` "
+        "rule, so CI will run this suite with no HTML to parse"
+    )
