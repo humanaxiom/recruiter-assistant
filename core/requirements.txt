@@ -20,6 +20,13 @@ pyyaml>=6.0.0           # skill alias table (src/pipeline/skill_data/aliases.yam
 rapidfuzz==3.10.1       # stage-3 anti-fabrication verifier (pinned == for gate
                         # reproducibility; partial_ratio is the load-bearing metric)
 
+# ── External job sources (ADR-046) ───────────────────────────
+beautifulsoup4>=4.12.0  # Taleo careers-page parsing (src/pipeline/sources).
+                        # Parse-only -- neither this nor lxml reaches the
+                        # network; the fetching half is behind TALEO_ENABLED,
+                        # which defaults to false.
+lxml>=5.0.0             # the parser backend BeautifulSoup is constructed with
+
 # ── Document extraction ──────────────────────────────────────────────────────
 PyMuPDF>=1.24.0         # import fitz
 python-docx>=1.1.0      # import docx
