@@ -28,6 +28,11 @@ services:
   frontend:
     environment:
       API_BASE_URL: http://api:8000
-      FLASK_SECRET_KEY: dev-only-change-me
+      # ROADMAP open item 1 — see the note in docker-compose.yml. This override
+      # matters MORE here than there: this file is the one that turns CAS on,
+      # so it is the file a real deployment uses, and it was pinning a
+      # published session-signing key onto exactly the deployments that have
+      # real people logged in.
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY must be set — 32 random bytes, base64; run scripts/quickstart.ps1}
       CAS_ENABLED: "true"
       CAS_SERVICE_BASE_URL: "http://localhost:${API_PORT:-8000}"

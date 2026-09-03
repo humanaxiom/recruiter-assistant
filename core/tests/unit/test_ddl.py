@@ -89,12 +89,22 @@ CUT_TABLES: tuple[str, ...] = (
     "jd_harmonizations",
 )
 
-# Columns cut from hris `jobs`: Taleo ingest, JD-Harmonizer, review workflow.
+# Columns cut from hris `jobs`: JD-Harmonizer and the review workflow.
+#
+# THE FOUR TALEO-INGEST COLUMNS WERE HERE UNTIL 2026-09-03 and have been
+# deliberately removed from this list — `source`, `external_id`,
+# `external_url`, `external_last_seen_at`. They were cut in Phase 2 under
+# ADR-012 §2, which deferred the Taleo connector; ADR-046 supersedes that
+# deferral at the sponsor's request, so the assertion that they are absent is
+# no longer a statement about this system's scope. The test was correct for the
+# old decision, and the decision changed — not the test.
+#
+# The rest of this list still stands, and the two remaining entries are NOT the
+# same kind of thing as the Taleo four: `title_autofilled` and
+# `approval_required_2nd_review` belong to features that are CUT, not deferred,
+# and `description_sfu` to the JD-Harmonizer that was never ported. Removing
+# one of those needs its own ADR, exactly as this removal did.
 CUT_JOB_COLUMNS: tuple[str, ...] = (
-    "source",
-    "external_id",
-    "external_url",
-    "external_last_seen_at",
     "description_sfu",
     "title_autofilled",
     "approval_required_2nd_review",

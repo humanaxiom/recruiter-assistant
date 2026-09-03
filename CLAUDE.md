@@ -12,7 +12,18 @@ Read automatically by Claude Code every session. This governs ALL work in this r
 - **Ollama over the tailnet** at `${LLM_BASE_URL}` — defaults to the GPU host `aria-gb10`
   (`.env.example` ships its tailnet IP); `host.docker.internal:11434/v1` is only the fallback for someone
   running their own Ollama on the app box. There is NO local Ollama in the standard setup.
-  NEVER add cloud API calls.
+  NEVER add cloud API calls. **Inference is offline, without exception** — no model
+  call ever leaves the tailnet, and no candidate data, résumé, prompt or shortlist
+  ever crosses a boundary.
+- **ONE documented egress carve-out exists, and it is not an inference one:**
+  [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md) permits outbound HTTPS
+  to `tre.tbe.taleo.net` **and only that host**, to READ SFU's own public job
+  postings. It is `TALEO_ENABLED`-gated and **defaults to `false`**, so a fresh
+  checkout, a CI run and any airgapped deployment never egress. Turning it on in
+  production has unmet obligations (an enumerated firewall rule, counsel +
+  privacy-officer sign-off, a named owner) — read the ADR before doing so.
+  **Adding a second carve-out needs the same treatment: an ADR, a default-off
+  flag, and a line here. Never a quiet import.**
 - Everything except Ollama runs in Docker (`docker compose up -d`)
 
 ## Non-negotiable gates — run before EVERY commit

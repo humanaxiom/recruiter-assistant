@@ -30,10 +30,11 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 
 | Slice | State |
 |---|---|
-| **S2** manager prompt — schema, DDL, the 10% weight move | **Schema + weights done.** Extraction pass, routes and UI still open. |
+| **S2** manager prompt (§I4) | **Done end to end** — field + DDL, the 10% weight move, `manager_prompt_v1` extraction, deterministic scoring, the create-form box, and provenance on the shortlist. **No edit path yet** (see the slice note). |
 | **S4/S5** work authorization + cover-letter decoupling | **Done end to end** — column, audited write, API route, read-time band, résumé-page control, shortlist card, CSV export. |
-| **S0** `FLASK_SECRET_KEY` | Not started. Still gates S6. |
-| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. |
+| **S0** `FLASK_SECRET_KEY` | **Done** — generated, sourced from the environment, and refused at boot on a published default. **S6 is unblocked.** The pilot box still needs the quickstart run against it to rotate; see [ROADMAP open item 1](ROADMAP.md). |
+| **Taleo import (§I3)** | **Slice 1 of 2 done** — [ADR-046](adr/046-taleo-job-source-egress-carveout.md) (the egress carve-out, superseding ADR-012 §2's deferral) plus the pure parsers, five vendored fixtures and 16 tests. **No network code yet.** Slice 2 is the client, DDL, upsert, cron and admin route, all behind `TALEO_ENABLED=false`. |
+| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. S6 is now unblocked by S0. |
 
 Two findings from building it, both recorded because they change what a future
 session should expect rather than because they were interesting:
@@ -312,17 +313,36 @@ ROADMAP open item 1. Generate it in `quickstart.ps1` beside
 the way `validate_startup_auth_config` already refuses a CAS-on/zero-key config.
 Gates S6.
 
-**S2 · Additional requirements prompt (I4, O1)** *(~1 day)* — **HALF SHIPPED**
+**S2 · Additional requirements prompt (I4, O1)** *(~1 day)* — **SHIPPED**
 The single highest value-per-hour item in the set.
 
-> ⓘ **Done:** `jobs.additional_requirements` + `additional_requirements_parsed`
-> (schema + DDL), the `ManagerRequirements` extraction shape, and the 0.10
-> weight the sponsor moved here off the cover letter -- including its
-> measurement marker, so "the manager asked for nothing" and "the candidate
-> matched none of it" are never the same stored zero.
-> **Still open:** the extraction pass itself (prompt pair + worker), the create/
-> edit form, and provenance on the shortlist. Measure the prompt budget with
-> `model-check.sh` -- the token floor is per-PROMPT, not per-model.
+> ⓘ **What building it changed.** Four things the framing below did not
+> anticipate, and one it got wrong:
+>
+> * **The requirements are NOT merged into the job's requirement set.** The
+>   bullet below says "merged into the job's requirement set and tagged with
+>   provenance". That would have double-counted them inside the 40% skill
+>   sub-score while the sponsor's separate 10% sat beside it, and it would have
+>   put the manager's wording into the same list as the posting's. They stay
+>   separate all the way to the screen: `manager_prompt_contributions` beside
+>   `skill_contributions`, and a distinctly-styled "Added by you" chip group.
+> * **Scoring is deterministic, not an LLM call.** A name comparison, not a
+>   judgement — which keeps it explainable without re-running a model and,
+>   load-bearing, keeps it outside stage 3's fail-closed path so a model outage
+>   cannot silently blank 10% of every candidate's score.
+> * **Matching leans on the vocabulary's FALLBACK, not its coverage.** This
+>   field exists for what the posting missed, so terms typed here are
+>   disproportionately out-of-vocabulary (open item 3: 54.8% coverage).
+>   `_basic_normalise` returns unresolved names unchanged, so non-vocab terms
+>   match on their normalised form. Exact after normalisation, never fuzzy.
+> * **The wiring got its own test file.** Four links, each silent if broken —
+>   which is exactly how the weight itself came to be applied by nothing.
+>
+> **Still open on this slice:** an **edit path**. `additional_requirements` can
+> be set at create time; changing it afterwards — and re-extracting *without*
+> re-running the JD parse — is not built. Also **unmeasured**: the prompt's real
+> token budget. Run `model-check.sh` rather than trusting the 2048 literal; the
+> floor is per-PROMPT, not per-model.
 
 - `JobCreate`/`JobUpdate`/`JobOut` gain `additional_requirements: str | None` (max ~4000). Idempotent `ALTER TABLE` in `ddl.py`, matching the `withdrawn_at` precedent.
 - A **second extraction pass** turns that free text into the same `Skill`/requirement shapes `JDExtracted` produces, merged into the job's requirement set and **tagged with provenance** (`source: "jd" | "manager_prompt"`) so the shortlist can show *why* a requirement is being scored — the repo's "never a number without a cited source" rule applied to the requirement side.

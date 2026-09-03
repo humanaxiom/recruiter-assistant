@@ -717,3 +717,39 @@ details.newjob summary {
   margin-right: 16px;
   font-size: 13px;
 }
+
+/* SPONSOR 2026-09-02 §I4 — the hiring manager's own requirements.
+
+   Deliberately a DIFFERENT hue from the posting's green/red chips rather than
+   a shade of them. The distinction being drawn is not "better or worse match",
+   it is "who asked for this" — and reusing the matched/missing palette would
+   read as a severity difference instead of a provenance one. Indigo matches
+   `.pill-skill`, which is already the neutral "this is a skill" colour here.
+
+   The missing variant keeps the indigo family and marks the miss with a dashed
+   border, so a reviewer scanning the card sees one provenance group whose
+   members differ, not two unrelated groups. */
+.chips-manager {
+  align-items: center;
+  margin-top: -4px;
+}
+
+.chips-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.chip-manager {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.chip-manager-missing {
+  background: #f8fafc;
+  color: #6366f1;
+  border: 1px dashed #a5b4fc;
+  /* Keep the pill the same height as its solid siblings despite the border. */
+  padding: 1px 9px;
+}
