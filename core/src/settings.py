@@ -391,6 +391,72 @@ def validate_startup_auth_config(settings: Settings) -> None:
         configured[value] = env_var
 
 
+# Session-signing keys this repository has published. Every one is a value a
+# real deployment could be running right now, so each has to be refused by
+# name rather than by a "looks weak" heuristic:
+#
+#   "dev-only"            — ``Settings.flask_secret_key``'s own field default
+#   "dev-only-change-me"  — committed in docker-compose.yml + compose.cas.yml
+#   "change-me"           — .env.example
+#
+# An explicit list, not an entropy check. A short key is not necessarily
+# forgeable and a long one is not necessarily secret; what makes these
+# dangerous is that they are PUBLISHED, and publication is a fact about this
+# repository that only a list can express. Anything added to a template or a
+# compose file in future belongs here on the same day.
+_PUBLISHED_SESSION_KEYS: frozenset[str] = frozenset(
+    {"dev-only", "dev-only-change-me", "change-me"}
+)
+
+
+def validate_startup_session_secret(settings: Settings) -> None:
+    """Refuse to boot a real deployment on a published Flask session key.
+
+    ROADMAP open item 1. Flask signs its session cookie with
+    ``FLASK_SECRET_KEY``; a published, guessable value means anyone who can
+    reach the frontend can forge a session for any role — including admin —
+    with no credential at all. The key was committed in both compose files,
+    which made it the DEFAULT rather than an accident: an ``environment:``
+    entry overrides ``env_file``, so a correct value in ``.env`` was silently
+    ignored.
+
+    Same discipline as :func:`validate_startup_auth_config`, and for the same
+    reasons:
+
+    * **Scoped to ``cas_enabled=True``** — a real deploy, not the
+      single-operator local-dev default. A refusal that also fires on every
+      developer's laptop gets disabled, and then protects nobody.
+    * **Refuses, never warns.** A warning in a startup log is a control nobody
+      reads. This one is only reached by a deployment that is already
+      forgeable.
+    * **Never names the value**, only the variable. A startup error reaches
+      logs, terminals and screenshots — the fix for a leaked secret must not
+      leak the next one.
+    * **Names the remedy.** The operator hitting this is mid-deploy; a refusal
+      that does not say what to run just moves the outage.
+
+    An EMPTY key is refused on the same path. Flask raises on the first session
+    write rather than at boot, so an empty key ships as a runtime 500 for
+    whichever user happens to log in first — a deployment that never starts is
+    strictly better than one that breaks for one person later.
+    """
+    if not settings.cas_enabled:
+        return
+    key = settings.flask_secret_key.strip()
+    if key and key not in _PUBLISHED_SESSION_KEYS:
+        return
+    problem = "is empty" if not key else "is one of this repo's published defaults"
+    raise RuntimeError(
+        f"FLASK_SECRET_KEY {problem} while CAS is enabled — refusing to start: "
+        "Flask signs its session cookie with this key, so a published or "
+        "absent value lets anyone who can reach the frontend forge a session "
+        "for any role, including admin, with no credential. Generate a real "
+        "one — scripts/quickstart.ps1 does it alongside PII_KEY and "
+        "SKILL_HASH_SALT — and make sure no compose file hard-codes it, "
+        "because an environment: entry overrides env_file."
+    )
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

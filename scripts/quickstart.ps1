@@ -190,16 +190,36 @@ $changed = $false
 # one key the Flask BFF presents on the browser's behalf
 # (frontend/api_client.py::build_client) — without it the UI 401s once auth
 # is on.
-foreach ($key in @('PII_KEY', 'SKILL_HASH_SALT', 'API_KEY_ADMIN', 'API_KEY_RECRUITER', 'API_KEY_HIRING_MANAGER', 'API_KEY_AUDITOR')) {
+# FLASK_SECRET_KEY joins this list for ROADMAP open item 1: Flask signs its
+# session cookie with it, and the compose files used to hard-code
+# `dev-only-change-me`. Both compose files now demand it from the environment
+# (`${FLASK_SECRET_KEY:?...}`) and `validate_startup_session_secret` refuses to
+# boot a CAS-enabled deployment on any published default — so without this
+# generator a fresh install would simply fail to start, which is why all three
+# layers had to land together.
+foreach ($key in @('PII_KEY', 'SKILL_HASH_SALT', 'FLASK_SECRET_KEY', 'API_KEY_ADMIN', 'API_KEY_RECRUITER', 'API_KEY_HIRING_MANAGER', 'API_KEY_AUDITOR')) {
     $line = $envLines | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -First 1
     $value = if ($line) { ($line -replace "^\s*$key\s*=", '').Trim() } else { $null }
-    if ([string]::IsNullOrWhiteSpace($value)) {
+    # Missing or blank is the ordinary case. A PUBLISHED DEFAULT is the one that
+    # nearly slipped through: `.env` files created while the compose files
+    # hard-coded `FLASK_SECRET_KEY: dev-only-change-me` carry that value
+    # already, so a "generate only if blank" rule would skip exactly the
+    # deployments that most need rotating -- and, now that the app refuses to
+    # boot on a published key with CAS on, would leave them unable to start
+    # with no working remedy. Treat a known-published value as absent.
+    $published = @('dev-only', 'dev-only-change-me', 'change-me')
+    $isPublished = $value -and ($published -contains $value)
+    if ([string]::IsNullOrWhiteSpace($value) -or $isPublished) {
         $secret = New-Base64Secret
         if ($line) {
             $envLines = $envLines | ForEach-Object { if ($_ -match "^\s*$key\s*=") { "$key=$secret" } else { $_ } }
         } else { $envLines += "$key=$secret" }
         $changed = $true
-        Write-Ok "Generated a random $key (32 bytes, base64)."
+        if ($isPublished) {
+            Write-Ok "Replaced a PUBLISHED default $key with a random one (32 bytes, base64)."
+        } else {
+            Write-Ok "Generated a random $key (32 bytes, base64)."
+        }
     }
 }
 

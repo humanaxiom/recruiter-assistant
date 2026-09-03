@@ -147,7 +147,17 @@ services:
     ports: ["${FRONTEND_PORT:-5000}:5000"]
     environment:
       API_BASE_URL: http://api:8000
-      FLASK_SECRET_KEY: dev-only-change-me
+      # ROADMAP open item 1. This used to read `FLASK_SECRET_KEY:
+      # dev-only-change-me`, and that literal was the whole defect: Flask signs
+      # its session cookie with this key, so a published value lets anyone who
+      # can reach the frontend forge a session for any role. Worse, an
+      # `environment:` entry OVERRIDES `env_file`, so a correct key in `.env`
+      # was silently ignored — the same class the CAS_ENABLED comment on the
+      # api service records.
+      #
+      # `:?` makes compose hard-fail rather than substituting a blank, matching
+      # PII_KEY / SKILL_HASH_SALT above; `scripts/quickstart.ps1` generates it.
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY must be set — 32 random bytes, base64; run scripts/quickstart.ps1}
       # The Flask BFF presents ONE fixed role key (recruiter) for every
       # browser it serves (frontend/api_client.py::build_client) — without
       # this, enabling auth (any API_KEY_* configured above) 401s every

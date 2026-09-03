@@ -36,7 +36,7 @@ from pydantic import ValidationError
 from frontend import api_client, csrf
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
-from src.settings import get_settings
+from src.settings import get_settings, validate_startup_session_secret
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,12 @@ MAX_UPLOAD_BYTES = 210 * 1024 * 1024  # 20 files * 10 MB + headroom
 
 _settings = get_settings()
 app = Flask(__name__)
+# ROADMAP open item 1 — refuse to serve a real deployment with a forgeable
+# session cookie. Checked BEFORE the key is installed, at import time, so a
+# misconfigured deployment fails on startup rather than on whichever user
+# happens to log in first. Scoped to CAS-enabled deployments, so local dev on
+# the default keeps booting (see the validator's docstring).
+validate_startup_session_secret(_settings)
 app.secret_key = _settings.flask_secret_key
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 API = _settings.api_base_url
