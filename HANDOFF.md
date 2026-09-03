@@ -114,10 +114,13 @@ Still open alongside it, and neither is superseded:
 
 **Next, in order:** **re-parse the 20 pilot jobs that still have no
 department** — this is the only unfinished half of the 2026-09-03 request, and
-it is BLOCKED ON A LOCAL CONFIG BUG, not on code: this box's `.env` still
-carries `LLM_TIMEOUT_S=120`, which is below the peer's real JD parse time, so
-every re-parse fails with `ReadTimeout` and trips the circuit breaker. Set it
-to 900 (`.env.example` already says so) before enqueuing anything.
+it is BLOCKED ON A LOCAL CONFIG BUG, not on code. `./scripts/doctor.sh` says
+so on its own — its ONLY finding is `deploy.timeout_below_profile`:
+`LLM_TIMEOUT_S` is 120s where the committed model profile measured
+`gpt-oss:20b` at **838s** under this concurrency. Two re-parses were observed
+dying on `ReadTimeout` and tripping the circuit breaker, exactly as the
+2026-08-21 note predicts. Set it to 838+ (`.env.example` says 900) before
+enqueuing anything.
 `core/scripts/backfill_job_fields.py --reparse-plan` prints the ids. Then:
 notifications (`mailhost.sfu.ca:25`, in-app table first) → candidate CSV (§S3,
 **blocked on a sample export** — ask for one) → blind review on the ranked
