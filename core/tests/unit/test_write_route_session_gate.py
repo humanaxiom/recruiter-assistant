@@ -91,6 +91,11 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # decision about a real person, so it carries the same session-role gate
     # as withdraw -- never a bare field edit.
     ("POST", "/resumes/{resume_id}/work-authorization"),
+    # SPONSOR §O4 -- serves a raw candidate document, so it is gated as a
+    # REVEAL rather than a read and belongs in this registry: the authority to
+    # fetch the file is the authority to un-blind, whatever the job's blind
+    # setting says.
+    ("POST", "/resumes/{resume_id}/document"),
     ("POST", "/resumes/{resume_id}/match-jobs"),
     ("POST", "/jobs/{job_id}/shortlist"),
     ("POST", "/jobs/{job_id}/assignees"),

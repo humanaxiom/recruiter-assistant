@@ -192,6 +192,10 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # ADR-046 -- the admin-only manual trigger for the Taleo sync. The only
         # route in the product that can cause an outbound request.
         "/admin/jobs/sync",
+        # SPONSOR §O4 -- the audited document download. POST, not GET: an href
+        # is prefetchable, and a speculative fetch would both fabricate an
+        # audit row and pull candidate PII into a cache.
+        "/resumes/{resume_id}/document",
     }
 )
 
