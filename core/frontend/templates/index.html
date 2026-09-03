@@ -25,10 +25,24 @@
       <input class="input" id="department" name="department" type="text"
              value="{{ form.get('department', '') }}">
     </div>
+    {# SPONSOR 2026-09-03 — Location means an SFU campus.
+
+       A `datalist` rather than a `select`: the three campuses are what this
+       is for, so they are one click away and the codes (BBY/YVR/SRY) are
+       accepted as typed input, but a genuine exception — "Remote", a fourth
+       site — is still enterable. The backend canonicalises either way
+       (`src/campus.py`), so "bby" and "Burnaby, BC" both store as "Burnaby".
+       A hard `select` would have forced somebody to lie. #}
     <div class="form-group">
-      <label class="label" for="location">Location</label>
+      <label class="label" for="location">Campus</label>
       <input class="input" id="location" name="location" type="text"
+             list="campus-options" autocomplete="off"
              value="{{ form.get('location', '') }}">
+      <datalist id="campus-options">
+        {% for campus in campuses %}<option value="{{ campus }}"></option>{% endfor %}
+      </datalist>
+      <span class="muted">Burnaby (BBY) · Vancouver (YVR) · Surrey (SRY).
+        Left blank, the JD parse fills it in when the posting says.</span>
     </div>
     <div class="form-group">
       <label class="label" for="min_years">Minimum years of experience</label>

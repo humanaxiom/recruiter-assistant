@@ -36,6 +36,67 @@
     {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
   </p>
 
+  {# SPONSOR 2026-09-03 — "have the fields in the UI to override/fill".
+
+     A bulk-uploaded requisition has no title, department or campus to work
+     with, so it takes the filename and nulls. The JD parse now fills what it
+     can, but a posting that never states its campus cannot be parsed into
+     one — one of 26 pilot JDs mentions a campus at all, and it names two, as
+     a description of scope. Typing it is the PRIMARY path here.
+
+     Collapsed by default: this is a correction, not a step in the flow, and
+     an open form on every job page would push the résumé list below the
+     fold. Open when there is something obviously missing, so the recruiter
+     is not asked to go looking for it. #}
+  {% if is_writer %}
+  <details class="card" style="margin-top:12px"
+           {% if not job.department or not job.location %}open{% endif %}>
+    <summary>Edit department &amp; campus</summary>
+    <form action="{{ url_for('edit_job_details', job_id=job.id) }}" method="post"
+          style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-department">Department</label>
+        <input class="input" id="job-department" name="department" type="text"
+               maxlength="100" value="{{ job.department or '' }}"
+               placeholder="e.g. School of Medicine">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-location">Campus</label>
+        <input class="input" id="job-location" name="location" type="text"
+               list="campus-options" autocomplete="off" maxlength="200"
+               value="{{ job.location or '' }}">
+        <datalist id="campus-options">
+          {% for campus in campuses %}<option value="{{ campus }}"></option>{% endfor %}
+        </datalist>
+        <span class="muted">
+          {% for campus, code in campus_codes.items() %}
+          {{ campus }} ({{ code }}){% if not loop.last %} · {% endif %}
+          {%- endfor %}. Codes are accepted; anything else is kept as typed.
+        </span>
+      </div>
+      <p class="hint">
+        Whatever you set here wins: a re-parse fills these only when they are
+        empty, and never replaces a value you entered.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {# The title a bulk upload had to invent. Shown so a recruiter looking at
+     "20260612 00138559 APSA JDFN 20260612" knows where it came from and that
+     the parse will replace it — 23 pilot requisitions read exactly like
+     that. Cleared the moment the extraction lands. #}
+  {% if job.title_provisional %}
+  <p class="hint">
+    This title came from the uploaded filename. The JD parse replaces it with
+    the title stated in the posting.
+  </p>
+  {% endif %}
+
   {# ADR-046 / sponsor §I3 — the link back to the live posting.
 
      This is the provenance the sponsor asked for. The sync captures the

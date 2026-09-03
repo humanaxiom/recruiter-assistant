@@ -34,6 +34,7 @@ from flask import (
 from pydantic import ValidationError
 
 from frontend import api_client, csrf
+from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import get_settings, validate_startup_session_secret
@@ -286,6 +287,16 @@ def inject_current_user() -> dict[str, Any]:
         # and `issue_page_token` is idempotent, so this costs one session read
         # on all but the first render of a session.
         "csrf_page_token": csrf.issue_page_token(),
+        # SPONSOR 2026-09-03 — the three SFU campuses, for the Location
+        # datalist. Injected globally, not passed per route, for the same
+        # reason as the CSRF token above: `index.html` renders from three
+        # different routes and `job_detail.html` from two, and a template
+        # referencing a name one of them forgot to pass renders a silent
+        # Jinja Undefined — which is exactly how three columns on the jobs
+        # list stayed blank for months. Sourced from `src.campus`, so the
+        # form and the canonicaliser cannot disagree about what a campus is.
+        "campuses": list(CAMPUS_CODES),
+        "campus_codes": CAMPUS_CODES,
     }
 
 
@@ -815,6 +826,61 @@ def transition_status(job_id: UUID) -> Any:
         # which this view's caller never used to see. Left uncaught, this
         # propagated as an unhandled 500 for a hiring_manager/auditor clicking
         # the control. Render the actual backend status (usually 403) instead.
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+#: The columns ``POST /jobs/<id>/details`` is allowed to touch. Not a general
+#: passthrough of ``request.form`` into ``JobUpdate``: that would let a crafted
+#: post reach ``blind_review`` (the widest-blast-radius write in the product —
+#: it permanently un-blinds every résumé under the job) or ``description_raw``
+#: through a form that renders neither. ``update_job`` has its own
+#: ``_UPDATABLE_JOB_COLUMNS`` allowlist; this is the same discipline one hop out.
+_EDITABLE_DETAIL_FIELDS = ("department", "location")
+
+
+@app.post("/jobs/<uuid:job_id>/details")
+def edit_job_details(job_id: UUID) -> Any:
+    """SPONSOR 2026-09-03 — fill or override Department and Campus by hand.
+
+    The backend has accepted both columns on ``PATCH /jobs/{id}`` since Phase 6
+    and no screen ever called it, so the 23 requisitions bulk-uploaded as files
+    had no way to acquire either. The JD parse now fills them too, but it can
+    only report what a posting states, and these JDs mostly do not state a
+    campus — one of 26 mentions one, and it mentions two. **Typing it is the
+    primary path, not the fallback.**
+
+    Deliberately thin. The value goes to the backend as typed (trimmed only):
+    ``JobUpdate`` canonicalises "bby" to "Burnaby" in ONE place shared with the
+    bulk manifest and any raw API caller, and a second copy of that rule here
+    is precisely how the two drift. An emptied box sends ``None`` — "unset" —
+    rather than an empty string, which would sit in the column as a value.
+
+    A field the form did not submit is not sent at all, honouring
+    ``JobUpdate``'s omit-means-unchanged convention: this route must not be able
+    to blank a column it was never asked about. If nothing was submitted it
+    redirects without calling the backend — a no-op PATCH would still bump
+    ``updated_at``, which the jobs list now renders as "Updated".
+
+    Anti-forgery is the ``_csrf_gate`` hook's job (opt-OUT, so this route was
+    protected the moment it was added). The ``BadRequest`` branch is the same
+    ADR-033 lesson as ``transition_status``: a non-writer session gets a 403
+    from the backend, and leaving it uncaught turns that into a 500.
+    """
+    payload: dict[str, Any] = {}
+    for field in _EDITABLE_DETAIL_FIELDS:
+        if field not in request.form:
+            continue
+        payload[field] = (request.form.get(field) or "").strip() or None
+    if not payload:
+        return redirect(url_for("job_detail", job_id=job_id))
+    try:
+        api_client.patch_job(job_id, payload)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
         abort(exc.status_code)
     return redirect(url_for("job_detail", job_id=job_id))
 
