@@ -96,26 +96,39 @@ Still open alongside it, and neither is superseded:
   rendered a `job.<field>` that `JobListItem` did not have — an em-dash or a
   blank cell forever, indistinguishable from real null data. Source is now the
   LINK back to the posting the sponsor asked for, Last updated joins it, and
-  `resume_count` is a correlated count in the list query. **Fixing Location
-  populates nothing on the pilot box**: 0 of 26 rows have one and 0 of 25
-  parsed JDs extracted one — only the Taleo sync fills Location or Department,
-  because `JDExtracted` has neither field.
+  `resume_count` is a correlated count in the list query. Fixing the plumbing
+  populated nothing by itself — 0 of 26 rows had a location — which is what the
+  next item exists to change.
+- **Department and campus, parsed and overridable** (sponsor, 2026-09-03).
+  `jd_extract_v2` adds `department` and asks for the campus; `record_parsed`
+  now writes `title`/`department`/`location` onto the ROW instead of only into
+  a JSONB blob nothing reads — which is why 23 requisitions displayed their own
+  filenames while the extraction beside them held the real title. Fill-when-
+  empty, so an override survives a re-parse. `src/campus.py` is the one place a
+  campus is spelled; a form on the job page fills or overrides either field.
 - **The Taleo combined-PDF splitter**, `core/scripts/split_taleo_pdf.py`, run
   via `scripts/split-taleo.{sh,ps1}`. It had sat untracked at the repo root for
   eleven days importing two hris modules that do not exist here. `make gates`
   and CI now lint and type-check `core/scripts` (not coverage), which is what
   makes that impossible to repeat.
 
-**Next, in order:** notifications (`mailhost.sfu.ca:25`, in-app table first) →
-candidate CSV (§S3, **blocked on a sample export** — ask for one) → blind
-review on the ranked list (§O5).
+**Next, in order:** **re-parse the 20 pilot jobs that still have no
+department** — this is the only unfinished half of the 2026-09-03 request, and
+it is BLOCKED ON A LOCAL CONFIG BUG, not on code: this box's `.env` still
+carries `LLM_TIMEOUT_S=120`, which is below the peer's real JD parse time, so
+every re-parse fails with `ReadTimeout` and trips the circuit breaker. Set it
+to 900 (`.env.example` already says so) before enqueuing anything.
+`core/scripts/backfill_job_fields.py --reparse-plan` prints the ids. Then:
+notifications (`mailhost.sfu.ca:25`, in-app table first) → candidate CSV (§S3,
+**blocked on a sample export** — ask for one) → blind review on the ranked
+list (§O5).
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
 amendment for the weight move. The document-download route needs no ADR: it is
 one obvious implementation, and the reasoning is in its commit.
 
-**Five things a future session must not rediscover the hard way:**
+**Six things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -139,7 +152,16 @@ one obvious implementation, and the reasoning is in its commit.
    `.replace` anchor `list_for_job` uses for FU-6 row scoping. The band uses a
    correlated subquery for exactly this reason. **The unit suite cannot see
    this** — it asserts on the SQL as a string.
-5. **A Jinja template can render a field the DTO does not have, silently.**
+5. **An LLM extraction can be written to a blob and to no column.**
+   `record_parsed` wrote `description_parsed` and nothing else for the whole
+   life of the project, so the title, department and location it read out of
+   every JD went somewhere no screen looks. It surfaced as three separate
+   complaints (empty Department, empty Location, requisitions named after their
+   own files) that were one defect. **The general question to ask of any new
+   extracted field: which column does it land in, and what happens on the
+   second parse?** The merge rules are in `_RECORD_PARSED_SQL` and the
+   real-Postgres proof in `test_jd_writeback_merge_pg.py`.
+6. **A Jinja template can render a field the DTO does not have, silently.**
    Undefined renders as an empty string and compares as "not none", so three of
    the jobs table's seven columns were dead for months and looked exactly like
    null data. `test_jobs_table_columns.py` now compares every `job.<x>` in

@@ -37,6 +37,7 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 | **S6** document links (§O4) | **Done** — the résumé and cover letter served from their blobs, audited, filename derived from the résumé id rather than the uploaded `original_filename`. |
 | **S1** splitter (§S1) | **Done** — `core/scripts/split_taleo_pdf.py`, run via `scripts/split-taleo.{sh,ps1}`. Landed inside the lint/type gates (see §2.0), which is the part that was actually missing. |
 | **The jobs list** | **Done, unasked-for scope that was a real defect** — three of the seven columns rendered a `job.<field>` `JobListItem` never had, so Location, Source and Résumés were permanently blank. Source is now the LINK the sponsor asked for; Last updated joins it. |
+| **Department & campus** (sponsor, 2026-09-03) | **Done** — `jd_extract_v2` extracts both; `record_parsed` writes them onto the row (fill-when-empty, so an override survives a re-parse); `src/campus.py` canonicalises Burnaby/BBY · Vancouver/YVR · Surrey/SRY; a form on the job page fills or overrides either. `scripts/backfill_job_fields.py` reached the 25 existing rows. **Departments still need a re-parse** — see the note below. |
 | **S3** CSV · **S7** notify · **S8** posting URL | Not started. **S3 is blocked on a sample export** — ask the sponsor for one. |
 
 Two findings from building it, both recorded because they change what a future
