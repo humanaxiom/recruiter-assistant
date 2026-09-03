@@ -84,20 +84,38 @@ Still open alongside it, and neither is superseded:
   by `quickstart.ps1`, sourced from the environment by both compose files, and
   refused at boot on a published default. **The pilot box still needs the
   quickstart run against it** — and rotating logs everyone out, so warn them.
-- **Taleo import, slice 1 of 2 (§I3).** [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md)
-  — the egress carve-out, superseding ADR-012 §2's deferral — plus the pure
-  parsers, five vendored fixtures, 16 tests. **No network code yet.**
+- **Taleo import (§I3), both slices.** [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md)
+  — the egress carve-out, superseding ADR-012 §2's deferral — the pure parsers
+  and five vendored fixtures, then the client, DDL, upsert, sync task and admin
+  trigger. All behind `TALEO_ENABLED=false`; the three obligations ADR-046
+  records are **unmet**, so it must not be enabled anywhere yet.
+- **Document links (§O4).** The résumé and cover letter are served from their
+  blobs, audited, with the filename derived from the résumé id rather than the
+  uploaded `original_filename`.
+- **The jobs table's three dead columns.** Location, Source and Résumés each
+  rendered a `job.<field>` that `JobListItem` did not have — an em-dash or a
+  blank cell forever, indistinguishable from real null data. Source is now the
+  LINK back to the posting the sponsor asked for, Last updated joins it, and
+  `resume_count` is a correlated count in the list query. **Fixing Location
+  populates nothing on the pilot box**: 0 of 26 rows have one and 0 of 25
+  parsed JDs extracted one — only the Taleo sync fills Location or Department,
+  because `JDExtracted` has neither field.
+- **The Taleo combined-PDF splitter**, `core/scripts/split_taleo_pdf.py`, run
+  via `scripts/split-taleo.{sh,ps1}`. It had sat untracked at the repo root for
+  eleven days importing two hris modules that do not exist here. `make gates`
+  and CI now lint and type-check `core/scripts` (not coverage), which is what
+  makes that impossible to repeat.
 
-**Next, in order:** Taleo slice 2 (the client, DDL, upsert, cron and admin
-route, all behind `TALEO_ENABLED=false`) → document links (S6, unblocked now
-that S0 is done) → notifications (`mailhost.sfu.ca:25`, in-app table first) →
-the splitter and candidate CSV.
+**Next, in order:** notifications (`mailhost.sfu.ca:25`, in-app table first) →
+candidate CSV (§S3, **blocked on a sample export** — ask for one) → blind
+review on the ranked list (§O5).
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
-amendment for the weight move.
+amendment for the weight move. The document-download route needs no ADR: it is
+one obvious implementation, and the reasoning is in its commit.
 
-**Four things a future session must not rediscover the hard way:**
+**Five things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -121,14 +139,23 @@ amendment for the weight move.
    `.replace` anchor `list_for_job` uses for FU-6 row scoping. The band uses a
    correlated subquery for exactly this reason. **The unit suite cannot see
    this** — it asserts on the SQL as a string.
+5. **A Jinja template can render a field the DTO does not have, silently.**
+   Undefined renders as an empty string and compares as "not none", so three of
+   the jobs table's seven columns were dead for months and looked exactly like
+   null data. `test_jobs_table_columns.py` now compares every `job.<x>` in
+   `index.html` against `JobListItem`. **No other template has that guard** —
+   `detail.html` and `shortlist.html` have never been checked, and a page whose
+   cells are all populated is not evidence, only a page with a suspiciously
+   empty column is.
 
 ### 4. Current state
 
 | | |
 |---|---|
 | `main` | `b012e82` — sponsor PRs #101 + #102 merged |
-| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3 |
-| Gates, this branch | 5,693 unit · 552 integration · 92.45% coverage — **re-run, do not cite** |
+| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3/§O4 |
+| Gates, this branch | 5,762 unit · 567 integration · 91.99% coverage — **re-run, do not cite** |
+| Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
 | LLM hosts | gb10 `100.88.247.106` · spark1 `100.114.185.88` — **both shared** |

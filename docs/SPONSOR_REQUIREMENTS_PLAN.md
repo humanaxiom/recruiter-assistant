@@ -34,7 +34,10 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 | **S4/S5** work authorization + cover-letter decoupling | **Done end to end** — column, audited write, API route, read-time band, résumé-page control, shortlist card, CSV export. |
 | **S0** `FLASK_SECRET_KEY` | **Done** — generated, sourced from the environment, and refused at boot on a published default. **S6 is unblocked.** The pilot box still needs the quickstart run against it to rotate; see [ROADMAP open item 1](ROADMAP.md). |
 | **Taleo import (§I3)** | **Code complete, DISABLED** — [ADR-046](adr/046-taleo-job-source-egress-carveout.md), parsers + fixtures, `TaleoClient` with its own host allowlist, the `jobs` source columns, the idempotent upsert and archive sweep, the daily cron and the admin trigger route. **`TALEO_ENABLED=false`**, and turning it on has three obligations the code cannot discharge — an enumerated firewall rule, counsel + privacy-officer sign-off, and a named owner. See ADR-046 §Consequences. |
-| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. S6 is now unblocked by S0. |
+| **S6** document links (§O4) | **Done** — the résumé and cover letter served from their blobs, audited, filename derived from the résumé id rather than the uploaded `original_filename`. |
+| **S1** splitter (§S1) | **Done** — `core/scripts/split_taleo_pdf.py`, run via `scripts/split-taleo.{sh,ps1}`. Landed inside the lint/type gates (see §2.0), which is the part that was actually missing. |
+| **The jobs list** | **Done, unasked-for scope that was a real defect** — three of the seven columns rendered a `job.<field>` `JobListItem` never had, so Location, Source and Résumés were permanently blank. Source is now the LINK the sponsor asked for; Last updated joins it. |
+| **S3** CSV · **S7** notify · **S8** posting URL | Not started. **S3 is blocked on a sample export** — ask the sponsor for one. |
 
 Two findings from building it, both recorded because they change what a future
 session should expect rather than because they were interesting:
@@ -99,7 +102,25 @@ Each carries a **recommended default** so none of these becomes a bare "blocked"
 line (`CLAUDE.md` §Economy 3). Work proceeds on the default unless the sponsor
 says otherwise; the "if not" column is what changes.
 
-### 2.0 The splitter as pushed does not run here — fix it first (no decision needed)
+### 2.0 The splitter as pushed did not run here — DONE, and the fix was not the imports
+
+**Resolved 2026-09-03.** The script now lives at
+`core/scripts/split_taleo_pdf.py` with `scripts/split-taleo.{sh,ps1}` as the
+entry points. What follows is the original diagnosis, kept because the
+conclusion it reached was too small.
+
+The three-line import fix was correct and was not the problem. **The problem
+was that a Python file at the repo root is outside every gate this project
+has** — `make gates` lints `core/{src,tests,frontend}` — so it sat untracked
+for eleven days with imports that resolve to nothing, and would have raised
+`ModuleNotFoundError` on the first line of real use. Moving it under
+`core/scripts` (also where the worker's bind mount already puts it, so no
+`-v` is needed for the code) and adding `scripts` to ruff/black/mypy in both
+the Makefile and `ci.yml` is what makes the recurrence impossible. It is not
+in the coverage denominator: these tools are exercised by hand against real
+exports.
+
+The original diagnosis:
 
 `scripts/split_taleo_pdf.py` is **untracked** (`git status` shows `??`) and was
 written against the sibling `hris` layout:
