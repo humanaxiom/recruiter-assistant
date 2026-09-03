@@ -50,6 +50,14 @@ def test_the_three_campuses_are_the_vocabulary() -> None:
         ("SRY", "Surrey"),
         ("Surrey Central City", "Surrey"),
         ("Surrey, BC", "Surrey"),
+        # Verbatim from the vendored Taleo pages (core/tests/vendor/taleo/) —
+        # the shape the ONE source that reliably supplies a campus actually
+        # emits. Five of the six location cells there read like this.
+        ("Burnaby (Hybrid)", "Burnaby"),
+        # TWO aliases, ONE campus. The ambiguity guard counts campuses, not
+        # matches; counting matches would reject this and lose a value that is
+        # not ambiguous at all.
+        ("Vancouver (Harbour Centre)", "Vancouver"),
     ],
 )
 def test_a_recognised_campus_canonicalises(raw: str, expected: str) -> None:
