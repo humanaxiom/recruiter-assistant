@@ -173,6 +173,20 @@ one obvious implementation, and the reasoning is in its commit.
    cells are all populated is not evidence, only a page with a suspiciously
    empty column is.
 
+   **And the sharper version of the same thing, which reached users on
+   2026-09-03: a template can call a method the JSON TYPE does not have.**
+   `{{ job.updated_at.strftime(...) }}` 500'd the whole jobs list, because the
+   frontend is a BFF — it reads JSON over HTTP, so every timestamp is a
+   **string** (`'2026-09-03T23:10:55.264135Z'`), never a `datetime`. Nothing
+   caught it: the new tests string-matched the template SOURCE, the older
+   frontend tests hand-write fixture dicts (which is where a `datetime` gets
+   typed by mistake), and `smoke.sh` FAILS rather than runs while CAS is on.
+   **Do not write a fixture dict for a page test.** Build the DTO and
+   `model_dump(mode="json")` it, the way
+   `tests/unit/test_templates_render_api_shaped_rows.py` does — that is what
+   makes the guard survive the next field. Use the `| day` filter for dates;
+   never `.strftime` in a template.
+
 ### 4. Current state
 
 | | |
