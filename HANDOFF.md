@@ -84,20 +84,54 @@ Still open alongside it, and neither is superseded:
   by `quickstart.ps1`, sourced from the environment by both compose files, and
   refused at boot on a published default. **The pilot box still needs the
   quickstart run against it** — and rotating logs everyone out, so warn them.
-- **Taleo import, slice 1 of 2 (§I3).** [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md)
-  — the egress carve-out, superseding ADR-012 §2's deferral — plus the pure
-  parsers, five vendored fixtures, 16 tests. **No network code yet.**
+- **Taleo import (§I3), both slices.** [ADR-046](docs/adr/046-taleo-job-source-egress-carveout.md)
+  — the egress carve-out, superseding ADR-012 §2's deferral — the pure parsers
+  and five vendored fixtures, then the client, DDL, upsert, sync task and admin
+  trigger. All behind `TALEO_ENABLED=false`; the three obligations ADR-046
+  records are **unmet**, so it must not be enabled anywhere yet.
+- **Document links (§O4).** The résumé and cover letter are served from their
+  blobs, audited, with the filename derived from the résumé id rather than the
+  uploaded `original_filename`.
+- **The jobs table's three dead columns.** Location, Source and Résumés each
+  rendered a `job.<field>` that `JobListItem` did not have — an em-dash or a
+  blank cell forever, indistinguishable from real null data. Source is now the
+  LINK back to the posting the sponsor asked for, Last updated joins it, and
+  `resume_count` is a correlated count in the list query. Fixing the plumbing
+  populated nothing by itself — 0 of 26 rows had a location — which is what the
+  next item exists to change.
+- **Department and campus, parsed and overridable** (sponsor, 2026-09-03).
+  `jd_extract_v2` adds `department` and asks for the campus; `record_parsed`
+  now writes `title`/`department`/`location` onto the ROW instead of only into
+  a JSONB blob nothing reads — which is why 23 requisitions displayed their own
+  filenames while the extraction beside them held the real title. Fill-when-
+  empty, so an override survives a re-parse. `src/campus.py` is the one place a
+  campus is spelled; a form on the job page fills or overrides either field.
+- **The Taleo combined-PDF splitter**, `core/scripts/split_taleo_pdf.py`, run
+  via `scripts/split-taleo.{sh,ps1}`. It had sat untracked at the repo root for
+  eleven days importing two hris modules that do not exist here. `make gates`
+  and CI now lint and type-check `core/scripts` (not coverage), which is what
+  makes that impossible to repeat.
 
-**Next, in order:** Taleo slice 2 (the client, DDL, upsert, cron and admin
-route, all behind `TALEO_ENABLED=false`) → document links (S6, unblocked now
-that S0 is done) → notifications (`mailhost.sfu.ca:25`, in-app table first) →
-the splitter and candidate CSV.
+**Next, in order:** **re-parse the 20 pilot jobs that still have no
+department** — this is the only unfinished half of the 2026-09-03 request, and
+it is BLOCKED ON A LOCAL CONFIG BUG, not on code. `./scripts/doctor.sh` says
+so on its own — its ONLY finding is `deploy.timeout_below_profile`:
+`LLM_TIMEOUT_S` is 120s where the committed model profile measured
+`gpt-oss:20b` at **838s** under this concurrency. Two re-parses were observed
+dying on `ReadTimeout` and tripping the circuit breaker, exactly as the
+2026-08-21 note predicts. Set it to 838+ (`.env.example` says 900) before
+enqueuing anything.
+`core/scripts/backfill_job_fields.py --reparse-plan` prints the ids. Then:
+notifications (`mailhost.sfu.ca:25`, in-app table first) → candidate CSV (§S3,
+**blocked on a sample export** — ask for one) → blind review on the ranked
+list (§O5).
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
-amendment for the weight move.
+amendment for the weight move. The document-download route needs no ADR: it is
+one obvious implementation, and the reasoning is in its commit.
 
-**Four things a future session must not rediscover the hard way:**
+**Six things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -121,14 +155,46 @@ amendment for the weight move.
    `.replace` anchor `list_for_job` uses for FU-6 row scoping. The band uses a
    correlated subquery for exactly this reason. **The unit suite cannot see
    this** — it asserts on the SQL as a string.
+5. **An LLM extraction can be written to a blob and to no column.**
+   `record_parsed` wrote `description_parsed` and nothing else for the whole
+   life of the project, so the title, department and location it read out of
+   every JD went somewhere no screen looks. It surfaced as three separate
+   complaints (empty Department, empty Location, requisitions named after their
+   own files) that were one defect. **The general question to ask of any new
+   extracted field: which column does it land in, and what happens on the
+   second parse?** The merge rules are in `_RECORD_PARSED_SQL` and the
+   real-Postgres proof in `test_jd_writeback_merge_pg.py`.
+6. **A Jinja template can render a field the DTO does not have, silently.**
+   Undefined renders as an empty string and compares as "not none", so three of
+   the jobs table's seven columns were dead for months and looked exactly like
+   null data. `test_jobs_table_columns.py` now compares every `job.<x>` in
+   `index.html` against `JobListItem`. **No other template has that guard** —
+   `detail.html` and `shortlist.html` have never been checked, and a page whose
+   cells are all populated is not evidence, only a page with a suspiciously
+   empty column is.
+
+   **And the sharper version of the same thing, which reached users on
+   2026-09-03: a template can call a method the JSON TYPE does not have.**
+   `{{ job.updated_at.strftime(...) }}` 500'd the whole jobs list, because the
+   frontend is a BFF — it reads JSON over HTTP, so every timestamp is a
+   **string** (`'2026-09-03T23:10:55.264135Z'`), never a `datetime`. Nothing
+   caught it: the new tests string-matched the template SOURCE, the older
+   frontend tests hand-write fixture dicts (which is where a `datetime` gets
+   typed by mistake), and `smoke.sh` FAILS rather than runs while CAS is on.
+   **Do not write a fixture dict for a page test.** Build the DTO and
+   `model_dump(mode="json")` it, the way
+   `tests/unit/test_templates_render_api_shaped_rows.py` does — that is what
+   makes the guard survive the next field. Use the `| day` filter for dates;
+   never `.strftime` in a template.
 
 ### 4. Current state
 
 | | |
 |---|---|
 | `main` | `b012e82` — sponsor PRs #101 + #102 merged |
-| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3 |
-| Gates, this branch | 5,693 unit · 552 integration · 92.45% coverage — **re-run, do not cite** |
+| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3/§O4 |
+| Gates, this branch | 5,762 unit · 567 integration · 91.99% coverage — **re-run, do not cite** |
+| Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
 | LLM hosts | gb10 `100.88.247.106` · spark1 `100.114.185.88` — **both shared** |

@@ -62,10 +62,21 @@ JOBS_PUBLIC: tuple[str, ...] = (
     "JDExtracted",
 )
 
-# hris fields cut from JobListItem: JD-comments (Feature 3) + Taleo ingest.
+# hris fields cut from JobListItem, and STILL cut.
+#
+# ``source`` LEFT this tuple on 2026-09-03. It was cut because the Taleo
+# ingest had not been ported; ADR-046 ported it, and the sponsor then asked
+# for provenance in the LIST — "source would be the link requested by DTO".
+# A cut justified by an absent feature has to be revisited when the feature
+# lands, or the justification quietly outlives its reason and becomes a rule.
+#
+# ``external_last_seen_at`` stays cut deliberately: ``updated_at`` answers
+# the recency question a list is scanned for, and "when did the sync last
+# SEE this posting" is a sync-health question, not a triage one.
+# ``comment_count`` stays cut because JD comments (hris Feature 3) are still
+# not a feature here.
 CUT_JOB_LIST_FIELDS: tuple[str, ...] = (
     "comment_count",
-    "source",
     "external_last_seen_at",
 )
 

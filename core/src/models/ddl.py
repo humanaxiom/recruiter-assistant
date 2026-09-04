@@ -207,6 +207,29 @@ _STATEMENTS: tuple[str, ...] = (
     # cannot answer the question the defense pack exists to answer.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements_parsed JSONB",
+    # ── Was this title CHOSEN, or DERIVED? ───────────────────────────────────
+    # A bulk JD upload has no title to work with, so it falls back to the
+    # filename stem. On the pilot box that produced 23 requisitions displayed
+    # as "20260612 00138559 APSA JDFN 20260612" while their extractions held
+    # "Multimedia Specialist" — correct, weeks old, and written to a JSONB blob
+    # that no screen reads.
+    #
+    # ``record_parsed`` can only fix that if it can tell a derived title from a
+    # chosen one. Both are non-empty strings, so nothing about the VALUE
+    # distinguishes them and this has to be recorded at insert time.
+    #
+    # FALSE for every existing row and every manual create, which is the safe
+    # direction: the worst case is a title nobody improves, not a title
+    # silently rewritten out from under the person who typed it. It also means
+    # the ALTER alone fixes nothing on the pilot box — the 23 rows predate it,
+    # and ``scripts/backfill_job_fields.py`` is what reaches them.
+    #
+    # This re-opens a Phase 0 cut (hris's ``title_autofilled``, dropped as
+    # bulk-ingest polish). What changed is that somebody bulk-uploaded 23 real
+    # requisitions whose filenames are req numbers. The hris COLUMN NAME stays
+    # absent, and a test in ``test_services_writeback.py`` keeps it that way.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_provisional "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
     # ── External job sources (ADR-046) ──────────────────────────────────────
     # Where a job CAME FROM. Every existing row is 'manual', which the DEFAULT
     # back-fills the instant the ALTER lands — the same reasoning as

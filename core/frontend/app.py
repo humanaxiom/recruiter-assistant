@@ -34,6 +34,7 @@ from flask import (
 from pydantic import ValidationError
 
 from frontend import api_client, csrf
+from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import get_settings, validate_startup_session_secret
@@ -193,6 +194,10 @@ _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
         # would buy nothing; accepting the page token INSTEAD would be a
         # downgrade, which test_exempt_routes_still_reject_a_page_token pins.
         "resume_work_authorization",
+        # SPONSOR §O4 -- same reason as the three above: its own per-résumé
+        # one-shot token (action="document"), strictly stronger than the
+        # session-wide page token this hook checks.
+        "resume_document",
     }
 )
 
@@ -243,6 +248,38 @@ def _csrf_gate() -> Any:
 _WRITER_ROLES = ("admin", "recruiter")
 
 
+@app.template_filter("day")
+def _day(value: Any) -> str:
+    """Render a timestamp as ``YYYY-MM-DD``, whatever shape it arrives in.
+
+    **This exists because of a production 500 on 2026-09-03.** The jobs list's
+    new Updated column called ``job.updated_at.strftime(...)`` and every job
+    page died with ``'str object' has no attribute 'strftime'``. The frontend
+    is a BFF: it reads JSON over HTTP, so a timestamp is always a **string**
+    here, never a ``datetime``. Tests that assert on template source text
+    cannot see that, and a hand-written fixture dict is exactly where somebody
+    types a ``datetime`` that the real API can never send.
+
+    So this takes both, plus ``None`` and the empty string, and — deliberately
+    — **never raises**. A filter that can throw turns one unparseable cell into
+    a blank page; an odd-looking date does not. The cell is informational and
+    the list is not.
+    """
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.strftime("%Y-%m-%d")
+    text = str(value)
+    try:
+        # ``Z`` is valid ISO-8601 and is what some producers emit;
+        # ``fromisoformat`` only learned it in 3.11+, so normalise anyway.
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d"
+        )
+    except ValueError:
+        return text
+
+
 @app.context_processor
 def inject_current_user() -> dict[str, Any]:
     """Injects the header auth widget's context into every template render.
@@ -270,6 +307,11 @@ def inject_current_user() -> dict[str, Any]:
     return {
         "current_user": current_user,
         "is_writer": is_writer,
+        # ADR-046 -- only an admin SESSION can trigger the Taleo sync, so only an
+        # admin sees the control. Same compensating-UX-control caveat as
+        # ``is_writer`` above: the backend gate is the real boundary, this just
+        # avoids showing a button that would 403.
+        "is_admin": current_user is None or current_user.get("role") == "admin",
         "logout_url": f"{base}/auth/cas/logout",
         "login_url": f"{base}/auth/cas/login?next=/",
         # Phase 1.3: minted here rather than per-route so EVERY render carries
@@ -277,6 +319,16 @@ def inject_current_user() -> dict[str, Any]:
         # and `issue_page_token` is idempotent, so this costs one session read
         # on all but the first render of a session.
         "csrf_page_token": csrf.issue_page_token(),
+        # SPONSOR 2026-09-03 — the three SFU campuses, for the Location
+        # datalist. Injected globally, not passed per route, for the same
+        # reason as the CSRF token above: `index.html` renders from three
+        # different routes and `job_detail.html` from two, and a template
+        # referencing a name one of them forgot to pass renders a silent
+        # Jinja Undefined — which is exactly how three columns on the jobs
+        # list stayed blank for months. Sourced from `src.campus`, so the
+        # form and the canonicaliser cannot disagree about what a campus is.
+        "campuses": list(CAMPUS_CODES),
+        "campus_codes": CAMPUS_CODES,
     }
 
 
@@ -810,6 +862,99 @@ def transition_status(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+#: The columns ``POST /jobs/<id>/details`` is allowed to touch. Not a general
+#: passthrough of ``request.form`` into ``JobUpdate``: that would let a crafted
+#: post reach ``blind_review`` (the widest-blast-radius write in the product —
+#: it permanently un-blinds every résumé under the job) or ``description_raw``
+#: through a form that renders neither. ``update_job`` has its own
+#: ``_UPDATABLE_JOB_COLUMNS`` allowlist; this is the same discipline one hop out.
+_EDITABLE_DETAIL_FIELDS = ("department", "location")
+
+
+@app.post("/jobs/<uuid:job_id>/details")
+def edit_job_details(job_id: UUID) -> Any:
+    """SPONSOR 2026-09-03 — fill or override Department and Campus by hand.
+
+    The backend has accepted both columns on ``PATCH /jobs/{id}`` since Phase 6
+    and no screen ever called it, so the 23 requisitions bulk-uploaded as files
+    had no way to acquire either. The JD parse now fills them too, but it can
+    only report what a posting states, and these JDs mostly do not state a
+    campus — one of 26 mentions one, and it mentions two. **Typing it is the
+    primary path, not the fallback.**
+
+    Deliberately thin. The value goes to the backend as typed (trimmed only):
+    ``JobUpdate`` canonicalises "bby" to "Burnaby" in ONE place shared with the
+    bulk manifest and any raw API caller, and a second copy of that rule here
+    is precisely how the two drift. An emptied box sends ``None`` — "unset" —
+    rather than an empty string, which would sit in the column as a value.
+
+    A field the form did not submit is not sent at all, honouring
+    ``JobUpdate``'s omit-means-unchanged convention: this route must not be able
+    to blank a column it was never asked about. If nothing was submitted it
+    redirects without calling the backend — a no-op PATCH would still bump
+    ``updated_at``, which the jobs list now renders as "Updated".
+
+    Anti-forgery is the ``_csrf_gate`` hook's job (opt-OUT, so this route was
+    protected the moment it was added). The ``BadRequest`` branch is the same
+    ADR-033 lesson as ``transition_status``: a non-writer session gets a 403
+    from the backend, and leaving it uncaught turns that into a 500.
+    """
+    payload: dict[str, Any] = {}
+    for field in _EDITABLE_DETAIL_FIELDS:
+        if field not in request.form:
+            continue
+        payload[field] = (request.form.get(field) or "").strip() or None
+    if not payload:
+        return redirect(url_for("job_detail", job_id=job_id))
+    try:
+        api_client.patch_job(job_id, payload)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/requirements")
+def edit_job_requirements(job_id: UUID) -> Any:
+    """SPONSOR §I4 — enter or change the manager's additional requirements on a
+    job that already exists.
+
+    Reported from the pilot box as *"i see no manager skills preference
+    input"*, and the gap was total: the only input was on the CREATE form, and
+    all 23 pilot requisitions arrived through the BULK uploader, which has no
+    such field. Not one of them could ever have had a note.
+
+    **Its own route rather than sharing ``edit_job_details``**, even though
+    both are one-field PATCHes to the same resource. The consequences differ:
+    this one costs an LLM call (the backend enqueues ``extract_manager_prompt``
+    whenever the field is present) and invalidates the shortlist. Folding it
+    into the department/campus form would resend the note on every campus fix
+    and burn an extraction each time.
+
+    An emptied box sends ``None``, not ``''`` — the ranking combine reads null
+    as *nobody asked* and marks that sub-score unmeasured, where an empty
+    string would assert the manager listed nothing. Nothing else in the form is
+    forwarded, so a crafted extra field cannot ride along.
+    """
+    if "additional_requirements" not in request.form:
+        return redirect(url_for("job_detail", job_id=job_id))
+    note = (request.form.get("additional_requirements") or "").strip() or None
+    try:
+        api_client.patch_job(job_id, {"additional_requirements": note})
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # Same ADR-033 lesson as ``transition_status``: a non-writer session
+        # gets a 403 from the backend, and leaving it uncaught is a 500.
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
 @app.post("/jobs/<uuid:job_id>/reparse")
 def reparse_job(job_id: UUID) -> Any:
     """Re-queue a JD parse that failed or was stranded.
@@ -1089,6 +1234,11 @@ def resume_detail(resume_id: UUID) -> Any:
         # is shown — sharing a slot would mean using one control silently
         # invalidated the other's token.
         work_auth_csrf_token=csrf.issue_token(resume_id, action="work_auth"),
+        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
+        # reveal, withdraw and work-authorization controls, so every one of them
+        # needs its own one-shot token: sharing a slot would mean using one
+        # silently invalidated the others.
+        document_csrf_token=csrf.issue_token(resume_id, action="document"),
     )
 
 
@@ -1176,6 +1326,87 @@ def resume_withdraw(resume_id: UUID) -> Any:
         else:
             return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/admin/jobs/sync")
+def admin_taleo_sync() -> Any:
+    """Trigger the Taleo job import by hand (ADR-046).
+
+    Guarded by the page CSRF token via the global ``_csrf_gate`` hook — this
+    route is deliberately NOT in the exemption set, because unlike reveal and
+    download it acts on no particular résumé, so there is no per-subject
+    one-shot token to mint. The session-wide page token is the right control
+    for a session-wide action.
+
+    The backend decides everything that matters: admin-session-only, and
+    whether ``TALEO_ENABLED`` permits a run at all. This hop adds no second
+    copy of either rule — it only reports what happened, since a button that
+    silently does nothing when the flag is off is indistinguishable from a
+    broken one.
+    """
+    try:
+        api_client.trigger_taleo_sync()
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    flash(
+        "Taleo sync queued. If the source is disabled (TALEO_ENABLED=false, "
+        "the default) the run will record 'skipped' and make no outbound "
+        "request — see ADR-046."
+    )
+    return redirect(url_for("index"))
+
+
+@app.post("/resumes/<uuid:resume_id>/document")
+def resume_document(resume_id: UUID) -> Any:
+    """AUDITED. Streams the candidate's source résumé or cover letter back to
+    the browser as a download (sponsor 2026-09-02 §O4).
+
+    Same guard shape as ``resume_reveal`` and for the same reason: fetching
+    the file discloses identity outright, so it is a reveal by another route.
+    Same-origin check first, then a one-shot CSRF token in its own
+    ``action="document"`` slot — both before anything reaches the backend, so
+    a rejected forgery can never produce the audit row OR the disclosure.
+
+    **POST, so it cannot be an ``href``.** That is the whole point: a link is
+    prefetchable, and a speculative fetch by a browser, link scanner or mail
+    client would write an audit row naming somebody who never clicked and pull
+    candidate PII into a cache. The template renders a submit button instead.
+
+    Headers are passed through from the backend rather than re-derived here.
+    The backend already chose the filename (from the résumé id, never the
+    candidate-supplied one) and the media type; a second opinion at this hop
+    could disagree with the audit row that justified the download.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="document"
+    ):
+        abort(403)
+    kind = (request.form.get("kind") or "resume").strip()
+    if kind not in ("resume", "cover_letter"):
+        abort(400)
+    try:
+        body, media_type, disposition = api_client.download_document(
+            resume_id, kind=kind
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return Response(
+        body,
+        mimetype=media_type,
+        headers={
+            "Content-Disposition": disposition
+            or f'attachment; filename="{kind}-{resume_id}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/resumes/<uuid:resume_id>/work-authorization")

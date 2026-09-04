@@ -12,6 +12,7 @@
       { "name": "terraform", "min_years": null }
     ],
     "min_years_experience": 4,
+    "department": "Faculty of Applied Sciences",
     "education": {
       "min_level": "bachelors",
       "fields": ["Computer Science", "Software Engineering"]

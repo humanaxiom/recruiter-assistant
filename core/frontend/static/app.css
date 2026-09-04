@@ -753,3 +753,31 @@ details.newjob summary {
   /* Keep the pill the same height as its solid siblings despite the border. */
   padding: 1px 9px;
 }
+
+/* SPONSOR §O4 — the audited document downloads. */
+.document-block {
+  margin: 12px 0;
+}
+
+/* SPONSOR §I4 — the manager's own note, read back on the job page. Set apart
+   from the parsed JD below it, because the whole point is that these two are
+   different claims by different authors. */
+.manager-note {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid #6366f1;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+
+/* ADR-046 — provenance on a job that came from an external ATS. Indigo, like
+   the manager chips: both answer "where did this come from", which is a
+   different question from the status pills' "what state is it in". */
+.pill-sourced {
+  background: #eef2ff;
+  color: #4338ca;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}

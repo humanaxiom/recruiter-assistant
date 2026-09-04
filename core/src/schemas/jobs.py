@@ -17,15 +17,42 @@ inline with "DEVIATION".
 from __future__ import annotations
 
 import datetime as dt
-from typing import Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+
+from src.campus import canonicalise_location
 
 JobStatus = Literal["draft", "open", "closed", "archived"]
 EmploymentType = Literal["full_time", "part_time", "contract", "intern"]
 Seniority = Literal["junior", "mid", "senior", "staff", "principal", "director", "vp"]
 RemotePolicy = Literal["onsite", "hybrid", "remote"]
+
+
+def _canonical_campus(value: Any) -> Any:
+    """Normalise an inbound location to an SFU campus name where possible.
+
+    SPONSOR 2026-09-03 — Location means a campus (Burnaby/BBY,
+    Vancouver/YVR, Surrey/SRY). Applied at the SCHEMA rather than at each
+    write site, so the create form, the bulk manifest and a raw API PATCH all
+    converge on one spelling and the column can be grouped, filtered and
+    counted. An unrecognised value is preserved verbatim — see ``src.campus``
+    for why, and for why nothing scans the job description for a campus.
+
+    A non-string is handed straight back for pydantic's own type check to
+    reject; this must not turn a 422 into an ``AttributeError``.
+    """
+    if value is None or isinstance(value, str):
+        return canonicalise_location(value)
+    return value
+
+
+#: ``location`` wherever a client can set it. NOT used on ``JobOut`` /
+#: ``JobListItem``: a read must show what is actually stored, so a row holding
+#: an uncanonical value from before this landed is visible rather than
+#: prettied up on the way out.
+CampusLocation = Annotated[str | None, BeforeValidator(_canonical_campus)]
 
 
 # ---------- HTTP request bodies ----------
@@ -38,7 +65,9 @@ class JobCreate(BaseModel):
 
     title: str = Field(min_length=2, max_length=200)
     department: str | None = Field(default=None, max_length=100)
-    location: str | None = Field(default=None, max_length=200)
+    # SPONSOR 2026-09-03 — Location means an SFU campus. ``CampusLocation``
+    # canonicalises on the way in; see the alias above.
+    location: CampusLocation = Field(default=None, max_length=200)
     employment_type: EmploymentType | None = None
     seniority: Seniority | None = None
     min_years: int | None = Field(default=None, ge=0, le=50)
@@ -77,7 +106,7 @@ class JobUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=2, max_length=200)
     department: str | None = Field(default=None, max_length=100)
-    location: str | None = Field(default=None, max_length=200)
+    location: CampusLocation = Field(default=None, max_length=200)
     employment_type: EmploymentType | None = None
     seniority: Seniority | None = None
     min_years: int | None = Field(default=None, ge=0, le=50)
@@ -160,6 +189,23 @@ class JobOut(BaseModel):
     # are distinguished by whether ``additional_requirements`` itself is set.
     additional_requirements: str | None = None
     additional_requirements_parsed: ManagerRequirements | None = None
+    # ADR-046 — where this job came from. ``"manual"`` for every human-created
+    # requisition (the column default), ``"taleo"`` for one the sync produced.
+    #
+    # ``external_url`` is the provenance half of sponsor §I3: a clickable link
+    # back to the live posting, so a recruiter can check a synced job against
+    # the source of truth. It is the ONLY way to reach the original from the
+    # product, which is why it is on the DTO rather than left in the database.
+    source: str = "manual"
+    external_id: str | None = None
+    external_url: str | None = None
+    external_last_seen_at: dt.datetime | None = None
+    # SPONSOR 2026-09-03 — provenance for the TITLE. True means it was derived
+    # from an uploaded filename and ``record_parsed`` will replace it once with
+    # the extracted title; False means a human chose it and nothing overwrites
+    # it. Defaults False so a row read before this landed is never reported as
+    # overwritable.
+    title_provisional: bool = False
 
 
 class JobReparseOut(BaseModel):
@@ -202,12 +248,38 @@ class JobListItem(BaseModel):
     id: UUID
     title: str
     department: str | None
+    # REPORTED FROM THE RUNNING PRODUCT, 2026-09-03: the jobs table has
+    # rendered a Location column since Phase 7 against a DTO with no such
+    # field, so every row printed an em-dash — permanently, for every job.
+    # Nothing caught it because a null location renders identically, so the
+    # bug and the empty-data case were indistinguishable on screen.
+    location: str | None = None
     status: JobStatus
     created_at: dt.datetime
-    parsed_at: dt.datetime | None
-    # DEVIATION: dropped hris ``comment_count`` (JD comments / Feature 3),
-    # ``source`` and ``external_last_seen_at`` (Taleo ingest provenance) —
-    # both features are cut and the Phase 0 DDL has none of these columns.
+    # Requested after seeing the list: ``created_at`` alone cannot tell a job
+    # re-synced this morning from one untouched since June — which is exactly
+    # the question a daily Taleo sync makes worth asking.
+    updated_at: dt.datetime | None = None
+    parsed_at: dt.datetime | None = None
+    # ADR-046 / sponsor §I3 — provenance where the question is actually asked.
+    # ``source`` is NOT NULL in the DDL with a 'manual' default; ``external_url``
+    # is the link back to the live posting, and it is the link the sponsor asked
+    # for rather than the label.
+    #
+    # DEVIATION from hris: ``comment_count`` (JD comments / Feature 3) stays
+    # dropped — that feature is cut, not deferred.
+    source: str = "manual"
+    external_url: str | None = None
+    # The SAME defect as ``location``, found alongside it and worse. The table
+    # has rendered ``job.resume_count`` since Phase 7; the only DTO carrying
+    # that name was ``JobDeleteOut``. Because the cell guarded with
+    # ``is not none`` and a Jinja Undefined is *not* None, it rendered EMPTY —
+    # not even the intended 0. It is the column that matters most on this
+    # page: the sponsor's premise is postings "receiving large numbers of
+    # applications", and this is the number that says which ones those are.
+    # Zero, never null: ``count(*)`` cannot return NULL, and a blank cell
+    # would again be indistinguishable from "we don't know".
+    resume_count: int = 0
 
 
 class JDExtractText(BaseModel):
@@ -319,6 +391,17 @@ class JDExtracted(BaseModel):
     nice_to_have_skills: list[Skill] = Field(default_factory=list, max_length=50)
     min_years_experience: int = Field(default=0, ge=0, le=50)
     education: Education | None = None
+    # SPONSOR 2026-09-03 — "we need to parse department and location from JDs".
+    # The schema had no department at all, so nothing could ever fill
+    # ``jobs.department``: 6 of 26 pilot rows have one and a human typed every
+    # six. The unit, faculty or school the JD names — inferable from the body
+    # ("the School of Medicine's digital teaching…") even though these JDs
+    # carry no labelled header field.
+    department: str | None = Field(default=None, max_length=200)
+    # Canonicalised to an SFU campus on the way to the column
+    # (``src.campus``); kept verbatim here, because this blob is the
+    # record of what the MODEL said and rewriting it would destroy the only
+    # evidence available when asking whether an extraction was faithful.
     location: str | None = Field(default=None, max_length=200)
     remote_policy: RemotePolicy | None = None
     responsibilities: list[str] = Field(default_factory=list, max_length=20)

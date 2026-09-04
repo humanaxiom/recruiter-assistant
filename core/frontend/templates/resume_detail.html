@@ -133,6 +133,50 @@
   {% endif %}
 
   {% if is_writer %}
+  {# SPONSOR 2026-09-02 §O4 — "the list should have Link to PDF coverletter
+     and resume."
+
+     BUTTONS, NOT LINKS, and that is not a styling choice. Fetching the file
+     discloses identity outright — the candidate's name is inside it — so this
+     is a reveal by another route and is audited as one. An <a href> is
+     prefetchable: browsers, link scanners and mail clients follow GETs
+     speculatively, and each such fetch would write an audit row naming
+     somebody who never clicked. So it posts, with its own one-shot token.
+
+     The cover-letter button renders only when there is one to fetch. Most
+     résumés have none, and a button that always 404s teaches people to
+     distrust the ones that work. #}
+  <div class="document-block">
+    <form method="post"
+          action="{{ url_for('resume_document', resume_id=resume.id) }}"
+          style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ document_csrf_token }}">
+      <input type="hidden" name="kind" value="resume">
+      <button type="submit" class="btn btn-secondary btn-sm">
+        Download résumé (audited)</button>
+    </form>
+    {% if resume.cover_letter_text or resume.cover_letter_parsed %}
+    {# One one-shot token per résumé, so the two buttons SHARE it and only one
+       can be used per page load; the second press 403s and a reload re-mints.
+       A real limitation, and the safe direction — minting per (résumé, kind)
+       needs another action slot to buy a case that is not the common one. #}
+    <form method="post"
+          action="{{ url_for('resume_document', resume_id=resume.id) }}"
+          style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ document_csrf_token }}">
+      <input type="hidden" name="kind" value="cover_letter">
+      <button type="submit" class="btn btn-secondary btn-sm">
+        Download cover letter (audited)</button>
+    </form>
+    {% endif %}
+    <p class="hint">
+      Every download is recorded against your name, whether or not the review
+      is blind — the file itself identifies the candidate.
+    </p>
+  </div>
+  {% endif %}
+
+  {% if is_writer %}
   {# SPONSOR 2026-09-02 §O2 — the work-authorization declaration.
 
      This control is the whole reason the field is usable. The roadmap records

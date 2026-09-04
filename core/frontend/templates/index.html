@@ -25,10 +25,24 @@
       <input class="input" id="department" name="department" type="text"
              value="{{ form.get('department', '') }}">
     </div>
+    {# SPONSOR 2026-09-03 — Location means an SFU campus.
+
+       A `datalist` rather than a `select`: the three campuses are what this
+       is for, so they are one click away and the codes (BBY/YVR/SRY) are
+       accepted as typed input, but a genuine exception — "Remote", a fourth
+       site — is still enterable. The backend canonicalises either way
+       (`src/campus.py`), so "bby" and "Burnaby, BC" both store as "Burnaby".
+       A hard `select` would have forced somebody to lie. #}
     <div class="form-group">
-      <label class="label" for="location">Location</label>
+      <label class="label" for="location">Campus</label>
       <input class="input" id="location" name="location" type="text"
+             list="campus-options" autocomplete="off"
              value="{{ form.get('location', '') }}">
+      <datalist id="campus-options">
+        {% for campus in campuses %}<option value="{{ campus }}"></option>{% endfor %}
+      </datalist>
+      <span class="muted">Burnaby (BBY) · Vancouver (YVR) · Surrey (SRY).
+        Left blank, the JD parse fills it in when the posting says.</span>
     </div>
     <div class="form-group">
       <label class="label" for="min_years">Minimum years of experience</label>
@@ -120,6 +134,29 @@
   </form>
 </details>
 
+{# ADR-046 — the manual Taleo import trigger.
+
+   ADMIN ONLY, and shown to nobody else: the backend gates it on an admin CAS
+   session, so rendering it for a recruiter would only produce a 403. This is
+   a compensating UX control, not the boundary.
+
+   It is honest about the flag rather than hiding when disabled. A button that
+   vanishes silently when TALEO_ENABLED=false is indistinguishable from a
+   feature that was never built, and the flag is off by DEFAULT — so the
+   common case would be an invisible feature nobody could ask about. #}
+{% if is_admin %}
+<form method="post" action="{{ url_for('admin_taleo_sync') }}"
+      style="margin-bottom:16px">
+  <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+  <button type="submit" class="btn btn-secondary btn-sm">
+    Import jobs from Taleo</button>
+  <span class="hint" style="margin-left:8px">
+    Reads SFU's public careers listing. Does nothing unless the source is
+    enabled for this deployment (ADR-046).
+  </span>
+</form>
+{% endif %}
+
 <div class="filter-row">
   <a href="{{ url_for('index') }}" class="{% if not status_filter %}active{% endif %}">All</a>
   {% for s in statuses %}
@@ -132,7 +169,7 @@
   <thead>
     <tr>
       <th>Title</th><th>Department</th><th>Location</th>
-      <th>Status</th><th>Résumés</th>
+      <th>Source</th><th>Status</th><th>Updated</th><th>Résumés</th>
     </tr>
   </thead>
   <tbody>
@@ -141,11 +178,37 @@
       <td><a href="{{ url_for('job_detail', job_id=job.id) }}">{{ job.title }}</a></td>
       <td>{{ job.department or '—' }}</td>
       <td>{{ job.location or '—' }}</td>
+      {# ADR-046 / sponsor §I3 — the LINK, not a label. "Where did this come
+         from" is answered by getting back to the posting, and asking that on
+         the detail page costs one click per job across a 40-row list.
+
+         Only a NON-manual source renders. Twenty-six rows reading "manual"
+         is a column that informs nobody, and the em-dash already says "a
+         human made this". #}
+      <td>
+        {%- if job.source and job.source != 'manual' -%}
+        {%- if job.external_url -%}
+        <a href="{{ job.external_url }}" target="_blank" rel="noopener noreferrer"
+           title="Open the original {{ job.source }} posting">{{ job.source }}</a>
+        {%- else -%}{{ job.source }}{%- endif -%}
+        {%- else -%}—{%- endif -%}
+      </td>
       <td><span class="pill pill-{{ job.status }}">{{ job.status }}</span></td>
-      <td>{{ job.resume_count if job.resume_count is not none else 0 }}</td>
+      {# `created_at` alone cannot tell a job re-synced this morning from one
+         untouched since June — the question a daily sync makes worth asking.
+         Date only: the time of day is noise in a list scanned for recency. #}
+      {# `| day`, not `.strftime` — this value crosses HTTP as JSON, so it is
+         a STRING here. Calling a datetime method on it 500'd every job page
+         on 2026-09-03. See `_day` in frontend/app.py. #}
+      <td class="muted">{{ job.updated_at | day }}</td>
+      {# Counted by the list query itself. The `is not none` guard this cell
+         used to carry is what hid the bug for three months: `resume_count`
+         was never a JobListItem field, and a Jinja Undefined is *not* None,
+         so the guard passed and the cell rendered blank. It is an int now. #}
+      <td>{{ job.resume_count }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">No jobs yet.</td></tr>
+    <tr><td colspan="7" class="muted">No jobs yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>

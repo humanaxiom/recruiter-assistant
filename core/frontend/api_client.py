@@ -515,6 +515,45 @@ def withdraw_resume(
     return response.json()
 
 
+def trigger_taleo_sync(*, client: httpx.Client | None = None) -> Any:
+    """ADR-046. ``POST /admin/jobs/sync`` -- enqueue the Taleo import.
+
+    202 and returns immediately: the sync walks paginated listings plus one
+    detail page per requisition at one request per second, so it runs on the
+    worker, not in this request. Admin-session-only, enforced by the backend.
+    """
+    response = _request("POST", "/admin/jobs/sync", client=client)
+    return response.json()
+
+
+def download_document(
+    resume_id: UUID,
+    *,
+    kind: str = "resume",
+    client: httpx.Client | None = None,
+) -> tuple[bytes, str, str]:
+    """AUDITED. ``POST /resumes/{id}/document`` — the candidate's source file.
+
+    Returns ``(body, media_type, content_disposition)`` rather than parsed
+    JSON: this is the one call in this client whose response is a binary
+    document. The Flask route passes all three through so the browser saves
+    the file with the server's own filename and type, and does not re-derive
+    either — the backend already decided them, and a second opinion here could
+    disagree with the audit row that justified the download.
+    """
+    response = _request(
+        "POST",
+        f"/resumes/{resume_id}/document",
+        params={"kind": kind},
+        client=client,
+    )
+    return (
+        response.content,
+        response.headers.get("content-type", "application/octet-stream"),
+        response.headers.get("content-disposition", ""),
+    )
+
+
 def set_work_authorization(
     resume_id: UUID,
     *,

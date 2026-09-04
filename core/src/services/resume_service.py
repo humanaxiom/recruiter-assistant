@@ -21,7 +21,8 @@ import datetime as dt
 import hashlib
 import json
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from src.errors import NotFoundError
@@ -901,6 +902,127 @@ async def reinstate_resume(
                 payload=payload,
             )
     return True
+
+
+DocumentKind = Literal["resume", "cover_letter"]
+
+#: Served when a blob key's extension is not one we recognise. NEVER guess
+#: ``application/pdf``: a browser told a DOCX is a PDF renders garbage, and the
+#: recruiter's conclusion is that the product corrupted the file.
+_FALLBACK_MEDIA_TYPE = "application/octet-stream"
+
+_DOCUMENT_SQL = (
+    "SELECT blob_key, mime_type, original_filename, cover_letter_blob_key "
+    "FROM resumes WHERE id = $1"
+)
+
+
+@dataclass(frozen=True)
+class DocumentDownload:
+    """One candidate document, ready to stream back."""
+
+    filename: str
+    media_type: str
+    data: bytes
+
+
+async def read_document(
+    conn: DbConn,
+    blob_store: BlobStore,
+    resume_id: UUID,
+    *,
+    kind: DocumentKind,
+    user_id: UUID | None,
+    actor_kind: str = "service",
+    actor_user_id: UUID | None = None,
+    actor_service: str | None = None,
+) -> DocumentDownload:
+    """Read one candidate document out of the blob store, audited.
+
+    SPONSOR 2026-09-02 §O4 — the first route in this product that returns a
+    raw candidate document, and therefore the first new PII-egress surface
+    since the pilot went live.
+
+    **The ordering is reveal's ordering** (ADR-016 §7, ADR-020 §5): the
+    scoped existence probe runs FIRST, so a caller denied by row scoping gets
+    a 404 indistinguishable from a genuinely missing résumé, leaves no audit
+    row, and causes no blob read. Only then is the download audited, and only
+    then is the blob touched.
+
+    **Every download is audited, blind job or not.** One rule, deliberately
+    without a branch. A blind job's document discloses identity outright (the
+    name is inside the file), so a download there is a reveal by another
+    route and owes the same evidence; a non-blind job's document is still a
+    candidate record leaving the system. Putting the branch in would place it
+    exactly where a later edit is most likely to invert it.
+
+    ``NotFoundError`` covers three cases on purpose — no such résumé, not
+    yours, and no document of that kind — because distinguishing them for the
+    caller would leak which of the three it was.
+    """
+    row = (
+        await conn.fetchrow(
+            f"{_DOCUMENT_SQL} AND {_RESUME_ASSIGNEE_EXISTS_SQL.format(n=2)}",
+            resume_id,
+            user_id,
+        )
+        if user_id is not None
+        else await conn.fetchrow(_DOCUMENT_SQL, resume_id)
+    )
+    if row is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+
+    if kind == "resume":
+        key = row["blob_key"]
+        # The résumé's own type is stored; the cover letter's is not.
+        media_type = row["mime_type"] or _media_type_for_key(key)
+    else:
+        key = row["cover_letter_blob_key"]
+        # There is no ``cover_letter_mime_type`` column. The extension on the
+        # server-generated ``cover_letters/{uuid}.{ext}`` key is the only
+        # record of the type.
+        media_type = _media_type_for_key(key) if key else _FALLBACK_MEDIA_TYPE
+    if not key:
+        # Most résumés have no cover letter. A 200 with an empty body would
+        # hand the recruiter a zero-byte file and no explanation.
+        raise NotFoundError(
+            f"resume {resume_id} has no {kind}", resume_id=str(resume_id)
+        )
+
+    await audit_service.record_audit(
+        conn,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+        action="download_document",
+        subject_type="resume",
+        subject_id=resume_id,
+        details={"kind": kind},
+    )
+
+    data = await blob_store.get(key)
+    return DocumentDownload(
+        # DERIVED from the résumé id, never ``original_filename``. That field
+        # is candidate-supplied and routinely "Jane_Smith_Resume.pdf". The
+        # document's CONTENT discloses identity and the audit row is what
+        # justifies that — but a filename is a different surface: it lands in
+        # a downloads folder, a shared drive, an email attachment and a
+        # screenshot, all detached from the audit row. The extension is kept
+        # so the file still opens.
+        filename=f"{kind}-{resume_id}{_suffix_for_key(key)}",
+        media_type=media_type,
+        data=data,
+    )
+
+
+def _suffix_for_key(key: str) -> str:
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+    return f".{ext}" if ext else ""
+
+
+def _media_type_for_key(key: str) -> str:
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+    return _EXT_MIME.get(ext, _FALLBACK_MEDIA_TYPE)
 
 
 async def set_work_authorization(
