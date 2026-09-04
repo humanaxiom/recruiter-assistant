@@ -248,6 +248,38 @@ def _csrf_gate() -> Any:
 _WRITER_ROLES = ("admin", "recruiter")
 
 
+@app.template_filter("day")
+def _day(value: Any) -> str:
+    """Render a timestamp as ``YYYY-MM-DD``, whatever shape it arrives in.
+
+    **This exists because of a production 500 on 2026-09-03.** The jobs list's
+    new Updated column called ``job.updated_at.strftime(...)`` and every job
+    page died with ``'str object' has no attribute 'strftime'``. The frontend
+    is a BFF: it reads JSON over HTTP, so a timestamp is always a **string**
+    here, never a ``datetime``. Tests that assert on template source text
+    cannot see that, and a hand-written fixture dict is exactly where somebody
+    types a ``datetime`` that the real API can never send.
+
+    So this takes both, plus ``None`` and the empty string, and — deliberately
+    — **never raises**. A filter that can throw turns one unparseable cell into
+    a blank page; an odd-looking date does not. The cell is informational and
+    the list is not.
+    """
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.strftime("%Y-%m-%d")
+    text = str(value)
+    try:
+        # ``Z`` is valid ISO-8601 and is what some producers emit;
+        # ``fromisoformat`` only learned it in 3.11+, so normalise anyway.
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d"
+        )
+    except ValueError:
+        return text
+
+
 @app.context_processor
 def inject_current_user() -> dict[str, Any]:
     """Injects the header auth widget's context into every template render.

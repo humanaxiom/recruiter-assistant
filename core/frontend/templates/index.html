@@ -197,9 +197,10 @@
       {# `created_at` alone cannot tell a job re-synced this morning from one
          untouched since June — the question a daily sync makes worth asking.
          Date only: the time of day is noise in a list scanned for recency. #}
-      <td class="muted">
-        {{ job.updated_at.strftime('%Y-%m-%d') if job.updated_at else '—' }}
-      </td>
+      {# `| day`, not `.strftime` — this value crosses HTTP as JSON, so it is
+         a STRING here. Calling a datetime method on it 500'd every job page
+         on 2026-09-03. See `_day` in frontend/app.py. #}
+      <td class="muted">{{ job.updated_at | day }}</td>
       {# Counted by the list query itself. The `is not none` guard this cell
          used to carry is what hid the bug for three months: `resume_count`
          was never a JobListItem field, and a Jinja Undefined is *not* None,
