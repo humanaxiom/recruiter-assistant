@@ -121,6 +121,56 @@
      was stored, extracted and scored but never returned by the API at all, so
      a manager had no way to see what they had asked for — the shortlist chips
      showed the EXTRACTION, and nothing showed the input it came from. #}
+  {# EDITABLE since 2026-09-03. It was read-only, which meant the ONLY way to
+     set a note was the create form — and every requisition on the pilot box
+     arrived through the bulk uploader, which has no such field. Reported as
+     "i see no manager skills preference input", and that was exactly right.
+
+     Its own form, separate from department/campus: this one costs an LLM call
+     and invalidates the shortlist, so it must not ride along on every campus
+     correction. Open when there is no note yet, because that is the state
+     somebody needs to act on. #}
+  {% if is_writer %}
+  <details class="card" style="margin-top:12px"
+           {% if not job.additional_requirements %}open{% endif %}>
+    <summary>
+      {% if job.additional_requirements %}Edit{% else %}Add{% endif %}
+      skills &amp; experience you are looking for</summary>
+    <form action="{{ url_for('edit_job_requirements', job_id=job.id) }}"
+          method="post" style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-additional-requirements">
+          Additional requirements</label>
+        <textarea class="textarea" id="job-additional-requirements"
+                  name="additional_requirements" maxlength="4000"
+                  style="min-height:90px"
+                  placeholder="e.g. Must have MEG analysis experience. Kafka in production is a bonus. Willing to travel to Burnaby weekly."
+                  >{{ job.additional_requirements or '' }}</textarea>
+        <p class="hint">
+          Special skills or experience you are looking for, whether or not the
+          posting mentions them. Anything you state plainly is treated as
+          <strong>required</strong>; write "nice to have", "bonus" or "ideally"
+          to soften one. These are scored separately from the posting, so the
+          shortlist can show which requirements came from you.
+        </p>
+      </div>
+      {# Saving re-extracts the note but does NOT re-rank — deliberately, since
+         regenerating would move a shortlist somebody may be reading. Saying so
+         is the whole point: silence would let a manager believe an edit had
+         taken effect on a list still reflecting the old note. #}
+      <p class="hint">
+        Saving re-reads these requirements straight away. It does <strong>not</strong>
+        re-rank anyone — use <strong>Regenerate</strong> on the shortlist when
+        you want the new requirements applied to the candidates.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save requirements</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
   {% if job.additional_requirements %}
   <div class="manager-note">
     <h3 style="margin-top:0">Your additional requirements</h3>

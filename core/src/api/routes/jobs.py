@@ -265,6 +265,7 @@ async def update_job(
     job_id: UUID,
     payload: JobUpdate,
     db: Db,
+    arq: Annotated[ArqRedis, Depends(get_arq)],
     user: Annotated[User | None, Depends(resolve_user)],
 ) -> JobOut:
     """General partial update. ``status`` is NOT settable here — ``JobUpdate``
@@ -286,7 +287,7 @@ async def update_job(
     caller (``user is None``) is forwarded as ``actor_kind='service'`` /
     ``actor_service='api'`` rather than 403ing."""
     actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
-    return await job_service.update_job(
+    job = await job_service.update_job(
         db,
         job_id,
         payload,
@@ -294,6 +295,26 @@ async def update_job(
         actor_user_id=actor_user_id,
         actor_service=actor_service,
     )
+    # SPONSOR §I4 (2026-09-03) — the promise ``JobUpdate``'s own comment has
+    # made since the field was added, and that nothing kept: "editing this
+    # re-extracts ONLY the manager prompt — it must never re-run the JD parse".
+    #
+    # Extraction previously happened solely inside ``parse_job``, so an edited
+    # note kept an extraction describing the PREVIOUS text: the shortlist
+    # scored candidates against requirements nobody had asked for, with the new
+    # ones displayed beside them. ``parse_job`` is the wrong tool for the fix —
+    # it re-derives the posting's own requirements (moving a shortlist someone
+    # is reading, ROADMAP §5) and is gated on 'draft', so on an open
+    # requisition it would silently do nothing.
+    #
+    # Keyed on ``model_fields_set``, not on truthiness: clearing the note is a
+    # change and must re-extract too, or the old extraction outlives its own
+    # input and keeps scoring against deleted requirements. An OMITTED field
+    # means "unchanged" and enqueues nothing, so fixing a campus does not burn
+    # an LLM call.
+    if "additional_requirements" in payload.model_fields_set:
+        await arq.enqueue_job("extract_manager_prompt", str(job_id))
+    return job
 
 
 @router.patch(

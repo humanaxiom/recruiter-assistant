@@ -102,7 +102,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -1475,3 +1475,85 @@ async def test_my_jobs_requires_auth_like_sibling_routes() -> None:
     async with await _client(app) as client:
         resp = await client.get("/my/jobs")
     assert resp.status_code == 401
+
+
+# ── SPONSOR §I4 (2026-09-03) — editing the manager's note re-extracts it ────
+#
+# `JobUpdate`'s own comment has said since the field was added: "Editing this
+# re-extracts ONLY the manager prompt — it must never re-run the JD parse."
+# Nothing implemented that. Extraction happened solely inside `parse_job`, so
+# a PATCH that changed the note (once `_UPDATABLE_JOB_COLUMNS` let it through
+# at all) would have left `additional_requirements_parsed` describing the
+# PREVIOUS text — a shortlist scored against requirements nobody asked for,
+# with the new ones displayed beside it.
+#
+# The "must never re-run the JD parse" half is load-bearing in its own right:
+# `parse_job` re-derives the posting's requirements from the LLM, which can
+# change them underneath a shortlist somebody is reading (ROADMAP §5).
+
+
+@pytest.mark.asyncio
+async def test_patch_touching_the_manager_note_enqueues_a_reextraction() -> None:
+    conn = _mock_conn(fetchrow=_job_row())
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    job_id = uuid4()
+    with patch.object(
+        jobs_routes.job_service, "update_job", AsyncMock(return_value=_job_out(job_id))
+    ):
+        async with await _client(app) as client:
+            resp = await client.patch(
+                f"/jobs/{job_id}", json={"additional_requirements": "Must have MEG."}
+            )
+    assert resp.status_code == 200
+    arq.enqueue_job.assert_awaited_once_with("extract_manager_prompt", str(job_id))
+
+
+@pytest.mark.asyncio
+async def test_patch_touching_the_manager_note_never_reruns_the_jd_parse() -> None:
+    conn = _mock_conn(fetchrow=_job_row())
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    with patch.object(
+        jobs_routes.job_service, "update_job", AsyncMock(return_value=_job_out())
+    ):
+        async with await _client(app) as client:
+            await client.patch(
+                f"/jobs/{uuid4()}", json={"additional_requirements": "Must have MEG."}
+            )
+    enqueued = {call.args[0] for call in arq.enqueue_job.await_args_list}
+    assert "parse_job" not in enqueued
+
+
+@pytest.mark.asyncio
+async def test_patch_that_does_not_touch_the_note_enqueues_nothing() -> None:
+    """An omitted field means "unchanged", so a campus fix must not burn an
+    LLM call on a note that did not move."""
+    conn = _mock_conn(fetchrow=_job_row())
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    with patch.object(
+        jobs_routes.job_service, "update_job", AsyncMock(return_value=_job_out())
+    ):
+        async with await _client(app) as client:
+            await client.patch(f"/jobs/{uuid4()}", json={"location": "Surrey"})
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_note_still_enqueues() -> None:
+    """Clearing it must re-extract too, or the old extraction survives its own
+    input and keeps scoring candidates against requirements that were deleted.
+    An explicit null is a change, not an omission."""
+    conn = _mock_conn(fetchrow=_job_row())
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    job_id = uuid4()
+    with patch.object(
+        jobs_routes.job_service, "update_job", AsyncMock(return_value=_job_out(job_id))
+    ):
+        async with await _client(app) as client:
+            await client.patch(
+                f"/jobs/{job_id}", json={"additional_requirements": None}
+            )
+    arq.enqueue_job.assert_awaited_once_with("extract_manager_prompt", str(job_id))

@@ -36,6 +36,7 @@ import pytest
 from src.settings import Settings, get_settings
 from src.storage.blob_store import BlobStore
 from src.worker.main import WorkerSettings, startup
+from src.worker.manager_prompt_task import extract_manager_prompt
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.resume_tasks import parse_resume
 from src.worker.taleo_sync_task import sync_taleo_jobs
@@ -143,6 +144,15 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         # the admin trigger route posts it -- so it belongs here as well as in
         # ``cron_jobs``.
         sync_taleo_jobs,
+        # SPONSOR I4, 2026-09-03. Enqueued by name from ``PATCH /jobs/{id}``
+        # whenever that request touches ``additional_requirements``.
+        #
+        # A SEPARATE task rather than reusing ``parse_job``, and the separation
+        # is the point: ``parse_job`` re-derives the POSTING's requirements
+        # from the LLM (moving a shortlist somebody is reading) and is gated on
+        # ``status = 'draft'``, so on an open requisition -- the case editing a
+        # note exists for -- it would have done nothing and reported success.
+        extract_manager_prompt,
     ]
 
 

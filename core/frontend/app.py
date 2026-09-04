@@ -917,6 +917,44 @@ def edit_job_details(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+@app.post("/jobs/<uuid:job_id>/requirements")
+def edit_job_requirements(job_id: UUID) -> Any:
+    """SPONSOR §I4 — enter or change the manager's additional requirements on a
+    job that already exists.
+
+    Reported from the pilot box as *"i see no manager skills preference
+    input"*, and the gap was total: the only input was on the CREATE form, and
+    all 23 pilot requisitions arrived through the BULK uploader, which has no
+    such field. Not one of them could ever have had a note.
+
+    **Its own route rather than sharing ``edit_job_details``**, even though
+    both are one-field PATCHes to the same resource. The consequences differ:
+    this one costs an LLM call (the backend enqueues ``extract_manager_prompt``
+    whenever the field is present) and invalidates the shortlist. Folding it
+    into the department/campus form would resend the note on every campus fix
+    and burn an extraction each time.
+
+    An emptied box sends ``None``, not ``''`` — the ranking combine reads null
+    as *nobody asked* and marks that sub-score unmeasured, where an empty
+    string would assert the manager listed nothing. Nothing else in the form is
+    forwarded, so a crafted extra field cannot ride along.
+    """
+    if "additional_requirements" not in request.form:
+        return redirect(url_for("job_detail", job_id=job_id))
+    note = (request.form.get("additional_requirements") or "").strip() or None
+    try:
+        api_client.patch_job(job_id, {"additional_requirements": note})
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # Same ADR-033 lesson as ``transition_status``: a non-writer session
+        # gets a 403 from the backend, and leaving it uncaught is a 500.
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
 @app.post("/jobs/<uuid:job_id>/reparse")
 def reparse_job(job_id: UUID) -> Any:
     """Re-queue a JD parse that failed or was stranded.

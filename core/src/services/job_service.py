@@ -327,8 +327,59 @@ _UPDATABLE_JOB_COLUMNS: frozenset[str] = frozenset(
         "retention_days",
         "shortlist_top_percent",
         "blind_review",
+        # SPONSOR §I4, added 2026-09-03 after "i see no manager skills
+        # preference input" from the pilot box.
+        #
+        # ``JobUpdate`` has carried this field since it was added and this
+        # allowlist did not, so ``update_job`` filtered it out and returned 200
+        # having changed nothing — the only way to set a manager note was the
+        # CREATE form, and all 23 pilot requisitions arrived through the BULK
+        # uploader, which has no such field. Not one of them could ever have
+        # had one.
+        #
+        # Changing it must re-extract: see ``record_manager_requirements`` and
+        # the ``extract_manager_prompt`` enqueue in the PATCH route. The
+        # extraction blob itself stays OUT of this set — it is the worker's to
+        # write, never a client's.
+        "additional_requirements",
     }
 )
+
+# The re-extraction write. Deliberately NOT scoped to ``status = 'draft'``,
+# unlike ``_RECORD_PARSED_SQL``: a manager adds requirements to a requisition
+# that is already OPEN and taking résumés, which is the entire reason the field
+# is editable after creation. A 'draft'-scoped UPDATE would apply to nothing on
+# every real job and report success.
+#
+# It touches ONE column. ``description_parsed`` / ``parsed_at`` / ``status``
+# are untouched on purpose — re-running the JD parse here would re-derive the
+# posting's own requirements from the LLM and move a shortlist somebody is
+# reading (ROADMAP §5). That separation is what ``JobUpdate``'s comment has
+# promised since the field was added, and what nothing implemented until now.
+_RECORD_MANAGER_REQS_SQL = """
+UPDATE jobs SET
+    additional_requirements_parsed = $2::jsonb,
+    updated_at = now()
+WHERE id = $1
+"""
+
+
+async def record_manager_requirements(
+    conn: DbConn, job_id: UUID, requirements: ManagerRequirements | None
+) -> None:
+    """Write ONLY the manager-note extraction back onto the job row.
+
+    ``None`` writes SQL NULL, and that is the correct outcome for both "the
+    note was cleared" and "the note would not parse": the ranking combine reads
+    null as *nobody asked* and marks the sub-score unmeasured, where an empty
+    object would assert the manager listed nothing — a different and false
+    claim (see ``extract_manager_requirements``).
+    """
+    await conn.execute(
+        _RECORD_MANAGER_REQS_SQL,
+        job_id,
+        json.dumps(requirements.model_dump()) if requirements is not None else None,
+    )
 
 
 def _row_to_jobout(row: Any) -> JobOut:

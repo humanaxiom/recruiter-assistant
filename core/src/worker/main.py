@@ -43,6 +43,7 @@ from src.pipeline.llm import CachedEmbedder, LLMClient
 from src.settings import get_settings
 from src.storage.blob_store import BlobStore
 from src.worker.graph_tasks import project_to_graph
+from src.worker.manager_prompt_task import extract_manager_prompt
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 from src.worker.reconcile import reconcile_stalled_parses
@@ -176,6 +177,9 @@ class WorkerSettings:
         shortlist_job,
         reverse_match_job,
         sync_taleo_jobs,
+        # SPONSOR I4, 2026-09-03. Enqueued by name from PATCH /jobs/{id}
+        # whenever that request touches the manager note.
+        extract_manager_prompt,
     ]
     # Phase 4b: the graph-projection drainer runs on its own schedule, not by
     # enqueue — every ~5s, matching decision 3's rationale (skill resolution
