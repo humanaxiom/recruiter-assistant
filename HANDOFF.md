@@ -46,6 +46,15 @@ The local dev stack is still up on `:29500` UI · `:29800` API · `:29432` pg ·
 stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 `.env.example` (`:29800` API, `:29500` frontend, `LLM_TIMEOUT_S=900`).
 
+**CAS is OFF on this box as of 2026-09-09**, at the user's request — *"this is
+still a dev/test box… we'll switch it on when users start playing around with
+it next week."* It is off via an untracked, gitignored
+`docker-compose.override.yml`, which also carries the `LLM_TIMEOUT_S` correction
+below. **Delete that file before anyone real touches the box**: with CAS off
+every visitor is an anonymous admin, including on the audit-log viewer.
+`doctor.sh` fails with `deploy.auth_disabled` for exactly as long as it is
+there, which is the intended nag — do not silence it.
+
 ### 3. The sponsor picked the next feature — and it is none of the three cards
 
 The DTO/CIO sent a requirements set on 2026-09-02 and answered all four open
@@ -114,13 +123,13 @@ Still open alongside it, and neither is superseded:
 
 **Next, in order:** **re-parse the 20 pilot jobs that still have no
 department** — this is the only unfinished half of the 2026-09-03 request, and
-it is BLOCKED ON A LOCAL CONFIG BUG, not on code. `./scripts/doctor.sh` says
-so on its own — its ONLY finding is `deploy.timeout_below_profile`:
-`LLM_TIMEOUT_S` is 120s where the committed model profile measured
-`gpt-oss:20b` at **838s** under this concurrency. Two re-parses were observed
-dying on `ReadTimeout` and tripping the circuit breaker, exactly as the
-2026-08-21 note predicts. Set it to 838+ (`.env.example` says 900) before
-enqueuing anything.
+it is BLOCKED ON A LOCAL CONFIG BUG, not on code: `.env` sets
+`LLM_TIMEOUT_S=120` where the committed profile measured `gpt-oss:20b` at
+**838s** at this concurrency. Two re-parses were observed dying on
+`ReadTimeout` and tripping the circuit breaker, exactly as the 2026-08-21 note
+predicts. **This box is currently masking it** with an untracked
+`docker-compose.override.yml` (900s) — that file is a crutch, not the fix, and
+deleting it re-breaks parsing. Set `.env` to 838+ properly.
 `core/scripts/backfill_job_fields.py --reparse-plan` prints the ids. Then:
 notifications (`mailhost.sfu.ca:25`, in-app table first) → candidate CSV (§S3,
 **blocked on a sample export** — ask for one) → blind review on the ranked
@@ -131,7 +140,7 @@ screening decision (it must record *why inference was rejected*) and an ADR-009
 amendment for the weight move. The document-download route needs no ADR: it is
 one obvious implementation, and the reasoning is in its commit.
 
-**Six things a future session must not rediscover the hard way:**
+**Seven things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -186,6 +195,30 @@ one obvious implementation, and the reasoning is in its commit.
    `tests/unit/test_templates_render_api_shaped_rows.py` does — that is what
    makes the guard survive the next field. Use the `| day` filter for dates;
    never `.strftime` in a template.
+7. **An LLM token budget measured at concurrency 1 tells you nothing.**
+   2026-09-09: the shortlist produced nothing for hours because
+   `match_evidence_max_tokens` was 2048 and gpt-oss:20b spent it all reasoning,
+   returning empty `content`. **Two separate probes called ONE evidence prompt
+   at a time and both PASSED at 2048** — a 5-chunk résumé in 205s, a 15-chunk
+   one in 303s. Only at the real fan-out (`match_llm_concurrency = 4`) did 2 of
+   4 fail, and *not* the biggest ones: the 15-chunk résumé passed while 12- and
+   9-chunk ones failed. A budget near the edge looks intermittent, not broken.
+   The committed profile already says this — *"a single uncontended call took
+   ~35s while four concurrent ones blew a 300s timeout"* — and it was read past
+   twice. **Reproduce at the real concurrency or do not claim a floor.**
+   Budget and `LLM_TIMEOUT_S` are coupled: those calls take 219–315s, so
+   raising one without the other converts empty responses into timeouts.
+
+   **The structural tail is OPEN and is why nothing caught it.**
+   `model_probe_live.py` measures three prompts — `resume_core_v1`,
+   `resume_skills_v2`, `jd_extract_v2` — and `shortlist_evidence` is not one of
+   them, so the prompt that broke had no measured floor at all. Worse, it
+   probes with `think: False` and schema-constrained `format`, a transport the
+   application does not use (`llm_ollama_native=False`), so
+   `docs/model-profiles/gpt-oss-20b.json` describes calls the product never
+   makes and `doctor.sh` reported the box healthy throughout. That is ADR-045's
+   recorded "transport gap", still unmeasured. **Any new prompt added to this
+   product currently ships with no measured budget.**
 
 ### 4. Current state
 
