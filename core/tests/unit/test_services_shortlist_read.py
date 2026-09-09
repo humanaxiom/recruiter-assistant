@@ -119,7 +119,14 @@ def _entry_row(
     score_breakdown: dict[str, Any] | None = None,
     evidence: dict[str, Any] | None = None,
     generated_at: dt.datetime | None = None,
+    display_label: str | None = None,
 ) -> _Row:
+    """``display_label`` simulates the non-blind ``_NAME_SUBQUERY`` column
+    (see the fix for the 2026-09-09 "None" shortlist-card defect) -- whatever
+    a real Postgres COALESCE(decrypted name, original_filename) resolves to
+    arrives on the row already, so the fake row carries it the same way.
+    Defaults to ``None`` (the pre-fix shape) so every EXISTING caller that
+    does not care about the label is unaffected."""
     return _Row(
         {
             "id": entry_id or uuid4(),
@@ -130,6 +137,7 @@ def _entry_row(
             "score_breakdown": json.dumps(score_breakdown or _breakdown_dict()),
             "evidence": json.dumps(evidence if evidence is not None else {}),
             "generated_at": generated_at or dt.datetime(2026, 7, 15, tzinfo=dt.UTC),
+            "display_label": display_label,
         }
     )
 
@@ -261,6 +269,14 @@ async def test_shortlist_evidence_empty_dict_deserializes_not_none() -> None:
 
 @pytest.mark.asyncio
 async def test_non_blind_job_returns_real_evidence_unblinded() -> None:
+    """RE-PINNED 2026-09-09 (commit 7ea9a47 flipped ``blind_review``'s
+    default to FALSE, so this is now the default shortlist experience): a
+    non-blind entry's ``display_label`` must carry the candidate's real
+    name, read off a correlated subquery mirroring ``_WORK_AUTH_SUBQUERY`` --
+    NOT ``None``. A bare ``None`` here is exactly the confirmed live defect
+    (``shortlist_cards.html`` prints ``{{ entry.display_label }}``
+    unguarded, which Jinja renders as the literal 4-character text
+    "None")."""
     from src.services.shortlist_service import list_for_job
 
     job_id = uuid4()
@@ -276,14 +292,17 @@ async def test_non_blind_job_returns_real_evidence_unblinded() -> None:
         ],
         "overall_summary": "Strong candidate.",
     }
-    row = _entry_row(job_id=job_id, rank=1, evidence=real_evidence)
+    row = _entry_row(
+        job_id=job_id, rank=1, evidence=real_evidence, display_label="Jane Smith"
+    )
     conn = _mock_conn(blind=False, rows=[row])
 
     entries = await list_for_job(conn, job_id=job_id)
 
     entry = entries[0]
     assert entry.blinded is False
-    assert entry.display_label is None
+    assert entry.display_label == "Jane Smith"
+    assert entry.display_label != "None"
     assert entry.evidence is not None
     assert "Jane Smith" in entry.evidence.requirements[0].evidence
     assert entry.evidence.overall_summary == "Strong candidate."
@@ -504,17 +523,25 @@ async def test_get_one_nonexistent_entry_raises_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_get_one_non_blind_returns_real_entry() -> None:
+    """RE-PINNED alongside the sibling ``list_for_job`` assertion -- same
+    defect, proven through ``get_one``'s own row-to-model path."""
     from src.services.shortlist_service import get_one
 
     entry_id = uuid4()
-    row = _entry_row(job_id=uuid4(), entry_id=entry_id, evidence={"requirements": []})
+    row = _entry_row(
+        job_id=uuid4(),
+        entry_id=entry_id,
+        evidence={"requirements": []},
+        display_label="Jane Smith",
+    )
     conn = _mock_conn(blind=False, row=row)
 
     entry = await get_one(conn, entry_id)
 
     assert entry.id == entry_id
     assert entry.blinded is False
-    assert entry.display_label is None
+    assert entry.display_label == "Jane Smith"
+    assert entry.display_label != "None"
 
 
 @pytest.mark.asyncio
@@ -906,3 +933,113 @@ async def test_non_numeric_folded_subscore_degrades_instead_of_500ing() -> None:
 
     assert entries[0].score_structured is None
     assert entries[0].score_evidence is None
+
+
+# ── RE-PINNED 2026-09-09: the "None" shortlist-card defect, closed ─────────
+#
+# Confirmed live on the user's own ranked job (blind_review now defaults to
+# FALSE -- commit 7ea9a47): every card printed the literal text "None"
+# because `_row_to_entry` never set `display_label` at all. The fix mirrors
+# `_WORK_AUTH_SUBQUERY` -- a correlated subquery (never a JOIN, per HANDOFF
+# lesson 4) that COALESCEs the decrypted name with the resume's
+# `original_filename` (NOT NULL in the DDL), aliased `display_label` on both
+# `_LIST_QUERY` and `_GET_QUERY`. Because the row already carries the
+# resolved column, `_row_to_entry`'s only job is to stop discarding it and to
+# set `blinded = False` -- the two re-pinned tests above cover that. The
+# tests below pin the SQL shape itself (string-level -- HANDOFF lesson 4 is
+# explicit that only a real Postgres, in `test_shortlist_read_export_pg.py`,
+# can prove the COALESCE/decrypt actually runs) and that the non-blind path
+# now opens its own transaction and calls `set_pii_key`, exactly like the
+# blind branch already does.
+
+
+@pytest.mark.asyncio
+async def test_non_blind_entry_never_stringifies_a_missing_label_to_the_word_none() -> (
+    None
+):
+    """A row whose subquery genuinely resolved nothing (should not happen at
+    the DB layer once ``original_filename NOT NULL`` backs the COALESCE --
+    proven at the integration level -- but this is the Python-level contract
+    in isolation) must degrade to a real ``None``, never the 4-character
+    string "None": the exact shape of the reported defect."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    row = _entry_row(job_id=job_id)  # display_label left at its None default
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    assert entries[0].display_label is None
+    assert entries[0].display_label != "None"
+
+
+def test_list_and_get_query_keep_the_fu6_anchor_and_never_join_resumes() -> None:
+    """HANDOFF lesson 4: ``_ENTRY_COLS`` selects bare ``id``/``job_id``, which
+    ``resumes`` also has -- a JOIN makes them ambiguous, and
+    ``WHERE job_id = $1`` is the exact substring ``list_for_job``'s FU-6
+    ``.replace`` anchors on. The name subquery this fix adds must not touch
+    either invariant."""
+    from src.services.shortlist_service import _GET_QUERY, _LIST_QUERY
+
+    assert "WHERE job_id = $1" in _LIST_QUERY
+    assert "WHERE id = $1" in _GET_QUERY
+    assert " JOIN resumes" not in _LIST_QUERY
+    assert " JOIN resumes" not in _GET_QUERY
+
+
+def test_list_and_get_query_derive_display_label_from_a_correlated_pii_subquery() -> (
+    None
+):
+    """Mirrors ``_WORK_AUTH_SUBQUERY``'s own shape: a decrypt call gated on
+    the same session-scoped PII key, projected under the exact DTO field
+    name so ``_row_to_entry`` needs no renaming step -- just like
+    ``work_authorization`` already works."""
+    from src.services.shortlist_service import _GET_QUERY, _LIST_QUERY
+
+    for query in (_LIST_QUERY, _GET_QUERY):
+        assert "pgp_sym_decrypt(" in query
+        assert "current_setting('app.pii_key')" in query
+        assert "AS display_label" in query
+
+
+@pytest.mark.asyncio
+async def test_non_blind_list_for_job_sets_pii_key_inside_a_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new name subquery decrypts ``resumes.candidate_name`` -- exactly
+    like the blind branch already does -- so the non-blind path must now
+    also open its own transaction and call ``set_pii_key`` before issuing
+    ``_LIST_QUERY``."""
+    import src.services.shortlist_service as svc
+
+    job_id = uuid4()
+    row = _entry_row(job_id=job_id, display_label="Jane Smith")
+    conn = _mock_conn(blind=False, rows=[row])
+    spy = AsyncMock()
+    monkeypatch.setattr(svc, "set_pii_key", spy)
+
+    await svc.list_for_job(conn, job_id=job_id)
+
+    spy.assert_awaited_once_with(conn)
+    conn.transaction.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_non_blind_get_one_sets_pii_key_inside_a_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same contract as the sibling ``list_for_job`` test above, proven
+    through ``get_one``'s own path."""
+    import src.services.shortlist_service as svc
+
+    entry_id = uuid4()
+    row = _entry_row(job_id=uuid4(), entry_id=entry_id, display_label="Jane Smith")
+    conn = _mock_conn(blind=False, row=row)
+    spy = AsyncMock()
+    monkeypatch.setattr(svc, "set_pii_key", spy)
+
+    await svc.get_one(conn, entry_id)
+
+    spy.assert_awaited_once_with(conn)
+    conn.transaction.assert_called()
