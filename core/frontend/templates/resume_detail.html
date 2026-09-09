@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 {% block title %}Résumé{% endblock %}
 {#
-  Résumé detail (ADR-011/012/013/016). BLIND IS THE DEFAULT: the non-reveal
-  render (`revealed` is false/absent) prints ONLY redacted, non-PII structured
-  fields from `resume.parsed` — no `candidate.*`. Identity fields render in
-  EXACTLY ONE place: the reveal-gated block below (guarded on the `revealed`
-  flag), reached only via the audited `POST /resumes/<id>/reveal` action
-  (FU-1). The default GET never sets `revealed`, so a URL edit or prefetch
-  can never surface identity.
+  Résumé detail (ADR-011/012/013/016, amended 2026-09-09). Blind review is
+  now OPT-IN PER JOB (default off since commit 7ea9a47), so identity now
+  renders in TWO places, never more: the audited block gated on the
+  `revealed` flag below (reached only via `POST /resumes/<id>/reveal`,
+  FU-1) and the trailing branch of the same conditional, which covers a
+  NON-BLIND job that was never revealed — the API already returns real
+  identity there (`resume_service.get_one`'s non-blind path), so the
+  template shows it directly, with no reveal form and no "recorded in the
+  audit log" notice (nothing was audited; it was never hidden). The middle
+  branch, gated on `resume.blinded`, stays exactly as PII-free as before
+  this change — a blind job's unrevealed render never prints `candidate.*`.
 #}
 {% set parsed = resume.parsed %}
 {% block content %}
@@ -71,6 +75,26 @@
         (audited)</button>
     </form>
     {% endif %}
+  </div>
+  {% else %}
+  {# Non-blind (opt-in, default off since 2026-09-09) job that was never
+     revealed: the API's non-blind read already returns real identity, so it
+     is shown directly here — no reveal form (there is nothing left to
+     reveal) and no "Identity revealed" audit notice (nothing was audited;
+     identity was never hidden on this job). Read off local variables (not
+     `resume.candidate.*` inline) purely so every `candidate.*` reference in
+     this branch sits together, ahead of the dl below. #}
+  {% set c_name = resume.candidate.name %}
+  {% set c_email = resume.candidate.email %}
+  {% set c_phone = resume.candidate.phone %}
+  {% set c_location = resume.candidate.location %}
+  <div class="identity-block">
+    <dl class="identity">
+      {% if c_name %}<dt>Name</dt><dd>{{ c_name }}</dd>{% endif %}
+      {% if c_email %}<dt>Email</dt><dd>{{ c_email }}</dd>{% endif %}
+      {% if c_phone %}<dt>Phone</dt><dd>{{ c_phone }}</dd>{% endif %}
+      {% if c_location %}<dt>Location</dt><dd>{{ c_location }}</dd>{% endif %}
+    </dl>
   </div>
   {% endif %}
 

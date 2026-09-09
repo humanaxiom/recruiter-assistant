@@ -18,10 +18,12 @@
   those four display fields (see the route). It is never the raw backend
   payload, so a field the backend should not have sent has no route here.
 
-  ``display_label`` is a BLIND-REVIEW field: ``_row_to_entry`` (the NON-blind
-  path) never sets it, so it is None on every entry of a job with
-  blind_review = FALSE. Every read of it below therefore carries a fallback --
-  interpolating it raw rendered the literal text "None" at the reader.
+  ``display_label`` carries the rank-based pseudonym on a BLIND job and the
+  real candidate name (or the résumé's filename, decided server-side) on a
+  NON-blind one (default since 2026-09-09) -- but a row written before this
+  fix, or a subquery that genuinely resolves nothing, still leaves it
+  ``None``. Every read of it below therefore keeps its fallback --
+  interpolating it raw once rendered the literal text "None" at the reader.
 
   PRIVACY: renders ONLY fields ``explanation``/``entry`` expose. Never
   re-fetches the résumé, never reaches around either object for a raw field.

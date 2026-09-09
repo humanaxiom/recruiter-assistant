@@ -100,7 +100,7 @@ byte-unchanged by this feature.
 
 1. **Jobs list** (`/`) — create-job form (title/department/location/min-years/JD text, with a JD-file
    upload that auto-extracts text into the description field via `POST /jobs/jd-extract`, unchanged from
-   Phase 6) plus a blind-review checkbox (default checked) and status-filter pills (draft/open/closed/
+   Phase 6) plus a blind-review checkbox (default unchecked since 2026-09-09) and status-filter pills (draft/open/closed/
    archived) over the job list.
 2. **Job detail** (`/jobs/<uuid>`) — a "parsing…" badge driven by a 3-second HTMX poll
    (`hx-trigger="every 3s"` on `/jobs/<uuid>/parse-status`) that stops issuing itself once `parsed_at` is

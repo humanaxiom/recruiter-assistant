@@ -47,7 +47,7 @@ fields of study, plus location and responsibilities.
 
 ### The settings you choose per job
 
-- **Blind review** — on by default. Hides candidate identity from the shortlist. It can be turned off for a
+- **Blind review** — off by default, switchable per job. Hides candidate identity from the shortlist. It can be turned off for a
   job, which permanently un-blinds every candidate on it for everyone thereafter; that action is recorded.
 - **Retention period** — between 30 and 730 days, 180 by default. See the caveat in "what is not finished":
   it is recorded but not yet enforced automatically.

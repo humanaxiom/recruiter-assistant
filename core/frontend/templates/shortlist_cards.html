@@ -6,8 +6,13 @@
   re-polls every 3s; once ranked entries exist it renders the cards WITHOUT the
   trigger, so polling stops.
 
-  Blind-boundary: every card surfaces `entry.display_label` ("Candidate A") —
-  NEVER a real candidate name/email/phone. No other candidate field is read.
+  Blind-boundary: every card surfaces `entry.display_label` for its heading.
+  On a BLIND job that is the rank-based pseudonym ("Candidate A") and the
+  audited "Reveal identity" form is the only path to the real name. On a
+  NON-blind job (default since 2026-09-09) `display_label` already carries
+  the real candidate name (or the résumé's original filename, decided
+  server-side) -- the reveal form has nothing left to do and does not
+  render.
 #}
 {% from "_work_auth_fieldset.html" import work_auth_radios %}
 {% set a = attempt|default(0) %}
@@ -185,10 +190,13 @@
         <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
            >{{ entry.display_label }}</a>
       </h3>
-      {% if is_writer %}
+      {% if is_writer and entry.blinded %}
       {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
          deliberate, logged act); it records who/what/when and opens the résumé
-         un-blinded. `context=shortlist` so the audit shows where it came from. #}
+         un-blinded. `context=shortlist` so the audit shows where it came from.
+         Only rendered on a BLIND card (`entry.blinded`) -- on a non-blind job
+         the heading already shows the real identity, so there is nothing left
+         for a reveal to do (2026-09-09). #}
       <form method="post"
             action="{{ url_for('resume_reveal', resume_id=entry.resume_id) }}"
             style="display:inline">
@@ -202,6 +210,8 @@
         <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
           (audited)</button>
       </form>
+      {% endif %}
+      {% if is_writer %}
       {# FU-8/ADR-026: a SECOND audited action on this same card — its own
          one-shot token, independent of the reveal form's token above (same
          résumé id, distinct action). `context=shortlist` mirrors the reveal
