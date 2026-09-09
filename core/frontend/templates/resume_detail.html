@@ -197,24 +197,14 @@
      and pre-selected when nothing has been declared. A UI that defaults to, or
      visually privileges, "not eligible" would nudge a recruiter toward an
      adverse finding on a protected-adjacent ground. #}
+  {% from "_work_auth_fieldset.html" import work_auth_radios %}
   <div class="work-auth-block">
     <form method="post"
           action="{{ url_for('resume_work_authorization', resume_id=resume.id) }}">
       <input type="hidden" name="csrf_token" value="{{ work_auth_csrf_token }}">
       <fieldset class="work-auth-fieldset">
         <legend class="label">Eligible to work in Canada</legend>
-        {% set current = resume.work_authorization or 'unknown' %}
-        {% for value, caption in [
-             ('unknown', 'Not recorded'),
-             ('eligible', 'Eligible'),
-             ('not_eligible', 'Not eligible'),
-           ] %}
-        <label class="work-auth-option">
-          <input type="radio" name="status" value="{{ value }}"
-                 {% if current == value %}checked{% endif %}>
-          {{ caption }}
-        </label>
-        {% endfor %}
+        {{ work_auth_radios(resume.work_authorization) }}
         <label class="label" for="work-auth-note">Note (optional)</label>
         <input class="input" type="text" id="work-auth-note" name="note"
                maxlength="500"

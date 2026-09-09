@@ -1,0 +1,28 @@
+{#
+  SPONSOR 2026-09-02 §O2 — the work-authorization enum, spelled ONCE.
+
+  Review finding 3: the three-value enum (unknown/eligible/not_eligible) and
+  its equal-weight radio markup were duplicated between resume_detail.html
+  and shortlist_cards.html — two copies of a legal-status enum is exactly how
+  they drift. This macro is the single place it is spelled; both templates
+  call it.
+
+  Deliberately equal-weight, "Not recorded" FIRST and pre-selected when
+  nothing has been declared. A UI that defaults to, or visually privileges,
+  "not eligible" would nudge a recruiter toward an adverse finding on a
+  protected-adjacent ground.
+#}
+{% macro work_auth_radios(current) %}
+{% set current = current or 'unknown' %}
+{% for value, caption in [
+     ('unknown', 'Not recorded'),
+     ('eligible', 'Eligible'),
+     ('not_eligible', 'Not eligible'),
+   ] %}
+<label class="work-auth-option">
+  <input type="radio" name="status" value="{{ value }}"
+         {% if current == value %}checked{% endif %}>
+  {{ caption }}
+</label>
+{% endfor %}
+{% endmacro %}

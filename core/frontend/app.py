@@ -1002,7 +1002,7 @@ def blind_review(job_id: UUID) -> Any:
 def _mint_card_tokens(
     entries: list[dict[str, Any]] | None, *, action: str = "reveal"
 ) -> dict[str, str]:
-    """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
+    """Ensure one per-résumé CSRF token per shortlist card is live (FU-4/D4).
 
     Returns a ``str(resume_id) -> token`` mapping the card template indexes by
     its own entry's résumé id, so every card on one render carries an
@@ -1013,13 +1013,22 @@ def _mint_card_tokens(
     behaviour); each card's withdraw control mints a SEPARATE set of tokens by
     calling this again with ``action="withdraw"``, so the two audited actions
     on one card never share a slot.
+
+    Security finding S2: uses :func:`csrf.ensure_token`, not
+    :func:`csrf.issue_token` — a shortlist render used to unconditionally
+    re-mint every card's slot, so simply VISITING the shortlist after opening
+    a résumé's own detail page silently invalidated that résumé's still-live
+    reveal/withdraw token, 403ing the résumé page's own form. Reusing a
+    still-live token when one already exists (minting only when the slot is
+    genuinely empty) fixes that while keeping every poll's cards in sync,
+    same as before.
     """
     tokens: dict[str, str] = {}
     for entry in entries or []:
         resume_id = entry.get("resume_id") if isinstance(entry, dict) else None
         if resume_id is None:
             continue
-        tokens[str(resume_id)] = csrf.issue_token(resume_id, action=action)
+        tokens[str(resume_id)] = csrf.ensure_token(resume_id, action=action)
     return tokens
 
 
@@ -1063,6 +1072,16 @@ def job_shortlist(job_id: UUID) -> Any:
         # independent of the reveal token above (same résumé id, different
         # action).
         withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
+        # SPONSOR 2026-09-02 §O2 follow-on: the per-card declaration control
+        # posts to `shortlist_work_authorization`, which is guarded by the
+        # ORDINARY `_csrf_gate` hook (the session-wide, reusable page token
+        # every other shortlist-page control already uses) — NOT a third
+        # one-shot slot here. Security + review measured a third per-card
+        # slot against MAX_TOKENS_PER_SESSION=64: at 22 cards the earliest
+        # reveal tokens are already evicted, at 32 every reveal token is
+        # dead. `csrf_page_token` is already in every template's context
+        # (see the `_render_...` context processor), so nothing extra is
+        # minted here.
     )
 
 
@@ -1139,10 +1158,11 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         shortlist_status=shortlist_status,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
-        # Each poll re-renders the cards, so re-minting here keeps every card's
-        # token in the swapped-in DOM in sync with its session slot. Re-minting
-        # for a résumé already present overwrites that résumé's slot in place,
-        # so repeated polls cannot grow the mapping or evict unrelated tokens.
+        # Each poll re-renders the cards; `_mint_card_tokens` (S2:
+        # `csrf.ensure_token`) reuses whatever is already live for a résumé
+        # already present rather than re-minting, so repeated polls neither
+        # grow the mapping nor evict unrelated tokens NOR invalidate a token
+        # the browser already has on screen from a previous poll.
         csrf_tokens=_mint_card_tokens(entries),
         withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
     )
@@ -1199,6 +1219,61 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
     return render_template("shortlist_entry.html", entry=entry, explanation=explanation)
 
 
+def _render_resume_detail(
+    resume_id: UUID, resume: dict[str, Any], *, revealed: bool
+) -> Any:
+    """Shared by BOTH ``resume_detail`` (GET) and ``resume_reveal`` (POST).
+
+    2026-09-09, reached a user: ``resume_reveal`` used to re-render
+    ``resume_detail.html`` by hand with only ``resume``/``current_year``/
+    ``revealed`` — none of the four one-shot CSRF tokens the template's forms
+    need. Jinja renders an undefined variable as ``""``, not an error, so
+    every audited form on the just-revealed page (withdraw/reinstate,
+    document, work-authorization) silently carried an empty token and was
+    403'd on the very next click. One helper that ensures all four are live
+    and is the ONLY thing either route calls means the two renders cannot
+    drift apart again.
+
+    Uses :func:`csrf.ensure_token`, not :func:`csrf.issue_token` — see that
+    function's docstring for why unconditional re-minting is wrong here. The
+    token is no longer rotated on every render of this page, only ever
+    minted once and then consumed one-shot, same as before this fix.
+
+    `current_year` drives the skill-recency colour buckets in the template
+    (current/aging/stale). Passed in so the comparison stays deterministic
+    and doesn't need any candidate.* field.
+    """
+    return render_template(
+        "resume_detail.html",
+        resume=resume,
+        current_year=dt.date.today().year,
+        revealed=revealed,
+        # FU-4/D4: the one-shot anti-forgery token the reveal form posts
+        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
+        # manufacture an audit row. Not minted at all once revealed=True: the
+        # reveal form never renders again on this page (see resume_detail.html
+        # — it's shown only for `resume.blinded and not revealed`), so there
+        # is nothing left to bind a fresh reveal token to.
+        csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
+        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
+        # the withdraw/reinstate controls the template renders — same résumé
+        # id, distinct action, so minting it never disturbs the reveal token
+        # above.
+        withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
+        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
+        # (which are mutually exclusive on the page, so they can share one),
+        # the work-authorization control renders ALONGSIDE whichever of those
+        # is shown — sharing a slot would mean using one control silently
+        # invalidated the other's token.
+        work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
+        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
+        # reveal, withdraw and work-authorization controls, so every one of them
+        # needs its own one-shot token: sharing a slot would mean using one
+        # silently invalidated the others.
+        document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+    )
+
+
 @app.get("/resumes/<uuid:resume_id>")
 def resume_detail(resume_id: UUID) -> Any:
     # CRITICAL redaction-boundary: any browser-supplied `?reveal=` query
@@ -1211,35 +1286,7 @@ def resume_detail(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    # `current_year` drives the skill-recency colour buckets in the template
-    # (current/aging/stale). Passed in so the comparison stays deterministic
-    # and doesn't need any candidate.* field.
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=False,
-        # FU-4/D4: mint the one-shot anti-forgery token the reveal form posts
-        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
-        # manufacture an audit row.
-        csrf_token=csrf.issue_token(resume_id),
-        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
-        # the withdraw/reinstate controls the template renders — same résumé
-        # id, distinct action, so minting it never disturbs the reveal token
-        # above.
-        withdraw_csrf_token=csrf.issue_token(resume_id, action="withdraw"),
-        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
-        # (which are mutually exclusive on the page, so they can share one),
-        # the work-authorization control renders ALONGSIDE whichever of those
-        # is shown — sharing a slot would mean using one control silently
-        # invalidated the other's token.
-        work_auth_csrf_token=csrf.issue_token(resume_id, action="work_auth"),
-        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
-        # reveal, withdraw and work-authorization controls, so every one of them
-        # needs its own one-shot token: sharing a slot would mean using one
-        # silently invalidated the others.
-        document_csrf_token=csrf.issue_token(resume_id, action="document"),
-    )
+    return _render_resume_detail(resume_id, resume, revealed=False)
 
 
 @app.post("/resumes/<uuid:resume_id>/reveal")
@@ -1273,12 +1320,7 @@ def resume_reveal(resume_id: UUID) -> Any:
         # ADR-033 §4), out of the tester's original scope but fixed in the
         # same pass. See the F4 comment on transition_status above.
         abort(exc.status_code)
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=True,
-    )
+    return _render_resume_detail(resume_id, resume, revealed=True)
 
 
 @app.post("/resumes/<uuid:resume_id>/withdraw")
@@ -1457,6 +1499,51 @@ def resume_work_authorization(resume_id: UUID) -> Any:
         else:
             return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/jobs/<uuid:job_id>/shortlist/<uuid:resume_id>/work-authorization")
+def shortlist_work_authorization(job_id: UUID, resume_id: UUID) -> Any:
+    """AUDITED. The shortlist card's OWN declaration control — "the current
+    location (on shortlist only) is not enough, because the declaration is a
+    critical eval parameter" (sponsor 2026-09-02 §O2 follow-on).
+
+    **Deliberately a SEPARATE route from ``resume_work_authorization``, and
+    deliberately guarded by the ORDINARY ``_csrf_gate`` hook (the session-
+    wide, reusable page token), not the one-shot per-résumé mechanism.**
+    Two constraints rule out reusing the résumé page's route/token as-is:
+
+    1. ``test_exempt_routes_still_reject_a_page_token`` pins that
+       ``resume_work_authorization`` must NOT accept the page token — it is
+       exempt from this hook precisely because its one-shot token is
+       strictly stronger, and accepting the weaker page token there would be
+       a downgrade.
+    2. A shortlist renders up to 50 cards (``match_coarse_k``). Minting a
+       THIRD one-shot slot per card (alongside reveal + withdraw) was
+       measured against the real cap (``MAX_TOKENS_PER_SESSION = 64``,
+       FIFO): 3 slots x 22 cards already evicts the earliest reveal tokens,
+       and by 32 cards every reveal token is dead. Raising the cap is
+       foreclosed by the cookie-ceiling test. The page token costs NOTHING
+       per card — every card renders the SAME reusable value — so this
+       route intentionally takes that weaker-but-adequate control instead,
+       on a NEW route rather than weakening the résumé page's existing one.
+
+    ``job_id``/``resume_id`` both live in the URL (unlike the résumé page's
+    route, which needs ``context``/``job_id`` hidden fields to know where to
+    redirect back to), so the card form carries no hidden fields beyond the
+    page token and the chosen status.
+    """
+    status = (request.form.get("status") or "").strip()
+    if not status:
+        abort(400)
+    try:
+        api_client.set_work_authorization(resume_id, status=status, note=None)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_shortlist", job_id=job_id))
 
 
 @app.post("/resumes/<uuid:resume_id>/reinstate")
