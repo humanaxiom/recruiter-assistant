@@ -151,6 +151,25 @@ Still open alongside it, and neither is superseded:
   title was replaced with the extracted one — titles are now right on 26 of
   26 real rows. The two stale `circuit breaker open` reasons are gone.
 
+- **"Work authorization is not working"** (reported 2026-09-09, the first
+  user click on the §O2 control). The frontend log had the whole story:
+  `POST /reveal` 200, then `POST /work-authorization` 403 eleven seconds
+  later. `resume_reveal` re-rendered the résumé page with three context
+  values and none of the four one-shot CSRF tokens, so every audited form on
+  a just-revealed page — declaration, withdraw/reinstate, download — carried
+  an empty token. Lesson 6 below, in the form that reached a user. One shared
+  render helper now, using `csrf.ensure_token` (reuse a live slot, mint an
+  empty one) — re-minting would have traded the 403 for a different 403 on
+  the next form. **And the second half of the report — "the declaration is a
+  critical eval parameter" — is why every shortlist card now carries the
+  control** plus a "N of M candidates have no declaration" line inside the
+  swapped fragment. The card posts to its own hook-guarded route on the
+  reusable page token, not a third one-shot slot: security and review both
+  measured a third slot evicting live reveal tokens from 22 cards up against
+  the 64-token session budget. That budget already breaks at 33 cards with
+  the two existing slots — recorded in ROADMAP §5 "Privacy / access", not
+  fixed; nobody has a shortlist that big yet.
+
 **Next, in order.**
 
 1. **Department on the two OPEN jobs** — *Associate Director, Finance* (the
@@ -179,7 +198,7 @@ screening decision (it must record *why inference was rejected*) and an ADR-009
 amendment for the weight move. The document-download route needs no ADR: it is
 one obvious implementation, and the reasoning is in its commit.
 
-**Seven things a future session must not rediscover the hard way:**
+**Eight things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -258,6 +277,14 @@ one obvious implementation, and the reasoning is in its commit.
    makes and `doctor.sh` reported the box healthy throughout. That is ADR-045's
    recorded "transport gap", still unmeasured. **Any new prompt added to this
    product currently ships with no measured budget.**
+8. **A per-card one-shot CSRF token has a budget, and a shortlist can exceed
+   it.** `MAX_TOKENS_PER_SESSION = 64`, FIFO-evicted, two slots per card
+   (reveal, withdraw), cap 50 cards. Adding a third slot per card passed
+   every unit test (they render 1–3 cards) and was measured dead from 22
+   cards. The cookie ceiling is pinned, so the cap cannot rise; the résumé
+   page's route must not accept the page token, also pinned. Anything new on
+   a card uses the page token or a new mechanism, and **any test of a
+   per-card control renders 32 and 50 cards** — the unit suite now does.
 
 ### 4. Current state
 
@@ -265,7 +292,7 @@ one obvious implementation, and the reasoning is in its commit.
 |---|---|
 | `main` | `b012e82` — sponsor PRs #101 + #102 merged |
 | Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3/§O4 |
-| Gates, this branch | 5,873 unit · 585 integration · 91.82% coverage, CI green — **re-run, do not cite** |
+| Gates, this branch | 5,892 unit · 585 integration · 91.74% coverage, local green 2026-09-09 — **re-run, do not cite** |
 | PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), OPEN + MERGEABLE, ~33 commits. Not merged: nobody has asked. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
@@ -297,11 +324,19 @@ auditor viewer; work-authorization screening; the manager's own requirements.
 - **The jobs list after the re-parses** (2026-09-09), rendered at `/` from
   real rows: Department populated on 22 of 27, `School of Medicine` visible
   on five rows in three spellings — ROADMAP §"Data quality" was right.
+- **The work-authorization fix, on the rebuilt frontend** (2026-09-09), with
+  write-free probes: the user's shortlist renders 10 card controls on the
+  page token and "10 of 10 candidates have no work-authorization
+  declaration"; the card route 403s without a token and reaches its 400
+  status check with one; the résumé page's own declaration still validates
+  after a shortlist visit (403 before). No declaration was written — all 35
+  résumés still read `unknown`, and that is now the user's to change.
 
-**Still not clicked by a human:** the work-authorization radio, the manager's
-requirements box, and the department/campus form all render and their round
-trips are tested, but nobody has driven them in a browser. CAS is off now, so
-that is finally cheap to do — `:29500`, no login.
+**Still not clicked successfully by a human:** the work-authorization radio
+was clicked once on 2026-09-09 and produced the 403 above; nobody has clicked
+it since the fix. The manager's requirements box and the department/campus
+form have never been driven in a browser. CAS is off, so that is cheap —
+`:29500`, no login.
 
 **The integration suite flakes.** `ERROR at setup` on `asyncpg.connect` in
 whichever file draws the short straw — seen once in this branch's history on
