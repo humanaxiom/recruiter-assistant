@@ -767,8 +767,16 @@ def test_shortlist_cards_shows_awaiting_llm_message_and_keeps_polling(
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     body = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert "Waiting for AI to rank candidates" in body
-    assert "hx-trigger" in body  # still polling — a retry is queued server-side
+    # Wording changed 2026-09-09: the banner used to read "Waiting for AI to
+    # rank candidates ... briefly unavailable ... no action needed", which was
+    # false in every clause for an invalid-output failure and cost a user
+    # hours. It now leads with what actually happened and shows the RECORDED
+    # reason. Pinned on the reason reaching the screen, not on a phrase --
+    # asserting the old copy is what made this a wording pin rather than a
+    # behaviour one.
+    assert "Ranking did not finish" in body
+    assert "empty response" in body, "the recorded reason must reach the screen"
+    assert "hx-trigger" in body  # still polling — a retry may be queued
 
 
 def test_shortlist_cards_no_awaiting_message_when_state_is_null(
@@ -789,7 +797,7 @@ def test_shortlist_cards_no_awaiting_message_when_state_is_null(
         ),
     )
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
-    assert "Waiting for AI to rank candidates" not in body
+    assert "Ranking did not finish" not in body
     assert "hx-trigger" in body  # ordinary "still generating" path, unchanged
 
 
@@ -879,11 +887,14 @@ def test_shortlist_cards_entries_present_and_awaiting_llm_banner_precedes_stale_
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
     normalized = _norm(body)
 
-    assert "waiting for ai to rank candidates" in normalized
-    assert "retry" in normalized  # "...queued to retry automatically..."
+    # Wording changed 2026-09-09 -- see the sibling test above. The ORDERING
+    # guarantee this test exists for is unchanged; only the phrase it anchors
+    # on moved.
+    assert "ranking did not finish" in normalized
+    assert "retry" in normalized
     assert "candidate a" in normalized
     # Ordering: the banner text must precede the card content, not follow it.
-    banner_idx = normalized.find("waiting for ai to rank candidates")
+    banner_idx = normalized.find("ranking did not finish")
     card_idx = normalized.find("candidate a")
     assert banner_idx != -1 and card_idx != -1
     assert (

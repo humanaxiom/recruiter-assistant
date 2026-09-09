@@ -133,7 +133,11 @@ def test_match_coarse_and_evidence_k_defaults() -> None:
 def test_match_llm_concurrency_and_max_tokens_defaults() -> None:
     s = Settings()
     assert s.match_llm_concurrency == 4
-    assert s.match_evidence_max_tokens == 2048
+    # 2048 -> 8192 on 2026-09-09: 2048 returned EMPTY content for 2 of 4
+    # concurrent evidence calls on gpt-oss:20b and withheld the whole
+    # shortlist (ADR-029 fails closed). Measured, not chosen — see
+    # tests/unit/test_evidence_budget_is_measured.py.
+    assert s.match_evidence_max_tokens == 8192
 
 
 @pytest.mark.parametrize(

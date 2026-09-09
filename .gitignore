@@ -17,3 +17,9 @@ htmlcov/
 # under PIPEDA/FIPPA. A `git add -A` swept them in on 2026-08-21 (349aadd) and
 # pushed 99MB to a public remote; see HANDOFF.md.
 fixtures/
+
+# Box-local compose overrides (CAS off on a dev box, a corrected timeout).
+# Never committed: an override that reaches another checkout changes that
+# machine's behaviour invisibly, and one of these turns authentication OFF.
+docker-compose.override.yml
+compose.override.yml

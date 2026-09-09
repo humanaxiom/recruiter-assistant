@@ -25,6 +25,28 @@
    new run grinds on for minutes, so `not entries` alone can no longer decide
    whether to keep polling. #}
 {% set ranking = _status is not none and _status.get('state') == 'ranking' %}
+{# The reason the run stopped, as the WORKER recorded it
+   (jobs.shortlist_state_reason -> ShortlistStateOut.reason -> here).
+
+   2026-09-09: this was already in the database, already on the DTO, and
+   already in this template's context — and the page threw it away to print
+   "the ranking model was briefly unavailable … no action needed" instead.
+   That was false in every clause: the model was up, the failure was an
+   invalid output (empty content from a starved token budget), and an invalid
+   output at temperature=0 reproduces forever. A user sat watching that
+   message for hours.
+
+   `RankingUnavailableError` covers BOTH "the model is down" and "the model
+   returned something unusable", deliberately — both must fail closed
+   (ADR-029). So the page cannot name which one happened, and must not try.
+   It shows what was recorded and stops promising the problem is temporary.
+
+   Nullable on the DTO, and null on any row written before the column
+   existed, so the whole clause disappears rather than rendering "because
+   None" — the jobs list took a page down over exactly this kind of absent
+   field a week ago. #}
+{% set _reason = (_status.get('reason') if _status is not none else none) %}
+{% set _why = (' — ' ~ _reason) if _reason else '' %}
 {# fix/regenerate-shortlist-no-feedback — awaiting_llm sibling of the
    `ranking` fix above: a Regenerate whose LLM call fails closed calls
    `set_shortlist_awaiting_llm` and returns WITHOUT ever reaching
@@ -74,29 +96,30 @@
      retry ceiling was already hit" apart from this payload alone. #}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Waiting for AI to rank candidates… the ranking model was briefly
-    unavailable. A retry may be queued automatically and will replace the
-    list below if it finishes — if nothing changes after a while, click
-    <strong>Regenerate</strong> to try again. The candidates below are from
-    the <strong>previous run</strong>.
+    Ranking did not finish{{ _why }}. A retry may be queued and would replace
+    the list below if it succeeds — but if the same reason keeps coming back,
+    waiting will not clear it: click <strong>Regenerate</strong>, and if that
+    reports the same thing, it needs looking at rather than more waiting. The
+    candidates below are from the <strong>previous run</strong>.
   </p>
   {% elif entries and awaiting_llm %}
   {# F3/F4 sibling of the branch above, once the poll ceiling has been
      reached: no spinner, no automatic-replacement promise, and an explicit
      manual fallback since a retry is no longer being awaited by this page. #}
   <p class="muted">
-    Waiting for AI to rank candidates did not finish in the time this page
-    was willing to keep checking. The candidates below are from the
-    <strong>previous run</strong> — click <strong>Regenerate</strong> to try
-    again.
+    Ranking did not finish{{ _why }}, and this page has stopped checking. The
+    candidates below are from the <strong>previous run</strong> — click
+    <strong>Regenerate</strong> to try again.
   </p>
   {% elif entries %}{# fall through to the cards below #}
   {% elif polling and awaiting_llm %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Waiting for AI to rank candidates… the ranking model was briefly
-    unavailable, so this run is queued to retry automatically. It will pick up
-    again on its own — no action needed.
+    Ranking did not finish{{ _why }}. A retry may be queued and would pick up
+    on its own — but this is <strong>not</strong> necessarily temporary: the
+    same input produces the same answer, so if that reason keeps coming back a
+    retry will keep hitting it. Click <strong>Regenerate</strong> to try again,
+    and if it reports the same thing it needs looking at rather than waiting.
     <br>
     <span class="elapsed">~{{ a * 3 }}s elapsed</span>
   </p>
