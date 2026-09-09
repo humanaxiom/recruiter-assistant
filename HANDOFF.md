@@ -120,20 +120,46 @@ Still open alongside it, and neither is superseded:
   eleven days importing two hris modules that do not exist here. `make gates`
   and CI now lint and type-check `core/scripts` (not coverage), which is what
   makes that impossible to repeat.
+- **The manager's requirements are editable on an existing job** (reported
+  2026-09-09 as "i see no manager skills preference input"). Four things were
+  broken at once: input only on the CREATE form while all 23 pilot jobs came
+  through BULK; a read-only job page; `additional_requirements` accepted by
+  `JobUpdate` but absent from `_UPDATABLE_JOB_COLUMNS`, so PATCH returned 200
+  having changed nothing; and no re-extraction, so an edited note kept the
+  previous text's extraction. `extract_manager_prompt` is now its own arq task
+  — deliberately not a `parse_job` re-run, which would re-derive the posting's
+  requirements under a live shortlist and is 'draft'-gated anyway.
+- **The shortlist could not finish** (reported 2026-09-09, "Generate shortlist
+  has not been producing anything"). `match_evidence_max_tokens` was 2048;
+  gpt-oss:20b spent it reasoning and returned empty content, and ADR-029's
+  fail-closed meant one starved candidate withheld the whole run. Now 8192 —
+  see lesson 7 below for why the measurement took three attempts. The page's
+  "briefly unavailable … no action needed" banner now shows the reason the
+  worker actually recorded, which was already in the database the whole time.
 
-**Next, in order:** **re-parse the 20 pilot jobs that still have no
-department** — this is the only unfinished half of the 2026-09-03 request, and
-it is BLOCKED ON A LOCAL CONFIG BUG, not on code: `.env` sets
-`LLM_TIMEOUT_S=120` where the committed profile measured `gpt-oss:20b` at
-**838s** at this concurrency. Two re-parses were observed dying on
-`ReadTimeout` and tripping the circuit breaker, exactly as the 2026-08-21 note
-predicts. **This box is currently masking it** with an untracked
-`docker-compose.override.yml` (900s) — that file is a crutch, not the fix, and
-deleting it re-breaks parsing. Set `.env` to 838+ properly.
-`core/scripts/backfill_job_fields.py --reparse-plan` prints the ids. Then:
-notifications (`mailhost.sfu.ca:25`, in-app table first) → candidate CSV (§S3,
-**blocked on a sample export** — ask for one) → blind review on the ranked
-list (§O5).
+**Next, in order.**
+
+1. **Re-parse the 20 pilot jobs that still have no department** — the only
+   unfinished half of the 2026-09-03 request. It was blocked on
+   `LLM_TIMEOUT_S=120`; the override now sets 900 on this box, so it is
+   **UNBLOCKED here and runnable today**. `core/scripts/backfill_job_fields.py
+   --reparse-plan` prints the ids; each costs one LLM call (~4 min at this
+   concurrency), so budget an hour and do not enqueue all 20 at once against a
+   shared peer. Expect department to fill and campus mostly not to — these JDs
+   rarely state one (see ROADMAP §5 on department not grouping).
+2. **Notifications** (§S7) — `mailhost.sfu.ca:25`, in-app table first.
+3. **Candidate CSV** (§S3) — **blocked on a sample export**; ask for one rather
+   than guessing the column shape.
+4. **Blind review on the ranked list** (§O5).
+
+**Two config duties that outrank all four**, both created by a live-ish box and
+neither fixable from an agent session:
+
+- **`.env` still sets `LLM_TIMEOUT_S=120`.** The override masks it; deleting
+  that file re-breaks parsing and ranking. Set `.env` to 838+ properly.
+- **Delete `docker-compose.override.yml` before real users arrive** (stated as
+  "next week" on 2026-09-09). CAS is off through it — every visitor is an
+  anonymous admin, audit-log viewer included.
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
@@ -226,7 +252,8 @@ one obvious implementation, and the reasoning is in its commit.
 |---|---|
 | `main` | `b012e82` — sponsor PRs #101 + #102 merged |
 | Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3/§O4 |
-| Gates, this branch | 5,762 unit · 567 integration · 91.99% coverage — **re-run, do not cite** |
+| Gates, this branch | 5,873 unit · 585 integration · 91.82% coverage, CI green — **re-run, do not cite** |
+| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), OPEN + MERGEABLE, ~33 commits. Not merged: nobody has asked. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
@@ -237,18 +264,27 @@ Working end to end: upload → parse → rank → shortlist; JD ingest; blind re
 PII encryption, audited reveal; CAS identity, session role enforcement, CSRF,
 auditor viewer; work-authorization screening; the manager's own requirements.
 
-**Verified against the RUNNING product** during this work: `smoke.sh` 10 passed
-(the browser→Flask→API seam); the work-authorization DDL confirmed live with all
-19 existing résumés back-filled to `unknown` and zero NULLs; the new route
-registered and 401ing an unauthenticated write. `doctor.sh` returns one finding —
-CAS is disabled on the **local dev stack**, which `smoke.sh` requires, so the two
-cannot both be satisfied here; it is a real finding for the pilot box, not for
-this branch.
+**Verified against the RUNNING product** during this work, not only in tests:
 
-**Still not clicked by a human:** the work-authorization radio and the manager's
-requirements box render and their round trips are unit-tested, but nobody has
-used them in a browser. Authenticating from here needs a role key out of `.env`,
-which this session did not read.
+- `smoke.sh` **10 passed in 13m18s** (2026-09-03) — the browser→Flask→API seam,
+  first green run in weeks. It needs CAS OFF and FAILS rather than skips, so it
+  had not run at all while CAS was on; that is how a 500 on the jobs list
+  reached a user.
+- The jobs list, rendered from real rows: titles corrected on 25 of 26,
+  `resume_count` populating, no 500.
+- A real `PATCH` through the deployed API persisting the manager's note
+  (scratch job created and removed).
+- **The shortlist, end to end on the user's own job (2026-09-09): 10 ranked
+  candidates, scores 19–50, `shortlist_state` NULL** — the run that had failed
+  every attempt for hours before the evidence-budget fix.
+- `doctor.sh`: one finding, `deploy.auth_disabled`, which is the CAS decision
+  in §2 surfacing correctly. The `deploy.timeout_below_profile` finding is gone
+  **because the override masks it**, not because `.env` was fixed.
+
+**Still not clicked by a human:** the work-authorization radio, the manager's
+requirements box, and the department/campus form all render and their round
+trips are tested, but nobody has driven them in a browser. CAS is off now, so
+that is finally cheap to do — `:29500`, no login.
 
 **The integration suite flakes.** `ERROR at setup` on `asyncpg.connect` in
 whichever file draws the short straw — seen once in this branch's history on
