@@ -137,16 +137,29 @@ Still open alongside it, and neither is superseded:
   "briefly unavailable … no action needed" banner now shows the reason the
   worker actually recorded, which was already in the database the whole time.
 
+- **The 18 draft pilot jobs re-parsed under `jd_extract_v2`** (2026-09-09) —
+  the other half of the 2026-09-03 request, unblocked by the 900s override.
+  Driven through the frontend's own re-parse form (page token + session
+  cookie, the way a browser does it — the bare API 401s without the key),
+  four at a time to match the worker's `max_jobs`, gb10 checked idle before
+  every batch. **18 of 18 parsed, 0 failures, 18 of 18 outbox events
+  delivered, 16 minutes end to end** — not the hour budgeted; the JD prompt
+  runs 30s–3min at this concurrency. Department filled on 15; the other three
+  JDs (AV Technician, Research Chairs Facilitator, Research Contracts Officer)
+  state none. Campus on 0 of 18, as predicted. The never-parsed CUPE JD that
+  had been failing on `title: missing` parsed first time, and its filename
+  title was replaced with the extracted one — titles are now right on 26 of
+  26 real rows. The two stale `circuit breaker open` reasons are gone.
+
 **Next, in order.**
 
-1. **Re-parse the 20 pilot jobs that still have no department** — the only
-   unfinished half of the 2026-09-03 request. It was blocked on
-   `LLM_TIMEOUT_S=120`; the override now sets 900 on this box, so it is
-   **UNBLOCKED here and runnable today**. `core/scripts/backfill_job_fields.py
-   --reparse-plan` prints the ids; each costs one LLM call (~4 min at this
-   concurrency), so budget an hour and do not enqueue all 20 at once against a
-   shared peer. Expect department to fill and campus mostly not to — these JDs
-   rarely state one (see ROADMAP §5 on department not grouping).
+1. **Department on the two OPEN jobs** — *Associate Director, Finance* (the
+   user's ranked job) and *Multimedia Specialist*. Re-parse is draft-gated by
+   design (it would re-derive requirements under a live shortlist), so the only
+   path is the department/campus form on the job page: type it, or ask. Note
+   the UI only renders its "Re-parse JD" button when `failure_reason` is set,
+   so a clean draft is re-parseable through the route alone — nobody has asked
+   for more than that.
 2. **Notifications** (§S7) — `mailhost.sfu.ca:25`, in-app table first.
 3. **Candidate CSV** (§S3) — **blocked on a sample export**; ask for one rather
    than guessing the column shape.
@@ -279,7 +292,11 @@ auditor viewer; work-authorization screening; the manager's own requirements.
   every attempt for hours before the evidence-budget fix.
 - `doctor.sh`: one finding, `deploy.auth_disabled`, which is the CAS decision
   in §2 surfacing correctly. The `deploy.timeout_below_profile` finding is gone
-  **because the override masks it**, not because `.env` was fixed.
+  **because the override masks it**, not because `.env` was fixed. Re-run
+  after the 18 re-parses: same single finding.
+- **The jobs list after the re-parses** (2026-09-09), rendered at `/` from
+  real rows: Department populated on 22 of 27, `School of Medicine` visible
+  on five rows in three spellings — ROADMAP §"Data quality" was right.
 
 **Still not clicked by a human:** the work-authorization radio, the manager's
 requirements box, and the department/campus form all render and their round
