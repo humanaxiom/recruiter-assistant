@@ -222,7 +222,7 @@ The three cards below stay **framed, not chosen**, as a menu for after the
 sponsor's set. Each honours the non-negotiables: **offline-only** (inference on
 `aria-gb10` over Tailscale — no cloud, ever), **evidence-backed** (never a number
 without a cited source), **privacy-first** (PIPEDA/FIPPA; PII never embedded;
-blind-by-default).
+blind review opt-in per job since 2026-09-09, audited reveal when it is on).
 
 > How to read a card: **Pitch → Why it's wow → Fits the thesis → Reuses → Next slice → Risks/decisions.**
 > The gate discipline (TDD, three merge-blocking gates, `./scripts/verify.sh all`) applies to all of them.

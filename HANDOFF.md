@@ -25,21 +25,14 @@ this repository gold-plating itself.
 ### 2. Do this first — the pilot box is not this box
 
 Everything in `docs/ROADMAP.md` §"Where things stand" describes the *product*.
-Nobody has written down the *deployment*: its address, whose `.env` it runs, when
-it was last updated from `main`, or whether it has ever had `doctor.sh` run
-against it. **Find that out and record it here**, replacing this paragraph.
-
-Two things to check the moment you have access:
-
-- **`FLASK_SECRET_KEY: dev-only-change-me` is committed** in
-  [docker-compose.yml:150](docker-compose.yml#L150) and
-  [compose.cas.yml:31](compose.cas.yml#L31). If the pilot box booted from either,
-  four real sessions are signed with a published key and any of them is forgeable.
-  Highest-severity open item in the repo — ROADMAP open item 1.
-- **`./scripts/doctor.sh` against the pilot box.** It exits non-zero on a failed
-  invariant *or on a datastore it could not reach* — "could not check" is never a
-  clean bill of health. It is the only tool that sees defects living in state
-  rather than in code, and this repo has shipped four of those.
+**Recorded 2026-09-09: this box IS the pilot box.** The 28 jobs, the 35
+résumés, the DTO's own ranked job and the director demo all live on the stack
+at `:29500`/`:29800` on this machine, booted from this checkout's `.env` plus
+the untracked override below. It was rebuilt from the branch head on
+2026-09-09 (three times that day, each after a gate), `doctor.sh` has run
+against it after every deploy, and the one finding it reports is the CAS-off
+decision. `FLASK_SECRET_KEY` is no longer committed anywhere; the quickstart
+generates it and boot refuses a published default.
 
 The local dev stack is still up on `:29500` UI · `:29800` API · `:29432` pg ·
 `:29474`/`:29687` neo4j. If CAS login is needed here, `.env` still carries the
@@ -61,7 +54,9 @@ The DTO/CIO sent a requirements set on 2026-09-02 and answered all four open
 decisions the same day. Plan of record:
 [docs/SPONSOR_REQUIREMENTS_PLAN.md](docs/SPONSOR_REQUIREMENTS_PLAN.md); read its
 §0 first, because **three of the four answers went against the recommended
-default.** Work in flight on `feat/sponsor-requirements`.
+default.** Delivered as PR #104 and merged 2026-09-09. **The DTO has a new set
+of major changes; they start on a NEW branch in a new session** — do not reopen
+`feat/sponsor-requirements`.
 
 Still open alongside it, and neither is superseded:
 
@@ -169,8 +164,33 @@ Still open alongside it, and neither is superseded:
   the 64-token session budget. That budget already breaks at 33 cards with
   the two existing slots — recorded in ROADMAP §5 "Privacy / access", not
   fixed; nobody has a shortlist that big yet.
+- **Blind review is OFF by default** (sponsor, 2026-09-09: *"reverse the blind
+  review to be off by default, keep the on switch button"*). DDL default,
+  `JobCreate`, the Taleo upsert, the unread setting, the create form; an
+  idempotent `ALTER ... SET DEFAULT FALSE` because `CREATE TABLE IF NOT EXISTS`
+  reaches no existing deployment; and `scripts/backfill_blind_review_default.py`,
+  which flips only jobs nobody toggled (the audit log's own
+  `blind_review_toggled` rows are the record of a human choice) and audits
+  each flip as a service actor. **Applied on this box: 26 flipped, all 28
+  jobs now off, second run proposes nothing.** ADR-004 §4, ADR-006, ADR-014
+  and ADR-016 are amended in place.
+- **A non-blind job shows the candidate's name** — on the card and on the
+  résumé page. The review of the default flip found that a non-blind card
+  rendered the literal `None` (the user's own job had shown ten of them since
+  17:03) and a non-blind résumé page rendered no identity at all: both paths
+  were only ever finished for blind-by-default. The name comes from a
+  correlated decrypting subquery (never a JOIN on `resumes`, lesson 4), falls
+  back to the filename, never to a pseudonym; the reveal button renders only
+  on a blind card.
+- **The ranking guard no longer waits for a degraded parse** (the director
+  demo, 21:42). One résumé's skills pass returned empty content and fell
+  back; ADR-030 never projects such a parse; the projection guard counted it
+  as eligible and deferred 20 × 45 s before ranking the other nine. The guard
+  now counts only what will be projected, and the shortlist page says how
+  many résumés are excluded as degraded. Lesson 9.
 
-**Next, in order.**
+**Next, in order.** (The DTO's new set outranks all of these and starts on a
+new branch; these are what remains of the first set.)
 
 1. **Department on the two OPEN jobs** — *Associate Director, Finance* (the
    user's ranked job) and *Multimedia Specialist*. Re-parse is draft-gated by
@@ -182,7 +202,13 @@ Still open alongside it, and neither is superseded:
 2. **Notifications** (§S7) — `mailhost.sfu.ca:25`, in-app table first.
 3. **Candidate CSV** (§S3) — **blocked on a sample export**; ask for one rather
    than guessing the column shape.
-4. **Blind review on the ranked list** (§O5).
+4. **Blind review on the ranked list** (§O5) — re-read it against the
+   2026-09-09 reversal before building: blind is now opt-in per job.
+5. **The skills prompt's budget is at its edge.** `resume_skills_v2` runs at
+   the measured 8192 floor and still returned empty content for one real
+   résumé at concurrency 4 (15k thinking chars measured). Lesson 7 applies:
+   reproduce at the real fan-out before raising it, and raise
+   `LLM_TIMEOUT_S` with it.
 
 **Two config duties that outrank all four**, both created by a live-ish box and
 neither fixable from an agent session:
@@ -198,7 +224,7 @@ screening decision (it must record *why inference was rejected*) and an ADR-009
 amendment for the weight move. The document-download route needs no ADR: it is
 one obvious implementation, and the reasoning is in its commit.
 
-**Eight things a future session must not rediscover the hard way:**
+**Ten things a future session must not rediscover the hard way:**
 
 1. **`pipeline_meta.weights` is a historical stamp and the read path validates
    it UNCAUGHT.** Adding a weight field with a non-zero default makes every
@@ -285,15 +311,31 @@ one obvious implementation, and the reasoning is in its commit.
    page's route must not accept the page token, also pinned. Anything new on
    a card uses the page token or a new mechanism, and **any test of a
    per-card control renders 32 and 50 cards** — the unit suite now does.
+9. **Two fail-closed decisions can deadlock into a bounded stall.** ADR-030
+   never projects a degraded parse; the projection guard (smoke, 2026-08-22)
+   waits for every parsed résumé to be projected. Each was right alone;
+   together, one degraded résumé cost a 15-minute silent wait in front of a
+   director, then ranked nine of ten anyway. **A guard that waits for a
+   count must count only what the producer will ever produce.** The general
+   question: for every "wait until X catches up", what does X deliberately
+   skip?
+10. **Reversing a default reaches no existing row, and exposes every path the
+    old default hid.** The blind-review flip needed an `ALTER ... SET
+    DEFAULT` for deployments that already had the table, a backfill that
+    respected the audit trail of who had toggled what, and then two read
+    paths that had never been finished for the other value: a card labelled
+    `None`, a résumé page with no identity. **When a default flips, walk
+    every branch the old value made unreachable** — the tests only ever
+    exercised the default.
 
 ### 4. Current state
 
 | | |
 |---|---|
-| `main` | `b012e82` — sponsor PRs #101 + #102 merged |
-| Branch in flight | `feat/sponsor-requirements` — §I3 Taleo, §I4 manager prompt, §O2/§O3/§O4 |
-| Gates, this branch | 5,892 unit · 585 integration · 91.74% coverage, local green 2026-09-09 — **re-run, do not cite** |
-| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), OPEN + MERGEABLE, ~33 commits. Not merged: nobody has asked. |
+| `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
+| Branch in flight | **none.** The DTO's new major changes start on a new branch, new session. |
+| Gates, last local run | see the merge commit message — **re-run, do not cite** |
+| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), MERGED at the user's request |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
@@ -331,6 +373,14 @@ auditor viewer; work-authorization screening; the manager's own requirements.
   status check with one; the résumé page's own declaration still validates
   after a shortlist visit (403 before). No declaration was written — all 35
   résumés still read `unknown`, and that is now the user's to change.
+
+- **The blind-review reversal and the non-blind name, deployed** (2026-09-09,
+  after the demo): column default reads `false`; the demo job's nine cards
+  show names, zero reveal forms, nine declaration controls; backfill applied
+  and idempotent; `doctor.sh` still one finding (CAS off).
+- **The demo job itself**: 9 ranked, scores 32–13, three minutes of ranking
+  once the guard stopped waiting. The tenth résumé is degraded and shown as
+  such on its own page.
 
 **Still not clicked successfully by a human:** the work-authorization radio
 was clicked once on 2026-09-09 and produced the 403 above; nobody has clicked
@@ -385,6 +435,9 @@ so an unprovisioned clone cannot report a green run that tested nothing.
 - **Competency scoring is no longer deferred by precondition.** It was blocked on
   *"corpus owner + HR, with pilot data"* — there is now pilot data. ROADMAP open
   item 3.
+- **Blind review is opt-in per job, by the sponsor's word on 2026-09-09.** The
+  switch and its audit stay; the audited reveal remains the only path to
+  identity on a blind job. Decision 4 of ADR-004 is amended, not reopened.
 
 ### 8. Host quirks
 
