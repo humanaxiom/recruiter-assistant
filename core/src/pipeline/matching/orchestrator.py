@@ -125,7 +125,11 @@ _FAMILY_MATCH_WEIGHT = 0.5
 # junk bucket, "domain" lumps disparate domains under one label.
 _NON_MATCHABLE_FAMILIES: tuple[str, ...] = ("other", "domain")
 _LLM_CONCURRENCY = 4
-_EVIDENCE_MAX_TOKENS = 2048
+# 2048 -> 8192 on 2026-09-09; the reasoning is on ``Settings
+# .match_evidence_max_tokens``, and "kept equal to the Settings defaults" above
+# is now enforced by ``test_evidence_budget_is_measured.py`` rather than
+# asserted in this comment.
+_EVIDENCE_MAX_TOKENS = 8192
 
 
 @dataclass(frozen=True)

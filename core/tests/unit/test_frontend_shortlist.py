@@ -49,6 +49,7 @@ ARITHMETIC, not a specific formatting choice.
 
 from __future__ import annotations
 
+import datetime as dt
 import inspect
 import json
 import re
@@ -62,7 +63,7 @@ import pytest
 
 from frontend import api_client
 from frontend import app as frontend_app_module
-from src.schemas.matching import ShortlistEntry
+from src.schemas.matching import ScoreBreakdown, ShortlistEntry
 from src.services import explanation as explanation_module
 
 _REAL_NAME = "Zzyzxqrst Wibblesworth"
@@ -185,6 +186,41 @@ def _full_entry(entry_id: Any) -> dict[str, Any]:
         "blinded": True,
         "display_label": "Candidate A",
     }
+
+
+def _dto_entry(
+    entry_id: Any,
+    *,
+    blinded: bool,
+    display_label: str | None,
+    job_id: Any | None = None,
+    resume_id: Any | None = None,
+) -> dict[str, Any]:
+    """A REAL ``ShortlistEntry`` DTO, ``model_dump(mode="json")``'d -- per
+    HANDOFF lesson 6, never a hand-written dict carrying a ``datetime`` --
+    used by the non-blind display-label tests below so a future field added
+    to the DTO can't silently go untyped here the way ``updated_at`` did on
+    the jobs list."""
+    entry = ShortlistEntry(
+        id=entry_id,
+        job_id=job_id or uuid4(),
+        resume_id=resume_id or uuid4(),
+        rank=1,
+        score_final=0.75,
+        score_breakdown=ScoreBreakdown(
+            skill=0.7,
+            experience=0.6,
+            education=0.5,
+            seniority=0.5,
+            vector=0.4,
+            structured=0.55,
+        ),
+        evidence=None,
+        generated_at=dt.datetime(2026, 7, 15, tzinfo=dt.UTC),
+        blinded=blinded,
+        display_label=display_label,
+    )
+    return entry.model_dump(mode="json")
 
 
 # ── api_client.generate_shortlist ────────────────────────────────────────
@@ -374,6 +410,60 @@ def test_shortlist_card_has_audited_reveal_button(
     assert 'method="post"' in body.lower()
     assert 'value="shortlist"' in body
     assert "Reveal identity" in body
+
+
+def test_card_renders_non_blind_display_label_never_the_word_none(
+    monkeypatch: Any, client: Any
+) -> None:
+    """RE-PINNED 2026-09-09 (commit 7ea9a47 flipped ``blind_review``'s
+    default to FALSE): confirmed live on the user's own ranked job -- every
+    card printed the literal text "None" because ``shortlist_cards.html``
+    interpolates ``{{ entry.display_label }}`` unguarded and the non-blind
+    read never set it. A well-formed non-blind entry must render its real
+    ``display_label`` as the card's link text, and the word "None" must
+    never appear anywhere on the page."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _dto_entry(
+        uuid4(),
+        blinded=False,
+        display_label="Jane Smith",
+        job_id=job_id,
+        resume_id=resume_id,
+    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+
+    link_re = re.compile(
+        r'<a href="[^"]*/resumes/' + re.escape(str(resume_id)) + r'"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    match = link_re.search(body)
+    assert match is not None, "expected the card's résumé link to render"
+    assert match.group(1).strip() == "Jane Smith"
+    assert "None" not in body
+
+
+def test_non_blind_card_omits_the_reveal_form(monkeypatch: Any, client: Any) -> None:
+    """A non-blind card already shows identity in its heading -- the audited
+    reveal control (which exists to un-blind a candidate) has nothing left
+    to do and must not render. Contrast
+    ``test_shortlist_card_has_audited_reveal_button`` above, which pins the
+    form is still present on a BLIND card."""
+    job_id = uuid4()
+    resume_id = uuid4()
+    entry = _dto_entry(
+        uuid4(),
+        blinded=False,
+        display_label="Jane Smith",
+        job_id=job_id,
+        resume_id=resume_id,
+    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+    body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
+
+    assert f"/resumes/{resume_id}/reveal" not in body
+    assert "Reveal identity" not in body
 
 
 def test_shortlist_cards_404s_when_job_missing(monkeypatch: Any, client: Any) -> None:
@@ -767,8 +857,16 @@ def test_shortlist_cards_shows_awaiting_llm_message_and_keeps_polling(
     resp = client.get(f"/jobs/{job_id}/shortlist-cards")
     body = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert "Waiting for AI to rank candidates" in body
-    assert "hx-trigger" in body  # still polling — a retry is queued server-side
+    # Wording changed 2026-09-09: the banner used to read "Waiting for AI to
+    # rank candidates ... briefly unavailable ... no action needed", which was
+    # false in every clause for an invalid-output failure and cost a user
+    # hours. It now leads with what actually happened and shows the RECORDED
+    # reason. Pinned on the reason reaching the screen, not on a phrase --
+    # asserting the old copy is what made this a wording pin rather than a
+    # behaviour one.
+    assert "Ranking did not finish" in body
+    assert "empty response" in body, "the recorded reason must reach the screen"
+    assert "hx-trigger" in body  # still polling — a retry may be queued
 
 
 def test_shortlist_cards_no_awaiting_message_when_state_is_null(
@@ -789,7 +887,7 @@ def test_shortlist_cards_no_awaiting_message_when_state_is_null(
         ),
     )
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
-    assert "Waiting for AI to rank candidates" not in body
+    assert "Ranking did not finish" not in body
     assert "hx-trigger" in body  # ordinary "still generating" path, unchanged
 
 
@@ -879,11 +977,14 @@ def test_shortlist_cards_entries_present_and_awaiting_llm_banner_precedes_stale_
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
     normalized = _norm(body)
 
-    assert "waiting for ai to rank candidates" in normalized
-    assert "retry" in normalized  # "...queued to retry automatically..."
+    # Wording changed 2026-09-09 -- see the sibling test above. The ORDERING
+    # guarantee this test exists for is unchanged; only the phrase it anchors
+    # on moved.
+    assert "ranking did not finish" in normalized
+    assert "retry" in normalized
     assert "candidate a" in normalized
     # Ordering: the banner text must precede the card content, not follow it.
-    banner_idx = normalized.find("waiting for ai to rank candidates")
+    banner_idx = normalized.find("ranking did not finish")
     card_idx = normalized.find("candidate a")
     assert banner_idx != -1 and card_idx != -1
     assert (

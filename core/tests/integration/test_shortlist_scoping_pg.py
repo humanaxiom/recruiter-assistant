@@ -464,6 +464,43 @@ async def test_list_shortlist_hiring_manager_sees_assigned_jobs_shortlist(
 
 
 @pytest.mark.asyncio
+async def test_list_shortlist_hiring_manager_assigned_job_sees_real_candidate_names(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-PINNED 2026-09-09 (commit 7ea9a47 flipped ``blind_review``'s
+    default to FALSE, which is why this whole file's jobs are already
+    non-blind by default): the assigned-job read above only proves the row
+    is VISIBLE -- this proves the visible row's ``display_label`` carries
+    the real candidate name, not the bare ``None`` that rendered as the
+    literal text "None" on the user's own ranked job."""
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    assigned_job = await _insert_job(pg_pool, title="Assigned")
+    resume_id = await _insert_resume(pg_pool, assigned_job, name="Assigned Candidate")
+    await _seed_shortlist_entry(pg_pool, job_id=assigned_job, resume_id=resume_id)
+
+    async with await _client(app) as client:
+        hm_id, sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="hiring_manager"
+        )
+        await _assign(pg_pool, job_id=assigned_job, user_id=hm_id, assigned_by=hm_id)
+
+        resp = await client.get(
+            f"/jobs/{assigned_job}/shortlist",
+            cookies={settings.session_cookie_name: sid},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["display_label"] == "Assigned Candidate"
+    assert body[0]["display_label"] != "None"
+    assert body[0]["blinded"] is False
+
+
+@pytest.mark.asyncio
 async def test_export_shortlist_hiring_manager_exports_assigned_job(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

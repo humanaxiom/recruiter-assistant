@@ -34,6 +34,7 @@ from flask import (
 from pydantic import ValidationError
 
 from frontend import api_client, csrf
+from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import get_settings, validate_startup_session_secret
@@ -193,6 +194,10 @@ _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
         # would buy nothing; accepting the page token INSTEAD would be a
         # downgrade, which test_exempt_routes_still_reject_a_page_token pins.
         "resume_work_authorization",
+        # SPONSOR §O4 -- same reason as the three above: its own per-résumé
+        # one-shot token (action="document"), strictly stronger than the
+        # session-wide page token this hook checks.
+        "resume_document",
     }
 )
 
@@ -243,6 +248,38 @@ def _csrf_gate() -> Any:
 _WRITER_ROLES = ("admin", "recruiter")
 
 
+@app.template_filter("day")
+def _day(value: Any) -> str:
+    """Render a timestamp as ``YYYY-MM-DD``, whatever shape it arrives in.
+
+    **This exists because of a production 500 on 2026-09-03.** The jobs list's
+    new Updated column called ``job.updated_at.strftime(...)`` and every job
+    page died with ``'str object' has no attribute 'strftime'``. The frontend
+    is a BFF: it reads JSON over HTTP, so a timestamp is always a **string**
+    here, never a ``datetime``. Tests that assert on template source text
+    cannot see that, and a hand-written fixture dict is exactly where somebody
+    types a ``datetime`` that the real API can never send.
+
+    So this takes both, plus ``None`` and the empty string, and — deliberately
+    — **never raises**. A filter that can throw turns one unparseable cell into
+    a blank page; an odd-looking date does not. The cell is informational and
+    the list is not.
+    """
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.strftime("%Y-%m-%d")
+    text = str(value)
+    try:
+        # ``Z`` is valid ISO-8601 and is what some producers emit;
+        # ``fromisoformat`` only learned it in 3.11+, so normalise anyway.
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d"
+        )
+    except ValueError:
+        return text
+
+
 @app.context_processor
 def inject_current_user() -> dict[str, Any]:
     """Injects the header auth widget's context into every template render.
@@ -270,6 +307,11 @@ def inject_current_user() -> dict[str, Any]:
     return {
         "current_user": current_user,
         "is_writer": is_writer,
+        # ADR-046 -- only an admin SESSION can trigger the Taleo sync, so only an
+        # admin sees the control. Same compensating-UX-control caveat as
+        # ``is_writer`` above: the backend gate is the real boundary, this just
+        # avoids showing a button that would 403.
+        "is_admin": current_user is None or current_user.get("role") == "admin",
         "logout_url": f"{base}/auth/cas/logout",
         "login_url": f"{base}/auth/cas/login?next=/",
         # Phase 1.3: minted here rather than per-route so EVERY render carries
@@ -277,6 +319,16 @@ def inject_current_user() -> dict[str, Any]:
         # and `issue_page_token` is idempotent, so this costs one session read
         # on all but the first render of a session.
         "csrf_page_token": csrf.issue_page_token(),
+        # SPONSOR 2026-09-03 — the three SFU campuses, for the Location
+        # datalist. Injected globally, not passed per route, for the same
+        # reason as the CSRF token above: `index.html` renders from three
+        # different routes and `job_detail.html` from two, and a template
+        # referencing a name one of them forgot to pass renders a silent
+        # Jinja Undefined — which is exactly how three columns on the jobs
+        # list stayed blank for months. Sourced from `src.campus`, so the
+        # form and the canonicaliser cannot disagree about what a campus is.
+        "campuses": list(CAMPUS_CODES),
+        "campus_codes": CAMPUS_CODES,
     }
 
 
@@ -618,6 +670,15 @@ def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") == "parsed" for r in resumes)
 
 
+def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
+    """Live demo, 2026-09-09: a degraded parse (FU-7 §4 / ADR-030) is never
+    projected and never ranked, but the shortlist page said nothing about it —
+    every résumé showed ``parsed`` while one silently never joined the graph.
+    Counts only résumés whose skills pass fell back to the keyword scan, not
+    the whole pool and not the ranked remainder."""
+    return sum(1 for r in resumes if r.get("degraded"))
+
+
 def _render_job_detail(
     job_id: UUID, *, error: str | None = None, status_code: int = 200
 ) -> Any:
@@ -810,6 +871,99 @@ def transition_status(job_id: UUID) -> Any:
     return redirect(url_for("job_detail", job_id=job_id))
 
 
+#: The columns ``POST /jobs/<id>/details`` is allowed to touch. Not a general
+#: passthrough of ``request.form`` into ``JobUpdate``: that would let a crafted
+#: post reach ``blind_review`` (the widest-blast-radius write in the product —
+#: it permanently un-blinds every résumé under the job) or ``description_raw``
+#: through a form that renders neither. ``update_job`` has its own
+#: ``_UPDATABLE_JOB_COLUMNS`` allowlist; this is the same discipline one hop out.
+_EDITABLE_DETAIL_FIELDS = ("department", "location")
+
+
+@app.post("/jobs/<uuid:job_id>/details")
+def edit_job_details(job_id: UUID) -> Any:
+    """SPONSOR 2026-09-03 — fill or override Department and Campus by hand.
+
+    The backend has accepted both columns on ``PATCH /jobs/{id}`` since Phase 6
+    and no screen ever called it, so the 23 requisitions bulk-uploaded as files
+    had no way to acquire either. The JD parse now fills them too, but it can
+    only report what a posting states, and these JDs mostly do not state a
+    campus — one of 26 mentions one, and it mentions two. **Typing it is the
+    primary path, not the fallback.**
+
+    Deliberately thin. The value goes to the backend as typed (trimmed only):
+    ``JobUpdate`` canonicalises "bby" to "Burnaby" in ONE place shared with the
+    bulk manifest and any raw API caller, and a second copy of that rule here
+    is precisely how the two drift. An emptied box sends ``None`` — "unset" —
+    rather than an empty string, which would sit in the column as a value.
+
+    A field the form did not submit is not sent at all, honouring
+    ``JobUpdate``'s omit-means-unchanged convention: this route must not be able
+    to blank a column it was never asked about. If nothing was submitted it
+    redirects without calling the backend — a no-op PATCH would still bump
+    ``updated_at``, which the jobs list now renders as "Updated".
+
+    Anti-forgery is the ``_csrf_gate`` hook's job (opt-OUT, so this route was
+    protected the moment it was added). The ``BadRequest`` branch is the same
+    ADR-033 lesson as ``transition_status``: a non-writer session gets a 403
+    from the backend, and leaving it uncaught turns that into a 500.
+    """
+    payload: dict[str, Any] = {}
+    for field in _EDITABLE_DETAIL_FIELDS:
+        if field not in request.form:
+            continue
+        payload[field] = (request.form.get(field) or "").strip() or None
+    if not payload:
+        return redirect(url_for("job_detail", job_id=job_id))
+    try:
+        api_client.patch_job(job_id, payload)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/requirements")
+def edit_job_requirements(job_id: UUID) -> Any:
+    """SPONSOR §I4 — enter or change the manager's additional requirements on a
+    job that already exists.
+
+    Reported from the pilot box as *"i see no manager skills preference
+    input"*, and the gap was total: the only input was on the CREATE form, and
+    all 23 pilot requisitions arrived through the BULK uploader, which has no
+    such field. Not one of them could ever have had a note.
+
+    **Its own route rather than sharing ``edit_job_details``**, even though
+    both are one-field PATCHes to the same resource. The consequences differ:
+    this one costs an LLM call (the backend enqueues ``extract_manager_prompt``
+    whenever the field is present) and invalidates the shortlist. Folding it
+    into the department/campus form would resend the note on every campus fix
+    and burn an extraction each time.
+
+    An emptied box sends ``None``, not ``''`` — the ranking combine reads null
+    as *nobody asked* and marks that sub-score unmeasured, where an empty
+    string would assert the manager listed nothing. Nothing else in the form is
+    forwarded, so a crafted extra field cannot ride along.
+    """
+    if "additional_requirements" not in request.form:
+        return redirect(url_for("job_detail", job_id=job_id))
+    note = (request.form.get("additional_requirements") or "").strip() or None
+    try:
+        api_client.patch_job(job_id, {"additional_requirements": note})
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        # Same ADR-033 lesson as ``transition_status``: a non-writer session
+        # gets a 403 from the backend, and leaving it uncaught is a 500.
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
 @app.post("/jobs/<uuid:job_id>/reparse")
 def reparse_job(job_id: UUID) -> Any:
     """Re-queue a JD parse that failed or was stranded.
@@ -857,7 +1011,7 @@ def blind_review(job_id: UUID) -> Any:
 def _mint_card_tokens(
     entries: list[dict[str, Any]] | None, *, action: str = "reveal"
 ) -> dict[str, str]:
-    """Mint one per-résumé CSRF token per shortlist card (FU-4/D4).
+    """Ensure one per-résumé CSRF token per shortlist card is live (FU-4/D4).
 
     Returns a ``str(resume_id) -> token`` mapping the card template indexes by
     its own entry's résumé id, so every card on one render carries an
@@ -868,13 +1022,22 @@ def _mint_card_tokens(
     behaviour); each card's withdraw control mints a SEPARATE set of tokens by
     calling this again with ``action="withdraw"``, so the two audited actions
     on one card never share a slot.
+
+    Security finding S2: uses :func:`csrf.ensure_token`, not
+    :func:`csrf.issue_token` — a shortlist render used to unconditionally
+    re-mint every card's slot, so simply VISITING the shortlist after opening
+    a résumé's own detail page silently invalidated that résumé's still-live
+    reveal/withdraw token, 403ing the résumé page's own form. Reusing a
+    still-live token when one already exists (minting only when the slot is
+    genuinely empty) fixes that while keeping every poll's cards in sync,
+    same as before.
     """
     tokens: dict[str, str] = {}
     for entry in entries or []:
         resume_id = entry.get("resume_id") if isinstance(entry, dict) else None
         if resume_id is None:
             continue
-        tokens[str(resume_id)] = csrf.issue_token(resume_id, action=action)
+        tokens[str(resume_id)] = csrf.ensure_token(resume_id, action=action)
     return tokens
 
 
@@ -908,6 +1071,7 @@ def job_shortlist(job_id: UUID) -> Any:
         entries=entries,
         shortlist_status=shortlist_status,
         any_resume_parsed=_any_resume_parsed(resumes),
+        degraded_count=_degraded_resume_count(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
         # The included `shortlist_cards.html` carries one reveal form per card,
@@ -918,6 +1082,16 @@ def job_shortlist(job_id: UUID) -> Any:
         # independent of the reveal token above (same résumé id, different
         # action).
         withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
+        # SPONSOR 2026-09-02 §O2 follow-on: the per-card declaration control
+        # posts to `shortlist_work_authorization`, which is guarded by the
+        # ORDINARY `_csrf_gate` hook (the session-wide, reusable page token
+        # every other shortlist-page control already uses) — NOT a third
+        # one-shot slot here. Security + review measured a third per-card
+        # slot against MAX_TOKENS_PER_SESSION=64: at 22 cards the earliest
+        # reveal tokens are already evicted, at 32 every reveal token is
+        # dead. `csrf_page_token` is already in every template's context
+        # (see the `_render_...` context processor), so nothing extra is
+        # minted here.
     )
 
 
@@ -994,10 +1168,11 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         shortlist_status=shortlist_status,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
-        # Each poll re-renders the cards, so re-minting here keeps every card's
-        # token in the swapped-in DOM in sync with its session slot. Re-minting
-        # for a résumé already present overwrites that résumé's slot in place,
-        # so repeated polls cannot grow the mapping or evict unrelated tokens.
+        # Each poll re-renders the cards; `_mint_card_tokens` (S2:
+        # `csrf.ensure_token`) reuses whatever is already live for a résumé
+        # already present rather than re-minting, so repeated polls neither
+        # grow the mapping nor evict unrelated tokens NOR invalidate a token
+        # the browser already has on screen from a previous poll.
         csrf_tokens=_mint_card_tokens(entries),
         withdraw_csrf_tokens=_mint_card_tokens(entries, action="withdraw"),
     )
@@ -1054,6 +1229,61 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
     return render_template("shortlist_entry.html", entry=entry, explanation=explanation)
 
 
+def _render_resume_detail(
+    resume_id: UUID, resume: dict[str, Any], *, revealed: bool
+) -> Any:
+    """Shared by BOTH ``resume_detail`` (GET) and ``resume_reveal`` (POST).
+
+    2026-09-09, reached a user: ``resume_reveal`` used to re-render
+    ``resume_detail.html`` by hand with only ``resume``/``current_year``/
+    ``revealed`` — none of the four one-shot CSRF tokens the template's forms
+    need. Jinja renders an undefined variable as ``""``, not an error, so
+    every audited form on the just-revealed page (withdraw/reinstate,
+    document, work-authorization) silently carried an empty token and was
+    403'd on the very next click. One helper that ensures all four are live
+    and is the ONLY thing either route calls means the two renders cannot
+    drift apart again.
+
+    Uses :func:`csrf.ensure_token`, not :func:`csrf.issue_token` — see that
+    function's docstring for why unconditional re-minting is wrong here. The
+    token is no longer rotated on every render of this page, only ever
+    minted once and then consumed one-shot, same as before this fix.
+
+    `current_year` drives the skill-recency colour buckets in the template
+    (current/aging/stale). Passed in so the comparison stays deterministic
+    and doesn't need any candidate.* field.
+    """
+    return render_template(
+        "resume_detail.html",
+        resume=resume,
+        current_year=dt.date.today().year,
+        revealed=revealed,
+        # FU-4/D4: the one-shot anti-forgery token the reveal form posts
+        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
+        # manufacture an audit row. Not minted at all once revealed=True: the
+        # reveal form never renders again on this page (see resume_detail.html
+        # — it's shown only for `resume.blinded and not revealed`), so there
+        # is nothing left to bind a fresh reveal token to.
+        csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
+        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
+        # the withdraw/reinstate controls the template renders — same résumé
+        # id, distinct action, so minting it never disturbs the reveal token
+        # above.
+        withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
+        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
+        # (which are mutually exclusive on the page, so they can share one),
+        # the work-authorization control renders ALONGSIDE whichever of those
+        # is shown — sharing a slot would mean using one control silently
+        # invalidated the other's token.
+        work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
+        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
+        # reveal, withdraw and work-authorization controls, so every one of them
+        # needs its own one-shot token: sharing a slot would mean using one
+        # silently invalidated the others.
+        document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+    )
+
+
 @app.get("/resumes/<uuid:resume_id>")
 def resume_detail(resume_id: UUID) -> Any:
     # CRITICAL redaction-boundary: any browser-supplied `?reveal=` query
@@ -1066,30 +1296,7 @@ def resume_detail(resume_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
-    # `current_year` drives the skill-recency colour buckets in the template
-    # (current/aging/stale). Passed in so the comparison stays deterministic
-    # and doesn't need any candidate.* field.
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=False,
-        # FU-4/D4: mint the one-shot anti-forgery token the reveal form posts
-        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
-        # manufacture an audit row.
-        csrf_token=csrf.issue_token(resume_id),
-        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
-        # the withdraw/reinstate controls the template renders — same résumé
-        # id, distinct action, so minting it never disturbs the reveal token
-        # above.
-        withdraw_csrf_token=csrf.issue_token(resume_id, action="withdraw"),
-        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
-        # (which are mutually exclusive on the page, so they can share one),
-        # the work-authorization control renders ALONGSIDE whichever of those
-        # is shown — sharing a slot would mean using one control silently
-        # invalidated the other's token.
-        work_auth_csrf_token=csrf.issue_token(resume_id, action="work_auth"),
-    )
+    return _render_resume_detail(resume_id, resume, revealed=False)
 
 
 @app.post("/resumes/<uuid:resume_id>/reveal")
@@ -1123,12 +1330,7 @@ def resume_reveal(resume_id: UUID) -> Any:
         # ADR-033 §4), out of the tester's original scope but fixed in the
         # same pass. See the F4 comment on transition_status above.
         abort(exc.status_code)
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=True,
-    )
+    return _render_resume_detail(resume_id, resume, revealed=True)
 
 
 @app.post("/resumes/<uuid:resume_id>/withdraw")
@@ -1176,6 +1378,87 @@ def resume_withdraw(resume_id: UUID) -> Any:
         else:
             return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/admin/jobs/sync")
+def admin_taleo_sync() -> Any:
+    """Trigger the Taleo job import by hand (ADR-046).
+
+    Guarded by the page CSRF token via the global ``_csrf_gate`` hook — this
+    route is deliberately NOT in the exemption set, because unlike reveal and
+    download it acts on no particular résumé, so there is no per-subject
+    one-shot token to mint. The session-wide page token is the right control
+    for a session-wide action.
+
+    The backend decides everything that matters: admin-session-only, and
+    whether ``TALEO_ENABLED`` permits a run at all. This hop adds no second
+    copy of either rule — it only reports what happened, since a button that
+    silently does nothing when the flag is off is indistinguishable from a
+    broken one.
+    """
+    try:
+        api_client.trigger_taleo_sync()
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    flash(
+        "Taleo sync queued. If the source is disabled (TALEO_ENABLED=false, "
+        "the default) the run will record 'skipped' and make no outbound "
+        "request — see ADR-046."
+    )
+    return redirect(url_for("index"))
+
+
+@app.post("/resumes/<uuid:resume_id>/document")
+def resume_document(resume_id: UUID) -> Any:
+    """AUDITED. Streams the candidate's source résumé or cover letter back to
+    the browser as a download (sponsor 2026-09-02 §O4).
+
+    Same guard shape as ``resume_reveal`` and for the same reason: fetching
+    the file discloses identity outright, so it is a reveal by another route.
+    Same-origin check first, then a one-shot CSRF token in its own
+    ``action="document"`` slot — both before anything reaches the backend, so
+    a rejected forgery can never produce the audit row OR the disclosure.
+
+    **POST, so it cannot be an ``href``.** That is the whole point: a link is
+    prefetchable, and a speculative fetch by a browser, link scanner or mail
+    client would write an audit row naming somebody who never clicked and pull
+    candidate PII into a cache. The template renders a submit button instead.
+
+    Headers are passed through from the backend rather than re-derived here.
+    The backend already chose the filename (from the résumé id, never the
+    candidate-supplied one) and the media type; a second opinion at this hop
+    could disagree with the audit row that justified the download.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        resume_id, request.form.get(csrf.FORM_FIELD), action="document"
+    ):
+        abort(403)
+    kind = (request.form.get("kind") or "resume").strip()
+    if kind not in ("resume", "cover_letter"):
+        abort(400)
+    try:
+        body, media_type, disposition = api_client.download_document(
+            resume_id, kind=kind
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return Response(
+        body,
+        mimetype=media_type,
+        headers={
+            "Content-Disposition": disposition
+            or f'attachment; filename="{kind}-{resume_id}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/resumes/<uuid:resume_id>/work-authorization")
@@ -1226,6 +1509,51 @@ def resume_work_authorization(resume_id: UUID) -> Any:
         else:
             return redirect(url_for("job_shortlist", job_id=job_id))
     return redirect(url_for("resume_detail", resume_id=resume_id))
+
+
+@app.post("/jobs/<uuid:job_id>/shortlist/<uuid:resume_id>/work-authorization")
+def shortlist_work_authorization(job_id: UUID, resume_id: UUID) -> Any:
+    """AUDITED. The shortlist card's OWN declaration control — "the current
+    location (on shortlist only) is not enough, because the declaration is a
+    critical eval parameter" (sponsor 2026-09-02 §O2 follow-on).
+
+    **Deliberately a SEPARATE route from ``resume_work_authorization``, and
+    deliberately guarded by the ORDINARY ``_csrf_gate`` hook (the session-
+    wide, reusable page token), not the one-shot per-résumé mechanism.**
+    Two constraints rule out reusing the résumé page's route/token as-is:
+
+    1. ``test_exempt_routes_still_reject_a_page_token`` pins that
+       ``resume_work_authorization`` must NOT accept the page token — it is
+       exempt from this hook precisely because its one-shot token is
+       strictly stronger, and accepting the weaker page token there would be
+       a downgrade.
+    2. A shortlist renders up to 50 cards (``match_coarse_k``). Minting a
+       THIRD one-shot slot per card (alongside reveal + withdraw) was
+       measured against the real cap (``MAX_TOKENS_PER_SESSION = 64``,
+       FIFO): 3 slots x 22 cards already evicts the earliest reveal tokens,
+       and by 32 cards every reveal token is dead. Raising the cap is
+       foreclosed by the cookie-ceiling test. The page token costs NOTHING
+       per card — every card renders the SAME reusable value — so this
+       route intentionally takes that weaker-but-adequate control instead,
+       on a NEW route rather than weakening the résumé page's existing one.
+
+    ``job_id``/``resume_id`` both live in the URL (unlike the résumé page's
+    route, which needs ``context``/``job_id`` hidden fields to know where to
+    redirect back to), so the card form carries no hidden fields beyond the
+    page token and the chosen status.
+    """
+    status = (request.form.get("status") or "").strip()
+    if not status:
+        abort(400)
+    try:
+        api_client.set_work_authorization(resume_id, status=status, note=None)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_shortlist", job_id=job_id))
 
 
 @app.post("/resumes/<uuid:resume_id>/reinstate")

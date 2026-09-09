@@ -91,6 +91,11 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # decision about a real person, so it carries the same session-role gate
     # as withdraw -- never a bare field edit.
     ("POST", "/resumes/{resume_id}/work-authorization"),
+    # SPONSOR §O4 -- serves a raw candidate document, so it is gated as a
+    # REVEAL rather than a read and belongs in this registry: the authority to
+    # fetch the file is the authority to un-blind, whatever the job's blind
+    # setting says.
+    ("POST", "/resumes/{resume_id}/document"),
     ("POST", "/resumes/{resume_id}/match-jobs"),
     ("POST", "/jobs/{job_id}/shortlist"),
     ("POST", "/jobs/{job_id}/assignees"),
@@ -103,12 +108,20 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/audit/log/{audit_id}/reveal"),
 )
 
-# The one write route explicitly exempted — see the module docstring for why.
+# The write routes explicitly exempted — see the module docstring for why.
 _EXEMPT_WRITE_ROUTES: dict[tuple[str, str], str] = {
     ("PATCH", "/users/{user_id}/role"): (
         "already correct via src.api.routes.users._require_admin_session — "
         "gates the CAS session role directly, strictly narrower than any "
         "require_session_role(...) set this slice would add."
+    ),
+    ("POST", "/admin/jobs/sync"): (
+        "ADR-046 — same _require_admin_session gate as PATCH /users/{id}/role, "
+        "and exempt for the identical reason: it checks the CAS session role "
+        "directly and is strictly narrower than any require_session_role(...) "
+        "set. Worth noting this is the one route in the product that can cause "
+        "an OUTBOUND request, so the gate being the narrower of the two is the "
+        "property that matters — an API key must not be able to trigger it."
     ),
 }
 

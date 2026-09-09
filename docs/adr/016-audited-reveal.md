@@ -3,6 +3,13 @@
 **Status:** Accepted
 **Date:** 2026-07-18
 
+**Amended 2026-09-09:** blind review is now opt-in **per job** (`jobs.blind_review` defaults to
+`FALSE`), reversing this ADR's "blind stays ON at every step by default" framing. On a non-blind
+job, identity is shown directly in the shortlist list, the shortlist card, and the résumé page —
+no reveal, no audit row — because it was never hidden there. The audited reveal below remains the
+**only** path to identity on a job that has blind review turned on; nothing about the reveal
+mechanism itself changed.
+
 ## Context
 
 Through the v1 plan and the first post-v1 features, the frontend was **blind-only by

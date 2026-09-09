@@ -122,15 +122,34 @@ async def test_job_service_record_parsed_sql_never_mentions_title_autofilled() -
 
 
 @pytest.mark.asyncio
-async def test_job_service_record_parsed_sql_never_touches_the_title_column() -> None:
-    """record_parsed only writes description_parsed/parsed_at/failure_reason
-    — it must never SET the `title` column at all (no refine_title branch;
-    that's a cut hris bulk-ingest feature)."""
+async def test_job_service_record_parsed_only_touches_a_provisional_title() -> None:
+    """REVERSED 2026-09-03, deliberately. This test used to assert that
+    ``record_parsed`` never mentions ``title`` at all.
+
+    That assertion was correct when it was written — bulk ingest was cut in
+    Phase 0, so nothing could ever create a job whose title needed improving.
+    Bulk ingest was then built (FU-3) and 23 real SFU requisitions were
+    uploaded as files, every one of them displaying its own filename
+    ("20260612 00138559 APSA JDFN 20260612") while its extraction held the
+    real title. A rule justified by an absent feature has to be revisited when
+    the feature arrives.
+
+    What replaces it is the narrower guarantee that actually matters: the title
+    is only ever written under the row's OWN ``title_provisional`` flag, so a
+    title a human chose cannot be replaced by a re-parse. The blanket ban would
+    have kept the pilot box's titles wrong forever; this keeps the thing the ban
+    was protecting.
+    """
     conn = _mock_conn("UPDATE 1")
     extracted = JDExtracted(title="Senior Engineer")
     await job_service.record_parsed(conn, uuid4(), extracted, _NOW)
     query = conn.execute.await_args.args[0]
-    assert not re.search(r"\btitle\b", query, re.IGNORECASE), query
+    assert re.search(
+        r"title\s*=\s*CASE\s+WHEN\s+jobs\.title_provisional", query, re.IGNORECASE
+    ), query
+    # Never an unconditional assignment — that is the version this reversal
+    # must not become.
+    assert not re.search(r"^\s*title\s*=\s*\$\d", query, re.MULTILINE), query
 
 
 @pytest.mark.asyncio

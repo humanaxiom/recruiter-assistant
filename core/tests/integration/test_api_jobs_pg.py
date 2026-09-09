@@ -11,8 +11,10 @@ collection or the first request. RED half of the TDD cycle.
 What a REAL Postgres proves that the mocked-conn route tests
 (``test_route_jobs.py``) cannot: ``create_job``'s INSERT actually satisfies
 the DDL's ``job_status`` enum / ``blind_review BOOLEAN NOT NULL DEFAULT
-TRUE`` / ``retention_days`` CHECK, and ``transition_status``'s UPDATE
-resolves against a row that REALLY started life in 'draft'.
+FALSE`` (REVERSED 2026-09-09 — was ``DEFAULT TRUE`` under decision 4; the
+per-job toggle is unchanged, only the create-time default flips) /
+``retention_days`` CHECK, and ``transition_status``'s UPDATE resolves against
+a row that REALLY started life in 'draft'.
 """
 
 from __future__ import annotations
@@ -104,9 +106,15 @@ async def test_create_and_get_job_round_trips_through_real_postgres(
 
 
 @pytest.mark.asyncio
-async def test_create_job_blind_review_defaults_true_against_real_ddl(
+async def test_create_job_blind_review_defaults_false_against_real_ddl(
     pg_pool: asyncpg.Pool,
 ) -> None:
+    """REVERSED 2026-09-09 (sponsor decision): blind review is opt-in per
+    job now, not default-on. A POST that omits ``blind_review`` entirely must
+    round-trip through the real ``JobCreate`` default AND the real DDL
+    default and come back ``False`` — this is the end-to-end proof neither
+    ``test_schemas_jobs.py`` (schema only) nor ``test_ddl.py``/``test_schema.py``
+    (DDL only) can give on their own."""
     arq = MagicMock(enqueue_job=AsyncMock())
     app = _build_app(pg_pool, arq=arq)
     async with await _client(app) as client:
@@ -115,6 +123,26 @@ async def test_create_job_blind_review_defaults_true_against_real_ddl(
             json={
                 "title": "Staff Engineer",
                 "description_raw": "We need a staff engineer. " * 3,
+            },
+        )
+    assert resp.json()["blind_review"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_job_blind_review_can_still_be_opted_in(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The reversal changes the DEFAULT only — a caller must still be able to
+    opt in explicitly at create time (mirrors the per-job toggle button)."""
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, arq=arq)
+    async with await _client(app) as client:
+        resp = await client.post(
+            "/jobs",
+            json={
+                "title": "Staff Engineer",
+                "description_raw": "We need a staff engineer. " * 3,
+                "blind_review": True,
             },
         )
     assert resp.json()["blind_review"] is True

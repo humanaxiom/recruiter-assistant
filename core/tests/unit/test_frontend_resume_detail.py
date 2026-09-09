@@ -361,6 +361,34 @@ def test_resume_detail_blind_banner_absent_when_not_blinded(
     assert "Identity hidden for blind review" not in body
 
 
+def test_resume_detail_non_blind_shows_identity_without_reveal_or_audit_notice(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Confirmed live on the running product, 2026-09-09: since commit
+    7ea9a47 flipped ``blind_review``'s default to FALSE, the API's non-blind
+    ``resume_service.get_one`` already returns the real
+    ``candidate.name``/``email``/``phone`` (see ``_resume(with_pii=True)``
+    above, which mirrors that shape) -- but the template only ever printed
+    ``candidate.*`` inside ``{% if revealed %}`` or showed nothing at all.
+    A non-blind, non-revealed résumé must show identity DIRECTLY (matching
+    the non-blind résumé LIST, which already shows ``candidate_name``)
+    without implying an audited reveal ever happened, and without offering a
+    reveal button that has nothing left to do."""
+    resume_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_resume",
+        MagicMock(return_value=_resume(resume_id, blinded=False, with_pii=True)),
+    )
+    body = client.get(f"/resumes/{resume_id}").get_data(as_text=True)
+    assert _REAL_NAME in body
+    assert _REAL_EMAIL in body
+    assert _REAL_PHONE in body
+    assert "Identity revealed" not in body
+    assert "audit log" not in body.lower()
+    assert "Reveal identity" not in body
+
+
 # ── skill recency colour-coding ──────────────────────────────────────────
 
 
@@ -563,10 +591,23 @@ def test_resume_reveal_uses_audited_endpoint_not_raw_reveal(
     get_spy.assert_not_called()
 
 
-def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
-    """Structural guard (updated for FU-1): the template MAY reference
-    ``candidate.*`` — but every such reference must sit inside the single
-    ``{% if revealed %}`` block, so no non-reveal render can reach it."""
+def test_resume_detail_candidate_refs_confined_to_reveal_and_non_blind_branches() -> (
+    None
+):
+    """Structural guard, RE-PINNED 2026-09-09 (commit 7ea9a47 flipped
+    ``blind_review``'s default to FALSE). The ORIGINAL ADR-016 invariant --
+    "the template renders ``candidate.*`` only inside the single
+    ``{% if revealed %}`` block" -- was written when the frontend was
+    blind-by-construction and blind was the only real posture; it is now
+    REPLACED, not weakened: ``candidate.*`` may sit in TWO places -- the
+    audited ``{% if revealed %}`` block (unchanged) AND a NEW ``{% else %}``
+    branch for a job with ``blind_review = FALSE`` that was never revealed
+    (the API's non-blind ``resume_service.get_one`` already returns real
+    identity there; only the template lacked anywhere to print it -- the
+    confirmed live defect this pins the fix for). The span that must STILL
+    never reference identity is the ``{% elif resume.blinded %}`` banner
+    branch itself -- a blind job's unrevealed render stays exactly as
+    PII-free as before this change."""
     template = (Path(app.root_path) / "templates" / "resume_detail.html").read_text(
         encoding="utf-8"
     )
@@ -574,9 +615,21 @@ def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
     elif_marker = template.find("{% elif resume.blinded %}")
     assert gate != -1, "expected an `{% if revealed %}` gate in resume_detail.html"
     assert elif_marker > gate, "expected the reveal block to end at `{% elif %}`"
-    # Every candidate.* reference must fall strictly inside the reveal-only span
-    # (between the `revealed` gate and the `elif blinded` branch), so no
-    # non-reveal render can reach it. Robust to the nested per-field ifs.
+    else_marker = template.find("{% else %}", elif_marker)
+    assert else_marker != -1, (
+        "expected a non-blind `{% else %}` branch after the blind banner, "
+        "so a non-blind résumé has somewhere to print its identity"
+    )
+    identity_endif = template.find("{% endif %}", else_marker)
+    assert identity_endif != -1
+    # Sanity anchor: the identity block's own else/endif must close before
+    # the unrelated withdrawal block begins, so a stray `{% else %}` further
+    # down the template can never be mistaken for this one.
+    withdraw_anchor = template.find("resume.withdrawn_at")
+    assert (
+        withdraw_anchor > identity_endif
+    ), "the else/endif found above do not belong to the identity block"
+
     banned = (
         "candidate.name",
         "candidate.email",
@@ -590,7 +643,15 @@ def test_resume_detail_candidate_refs_only_inside_reveal_branch() -> None:
     for token in banned:
         idx = template.find(token)
         while idx != -1:
-            assert gate < idx < elif_marker, f"{token} outside the reveal block"
+            in_reveal_block = gate < idx < elif_marker
+            in_non_blind_block = else_marker < idx < identity_endif
+            assert in_reveal_block or in_non_blind_block, (
+                f"{token} at {idx} is outside both the reveal block and the "
+                "non-blind else branch"
+            )
+            assert not (
+                elif_marker <= idx <= else_marker
+            ), f"{token} leaked into the blind-banner-only branch"
             idx = template.find(token, idx + 1)
 
 

@@ -73,8 +73,8 @@ def _load_cases(fixtures: Path) -> list[tuple[str, Any, Any]]:
             ResumeSkillDetails,
         ),
         (
-            "jd_extract_v1",
-            load_prompt("jd_extract_v1", jd_text=jd_text),
+            "jd_extract_v2",
+            load_prompt("jd_extract_v2", jd_text=jd_text),
             JDExtracted,
         ),
     ]

@@ -276,3 +276,56 @@ async def test_manual_jobs_do_not_collide_on_the_partial_unique_index(
             )
         count = await conn.fetchval("SELECT count(*) FROM jobs WHERE source='manual'")
     assert count == 3
+
+
+# --------------------------------------------------- 2026-09-03: campus + COALESCE
+
+
+async def test_a_synced_location_is_canonicalised_to_a_campus(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """A listing cell reads "Burnaby, BC"; the create form posts "bby". Both
+    have to land on "Burnaby" or the column cannot be grouped or counted, and
+    Taleo is the ONE campus source that actually fills it reliably — these JDs
+    mostly do not state a campus, so this is where the column earns its keep."""
+    async with pg_pool.acquire() as conn:
+        result = await upsert_external_job(conn, _payload(location="Burnaby, BC"))
+    assert (await _one(pg_pool, result.job_id))["location"] == "Burnaby"
+
+
+async def test_a_resync_with_no_location_does_not_wipe_a_recruiters(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The same reasoning as ``blind_review`` one section up, applied to the
+    fields the sponsor asked to be overridable. The ATS still WINS when it
+    supplies a value — it owns the requisition — but a posting whose accordion
+    omits the location must not blank a campus somebody filled in by hand, or
+    the UI's override field is a promise the nightly sync quietly breaks."""
+    async with pg_pool.acquire() as conn:
+        first = await upsert_external_job(conn, _payload(location=None))
+        await conn.execute(
+            "UPDATE jobs SET location = 'Surrey', department = 'Library' WHERE id = $1",
+            first.job_id,
+        )
+        await upsert_external_job(conn, _payload(location=None, department=None))
+
+    row = await _one(pg_pool, first.job_id)
+    assert row["location"] == "Surrey"
+    assert row["department"] == "Library"
+
+
+async def test_a_resync_that_does_supply_a_location_still_wins(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The other half, stated so the COALESCE is not mistaken for
+    "local edits always win". For a job the ATS owns, a value the ATS asserts
+    is the value of record — moving a requisition between campuses upstream has
+    to reach the product."""
+    async with pg_pool.acquire() as conn:
+        first = await upsert_external_job(conn, _payload(location="Burnaby"))
+        await conn.execute(
+            "UPDATE jobs SET location = 'Vancouver' WHERE id = $1", first.job_id
+        )
+        await upsert_external_job(conn, _payload(location="Surrey"))
+
+    assert (await _one(pg_pool, first.job_id))["location"] == "Surrey"

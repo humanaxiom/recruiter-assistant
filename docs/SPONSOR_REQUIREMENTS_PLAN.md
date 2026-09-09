@@ -1,6 +1,9 @@
 # Sponsor requirements (DTO/CIO, 2026-09-02) — gap analysis and build plan
 
-**Status:** in progress on `feat/sponsor-requirements`. **Source:** requirements
+**Status:** delivered on `feat/sponsor-requirements` (PR #104, merged
+2026-09-09). The DTO has a new set of major changes; those start on a new
+branch in a new session, with this document as the record of what the first
+set became. **Source:** requirements
 sent by the sponsor (DTO/CIO) on 2026-09-02, with all four open decisions
 answered by them the same day (§0). This is **user-sourced work from the person
 who owns the pilot**, so under `CLAUDE.md` §Economy 0 it outranks every
@@ -30,18 +33,34 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 
 | Slice | State |
 |---|---|
-| **S2** manager prompt (§I4) | **Done end to end** — field + DDL, the 10% weight move, `manager_prompt_v1` extraction, deterministic scoring, the create-form box, and provenance on the shortlist. **No edit path yet** (see the slice note). |
+| **S2** manager prompt (§I4) | **Done end to end, and the edit path landed 2026-09-09** — field + DDL, the 10% weight move, `manager_prompt_v1` extraction, deterministic scoring, the create-form box, provenance on the shortlist, and now a form on the JOB page. The "no edit path yet" note above was not a gap in polish: reported as "i see no manager skills preference input", it meant not one of the 23 bulk-uploaded pilot jobs could ever have had a note. See the 2026-09-09 findings below. |
 | **S4/S5** work authorization + cover-letter decoupling | **Done end to end** — column, audited write, API route, read-time band, résumé-page control, shortlist card, CSV export. |
 | **S0** `FLASK_SECRET_KEY` | **Done** — generated, sourced from the environment, and refused at boot on a published default. **S6 is unblocked.** The pilot box still needs the quickstart run against it to rotate; see [ROADMAP open item 1](ROADMAP.md). |
-| **Taleo import (§I3)** | **Slice 1 of 2 done** — [ADR-046](adr/046-taleo-job-source-egress-carveout.md) (the egress carve-out, superseding ADR-012 §2's deferral) plus the pure parsers, five vendored fixtures and 16 tests. **No network code yet.** Slice 2 is the client, DDL, upsert, cron and admin route, all behind `TALEO_ENABLED=false`. |
-| **S1** splitter · **S3** CSV · **S6** links · **S7** notify · **S8** posting URL | Not started. S6 is now unblocked by S0. |
+| **Taleo import (§I3)** | **Code complete, DISABLED** — [ADR-046](adr/046-taleo-job-source-egress-carveout.md), parsers + fixtures, `TaleoClient` with its own host allowlist, the `jobs` source columns, the idempotent upsert and archive sweep, the daily cron and the admin trigger route. **`TALEO_ENABLED=false`**, and turning it on has three obligations the code cannot discharge — an enumerated firewall rule, counsel + privacy-officer sign-off, and a named owner. See ADR-046 §Consequences. |
+| **S6** document links (§O4) | **Done** — the résumé and cover letter served from their blobs, audited, filename derived from the résumé id rather than the uploaded `original_filename`. |
+| **S1** splitter (§S1) | **Done** — `core/scripts/split_taleo_pdf.py`, run via `scripts/split-taleo.{sh,ps1}`. Landed inside the lint/type gates (see §2.0), which is the part that was actually missing. |
+| **The jobs list** | **Done, unasked-for scope that was a real defect** — three of the seven columns rendered a `job.<field>` `JobListItem` never had, so Location, Source and Résumés were permanently blank. Source is now the LINK the sponsor asked for; Last updated joins it. |
+| **Department & campus** (sponsor, 2026-09-03) | **Done** — `jd_extract_v2` extracts both; `record_parsed` writes them onto the row (fill-when-empty, so an override survives a re-parse); `src/campus.py` canonicalises Burnaby/BBY · Vancouver/YVR · Surrey/SRY; a form on the job page fills or overrides either. `scripts/backfill_job_fields.py` reached the 25 existing rows. **The 18 draft jobs were re-parsed on 2026-09-09** (16 minutes, 0 failures): department on 22 of 27 jobs, three JDs state none, the two OPEN jobs need the form. Campus on none, as predicted. |
+| **The shortlist run** (2026-09-09) | **Fixed** — the evidence token budget was below the model's floor at the real concurrency, so every run failed closed and the page claimed it was temporary. Verified on the sponsor's own job: 10 ranked candidates. |
+| **Work authorization, as clicked** (2026-09-09) | **Fixed** — the first human click on the §O2 control returned 403, because the reveal re-render minted none of the page's one-shot tokens. Reported with *"the declaration is a critical eval parameter"*, so every shortlist card now carries the control and the list says how many candidates have no declaration. |
+| **Blind review off by default** (sponsor, 2026-09-09) | **Done** — *"reverse the blind review to be off by default, keep the on switch button."* DDL default, create schema, Taleo default, the create form; an idempotent `ALTER` for existing deployments and `scripts/backfill_blind_review_default.py` for rows created under the old default (a job someone toggled by hand keeps their choice). And the defect it exposed: a non-blind shortlist card was labelled `None` and a non-blind résumé page showed no name — now the candidate's name, as the résumé list already did. |
+| **The demo stall** (2026-09-09) | **Fixed** — a résumé whose skills pass fell back is deliberately never projected (ADR-030), but the ranking guard counted it as eligible and deferred 20 × 45 s for a projection that could not come. The guard now counts only what will be projected, and the shortlist says how many résumés are excluded as degraded. |
+| **S3** CSV · **S7** notify · **S8** posting URL | Not started. **S3 is blocked on a sample export** — ask the sponsor for one. |
 
-Two findings from building it, both recorded because they change what a future
-session should expect rather than because they were interesting:
+Findings from building it, recorded because they change what a future session
+should expect rather than because they were interesting. **The last two came
+from the sponsor using the product, not from inspecting it** — which is the
+whole argument for `CLAUDE.md` §Economy 0:
 
 - **The 10% move nearly broke every existing shortlist page.** `pipeline_meta.weights` is a historical stamp read back verbatim off each ranked row, and the read path validates *uncaught*. Every stamp on the pilot box carries `motivation: 0.1` and no `manager_prompt` key; the new field's 0.10 default made those sum to 1.10 → a 500 on every shortlist page for every job ranked before the change. Handled by a `mode="before"` validator that reads "names `motivation`, does not name `manager_prompt`" as a pre-feature stamp whose manager-prompt weight was genuinely zero. A payload naming both gets no forgiveness.
 - **The eval corpus asserted the opposite of §O3.** An ordering control required that the cover-letter twin out-rank its twin. It went red, correctly. It was **inverted, not deleted** — the pair now asserts the two scores are *exactly* equal, which is strictly stronger than the control it replaced (whose rank-only half a prior finding had already shown was satisfiable by tie-break luck).
 - **The new weight was declared, validated, and applied by nothing.** `manager_prompt = 0.10` passed its sums-to-1.0 validator and was surfaced on the breakdown, but neither combine site multiplied it in — so the blend actually applied summed to 0.9 and every `score_final` came out uniformly 10% low. **No gate could see it:** the deflation is uniform, so it reorders nobody, and `ranking-evals` is an ordering gate. Fixed, with a guard that drives every sub-score to 1.0 and asserts `score_final == 1.0` — shaped to catch the *next* unapplied weight without anyone remembering to update it.
+
+- **2026-09-09 — the manager prompt had no input on any job that existed.** Reported as *"i see no manager skills preference input"*. Four independent breaks, each fatal alone: the only input was on the CREATE form while all 23 pilot jobs arrived via BULK; the job page was read-only; `additional_requirements` was accepted by `JobUpdate` but absent from `_UPDATABLE_JOB_COLUMNS`, so PATCH returned **200 having changed nothing**; and nothing re-extracted, so an edited note would have kept the previous text's extraction. **This slice had been reported "done end to end" twice** — in this table and in the PR. The lesson is not "test more"; it is that "the pieces exist" and "a person can complete the task" are different claims, and only the second one was ever the deliverable.
+- **2026-09-09 — the shortlist could not finish, and the page said "no action needed".** `match_evidence_max_tokens` was 2048; gpt-oss:20b spent it reasoning and returned empty content; ADR-029 fails closed, so one starved candidate withheld the whole run. **The measurement took three attempts and the first two were wrong in public**: probing ONE prompt at a time passed at 2048 (205s, then 303s), and only the real fan-out (`match_llm_concurrency = 4`) reproduced it — where the failures were *not* size-ordered, the largest résumé passing while smaller ones failed. Budget is now 8192 (measured floor 4096, margin because the failure is all-or-nothing). Separately, the true reason was already in `jobs.shortlist_state_reason`, already on the DTO, already in the template's context — and the banner discarded it to print a guess about transience it could not know. **`model-check.sh` never measures `shortlist_evidence` and probes a transport the app does not use, so no new prompt in this product ships with a measured budget.** That gap is open.
+- **2026-09-09 — the declaration control failed on its first human click.** The frontend log had it in two lines: `POST /reveal` 200, then `POST /work-authorization` 403. The reveal handler re-rendered the résumé page with three context values and none of its four one-shot CSRF tokens, so every audited form on a just-revealed page carried an empty token. The fix is one shared render helper; the lesson is HANDOFF lesson 6 again. The card control that followed was first built as a third one-shot slot per card and **measured dead from 22 cards** against the 64-token session budget — so it posts on the reusable page token instead, and the pre-existing two-slot ceiling (reveal tokens dead from 33 cards) is recorded, not fixed.
+- **2026-09-09 — reversing a default reaches no existing row, and exposes every path the old default hid.** Blind review off by default needed an `ALTER ... SET DEFAULT` for deployments that already had the table, a backfill that respects the audit trail of who toggled what, and then the non-blind read paths turned out to have never been finished: the card label was `None` and the résumé page rendered identity in exactly one, reveal-gated place. Both were correct under blind-by-default and wrong the moment it flipped.
+- **2026-09-09 — two fail-closed decisions, each right alone, wedged the demo together.** ADR-030 never projects a degraded parse; the projection guard (found by smoke on 2026-08-22) waits for every parsed résumé to be projected. One degraded résumé meant a 15-minute silent wait before ranking nine of ten. The guard now counts only what will be projected.
 
 ### ⚠️ One decision taken by default that the sponsor may want to overturn
 
@@ -83,7 +102,7 @@ Legend: ✅ shipped · ⚠️ partial or conflicting · ❌ absent.
 | **O2** | Auto-reject those not eligible to work in Canada — rank them last | ❌ | **Nothing anywhere.** No work-authorization field in the DDL, the parse schema, the graph, or the ranking engine. `_ELIGIBLE_SQL` in [matching_tasks.py:73](../core/src/worker/matching_tasks.py#L73) is about *ranking* eligibility (is the row projected yet), not work eligibility. Ranking is a pure score sort ([orchestrator.py:1151](../core/src/pipeline/matching/orchestrator.py#L1151)). |
 | **O3** | Identify whether a cover letter was included — **must not affect ranking** | ⚠️ **conflict** | Presence is stored (`resumes.cover_letter_blob_key`, [ddl.py:265](../core/src/models/ddl.py#L265)) and surfaced on the résumé list as `has_cover_letter` ([resume_service.py:443](../core/src/services/resume_service.py#L443)) — but **not on the shortlist card or in the CSV export** ([_CSV_FIELDS, shortlist_service.py:1195](../core/src/services/shortlist_service.py#L1195)). Worse: it **does** affect the ranking. `motivation` is **10% of `score_final`** and is computed from cover-letter evidence ([_motivation_score, stages.py:664](../core/src/pipeline/matching/stages.py#L664)). The product currently does the opposite of what was asked. |
 | **O4** | The list should link to the PDF résumé and cover letter | ❌ | **There is no blob download route in the entire API.** Blobs are written to `BlobStore` and never served — grep for `StreamingResponse\|FileResponse\|send_file` over routes returns nothing. This is also a new PII-egress surface that interacts with blind review (§2.4). |
-| **B1** | Blind review (optional) | ✅ **exceeds** | Blind-by-default per job (`JobCreate.blind_review = True`), rank-based pseudonyms, PII encrypted at rest, and an *audited* reveal (ADR-016/ADR-036). Nothing to build. Worth demoing back — this is stronger than "optional". |
+| **B1** | Blind review (optional) | ✅ **exceeds** | Opt-in per job (`JobCreate.blind_review = False`, reversed 2026-09-09), rank-based pseudonyms, PII encrypted at rest, and an *audited* reveal (ADR-016/ADR-036). Nothing to build. Worth demoing back — this is stronger than "optional". |
 | **N1** | Next version: highlight / long-list candidates | ❌ | No flag/promote concept. `withdraw` removes a candidate; there is no positive counterpart. |
 | **N2** | Next version: notes (sponsor unsure — FIPPA) | ❌ | Nothing, and the sponsor's own hesitation is correct. Not planned. See §4. |
 
@@ -99,7 +118,25 @@ Each carries a **recommended default** so none of these becomes a bare "blocked"
 line (`CLAUDE.md` §Economy 3). Work proceeds on the default unless the sponsor
 says otherwise; the "if not" column is what changes.
 
-### 2.0 The splitter as pushed does not run here — fix it first (no decision needed)
+### 2.0 The splitter as pushed did not run here — DONE, and the fix was not the imports
+
+**Resolved 2026-09-03.** The script now lives at
+`core/scripts/split_taleo_pdf.py` with `scripts/split-taleo.{sh,ps1}` as the
+entry points. What follows is the original diagnosis, kept because the
+conclusion it reached was too small.
+
+The three-line import fix was correct and was not the problem. **The problem
+was that a Python file at the repo root is outside every gate this project
+has** — `make gates` lints `core/{src,tests,frontend}` — so it sat untracked
+for eleven days with imports that resolve to nothing, and would have raised
+`ModuleNotFoundError` on the first line of real use. Moving it under
+`core/scripts` (also where the worker's bind mount already puts it, so no
+`-v` is needed for the code) and adding `scripts` to ruff/black/mypy in both
+the Makefile and `ci.yml` is what makes the recurrence impossible. It is not
+in the coverage denominator: these tools are exercised by hand against real
+exports.
+
+The original diagnosis:
 
 `scripts/split_taleo_pdf.py` is **untracked** (`git status` shows `??`) and was
 written against the sibling `hris` layout:

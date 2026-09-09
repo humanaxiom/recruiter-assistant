@@ -10,6 +10,12 @@
   <div class="card-header">
     <h1 style="margin:0">{{ job.title }}</h1>
     <span class="pill pill-{{ job.status }}">{{ job.status }}</span>
+    {# ADR-046 — provenance. Shown ONLY for a synced job: 'manual' is what
+       every human-created requisition carries, and badging those "manual"
+       would put a label on every job in the system to inform nobody. #}
+    {% if job.source and job.source != 'manual' %}
+    <span class="pill pill-sourced">{{ job.source }}</span>
+    {% endif %}
     {#
       Tri-state, not two. Deriving this from `parsed_at` alone made a JD that
       died yesterday pixel-identical to one that started five seconds ago, which
@@ -29,6 +35,163 @@
     {% if job.location %} · {{ job.location }}{% endif %}
     {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
   </p>
+
+  {# SPONSOR 2026-09-03 — "have the fields in the UI to override/fill".
+
+     A bulk-uploaded requisition has no title, department or campus to work
+     with, so it takes the filename and nulls. The JD parse now fills what it
+     can, but a posting that never states its campus cannot be parsed into
+     one — one of 26 pilot JDs mentions a campus at all, and it names two, as
+     a description of scope. Typing it is the PRIMARY path here.
+
+     Collapsed by default: this is a correction, not a step in the flow, and
+     an open form on every job page would push the résumé list below the
+     fold. Open when there is something obviously missing, so the recruiter
+     is not asked to go looking for it. #}
+  {% if is_writer %}
+  <details class="card" style="margin-top:12px"
+           {% if not job.department or not job.location %}open{% endif %}>
+    <summary>Edit department &amp; campus</summary>
+    <form action="{{ url_for('edit_job_details', job_id=job.id) }}" method="post"
+          style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-department">Department</label>
+        <input class="input" id="job-department" name="department" type="text"
+               maxlength="100" value="{{ job.department or '' }}"
+               placeholder="e.g. School of Medicine">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-location">Campus</label>
+        <input class="input" id="job-location" name="location" type="text"
+               list="campus-options" autocomplete="off" maxlength="200"
+               value="{{ job.location or '' }}">
+        <datalist id="campus-options">
+          {% for campus in campuses %}<option value="{{ campus }}"></option>{% endfor %}
+        </datalist>
+        <span class="muted">
+          {% for campus, code in campus_codes.items() %}
+          {{ campus }} ({{ code }}){% if not loop.last %} · {% endif %}
+          {%- endfor %}. Codes are accepted; anything else is kept as typed.
+        </span>
+      </div>
+      <p class="hint">
+        Whatever you set here wins: a re-parse fills these only when they are
+        empty, and never replaces a value you entered.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {# The title a bulk upload had to invent. Shown so a recruiter looking at
+     "20260612 00138559 APSA JDFN 20260612" knows where it came from and that
+     the parse will replace it — 23 pilot requisitions read exactly like
+     that. Cleared the moment the extraction lands. #}
+  {% if job.title_provisional %}
+  <p class="hint">
+    This title came from the uploaded filename. The JD parse replaces it with
+    the title stated in the posting.
+  </p>
+  {% endif %}
+
+  {# ADR-046 / sponsor §I3 — the link back to the live posting.
+
+     This is the provenance the sponsor asked for. The sync captures the
+     inline summary only and deliberately does NOT fetch the linked "Full Job
+     Description" PDF (ADR-046 alternative E), so for a thin posting THIS LINK
+     IS THE ONLY ROUTE to the real job description. `rel="noopener"` because
+     it opens a third-party origin. #}
+  {% if job.external_url %}
+  <p class="hint">
+    Imported from {{ job.source }} ·
+    <a href="{{ job.external_url }}" target="_blank" rel="noopener noreferrer"
+       >View the original posting</a>
+    {% if job.external_last_seen_at %}
+    · last seen upstream {{ job.external_last_seen_at }}
+    {% endif %}
+  </p>
+  {% endif %}
+
+  {# SPONSOR §I4 — the manager's own additional requirements, read back.
+
+     Shown to the person who typed them, verbatim. Until this branch the note
+     was stored, extracted and scored but never returned by the API at all, so
+     a manager had no way to see what they had asked for — the shortlist chips
+     showed the EXTRACTION, and nothing showed the input it came from. #}
+  {# EDITABLE since 2026-09-03. It was read-only, which meant the ONLY way to
+     set a note was the create form — and every requisition on the pilot box
+     arrived through the bulk uploader, which has no such field. Reported as
+     "i see no manager skills preference input", and that was exactly right.
+
+     Its own form, separate from department/campus: this one costs an LLM call
+     and invalidates the shortlist, so it must not ride along on every campus
+     correction. Open when there is no note yet, because that is the state
+     somebody needs to act on. #}
+  {% if is_writer %}
+  <details class="card" style="margin-top:12px"
+           {% if not job.additional_requirements %}open{% endif %}>
+    <summary>
+      {% if job.additional_requirements %}Edit{% else %}Add{% endif %}
+      skills &amp; experience you are looking for</summary>
+    <form action="{{ url_for('edit_job_requirements', job_id=job.id) }}"
+          method="post" style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-additional-requirements">
+          Additional requirements</label>
+        <textarea class="textarea" id="job-additional-requirements"
+                  name="additional_requirements" maxlength="4000"
+                  style="min-height:90px"
+                  placeholder="e.g. Must have MEG analysis experience. Kafka in production is a bonus. Willing to travel to Burnaby weekly."
+                  >{{ job.additional_requirements or '' }}</textarea>
+        <p class="hint">
+          Special skills or experience you are looking for, whether or not the
+          posting mentions them. Anything you state plainly is treated as
+          <strong>required</strong>; write "nice to have", "bonus" or "ideally"
+          to soften one. These are scored separately from the posting, so the
+          shortlist can show which requirements came from you.
+        </p>
+      </div>
+      {# Saving re-extracts the note but does NOT re-rank — deliberately, since
+         regenerating would move a shortlist somebody may be reading. Saying so
+         is the whole point: silence would let a manager believe an edit had
+         taken effect on a list still reflecting the old note. #}
+      <p class="hint">
+        Saving re-reads these requirements straight away. It does <strong>not</strong>
+        re-rank anyone — use <strong>Regenerate</strong> on the shortlist when
+        you want the new requirements applied to the candidates.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save requirements</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {% if job.additional_requirements %}
+  <div class="manager-note">
+    <h3 style="margin-top:0">Your additional requirements</h3>
+    <p class="muted">{{ job.additional_requirements }}</p>
+    {% if job.additional_requirements_parsed %}
+    <p class="hint">
+      Scored as:
+      {% for s in job.additional_requirements_parsed.must_have_skills %}
+      <span class="chip chip-manager">{{ s.name }} · required</span>
+      {% endfor %}
+      {% for s in job.additional_requirements_parsed.nice_to_have_skills %}
+      <span class="chip chip-manager">{{ s.name }}</span>
+      {% endfor %}
+      {% if job.additional_requirements_parsed.other_requirements %}
+      <br>Not scored as skills (shown to reviewers only):
+      {{ job.additional_requirements_parsed.other_requirements | join('; ') }}
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
 
   <h3>Parsed requirements</h3>
   {% include "parse_status.html" %}

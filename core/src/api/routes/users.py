@@ -22,12 +22,14 @@ is already 403'd by it alone), so stacking the two would be redundant.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Annotated
 from uuid import UUID
 
+from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.api.deps import actor_fields_from_user, resolve_user
+from src.api.deps import actor_fields_from_user, get_arq, resolve_user
 from src.errors import ConflictError, NotFoundError
 from src.models.pool import Db
 from src.schemas.auth import RoleAssignment, User
@@ -63,6 +65,42 @@ async def list_users(
     _admin: Annotated[User, Depends(_require_admin_session)],
 ) -> list[User]:
     return await user_service.list_users(db)
+
+
+@router.post("/admin/jobs/sync", status_code=202)
+async def trigger_taleo_sync(
+    arq: Annotated[ArqRedis, Depends(get_arq)],
+    admin: Annotated[User, Depends(_require_admin_session)],
+) -> dict[str, str]:
+    """Trigger the Taleo job sync by hand (ADR-046).
+
+    **Admin session only** — the same ``_require_admin_session`` gate as the
+    user-management routes, not an API key. This is the one route in the
+    product that can cause an outbound request, and the person who caused it
+    has to be nameable: the acting admin's CAS username rides into the sync's
+    audit row via ``triggered_by``.
+
+    **202, and it enqueues rather than runs.** A full sync walks paginated
+    listings plus one detail page per requisition at one request per second —
+    minutes of work. Doing it inline would hold an HTTP connection open for
+    the duration and give a proxy every reason to time out mid-walk, leaving
+    the run's outcome unknowable.
+
+    Returns 202 even when ``TALEO_ENABLED`` is false. The route does not read
+    the flag, deliberately: the task is the single place that decides whether
+    to egress, and duplicating that check here would be a second copy of the
+    rule that could disagree with it. A disabled deployment enqueues a job
+    that returns ``{"outcome": "skipped"}`` without touching the network.
+    """
+    await arq.enqueue_job(
+        "sync_taleo_jobs",
+        f"admin:{admin.cas_username}",
+        # Idempotent per admin per minute: a double-click, or an impatient
+        # second press, must not start two concurrent walks of a university's
+        # careers site.
+        _job_id=f"sync_taleo_jobs:{dt.datetime.now(dt.UTC):%Y%m%d%H%M}",
+    )
+    return {"status": "queued"}
 
 
 @router.patch("/users/{user_id}/role")

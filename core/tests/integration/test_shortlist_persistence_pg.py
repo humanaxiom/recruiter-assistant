@@ -91,9 +91,12 @@ async def _insert_job(
     description_parsed: dict[str, Any] | None = None,
     blind_review: bool | None = None,
 ) -> UUID:
-    """``blind_review=None`` leaves the column at its table DEFAULT (TRUE), so
-    every pre-existing caller is byte-unchanged. Pass it explicitly to reach
-    the NON-blind read path (``_row_to_entry``), which the default hides."""
+    """``blind_review=None`` leaves the column at its table DEFAULT --
+    FALSE as of the 2026-09-09 opt-in reversal (was TRUE under decision
+    4), so every pre-existing caller here is still byte-unchanged.
+    Passing ``blind_review=True`` explicitly is now what reaches the
+    BLIND read path (``_row_to_blind_entry``) -- the reverse of what
+    this docstring said before the reversal."""
     async with pool.acquire() as conn:
         if blind_review is None:
             job_id: UUID = await conn.fetchval(
@@ -481,9 +484,12 @@ async def test_persist_then_get_one_round_trips_structured_evidence_and_weights(
 
     PARAMETRIZED over ``jobs.blind_review`` because ``get_one`` forks into two
     ENTIRELY SEPARATE row-to-DTO functions on it (``_row_to_blind_entry`` vs
-    ``_row_to_entry``), and the column DEFAULTS to TRUE — so the unparametrized
-    version of this test exercised only the blind branch and left the
-    non-blind unfold with no real-Postgres coverage at all."""
+    ``_row_to_entry``). The column now DEFAULTS to FALSE (the 2026-09-09
+    opt-in reversal -- see ``_insert_job``'s own docstring above), so
+    ``blind_review=True`` is explicitly passed here to still exercise the
+    BLIND branch; without the parametrization the unparametrized version of
+    this test would exercise only the (now-default) non-blind branch and
+    leave the blind unfold with no real-Postgres coverage at all."""
     from src.services.shortlist_service import get_one, persist_shortlist
 
     job_id = await _insert_job(pg_pool, blind_review=blind_review)
@@ -522,8 +528,14 @@ async def test_persist_then_get_one_round_trips_structured_evidence_and_weights(
     if blind_review:
         assert entry.display_label == "Candidate A"
     else:
-        assert entry.display_label is None
-
+        # ``_insert_resume`` never sets ``candidate_name`` (stays NULL) and
+        # hardcodes ``original_filename`` to ``'resume.pdf'`` -- the
+        # COALESCE(decrypted name, original_filename) subquery falls back to
+        # it. This is exactly the fallback the 2026-09-09 "None" shortlist-
+        # card defect fix requires: never a bare None, never the literal
+        # string "None".
+        assert entry.display_label == "resume.pdf"
+        assert entry.display_label != "None"
     # score_structured=0.8 / score_evidence=0.7 come from _shortlist_entry().
     assert entry.score_structured == pytest.approx(0.8)
     assert entry.score_evidence == pytest.approx(0.7)

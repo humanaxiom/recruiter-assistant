@@ -43,6 +43,7 @@ from testcontainers.postgres import PostgresContainer
 from src.errors import NotFoundError
 from src.models.ddl import init_schema
 from src.services import audit_service, resume_service
+from src.services.pii import set_pii_key
 
 _ACTOR_ID = uuid.UUID("a11ce000-0000-4000-8000-000000000002")
 
@@ -288,7 +289,16 @@ async def test_an_ineligible_high_scorer_sorts_below_an_eligible_low_scorer(
             "UPDATE resumes SET work_authorization = 'not_eligible' WHERE id = $1",
             top,
         )
-        rows = await conn.fetch(resume_service_list_query(), job_id)
+        # `_LIST_QUERY` now decrypts the candidate's name via a correlated
+        # `pgp_sym_decrypt(..., current_setting('app.pii_key'))` subquery (the
+        # 2026-09-09 "None" shortlist-card fix) -- the same STRICT-read
+        # precondition `test_export_rows_without_set_pii_key_raises_postgres_error`
+        # already documents. `set_pii_key` must run inside an open transaction
+        # first, or Postgres raises "unrecognized configuration parameter"
+        # before the band/order assertions below ever run.
+        async with conn.transaction():
+            await set_pii_key(conn)
+            rows = await conn.fetch(resume_service_list_query(), job_id)
 
     order = [r["resume_id"] for r in rows]
     assert order == [mid, low, top], (

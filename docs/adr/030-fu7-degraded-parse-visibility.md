@@ -218,6 +218,18 @@ flowchart TD
   verbatim. The fixed literal plus the separately-logged full exception preserves debuggability without the
   leak surface.
 
+**Amended 2026-09-09:** the shortlist ranking guard (`ensure_projection_caught_up`,
+`core/src/worker/matching_tasks.py`) counted a degraded résumé as "eligible" for graph
+projection (`_ELIGIBLE_SQL`: `status = 'parsed' AND withdrawn_at IS NULL`) even though this
+ADR's own projection skip guarantees a degraded parse is never enqueued for projection. The
+guard's `eligible` count could therefore never be caught by `projected`, and the run deferred
+every one of `shortlist_max_tries` (20 × 45s = 15 minutes, silently) before ranking the rest —
+observed live in front of a director. `_ELIGIBLE_SQL` now excludes a degraded parse with the
+same `COALESCE((parsed->>'degraded')::bool, false)` expression `resume_service` already uses,
+and the shortlist page now surfaces a count of degraded, unranked résumés so the recruiter
+sees why the shortlist looks short instead of being told to wait on a projection that was
+never coming.
+
 ## Cross-references
 
 ADR-021 §4 (source scoping, now implemented here); ADR-029 (the fail-closed precedent this ADR's exclusion

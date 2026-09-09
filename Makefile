@@ -14,6 +14,14 @@ logs:
 # `make gates` is the OFFLINE default — no Docker, green on a fresh clone.
 # Integration (real Postgres/Neo4j/Redis via testcontainers) is a separate
 # target because it needs a running Docker socket. CI runs `gates-all`.
+#
+# `scripts` (core/scripts, ops utilities run inside the worker container) is
+# linted and type-checked but NOT in the coverage denominator — the tools are
+# exercised by hand against real exports, not by the unit suite. It was added
+# on 2026-09-03 after `split_taleo_pdf.py` sat outside every gate for eleven
+# days importing two modules that do not exist in this repo (`pipeline.config`,
+# `pipeline.llm` — hris names that survived the port). Nothing could have
+# caught that, because nothing was looking at the file.
 
 branch-name:      ## Enforce branch naming (agent|feat|fix|chore)/<slug>
 	@B=$$(git branch --show-current); \
@@ -22,16 +30,16 @@ branch-name:      ## Enforce branch naming (agent|feat|fix|chore)/<slug>
 	@echo "✅ branch name OK"
 
 gates: branch-name  ## Offline gate suite (ruff·black·mypy·unit·coverage·branch)
-	cd core && ruff check src tests frontend
-	cd core && black --check src tests frontend
-	cd core && mypy src frontend --strict
+	cd core && ruff check src tests frontend scripts
+	cd core && black --check src tests frontend scripts
+	cd core && mypy src frontend scripts --strict
 	cd core && pytest tests/unit \
 		--cov=src --cov=frontend --cov-fail-under=$${COVERAGE_THRESHOLD:-80} --timeout=120 -q
 	@echo "✅ OFFLINE GATES GREEN"
 
 gates-fast:       ## Pre-commit subset (no coverage, no integration)
-	cd core && ruff check src tests frontend && black --check src tests frontend
-	cd core && mypy src frontend --strict
+	cd core && ruff check src tests frontend scripts && black --check src tests frontend scripts
+	cd core && mypy src frontend scripts --strict
 	cd core && pytest tests/unit -q --timeout=120
 
 gates-integration:  ## Integration tests — requires a running Docker socket

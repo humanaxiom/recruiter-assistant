@@ -195,6 +195,12 @@ def test_the_hook_exemption_set_is_exactly_the_one_shot_routes() -> None:
             # dedicated action slot. An endpoint without that stronger control
             # must never be added to this set.
             "resume_work_authorization",
+            # SPONSOR §O4 -- the audited document download, same rule: its own
+            # one-shot token in an action="document" slot. Note this route
+            # DISCLOSES rather than mutates, which makes the per-résumé binding
+            # matter more, not less -- a session-wide page token would let one
+            # forged submit fetch ANY candidate's file.
+            "resume_document",
         }
     ), (
         "the CSRF hook's exemption set changed. Every exemption is a route "
@@ -215,6 +221,7 @@ def test_the_hook_exemption_set_is_exactly_the_one_shot_routes() -> None:
         ("resume_withdraw", "withdraw"),
         ("resume_reinstate", "reinstate"),
         ("resume_work_authorization", "work-authorization"),
+        ("resume_document", "document"),
     ],
 )
 def test_exempt_routes_still_reject_a_page_token(

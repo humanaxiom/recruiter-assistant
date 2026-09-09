@@ -94,9 +94,14 @@ def test_embedding_dim_is_768() -> None:
     assert Settings().llm_embedding_dim == 768
 
 
-def test_blind_review_default_is_true() -> None:
-    """Decision 4 — redaction is ON unless a recruiter opts out."""
-    assert Settings().blind_review_default is True
+def test_blind_review_default_is_false() -> None:
+    """REVERSED 2026-09-09 (sponsor decision): "reverse the blind review to
+    be off by default, keep the on switch button." Decision 4's "redaction ON
+    unless a recruiter opts out" is what changed here, not this test —
+    ``Settings.blind_review_default`` must now match the (also-reversed)
+    ``JobCreate``/DDL default, or this field would silently lie about the
+    product's real default the moment anything starts reading it."""
+    assert Settings().blind_review_default is False
 
 
 def test_storage_and_pii_defaults() -> None:
@@ -170,8 +175,16 @@ def test_env_override_embedding_dim(monkeypatch: MonkeyPatch) -> None:
 
 
 def test_env_override_blind_review_default(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("BLIND_REVIEW_DEFAULT", "false")
-    assert Settings().blind_review_default is False
+    """The override must still prove the override MECHANISM, not just repeat
+    the default. Now that the default itself is FALSE (see
+    ``test_blind_review_default_is_false`` above), the direction that
+    actually exercises the env-override code path is FALSE -> TRUE — the
+    mirror image of this test's pre-reversal form (which was TRUE -> FALSE).
+    An unchanged ``monkeypatch.setenv(..., "false")`` here would pass even if
+    the override wiring were deleted entirely, since FALSE is now also the
+    do-nothing default."""
+    monkeypatch.setenv("BLIND_REVIEW_DEFAULT", "true")
+    assert Settings().blind_review_default is True
 
 
 def test_env_override_pii_key(monkeypatch: MonkeyPatch) -> None:

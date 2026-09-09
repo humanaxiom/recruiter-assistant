@@ -130,3 +130,83 @@ def test_the_helper_is_wired_into_shortlist_job() -> None:
 
     src = inspect.getsource(matching_tasks.shortlist_job)
     assert "ensure_projection_caught_up" in src
+
+
+# ── Live demo, 2026-09-09 21:42 — a degraded parse wedges ranking forever ───
+#
+# 10 résumés parsed for one job; one had its skills LLM pass fail (empty
+# content), fell back to the keyword scan, and was persisted with
+# ``parsed->>'degraded' = true``. By design (FU-7 §4 / ADR-030,
+# ``resume_tasks.py``'s ``degraded_skip_projection``) a degraded parse is
+# NEVER enqueued for projection — no Neo4j node, no ranking. But
+# ``_ELIGIBLE_SQL`` counted it anyway (``status = 'parsed' AND withdrawn_at
+# IS NULL`` says nothing about ``degraded``), so ``projected`` (9) could never
+# catch ``eligible`` (10) — the run deferred every one of ``shortlist_max_tries``
+# (20) x 45s (15 minutes, silently) before ranking the nine it could. Two
+# fail-closed decisions, each correct alone, wedged the demo together.
+#
+# The fix: ``_ELIGIBLE_SQL`` excludes a degraded parse with the SAME
+# expression ``resume_service`` already uses (``status_breakdown`` ~451,
+# ``list_for_job`` ~799) — ``AND NOT COALESCE((parsed->>'degraded')::bool,
+# false)`` — so a degraded résumé is never "eligible" for a graph it will
+# never reach.
+
+
+def test_the_eligible_sql_excludes_degraded_parses() -> None:
+    """Pin the exact predicate, matching ``resume_service``'s own
+    ``COALESCE((parsed->>'degraded')::bool, false)`` expression byte-for-byte
+    (mirrors the existing ``lower()``-normalized style of the withdrawn-at
+    pin above) so a future refactor of either side cannot silently drift the
+    other out of sync."""
+    sql = matching_tasks._ELIGIBLE_SQL.lower()
+    assert "coalesce((parsed->>'degraded')::bool, false)" in sql
+    assert "not coalesce((parsed->>'degraded')::bool, false)" in sql, (
+        "the predicate must EXCLUDE a degraded parse, not merely reference "
+        "the column — a bare COALESCE with no NOT still counts it as eligible"
+    )
+
+
+async def test_the_eligible_query_excludes_degraded_alongside_withdrawn() -> None:
+    """Same style as ``test_the_eligible_count_excludes_withdrawn_resumes``
+    above: assert on the ACTUAL SQL text handed to ``conn.fetchval``, not a
+    hand-duplicated string, so the two tests cannot both pass against a query
+    that dropped one predicate to satisfy the other."""
+    conn = _conn(9)
+    await matching_tasks.ensure_projection_caught_up(
+        conn, _neo4j(9), job_id=uuid4(), job_try=1, max_tries=20, defer_s=45
+    )
+    sql = str(conn.fetchval.await_args.args[0]).lower()
+    assert "withdrawn_at is null" in sql
+    assert "not coalesce((parsed->>'degraded')::bool, false)" in sql
+
+
+async def test_ranking_proceeds_when_the_degraded_parse_is_excluded_from_eligible() -> (
+    None
+):
+    """The reported incident, reproduced at its own numbers: 10 résumés
+    parsed, 1 degraded (never projected by design), 9 correctly projected.
+    Once ``_ELIGIBLE_SQL`` excludes the degraded row, ``eligible`` reads 9 —
+    not 10 — so a graph that has caught up on every résumé it was ever going
+    to receive must NOT raise ``Retry``. Before the fix, ``_conn(9)`` here
+    stood in for the OLD (defective) query still counting all 10; this pins
+    what the query must now return for the same real data: 9, matching
+    ``projected``."""
+    await matching_tasks.ensure_projection_caught_up(
+        _conn(9), _neo4j(9), job_id=uuid4(), job_try=1, max_tries=20, defer_s=45
+    )
+
+
+async def test_a_degraded_parse_deferred_under_the_old_query_would_never_catch_up() -> (
+    None
+):
+    """Documents the FAILURE mode this fix removes: if ``eligible`` still
+    counted the degraded row (10) against a graph that will only ever reach
+    9, every retry up to the ceiling defers, and the run only proceeds once
+    ``job_try`` reaches ``max_tries`` — the 15-minute silent wait from the
+    incident. This is the behaviour the SQL-predicate tests above must make
+    unreachable in the real query; it is pinned here via the same helpers,
+    with a low ``job_try`` standing in for "not yet at the ceiling"."""
+    with pytest.raises(Retry):
+        await matching_tasks.ensure_projection_caught_up(
+            _conn(10), _neo4j(9), job_id=uuid4(), job_try=1, max_tries=20, defer_s=45
+        )

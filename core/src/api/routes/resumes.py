@@ -13,7 +13,7 @@ in blind form (D2) but may never un-blind one.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from arq.connections import ArqRedis
@@ -24,6 +24,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Response,
     UploadFile,
     status,
 )
@@ -454,6 +455,85 @@ async def reinstate_resume(
         actor_service=actor_service,
     )
     return await resume_service.get_one(db, resume_id)
+
+
+@router.post(
+    "/resumes/{resume_id}/document",
+    dependencies=[
+        Depends(require_role(*_REVEALERS)),
+        Depends(require_session_role(*_REVEALERS)),
+    ],
+    response_class=Response,
+)
+async def download_resume_document(
+    resume_id: UUID,
+    db: Db,
+    blob_store: Annotated[BlobStore, Depends(get_blob_store)],
+    role: Annotated[Role, Depends(require_role(*_REVEALERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+    kind: Annotated[Literal["resume", "cover_letter"], Query()] = "resume",
+) -> Response:
+    """Serve the candidate's source document (sponsor 2026-09-02 §O4).
+
+    The first route in this product that returns a raw candidate document —
+    résumés and cover letters have been written to ``BlobStore`` since Phase 6
+    and never served — which makes it the first new PII-egress surface since
+    the pilot went live.
+
+    **Gated as a REVEAL, not as a read.** ``_REVEALERS`` rather than
+    ``_RESUME_READERS``: the file's content discloses identity outright,
+    whatever the job's blind setting says, so the authority to fetch it is the
+    authority to un-blind. Both the API-key role and the CAS session role are
+    checked, because the Flask viewer presents one shared recruiter key for
+    every human (ADR-020 §3/§4) and only the session can confine a caller.
+
+    **POST, and this is the decision most likely to look wrong.** A download
+    wants to be an ``href``, and an ``href`` is prefetchable — browsers, link
+    scanners and mail clients follow GETs speculatively. Each such fetch would
+    write an audit row attributing a disclosure to somebody who never clicked,
+    and pull candidate PII into a cache. ``POST /resumes/{id}/reveal`` is
+    POST-only for exactly this reason; a route that hands over the whole
+    document has no weaker claim on it.
+
+    **Ordering, inherited from reveal** (ADR-016 §7, ADR-020 §5): human gate,
+    then the scoped existence probe, then the audit row, then the blob read.
+    A caller denied by row scoping 404s exactly like one asking about a
+    nonexistent résumé, writes no audit row, and causes no disclosure.
+
+    ``Content-Disposition: attachment`` on every response, with a filename
+    derived from the résumé id rather than the candidate-supplied one. Serving
+    a document inline would let a crafted upload render in the browser's origin;
+    ``attachment`` makes the browser save it instead.
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="downloading a candidate document requires an attributable "
+            "human session",
+        )
+    user_id = await scoped_user_id_or_403(user, role)
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+
+    doc = await resume_service.read_document(
+        db,
+        blob_store,
+        resume_id,
+        kind=kind,
+        user_id=user_id,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
+    return Response(
+        content=doc.data,
+        media_type=doc.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{doc.filename}"',
+            # Belt and braces on top of `attachment`: a document served with a
+            # sniffable body can still be re-typed by a browser heuristic.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post(

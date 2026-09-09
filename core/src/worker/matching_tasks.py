@@ -73,6 +73,7 @@ _PARSED_JOB_IDS_SQL = "SELECT id FROM jobs WHERE description_parsed IS NOT NULL"
 _ELIGIBLE_SQL = """
 SELECT count(*) FROM resumes
 WHERE job_id = $1 AND status = 'parsed' AND withdrawn_at IS NULL
+AND NOT COALESCE((parsed->>'degraded')::bool, false)
 """
 
 _PROJECTED_CYPHER = "MATCH (r:Resume {job_id: $jid}) RETURN count(r) AS n"
@@ -110,6 +111,18 @@ async def ensure_projection_caught_up(
     cannot be counted, the ranking immediately after will fail on its own and
     report properly; converting an unreadable count into an infinite defer would
     replace a loud failure with a silent one.
+
+    **The eligible count excludes a degraded parse.** By design (FU-7 §4 /
+    ADR-030, ``resume_tasks.py``'s ``degraded_skip_projection``) a résumé whose
+    skills pass fell back to the keyword scan is never enqueued for
+    projection — no Neo4j node will ever exist for it. Counting it as
+    "eligible" here makes ``projected`` chase a number it can structurally
+    never reach: measured live on 2026-09-09 as a 15-minute silent stall
+    (every one of ``shortlist_max_tries`` deferred) in front of a director,
+    with the shortlist page showing "No ranked candidates yet" while every
+    résumé on the job read ``parsed``. ``_ELIGIBLE_SQL`` now excludes it with
+    the same ``COALESCE((parsed->>'degraded')::bool, false)`` expression
+    ``resume_service`` already uses for the same column.
     """
     try:
         eligible = int(await conn.fetchval(_ELIGIBLE_SQL, job_id) or 0)

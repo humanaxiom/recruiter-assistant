@@ -59,10 +59,13 @@ FORM_FIELD = "csrf_token"
 HEADER_FIELD = "X-CSRF-Token"
 
 #: Upper bound on how many per-résumé tokens one session may hold at once.
-#: A shortlist render mints one token per card and is structurally capped at
-#: the stage-1 ``k=50`` oversample (ADR-012 SEC-3), so 64 clears a full
-#: shortlist page with headroom for a couple of other open résumé tabs while
-#: still bounding the signed session cookie well inside the ~4KB ceiling.
+#: A shortlist render ensures TWO tokens per card (reveal + withdraw; the
+#: per-card work-authorization control deliberately does NOT take a third
+#: one-shot slot here -- see ``frontend.app.shortlist_work_authorization``)
+#: and is structurally capped at the stage-1 ``k=50`` oversample (ADR-012
+#: SEC-3), so 64 clears a full shortlist page with headroom for a couple of
+#: other open résumé tabs while still bounding the signed session cookie
+#: well inside the ~4KB ceiling.
 MAX_TOKENS_PER_SESSION = 64
 
 #: Entropy of a minted token, in bytes (URL-safe base64 expands this ~1.3x, so
@@ -139,6 +142,39 @@ def issue_token(resume_id: Any, *, action: str = "reveal") -> str:
     # Reassign rather than mutate in place so Flask marks the session dirty.
     flask.session[SESSION_KEY] = mapping
     return token
+
+
+def ensure_token(resume_id: Any, *, action: str = "reveal") -> str:
+    """Return ``(resume_id, action)``'s CURRENT token, minting one only if the
+    slot is empty — unlike :func:`issue_token`, this NEVER overwrites a still
+    -live token.
+
+    2026-09-09, reached a user: a re-render that shares this résumé's page
+    (``resume_reveal`` re-rendering ``resume_detail.html`` after consuming
+    the reveal slot) must still hand back a WORKING token for every OTHER
+    audited form on that same page (withdraw/reinstate, document,
+    work-authorization). Calling :func:`issue_token` there would mint a
+    fresh replacement for each of those slots too, silently invalidating the
+    very token the FIRST render already put in front of the recruiter —
+    trading one 403 defect for another. Reusing whatever is already live
+    keeps a token minted by an earlier render of this same page valid across
+    an intervening action on a DIFFERENT slot, while an empty/consumed slot
+    still mints exactly like :func:`issue_token`.
+
+    Security finding S2 (same root cause, a different pair of call sites):
+    ``frontend.app._mint_card_tokens`` used :func:`issue_token` for every
+    shortlist render, which ALSO overwrites reveal/withdraw slots for
+    résumés the recruiter had already opened the detail page of in the SAME
+    session — so simply visiting the shortlist after opening a résumé's own
+    page silently invalidated that page's still-live token. This function is
+    the one fix for both call sites: reuse-if-live, mint-if-absent.
+    """
+    key = _session_key_for(resume_id, action)
+    mapping = _mapping()
+    existing = mapping.get(key)
+    if existing:
+        return existing
+    return issue_token(resume_id, action=action)
 
 
 def verify_and_consume(
@@ -279,6 +315,7 @@ __all__ = [
     "HEADER_FIELD",
     "MAX_TOKENS_PER_SESSION",
     "issue_token",
+    "ensure_token",
     "verify_and_consume",
     "issue_page_token",
     "verify_page_token",

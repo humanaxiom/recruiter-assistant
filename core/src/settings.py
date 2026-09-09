@@ -118,7 +118,9 @@ class Settings(BaseSettings):
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
-    blind_review_default: bool = True  # decision 4 — redaction ON by default
+    # Reversed 2026-09-09 (sponsor decision) to match JobCreate/DDL — has no
+    # reader in src/ (nothing wires it up); kept only as a pinned setting.
+    blind_review_default: bool = False
     # ADR-008 — the salt folded into every NON-VOCAB skill's canonical Skill-
     # graph key (``h:sha256(salt + normalised_name)[:32]``). Empty by default,
     # same discipline as ``pii_key`` above: ``src.worker.main.startup`` refuses
@@ -227,7 +229,38 @@ class Settings(BaseSettings):
     # synchronous-endpoint value of 0.
     match_reverse_evidence_k: int = 10
     match_llm_concurrency: int = 4
-    match_evidence_max_tokens: int = 2048
+    # 2048 -> 8192 on 2026-09-09, after a user reported "Generate shortlist has
+    # not been producing anything". It had been retrying for hours behind
+    # "the ranking model was briefly unavailable... no action needed".
+    #
+    # It was not unavailable. gpt-oss:20b, on this deployment's transport
+    # (OpenAI-compatible, UNCONSTRAINED, reasoning channel on), spent the whole
+    # 2048 reasoning and returned empty `content`. Stage 3 fails CLOSED
+    # (ADR-029), so one starved candidate withheld the entire shortlist.
+    #
+    # MEASURED at the real concurrency, on the real failing job. Two earlier
+    # attempts at this measurement called ONE prompt at a time and both PASSED
+    # at 2048 -- nearly certifying the broken config as healthy. Concurrency was
+    # the missing variable, exactly as the model profile warns:
+    #
+    #   2048, 4 concurrent: 15 chunks OK · 12 chunks FAIL · 11 OK · 9 FAIL
+    #   4096, 4 concurrent: all four OK, 219-273s
+    #
+    # The failures are NOT size-ordered -- the largest résumé passed. 2048 sat
+    # close enough to the edge that reasoning length tipped some inputs over and
+    # not others, which is why this read as intermittent rather than broken.
+    #
+    # 8192 rather than the measured 4096, deliberately: four samples is a thin
+    # floor when the failure is input-dependent (2048 passed two of those same
+    # four), `max_tokens` is a CEILING so the margin is free on any call that
+    # finishes early, and ADR-029 makes the downside all-or-nothing. It is also
+    # REASONING_JSON_MIN_TOKENS -- what every other JSON call site here already
+    # budgets -- and the committed profile's own recommended_max_tokens.
+    #
+    # COUPLED to LLM_TIMEOUT_S: these calls take 219-315s at concurrency 4, so a
+    # 120s timeout converts every one of them into a ReadTimeout regardless of
+    # this value. See docs/model-profiles/gpt-oss-20b.json.
+    match_evidence_max_tokens: int = 8192
 
     # ── FU-7 (ADR-021 §3): honest résumé parse status ─────────────────────────
     # The arq JOB-layer retry ceiling `parse_resume`'s `LLMUnavailableError`

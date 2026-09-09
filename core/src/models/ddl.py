@@ -9,7 +9,12 @@ originally cut too, but ADR-019 (FU-5) reverses that: ``users`` and
 
 Deviations from hris, all deliberate:
 
-* ``jobs.blind_review`` defaults ``TRUE`` (hris: ``FALSE``) — decision 4.
+* ``jobs.blind_review`` defaults ``FALSE`` (hris: also ``FALSE``) — decision 4
+  set it ``TRUE``; reversed 2026-09-09 at the sponsor's request ("reverse the
+  blind review to be off by default, keep the on switch button"). The
+  per-job toggle is unchanged. A dedicated ``ALTER ... SET DEFAULT FALSE``
+  below reverses an already-migrated deployment's default too — see its
+  comment for why ``CREATE TABLE IF NOT EXISTS`` alone cannot.
 * ``jobs.created_by`` / ``resumes.uploaded_by`` are nullable ``TEXT`` actor
   labels, not UUID FKs — this predates ADR-019's ``users`` table and is not
   yet wired to it (FU-5 slice 1 is schema only).
@@ -133,7 +138,7 @@ _STATEMENTS: tuple[str, ...] = (
                           CHECK (retention_days BETWEEN 30 AND 730),
         shortlist_top_percent INTEGER NOT NULL DEFAULT 100
                           CHECK (shortlist_top_percent BETWEEN 1 AND 100),
-        blind_review      BOOLEAN NOT NULL DEFAULT TRUE,
+        blind_review      BOOLEAN NOT NULL DEFAULT FALSE,
         additional_requirements        TEXT,
         additional_requirements_parsed JSONB,
         source            TEXT NOT NULL DEFAULT 'manual'
@@ -207,6 +212,29 @@ _STATEMENTS: tuple[str, ...] = (
     # cannot answer the question the defense pack exists to answer.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS additional_requirements_parsed JSONB",
+    # ── Was this title CHOSEN, or DERIVED? ───────────────────────────────────
+    # A bulk JD upload has no title to work with, so it falls back to the
+    # filename stem. On the pilot box that produced 23 requisitions displayed
+    # as "20260612 00138559 APSA JDFN 20260612" while their extractions held
+    # "Multimedia Specialist" — correct, weeks old, and written to a JSONB blob
+    # that no screen reads.
+    #
+    # ``record_parsed`` can only fix that if it can tell a derived title from a
+    # chosen one. Both are non-empty strings, so nothing about the VALUE
+    # distinguishes them and this has to be recorded at insert time.
+    #
+    # FALSE for every existing row and every manual create, which is the safe
+    # direction: the worst case is a title nobody improves, not a title
+    # silently rewritten out from under the person who typed it. It also means
+    # the ALTER alone fixes nothing on the pilot box — the 23 rows predate it,
+    # and ``scripts/backfill_job_fields.py`` is what reaches them.
+    #
+    # This re-opens a Phase 0 cut (hris's ``title_autofilled``, dropped as
+    # bulk-ingest polish). What changed is that somebody bulk-uploaded 23 real
+    # requisitions whose filenames are req numbers. The hris COLUMN NAME stays
+    # absent, and a test in ``test_services_writeback.py`` keeps it that way.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_provisional "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
     # ── External job sources (ADR-046) ──────────────────────────────────────
     # Where a job CAME FROM. Every existing row is 'manual', which the DEFAULT
     # back-fills the instant the ALTER lands — the same reasoning as
@@ -589,6 +617,15 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS job_assignees_user_idx
         ON job_assignees (user_id, assigned_at DESC)
     """,
+    # 2026-09-09 sponsor decision reverses ``jobs.blind_review`` from
+    # default-ON back to default-OFF (decision 4, above). ``CREATE TABLE IF
+    # NOT EXISTS`` never touches an already-existing deployment's column
+    # default, and the pilot box has 26 rows created under the old one — so
+    # a dedicated, idempotent ALTER (mirrors ``description_sha256`` /
+    # ``shortlist_top_percent`` / ``users.role`` elsewhere in this module) is
+    # required to actually reverse a LIVE deployment, not just a fresh
+    # install's CREATE TABLE. Must run after ``jobs`` exists.
+    "ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT FALSE",
 )
 
 

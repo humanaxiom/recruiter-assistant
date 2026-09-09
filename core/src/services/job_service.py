@@ -4,17 +4,23 @@ Phase 3 ports ONLY the two worker-side mutations from hris
 ``apps/api/src/api/services/job_service.py``; the CRUD / status state machine
 lands with the routes in Phase 6.
 
-Two deliberate cuts from the hris source:
+One deliberate cut from the hris source, and one that was reversed:
 
-* **No ``refine_title`` branch.** hris had a second UPDATE that also wrote
-  ``title = $4, title_autofilled = FALSE`` so a bulk-ingest job whose title was
-  derived from a filename could be corrected once by the LLM. Bulk ingest is
-  cut, and ``jobs.title_autofilled`` does not exist in ``src/models/ddl.py`` —
-  porting the branch would be an ``UndefinedColumnError`` waiting to happen.
-  ``record_parsed`` never touches the ``title`` column at all.
 * **No ``'failed'`` status.** ``job_status`` is ('draft','open','closed',
   'archived') — there is no failed state for a job, so a parse failure only
   surfaces on ``failure_reason`` and the row stays in 'draft' for a retry.
+* **``refine_title`` came back on 2026-09-03, under a different column.** This
+  docstring used to state that ``record_parsed`` "never touches the ``title``
+  column at all", because bulk ingest was cut in Phase 0 along with hris's
+  ``jobs.title_autofilled``. Bulk ingest was then built (FU-3), 23 real SFU
+  requisitions were uploaded as files, and every one of them displayed its own
+  filename — "20260612 00138559 APSA JDFN 20260612" — while its extraction
+  held "Multimedia Specialist". The cut was correct when nothing bulk-uploaded
+  anything and wrong the moment something did.
+
+  The column is ``jobs.title_provisional``, not hris's name: this repo's DDL is
+  its own, and a test in ``tests/unit/test_services_writeback.py`` still asserts
+  ``title_autofilled`` never appears in this module's SQL.
 
 ``record_parsed`` carries an optimistic-concurrency guard: the UPDATE applies
 only while the row is still ``status = 'draft'``. If a concurrent transition
@@ -35,6 +41,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from src.campus import canonicalise_location
 from src.errors import NotFoundError
 from src.schemas.jobs import (
     BulkJobResult,
@@ -61,11 +68,42 @@ _MAX_REASON_CHARS = 1000
 # job, so it becomes a per-file ``failed`` outcome rather than aborting the batch.
 _MIN_DESCRIPTION_CHARS = 50
 
+# SPONSOR 2026-09-03 — the extraction now reaches the ROW, not only the blob.
+#
+# Until this, ``record_parsed`` wrote ``description_parsed`` and nothing else,
+# so every field the LLM read out of a JD was stored where no screen looks. On
+# the pilot box that meant 23 requisitions titled with their own filenames
+# ("20260612 00138559 APSA JDFN 20260612") while their extractions held
+# "Multimedia Specialist", plus an empty Department on 20 of 26 and an empty
+# Location on all 26.
+#
+# THREE DIFFERENT MERGE RULES, because the columns are not alike:
+#
+# * ``department``/``location`` — fill when EMPTY, never overwrite. The sponsor
+#   asked for UI fields "to override/fill", so an override that a re-parse
+#   silently reverts would not be one. ``NULLIF(col, '')`` and not a bare
+#   COALESCE: the create form posts an empty string for a field left blank, so
+#   a bare COALESCE would treat '' as a value and leave those rows permanently
+#   unfillable.
+# * ``title`` — ``NOT NULL``, so "fill when empty" can never fire. Replaced
+#   only when the row itself says the title was DERIVED (``title_provisional``,
+#   set by the bulk path when it falls back to a filename stem), and the flag
+#   is cleared in the same statement so a later re-parse cannot rename a title
+#   a human has since corrected.
+#
+# The whole merge lives in the UPDATE rather than in Python on purpose: reading
+# the row first and deciding in the worker opens a window where a recruiter's
+# edit lands between the read and the write and is lost.
 _RECORD_PARSED_SQL = """
 UPDATE jobs SET
     description_parsed = $2::jsonb,
     parsed_at = $3,
     additional_requirements_parsed = $4::jsonb,
+    department = COALESCE(NULLIF(jobs.department, ''), $5),
+    location = COALESCE(NULLIF(jobs.location, ''), $6),
+    title = CASE WHEN jobs.title_provisional THEN $7 ELSE jobs.title END,
+    title_provisional = CASE WHEN jobs.title_provisional THEN FALSE
+                             ELSE jobs.title_provisional END,
     failure_reason = NULL,
     updated_at = now()
 WHERE id = $1 AND status = 'draft'
@@ -100,6 +138,12 @@ async def record_parsed(
     *nobody asked* rather than *asked and matched nothing*. Writing an empty
     object instead would assert the manager listed nothing, which is a
     different and false claim.
+
+    SPONSOR 2026-09-03 — this also fills ``title``/``department``/``location``
+    from the extraction. See ``_RECORD_PARSED_SQL`` for the three merge rules;
+    the short version is that a value a human (or a manifest, or Taleo) already
+    put there always wins, and a title is only replaced when the row records
+    that its title was derived from a filename rather than chosen.
     """
     result = await conn.execute(
         _RECORD_PARSED_SQL,
@@ -111,6 +155,12 @@ async def record_parsed(
             if manager_requirements is not None
             else None
         ),
+        (extracted.department or "").strip() or None,
+        # The ONE place a campus is normalised on the JD path. The blob above
+        # keeps the model's own words; the column gets the canonical spelling so
+        # it can be grouped and filtered.
+        canonicalise_location(extracted.location),
+        extracted.title,
     )
     applied = result.endswith(" 1")
     if not applied:
@@ -159,15 +209,24 @@ _JOB_COLS = (
     # SPONSOR 2026-09-02 §I4 -- both halves of the manager note. Reading back
     # only the extraction would leave a human unable to check it against what
     # was actually typed.
-    "additional_requirements, additional_requirements_parsed"
+    "additional_requirements, additional_requirements_parsed, "
+    # ADR-046 provenance. Omitting these here while _row_to_jobout reads them
+    # would make JobOut.source read "manual" on every real query -- the guard
+    # below only caught SELECTed-but-unmapped, not the reverse, until
+    # test_jobout_carries_every_column.py was made bidirectional.
+    "source, external_id, external_url, external_last_seen_at, "
+    # Was this title CHOSEN or DERIVED? Returned so the detail page can say
+    # "taken from the uploaded filename" rather than leaving a recruiter to
+    # wonder why their requisition is called 20260612 00138559 APSA JDFN.
+    "title_provisional"
 )
 
 _INSERT_JOB_SQL = f"""
 INSERT INTO jobs (
     title, department, location, employment_type, seniority, min_years,
     description_raw, retention_days, shortlist_top_percent, blind_review,
-    created_by, description_sha256, additional_requirements
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    created_by, description_sha256, additional_requirements, title_provisional
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 RETURNING {_JOB_COLS}
 """
 
@@ -188,9 +247,18 @@ async def _insert_job(
     *,
     created_by: str | None,
     description_sha256: str,
+    title_provisional: bool = False,
 ) -> Any:
     """THE single INSERT both ``create_job`` and ``create_jobs_bulk`` write
-    through, so the column list stays in one place."""
+    through, so the column list stays in one place.
+
+    ``title_provisional`` says the title was DERIVED, not chosen — only the
+    bulk path's filename-stem fallback sets it, and it is what licenses
+    ``record_parsed`` to replace the title later. It defaults to ``False``
+    because that is the direction that cannot lose information: an
+    un-improved title beats one silently rewritten under the person who
+    typed it.
+    """
     return await conn.fetchrow(
         _INSERT_JOB_SQL,
         payload.title,
@@ -206,13 +274,26 @@ async def _insert_job(
         created_by,
         description_sha256,
         payload.additional_requirements,
+        title_provisional,
     )
 
 
 _GET_JOB_SQL = f"SELECT {_JOB_COLS} FROM jobs WHERE id = $1"
 
+# The list read. EVERY field on ``JobListItem`` must appear here -- a field the
+# SELECT omits reads None on every row forever, which is how the Location
+# column printed an em-dash for every job since Phase 7.
+# ``test_jobs_table_columns.py`` compares the two and fails on a mismatch.
+# A correlated subquery rather than a LEFT JOIN + GROUP BY: the WHERE clause
+# this query is assembled with (status filter, and FU-6's ``EXISTS`` against
+# ``job_assignees``) is appended verbatim after ``FROM jobs``, and a GROUP BY
+# would have to land after it. ``resumes (job_id, status)`` is already
+# indexed, and the row count here is bounded by LIMIT.
 _LIST_JOBS_BASE_SQL = (
-    "SELECT id, title, department, status, created_at, parsed_at FROM jobs"
+    "SELECT id, title, department, location, status, created_at, updated_at, "
+    "parsed_at, source, external_url, "
+    "(SELECT count(*) FROM resumes WHERE resumes.job_id = jobs.id) "
+    "AS resume_count FROM jobs"
 )
 
 _UPDATE_STATUS_SQL = f"""
@@ -246,8 +327,59 @@ _UPDATABLE_JOB_COLUMNS: frozenset[str] = frozenset(
         "retention_days",
         "shortlist_top_percent",
         "blind_review",
+        # SPONSOR §I4, added 2026-09-03 after "i see no manager skills
+        # preference input" from the pilot box.
+        #
+        # ``JobUpdate`` has carried this field since it was added and this
+        # allowlist did not, so ``update_job`` filtered it out and returned 200
+        # having changed nothing — the only way to set a manager note was the
+        # CREATE form, and all 23 pilot requisitions arrived through the BULK
+        # uploader, which has no such field. Not one of them could ever have
+        # had one.
+        #
+        # Changing it must re-extract: see ``record_manager_requirements`` and
+        # the ``extract_manager_prompt`` enqueue in the PATCH route. The
+        # extraction blob itself stays OUT of this set — it is the worker's to
+        # write, never a client's.
+        "additional_requirements",
     }
 )
+
+# The re-extraction write. Deliberately NOT scoped to ``status = 'draft'``,
+# unlike ``_RECORD_PARSED_SQL``: a manager adds requirements to a requisition
+# that is already OPEN and taking résumés, which is the entire reason the field
+# is editable after creation. A 'draft'-scoped UPDATE would apply to nothing on
+# every real job and report success.
+#
+# It touches ONE column. ``description_parsed`` / ``parsed_at`` / ``status``
+# are untouched on purpose — re-running the JD parse here would re-derive the
+# posting's own requirements from the LLM and move a shortlist somebody is
+# reading (ROADMAP §5). That separation is what ``JobUpdate``'s comment has
+# promised since the field was added, and what nothing implemented until now.
+_RECORD_MANAGER_REQS_SQL = """
+UPDATE jobs SET
+    additional_requirements_parsed = $2::jsonb,
+    updated_at = now()
+WHERE id = $1
+"""
+
+
+async def record_manager_requirements(
+    conn: DbConn, job_id: UUID, requirements: ManagerRequirements | None
+) -> None:
+    """Write ONLY the manager-note extraction back onto the job row.
+
+    ``None`` writes SQL NULL, and that is the correct outcome for both "the
+    note was cleared" and "the note would not parse": the ranking combine reads
+    null as *nobody asked* and marks the sub-score unmeasured, where an empty
+    object would assert the manager listed nothing — a different and false
+    claim (see ``extract_manager_requirements``).
+    """
+    await conn.execute(
+        _RECORD_MANAGER_REQS_SQL,
+        job_id,
+        json.dumps(requirements.model_dump()) if requirements is not None else None,
+    )
 
 
 def _row_to_jobout(row: Any) -> JobOut:
@@ -257,6 +389,17 @@ def _row_to_jobout(row: Any) -> JobOut:
     ``False`` (fail-OPEN) if a builder ever omits it — this function MUST
     read ``row["blind_review"]`` explicitly, never rely on the pydantic
     default.
+
+    **The cost of that explicitness, and the trap it sets.** Because every
+    field is named here, adding a column to ``_JOB_COLS`` does NOT add it to
+    the API — the column is SELECTed and dropped on the floor, silently, with
+    ``JobOut``'s default standing in for it. Both columns added on
+    2026-09-02/03 hit exactly that: ``additional_requirements`` (the manager's
+    own note, stored and scored and never returned) and the ADR-046 provenance
+    four. No test failed, because ``extra="forbid"`` rejects UNKNOWN keys and
+    says nothing about known ones being skipped.
+    ``tests/unit/test_jobout_carries_every_column.py`` now compares the SELECT
+    list against the DTO and fails on the next one.
     """
     raw = dict(row)
     desc_parsed_raw = raw["description_parsed"]
@@ -287,7 +430,52 @@ def _row_to_jobout(row: Any) -> JobOut:
         updated_at=raw["updated_at"],
         parsed_at=raw["parsed_at"],
         closed_at=raw["closed_at"],
+        # SPONSOR §I4 — the manager's note AND its extraction. Returning only
+        # the extraction would leave a manager unable to see what they typed,
+        # and nobody able to check the parse against it.
+        # ``.get`` for the ADDITIVE columns, unlike the required fields above.
+        # Not laziness: these arrived after several hundred tests were written
+        # against partial mock rows, and a narrower SELECT is a legitimate
+        # caller. The ADR-006 argument for reading ``blind_review`` explicitly
+        # does not transfer — its default is fail-OPEN (un-blinded), whereas
+        # every default here is the absence of an optional extra.
+        additional_requirements=raw.get("additional_requirements"),
+        additional_requirements_parsed=_manager_requirements(
+            raw.get("additional_requirements_parsed")
+        ),
+        # ADR-046 provenance. ``source`` is NOT NULL with a 'manual' default in
+        # the DDL, so the fallback only covers a row that did not select it.
+        source=raw.get("source") or "manual",
+        external_id=raw.get("external_id"),
+        external_url=raw.get("external_url"),
+        external_last_seen_at=raw.get("external_last_seen_at"),
+        # Provenance, like ``source``: a title the bulk path derived from a
+        # filename, still awaiting the extraction that will replace it.
+        title_provisional=bool(raw.get("title_provisional")),
     )
+
+
+def _manager_requirements(value: Any) -> ManagerRequirements | None:
+    """Parse the stored manager-requirements jsonb, tolerantly.
+
+    A malformed payload degrades to ``None`` rather than 500ing the job read:
+    the extraction is an EXTRA on a requisition whose JD is the record, and one
+    bad jsonb blob must not make the job unreadable. Mirrors
+    ``load_job_view``'s handling on the ranking side.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            logger.warning("job.additional_requirements_parsed_unreadable")
+            return None
+    try:
+        return ManagerRequirements.model_validate(value)
+    except ValidationError:
+        logger.warning("job.additional_requirements_parsed_invalid")
+        return None
 
 
 async def create_job(
@@ -423,7 +611,17 @@ async def create_jobs_bulk(
             continue
 
         inserted = await _insert_job(
-            conn, payload, created_by=created_by, description_sha256=sha
+            conn,
+            payload,
+            created_by=created_by,
+            description_sha256=sha,
+            # The title is DERIVED unless the manifest supplied one. A filename
+            # stem is a placeholder — "20260612 00138559 APSA JDFN 20260612" is
+            # what 23 pilot requisitions displayed for weeks — so the row says
+            # so, and ``record_parsed`` is licensed to replace it once with the
+            # extracted title. A manifest title was chosen by a human and is
+            # therefore permanent.
+            title_provisional=row is None or not row.title,
         )
         job = _row_to_jobout(inserted)
         created_in_batch[sha] = job.id
@@ -500,18 +698,24 @@ async def list_jobs(
     args.append(offset)
     query += f" OFFSET ${len(args)}"
     rows = await conn.fetch(query, *args)
-    # Explicit field-by-field projection (not `dict(r)`) — the real SQL only
-    # selects these six columns, but a test double (or a future query that
-    # widens its SELECT) may hand back a row carrying extra keys; JobListItem
-    # is extra="forbid", so trusting the row's own key set would be fragile.
+    # Explicit field-by-field projection (not `dict(r)`) — a test double (or a
+    # future query that widens its SELECT) may hand back a row carrying extra
+    # keys, and JobListItem is extra="forbid", so trusting the row's own key
+    # set would be fragile. ``.get`` on the columns added after the doubles
+    # were written keeps those doubles valid.
     return [
         JobListItem(
             id=r["id"],
             title=r["title"],
             department=r["department"],
+            location=r.get("location"),
             status=r["status"],
             created_at=r["created_at"],
+            updated_at=r.get("updated_at"),
             parsed_at=r["parsed_at"],
+            source=r.get("source") or "manual",
+            external_url=r.get("external_url"),
+            resume_count=r.get("resume_count") or 0,
         )
         for r in rows
     ]

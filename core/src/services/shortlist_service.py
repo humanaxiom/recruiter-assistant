@@ -436,14 +436,36 @@ _WORK_AUTH_SUBQUERY = (
     "(SELECT wa.work_authorization FROM resumes wa "
     "WHERE wa.id = shortlist_entries.resume_id)"
 )
+# RE-PINNED 2026-09-09 -- the "None" shortlist-card defect. On a non-blind job
+# (default since commit 7ea9a47) the list/get read never surfaced ANY
+# candidate-facing label at all, so `shortlist_cards.html`'s unguarded
+# `{{ entry.display_label }}` rendered the literal 4-character text "None" on
+# every card. This mirrors `_WORK_AUTH_SUBQUERY`'s exact shape -- a correlated
+# subquery (never a join, for the same ambiguous-``id``/``job_id`` reason
+# documented above _WORK_AUTH_SUBQUERY) that decrypts the résumé's PII name
+# under the SAME session-scoped `app.pii_key`, falling back to the résumé's
+# `original_filename` (NOT NULL in the DDL) when the candidate never supplied
+# one -- so a real Postgres never resolves this to a bare NULL. The whole
+# COALESCE is done in ONE subquery, aliased directly as `display_label`, so
+# `_row_to_entry` needs no combining/renaming step and never carries a
+# `_c_name`/`_c_filename`-shaped extra key that `ShortlistEntry`'s
+# ``extra="forbid"`` would reject.
+_NAME_SUBQUERY = (
+    "(SELECT COALESCE("
+    "pgp_sym_decrypt(dl.candidate_name, current_setting('app.pii_key')), "
+    "dl.original_filename) "
+    "FROM resumes dl WHERE dl.id = shortlist_entries.resume_id)"
+)
 _LIST_QUERY = (
-    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization "
+    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization, "
+    f"{_NAME_SUBQUERY} AS display_label "
     f"FROM shortlist_entries "
     f"WHERE job_id = $1 AND {_NOT_WITHDRAWN_SQL} "
     f"ORDER BY ({_WORK_AUTH_SUBQUERY} = 'not_eligible') ASC, rank ASC"
 )
 _GET_QUERY = (
-    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization "
+    f"SELECT {_ENTRY_COLS}, {_WORK_AUTH_SUBQUERY} AS work_authorization, "
+    f"{_NAME_SUBQUERY} AS display_label "
     f"FROM shortlist_entries "
     f"WHERE id = $1 AND {_NOT_WITHDRAWN_SQL}"
 )
@@ -539,15 +561,21 @@ async def list_for_job(
                 )
                 rows = await conn.fetch(query, job_id, user_id)
         return [_row_to_blind_entry(r) for r in rows]
-    if user_id is None:
-        rows = await conn.fetch(_LIST_QUERY, job_id)
-    else:
-        query = _LIST_QUERY.replace(
-            "WHERE job_id = $1",
-            "WHERE job_id = $1 AND "
-            + _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table="shortlist_entries", n=2),
-        )
-        rows = await conn.fetch(query, job_id, user_id)
+    # RE-PINNED 2026-09-09 -- _LIST_QUERY's new _NAME_SUBQUERY decrypts
+    # resumes.candidate_name (see its comment above), so the non-blind path
+    # now needs the SAME session-scoped key + open transaction as the blind
+    # branch above, not just a bare fetch.
+    async with conn.transaction():
+        await set_pii_key(conn)
+        if user_id is None:
+            rows = await conn.fetch(_LIST_QUERY, job_id)
+        else:
+            query = _LIST_QUERY.replace(
+                "WHERE job_id = $1",
+                "WHERE job_id = $1 AND "
+                + _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table="shortlist_entries", n=2),
+            )
+            rows = await conn.fetch(query, job_id, user_id)
     return [_row_to_entry(r) for r in rows]
 
 
@@ -581,14 +609,20 @@ async def get_one(
                 f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
             )
         return _row_to_blind_entry(row)
-    if user_id is None:
-        row = await conn.fetchrow(_GET_QUERY, entry_id)
-    else:
-        query = (
-            f"{_GET_QUERY} AND "
-            f"{_SHORTLIST_ASSIGNEE_EXISTS_SQL.format(table='shortlist_entries', n=2)}"
-        )
-        row = await conn.fetchrow(query, entry_id, user_id)
+    # RE-PINNED 2026-09-09 -- same reason as the sibling branch in
+    # list_for_job above: _GET_QUERY's _NAME_SUBQUERY decrypts
+    # resumes.candidate_name, so this path now needs its own transaction +
+    # set_pii_key too.
+    async with conn.transaction():
+        await set_pii_key(conn)
+        if user_id is None:
+            row = await conn.fetchrow(_GET_QUERY, entry_id)
+        else:
+            scope = _SHORTLIST_ASSIGNEE_EXISTS_SQL.format(
+                table="shortlist_entries", n=2
+            )
+            query = f"{_GET_QUERY} AND {scope}"
+            row = await conn.fetchrow(query, entry_id, user_id)
     if row is None:
         raise NotFoundError(
             f"shortlist entry {entry_id} not found", entry_id=str(entry_id)
@@ -748,6 +782,12 @@ def _row_to_entry(row: Any) -> ShortlistEntry:
     raw["pipeline_meta"] = _parse_pipeline_meta(
         raw.get("pipeline_meta"), entry_id=raw.get("id")
     )
+    # A non-blind job (default since 2026-09-09): identity is not masked, and
+    # `display_label` already arrived on the row pre-resolved by
+    # `_NAME_SUBQUERY`'s COALESCE -- real name, falling back to the résumé's
+    # filename, or a bare `None` if the row predates this fix. Never the
+    # pseudonym (`_row_to_blind_entry` is the only caller of `pseudonym()`).
+    raw["blinded"] = False
     return ShortlistEntry.model_validate(raw)
 
 

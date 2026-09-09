@@ -6,9 +6,15 @@
   re-polls every 3s; once ranked entries exist it renders the cards WITHOUT the
   trigger, so polling stops.
 
-  Blind-boundary: every card surfaces `entry.display_label` ("Candidate A") —
-  NEVER a real candidate name/email/phone. No other candidate field is read.
+  Blind-boundary: every card surfaces `entry.display_label` for its heading.
+  On a BLIND job that is the rank-based pseudonym ("Candidate A") and the
+  audited "Reveal identity" form is the only path to the real name. On a
+  NON-blind job (default since 2026-09-09) `display_label` already carries
+  the real candidate name (or the résumé's original filename, decided
+  server-side) -- the reveal form has nothing left to do and does not
+  render.
 #}
+{% from "_work_auth_fieldset.html" import work_auth_radios %}
 {% set a = attempt|default(0) %}
 {% set m = max_attempts|default(400) %}
 {# FU-7 §2 (ADR-021 §2 / ADR-029): the fail-closed ranking state. When ranking
@@ -25,6 +31,28 @@
    new run grinds on for minutes, so `not entries` alone can no longer decide
    whether to keep polling. #}
 {% set ranking = _status is not none and _status.get('state') == 'ranking' %}
+{# The reason the run stopped, as the WORKER recorded it
+   (jobs.shortlist_state_reason -> ShortlistStateOut.reason -> here).
+
+   2026-09-09: this was already in the database, already on the DTO, and
+   already in this template's context — and the page threw it away to print
+   "the ranking model was briefly unavailable … no action needed" instead.
+   That was false in every clause: the model was up, the failure was an
+   invalid output (empty content from a starved token budget), and an invalid
+   output at temperature=0 reproduces forever. A user sat watching that
+   message for hours.
+
+   `RankingUnavailableError` covers BOTH "the model is down" and "the model
+   returned something unusable", deliberately — both must fail closed
+   (ADR-029). So the page cannot name which one happened, and must not try.
+   It shows what was recorded and stops promising the problem is temporary.
+
+   Nullable on the DTO, and null on any row written before the column
+   existed, so the whole clause disappears rather than rendering "because
+   None" — the jobs list took a page down over exactly this kind of absent
+   field a week ago. #}
+{% set _reason = (_status.get('reason') if _status is not none else none) %}
+{% set _why = (' — ' ~ _reason) if _reason else '' %}
 {# fix/regenerate-shortlist-no-feedback — awaiting_llm sibling of the
    `ranking` fix above: a Regenerate whose LLM call fails closed calls
    `set_shortlist_awaiting_llm` and returns WITHOUT ever reaching
@@ -43,6 +71,26 @@
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
+  {% if entries %}
+  {# SPONSOR 2026-09-02 §O2 follow-on: "the declaration is a critical eval
+     parameter", so a recruiter needs to see at a glance how many candidates
+     on THIS shortlist still have nothing recorded, without opening every
+     card. Deliberately INSIDE `#shortlist-cards` (what both Generate and the
+     3s poll swap via htmx) rather than in shortlist_list.html around it —
+     a count rendered outside that div would go stale the moment the cards
+     themselves refresh. Suppressed when there are no entries at all: "0 of
+     0" states nothing a recruiter needs told. #}
+  {% set _undeclared = namespace(count=0) %}
+  {% for _e in entries %}
+    {% if (_e.work_authorization|default('unknown', true)) == 'unknown' %}
+      {% set _undeclared.count = _undeclared.count + 1 %}
+    {% endif %}
+  {% endfor %}
+  <p class="hint">
+    {{ _undeclared.count }} of {{ entries|length }} candidate{% if entries|length != 1 %}s{% endif %}
+    {{ 'has' if _undeclared.count == 1 else 'have' }} no work-authorization declaration.
+  </p>
+  {% endif %}
   {% if entries and ranking and polling %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
@@ -74,29 +122,30 @@
      retry ceiling was already hit" apart from this payload alone. #}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Waiting for AI to rank candidates… the ranking model was briefly
-    unavailable. A retry may be queued automatically and will replace the
-    list below if it finishes — if nothing changes after a while, click
-    <strong>Regenerate</strong> to try again. The candidates below are from
-    the <strong>previous run</strong>.
+    Ranking did not finish{{ _why }}. A retry may be queued and would replace
+    the list below if it succeeds — but if the same reason keeps coming back,
+    waiting will not clear it: click <strong>Regenerate</strong>, and if that
+    reports the same thing, it needs looking at rather than more waiting. The
+    candidates below are from the <strong>previous run</strong>.
   </p>
   {% elif entries and awaiting_llm %}
   {# F3/F4 sibling of the branch above, once the poll ceiling has been
      reached: no spinner, no automatic-replacement promise, and an explicit
      manual fallback since a retry is no longer being awaited by this page. #}
   <p class="muted">
-    Waiting for AI to rank candidates did not finish in the time this page
-    was willing to keep checking. The candidates below are from the
-    <strong>previous run</strong> — click <strong>Regenerate</strong> to try
-    again.
+    Ranking did not finish{{ _why }}, and this page has stopped checking. The
+    candidates below are from the <strong>previous run</strong> — click
+    <strong>Regenerate</strong> to try again.
   </p>
   {% elif entries %}{# fall through to the cards below #}
   {% elif polling and awaiting_llm %}
   <p class="muted">
     <span class="htmx-indicator spinner">polling…</span>
-    Waiting for AI to rank candidates… the ranking model was briefly
-    unavailable, so this run is queued to retry automatically. It will pick up
-    again on its own — no action needed.
+    Ranking did not finish{{ _why }}. A retry may be queued and would pick up
+    on its own — but this is <strong>not</strong> necessarily temporary: the
+    same input produces the same answer, so if that reason keeps coming back a
+    retry will keep hitting it. Click <strong>Regenerate</strong> to try again,
+    and if it reports the same thing it needs looking at rather than waiting.
     <br>
     <span class="elapsed">~{{ a * 3 }}s elapsed</span>
   </p>
@@ -141,10 +190,13 @@
         <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
            >{{ entry.display_label }}</a>
       </h3>
-      {% if is_writer %}
+      {% if is_writer and entry.blinded %}
       {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
          deliberate, logged act); it records who/what/when and opens the résumé
-         un-blinded. `context=shortlist` so the audit shows where it came from. #}
+         un-blinded. `context=shortlist` so the audit shows where it came from.
+         Only rendered on a BLIND card (`entry.blinded`) -- on a non-blind job
+         the heading already shows the real identity, so there is nothing left
+         for a reveal to do (2026-09-09). #}
       <form method="post"
             action="{{ url_for('resume_reveal', resume_id=entry.resume_id) }}"
             style="display:inline">
@@ -158,6 +210,8 @@
         <button type="submit" class="btn btn-secondary btn-sm">Reveal identity
           (audited)</button>
       </form>
+      {% endif %}
+      {% if is_writer %}
       {# FU-8/ADR-026: a SECOND audited action on this same card — its own
          one-shot token, independent of the reveal form's token above (same
          résumé id, distinct action). `context=shortlist` mirrors the reveal
@@ -195,7 +249,58 @@
       Nothing has been deleted — the full evidence is still on the candidate
       page. If this is wrong, correct the declaration there.
     </p>
-    {% elif entry.work_authorization == 'unknown' %}
+    {% endif %}
+
+    {% if is_writer %}
+    {# SPONSOR 2026-09-02 §O2 follow-on, from the same user who asked for the
+       control: "the current location (on shortlist only) is not enough,
+       because the declaration is a critical eval parameter" — meaning the
+       declaration belongs on the card where a recruiter is actually
+       comparing candidates, not just on the résumé-detail page.
+
+       REVISED DESIGN (security + review, 2026-09-09): posts to the
+       shortlist-scoped `shortlist_work_authorization` route, NOT the résumé
+       page's `resume_work_authorization` — that route is exempt from the
+       ordinary CSRF hook and only accepts its own one-shot per-résumé token
+       (`test_exempt_routes_still_reject_a_page_token` pins that it must stay
+       that way), and a shortlist renders up to 50 cards: minting a THIRD
+       one-shot slot per card here (alongside reveal + withdraw) was measured
+       against the real MAX_TOKENS_PER_SESSION=64 cap and breaks well before
+       that — at 22 cards the earliest reveal tokens are already evicted, at
+       32 every one is dead. `shortlist_work_authorization` is guarded by the
+       ORDINARY page-token hook instead: `csrf_page_token` is the SAME
+       reusable value on every card and every render, so it costs nothing
+       per card no matter how many render. `job_id`/`resume_id` live in the
+       URL, so no hidden `context`/`job_id` fields are needed.
+
+       Rendered on a VOIDED (not-eligible) card too — correcting a mis-set
+       "not eligible" declaration from the card is the entire point; hiding
+       the control on exactly the card that most needs correcting would
+       defeat it. No note field here — the résumé page keeps that; this is
+       the fast-path control for the value recruiters actually act on.
+
+       The radio enum is spelled ONCE, in `_work_auth_fieldset.html`'s
+       `work_auth_radios` macro — resume_detail.html uses the same macro
+       (review finding 3), so the three-value enum cannot drift between the
+       two forms. #}
+    <form method="post"
+          action="{{ url_for('shortlist_work_authorization', job_id=job_id, resume_id=entry.resume_id) }}"
+          class="work-auth-block">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <fieldset class="work-auth-fieldset">
+        <legend class="label">Eligible to work in Canada</legend>
+        {{ work_auth_radios(entry.work_authorization) }}
+        <button type="submit" class="btn btn-secondary btn-sm">Save</button>
+      </fieldset>
+      {# The one-line consequence hint every writer card carries, independent
+         of the `voided` banner above (which only appears once a candidate is
+         ALREADY marked not eligible) — this is shown before that happens, so
+         the recruiter knows what choosing "Not eligible" here will do. #}
+      <p class="hint small">Marked not eligible: ranked last, scores shown as
+        not applicable — nothing is deleted and this can be changed back at
+        any time.</p>
+    </form>
+    {% elif not voided and entry.work_authorization == 'unknown' %}
     {# Deliberately NOT a warning, and deliberately not styled like the band
        above. "Nobody has recorded this yet" is the default state of every
        candidate and carries no adverse meaning whatsoever; dressing it as a

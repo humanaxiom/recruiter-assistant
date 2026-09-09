@@ -166,13 +166,16 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - Renormalising the remaining sub-weights when a dimension is unmeasurable is open, and needs the same HR decision as item 3: is "no work history at all" neutral-weighted, or does it genuinely mean no seniority?
 - Reverse match fails **open** at stage 3 and is **unwrapped at stage 2** (`orchestrator.py:955-970`), so a stage-3-only fix leaves half the problem.
 
+**Data quality**
+- **`department` is free text and will not group.** Measured on three real SFU JDs through `jd_extract_v2`, then confirmed on the full 2026-09-09 re-parse of 18: the same unit came back as "School of Medicine", "Stephen's Family School of Medicine", "Stephen’s Family School of Medicine" and "Stephens Family School of Medicine" — four spellings across the two measurements, three differing only in the apostrophe (today's five rows alone hold three of them). The extraction itself is good; there is no controlled vocabulary for it to land on, and Campus has one only because SFU has exactly three. **The cheap mitigation is a datalist of the departments already in use** on the create/edit forms ([job_detail.html](../core/frontend/templates/job_detail.html)), so the second person to type a unit picks the existing spelling rather than inventing one — no HR list required. A real vocabulary is HR's decision, not a guess.
+
 **Operational**
 - **Nothing detects "the fix that never ran."** No check reports job edges missing `display_name`, so the next projection-shaped fix will be inert for exactly as long before someone happens to look at a screen. A startup or health-check count of unlabelled edges would have caught the last one in a day.
 - **No way to re-project a job without re-parsing it.** `parse_job` re-runs the LLM and can change the extracted requirements, so it is not a safe "refresh the projection" control. A JD re-parse route exists ([jobs.py:318](../core/src/api/routes/jobs.py#L318)); a re-*project* control does not.
 - `shortlist_entries.score_breakdown` caches the rendered label, so a graph backfill stays invisible until each job is regenerated.
 - The Regenerate staleness bound is wall-clock, not job-time — a 2+ hour ranking reads stale after 1 hour (`shortlist_service.py:276-279`).
 - A second Regenerate during a run is silently dropped by the advisory lock with no user acknowledgement (`matching_tasks.py:80-87`).
-- **Job `306c573c` fails extraction on model output, not infrastructure.** The longest real posting (9,523 chars) returns `llm output invalid: title: missing`. `chat_json` already retries once with the validator error appended, and generation is `temperature=0`, so a retry reproduces it. **Measure before guessing:** `jd_extract_v1`'s measured 4096 floor came from a shorter fixture, and the token floor is per-*prompt*, not per-model.
+- ~~Job `306c573c` fails extraction on model output~~ — **resolved 2026-09-09**: it parsed first time under `jd_extract_v2` at the 8192 floor (`Co-operative Education Program Assistant`, department filled). The residual lesson stands: the token floor is per-*prompt*, not per-model.
 - **No `POST /resumes/{id}/reparse` route** — a degraded résumé cannot be recovered without re-upload. The JD side has one; the résumé side does not.
 - `resume_parse_max_tries` has no upper sanity cap.
 - **FU-7 decision 1 — LLM provider failover chain.** Genuinely useful now: a second Ollama host would let an `aria-gb10` outage fail *over* rather than fail *closed*.
@@ -181,6 +184,7 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - **🔴 GitHub Support PII purge — still open, ~15 minutes of someone's time.** Real candidate résumés remain fetchable by SHA on a public repo. Deleting the branch did **not** stop GitHub serving them (tested, not assumed). Both `humanaxiom/` and `sfu-aria/` are public. This is the oldest unactioned item in the file and the only one with a live external exposure.
 - The shortlist card's quick withdraw still collects no reason (`shortlist_cards.html:151-158`) — deliberate: a text input on every card is poor UX. Consequence: those withdrawals record `None`, so the audited reveal has nothing to offer for them. **Revisit if pilot users withdraw mostly from cards** — now checkable.
 - Reveals are not rate-limited. The audit trail *is* the control (option C records access rather than preventing it), but nothing alerts on the pattern.
+- **The shortlist's per-card one-shot tokens die past 32 cards** (measured 2026-09-09, security + review of the work-authorization fix). Each card mints a reveal AND a withdraw slot (`_mint_card_tokens`, [app.py](../core/frontend/app.py)) against `MAX_TOKENS_PER_SESSION = 64` ([csrf.py:66](../core/frontend/csrf.py#L66)), FIFO-evicted: at 35 cards 6 reveal tokens are dead, at 50 (`match_coarse_k`) 36 are — "Reveal identity" 403s on those cards. Raising the cap is not available (the 4093-byte cookie ceiling is pinned by a test), which is why the card's declaration control was put on the reusable page token instead of a third slot. Nobody has hit it: pilot shortlists are ≤10 today, but 35 résumés are parsed on one job and `shortlist_top_percent` defaults to 100. **Recommended fix when it is hit:** derive card tokens per session from one HMAC key plus a small consumed-set, so the cookie holds one secret instead of 2N.
 
 ---
 
@@ -218,7 +222,7 @@ The three cards below stay **framed, not chosen**, as a menu for after the
 sponsor's set. Each honours the non-negotiables: **offline-only** (inference on
 `aria-gb10` over Tailscale — no cloud, ever), **evidence-backed** (never a number
 without a cited source), **privacy-first** (PIPEDA/FIPPA; PII never embedded;
-blind-by-default).
+blind review opt-in per job since 2026-09-09, audited reveal when it is on).
 
 > How to read a card: **Pitch → Why it's wow → Fits the thesis → Reuses → Next slice → Risks/decisions.**
 > The gate discipline (TDD, three merge-blocking gates, `./scripts/verify.sh all`) applies to all of them.

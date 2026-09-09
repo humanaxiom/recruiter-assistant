@@ -359,7 +359,12 @@ async def test_non_blind_review_shows_real_evidence_against_real_rows(
         entries = await list_for_job(conn, job_id=job_id)
 
     assert entries[0].blinded is False
-    assert entries[0].display_label is None
+    # RE-PINNED 2026-09-09 (commit 7ea9a47 flipped blind_review's default to
+    # FALSE): the read layer must decrypt the real name off the correlated
+    # subquery, never leave display_label as the bare None that rendered as
+    # the literal text "None" on every card of the user's own ranked job.
+    assert entries[0].display_label == "Jane Smith"
+    assert entries[0].display_label != "None"
     got_evidence = entries[0].evidence
     assert got_evidence is not None
     assert "Jane Smith" in got_evidence.requirements[0].evidence
@@ -502,3 +507,130 @@ async def test_export_rows_reveal_false_redacts_identifying_filename_real_rows(
         rows = await export_rows(conn, job_id=job_id, reveal=False)
 
     assert rows[0]["original_filename"] == "resume.pdf"
+
+
+# ── test 29 (new, 2026-09-09): non-blind display_label against real rows ───
+#
+# The mocked-conn unit tests (test_services_shortlist_read.py) can only prove
+# the row-to-DTO pass-through; only a real Postgres proves the COALESCE
+# actually falls back to `original_filename` (NOT NULL in the DDL, so this
+# guarantees display_label is never the bare Python None that rendered as
+# the literal text "None") and that the correlated subquery's
+# pgp_sym_decrypt resolves against the SAME resume the entry belongs to.
+
+
+@pytest.mark.asyncio
+async def test_non_blind_entry_falls_back_to_filename_when_resume_has_no_parsed_name(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.shortlist_service import list_for_job, persist_shortlist
+
+    job_id = await _insert_job(pg_pool, blind_review=False)
+    resume_id = await _insert_resume_with_pii(
+        pg_pool,
+        job_id,
+        name=None,
+        original_filename="candidate_resume_v3.pdf",
+    )
+    entry = ShortlistResultEntry(
+        resume_id=resume_id,
+        rank=1,
+        score_final=0.85,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown(),
+        evidence=None,
+    )
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn, ShortlistResult(job_id=job_id, entries=[entry], pipeline_meta=_meta())
+        )
+
+    async with pg_pool.acquire() as conn:
+        entries = await list_for_job(conn, job_id=job_id)
+
+    assert entries[0].display_label == "candidate_resume_v3.pdf"
+    assert entries[0].display_label is not None
+    assert entries[0].display_label != "None"
+
+
+@pytest.mark.asyncio
+async def test_non_blind_get_one_shows_real_name_against_real_rows(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Same contract as the sibling ``list_for_job`` re-pinned test above,
+    proven through ``get_one``'s own query (``_GET_QUERY``)."""
+    from src.services.shortlist_service import get_one, persist_shortlist
+
+    job_id = await _insert_job(pg_pool, blind_review=False)
+    resume_id = await _insert_resume_with_pii(
+        pg_pool, job_id, name="Jane Smith", email="jane.smith@example.test"
+    )
+    entry = ShortlistResultEntry(
+        resume_id=resume_id,
+        rank=1,
+        score_final=0.85,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown(),
+        evidence=None,
+    )
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn, ShortlistResult(job_id=job_id, entries=[entry], pipeline_meta=_meta())
+        )
+        row = await conn.fetchrow(
+            "SELECT id FROM shortlist_entries WHERE job_id = $1 AND resume_id = $2",
+            job_id,
+            resume_id,
+        )
+    assert row is not None
+    entry_id = row["id"]
+
+    async with pg_pool.acquire() as conn:
+        got = await get_one(conn, entry_id)
+
+    assert got.blinded is False
+    assert got.display_label == "Jane Smith"
+    assert got.display_label != "None"
+
+
+@pytest.mark.asyncio
+async def test_non_blind_get_one_falls_back_to_filename_when_resume_has_no_parsed_name(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.shortlist_service import get_one, persist_shortlist
+
+    job_id = await _insert_job(pg_pool, blind_review=False)
+    resume_id = await _insert_resume_with_pii(
+        pg_pool,
+        job_id,
+        name=None,
+        original_filename="another_candidate.pdf",
+    )
+    entry = ShortlistResultEntry(
+        resume_id=resume_id,
+        rank=1,
+        score_final=0.85,
+        score_structured=0.8,
+        score_evidence=0.7,
+        breakdown=_breakdown(),
+        evidence=None,
+    )
+    async with pg_pool.acquire() as conn:
+        await persist_shortlist(
+            conn, ShortlistResult(job_id=job_id, entries=[entry], pipeline_meta=_meta())
+        )
+        row = await conn.fetchrow(
+            "SELECT id FROM shortlist_entries WHERE job_id = $1 AND resume_id = $2",
+            job_id,
+            resume_id,
+        )
+    assert row is not None
+    entry_id = row["id"]
+
+    async with pg_pool.acquire() as conn:
+        got = await get_one(conn, entry_id)
+
+    assert got.display_label == "another_candidate.pdf"
+    assert got.display_label != "None"
