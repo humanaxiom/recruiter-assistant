@@ -91,9 +91,12 @@ async def _insert_job(
     description_parsed: dict[str, Any] | None = None,
     blind_review: bool | None = None,
 ) -> UUID:
-    """``blind_review=None`` leaves the column at its table DEFAULT (TRUE), so
-    every pre-existing caller is byte-unchanged. Pass it explicitly to reach
-    the NON-blind read path (``_row_to_entry``), which the default hides."""
+    """``blind_review=None`` leaves the column at its table DEFAULT --
+    FALSE as of the 2026-09-09 opt-in reversal (was TRUE under decision
+    4), so every pre-existing caller here is still byte-unchanged.
+    Passing ``blind_review=True`` explicitly is now what reaches the
+    BLIND read path (``_row_to_blind_entry``) -- the reverse of what
+    this docstring said before the reversal."""
     async with pool.acquire() as conn:
         if blind_review is None:
             job_id: UUID = await conn.fetchval(
