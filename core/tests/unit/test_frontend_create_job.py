@@ -10,6 +10,7 @@ the recruiter's inputs intact — no data loss.
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -36,6 +37,14 @@ def _client_with(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+
+
+def _blind_review_input_tag(body: str) -> str:
+    """Isolate the ``<input ... id="blind_review" ...>`` tag so a ``checked``
+    assertion cannot accidentally match some OTHER checkbox on the page."""
+    match = re.search(r'<input\b[^>]*id="blind_review"[^>]*>', body)
+    assert match is not None, 'no <input id="blind_review"> tag found on the page'
+    return match.group(0)
 
 
 # ── api_client.create_job ────────────────────────────────────────────────
@@ -152,6 +161,85 @@ def test_index_renders_status_filter_pills(monkeypatch: Any, client: Any) -> Non
     body = client.get("/").get_data(as_text=True)
     for status in ("draft", "open", "closed", "archived"):
         assert f"status={status}" in body
+
+
+# ── GET / — the blind-review checkbox default (REVERSED 2026-09-09) ───────
+#
+# Sponsor decision, 2026-09-09: "reverse the blind review to be off by
+# default, keep the on switch button." The create-job checkbox must render
+# UNCHECKED on a fresh page, and the "(recommended)" qualifier — which only
+# made sense when blind review was the default-on, safer choice — must be
+# gone. The per-job PATCH toggle on the job-detail page is untouched by this
+# reversal; these tests are about the CREATE form only.
+
+
+def test_index_renders_the_blind_review_checkbox_unchecked_by_default(
+    monkeypatch: Any, client: Any
+) -> None:
+    monkeypatch.setattr(api_client, "list_jobs", MagicMock(return_value=[]))
+    body = client.get("/").get_data(as_text=True)
+    tag = _blind_review_input_tag(body)
+    assert "checked" not in tag
+
+
+def test_index_blind_review_label_no_longer_says_recommended(
+    monkeypatch: Any, client: Any
+) -> None:
+    monkeypatch.setattr(api_client, "list_jobs", MagicMock(return_value=[]))
+    body = client.get("/").get_data(as_text=True)
+    assert "(recommended)" not in body
+
+
+def test_post_jobs_422_rerender_blind_review_ticked_stays_checked(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A recruiter who DID tick the box before a validation error must not
+    have their choice silently reset on re-render."""
+    monkeypatch.setattr(
+        api_client,
+        "create_job",
+        MagicMock(
+            side_effect=api_client.BadRequest(
+                "bad", status_code=422, detail={"detail": "description_raw too short"}
+            )
+        ),
+    )
+    monkeypatch.setattr(api_client, "list_jobs", MagicMock(return_value=[]))
+    resp = client.post(
+        "/jobs",
+        data={
+            "title": "My Distinctive Title",
+            "description_raw": "short",
+            "blind_review": "on",
+        },
+    )
+    body = resp.get_data(as_text=True)
+    tag = _blind_review_input_tag(body)
+    assert "checked" in tag
+
+
+def test_post_jobs_422_rerender_blind_review_unticked_stays_unchecked(
+    monkeypatch: Any, client: Any
+) -> None:
+    """The opt-in default: a recruiter who did NOT tick the box must not see
+    it flip to checked just because the form round-tripped through a 422."""
+    monkeypatch.setattr(
+        api_client,
+        "create_job",
+        MagicMock(
+            side_effect=api_client.BadRequest(
+                "bad", status_code=422, detail={"detail": "description_raw too short"}
+            )
+        ),
+    )
+    monkeypatch.setattr(api_client, "list_jobs", MagicMock(return_value=[]))
+    resp = client.post(
+        "/jobs",
+        data={"title": "My Distinctive Title", "description_raw": "short"},
+    )
+    body = resp.get_data(as_text=True)
+    tag = _blind_review_input_tag(body)
+    assert "checked" not in tag
 
 
 # ── POST /jobs/jd-extract — proxy prefill ────────────────────────────────

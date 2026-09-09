@@ -6,7 +6,10 @@ recruiter-assistant's scope. These tests pin, as merge-blocking contracts:
 * the KEEP set is importable from the module AND re-exported by ``src.schemas``,
 * the deliberate DEVIATIONS from hris (drop ``approval_required_2nd_review``;
   ``JobOut.created_by`` is a nullable ``str`` actor label, not a required UUID;
-  ``JobCreate.blind_review`` defaults ``True`` per decision 4 / the Phase 0 DDL;
+  ``JobCreate.blind_review`` defaults ``False`` — REVERSED 2026-09-09 by the
+  sponsor: blind review is now opt-in per job, not default-on. It was ``True``
+  per decision 4 / the Phase 0 DDL until this reversal; the per-job toggle
+  itself (``PATCH /jobs/{id}`` -> ``blind_review``) is unchanged;
   ``JobListItem`` drops the cut JD-comment/Taleo columns),
 * field constraints reject bad input and ``extra="forbid"``/``"ignore"`` behave
   per model.
@@ -223,12 +226,26 @@ def test_job_out_created_by_rejects_non_string() -> None:
         JobOut(**_job_out_kwargs(created_by=123))
 
 
-# ── DEVIATION 3: blind_review defaults True on JobCreate (decision 4) ─────────
+# ── DEVIATION 3: blind_review defaults False on JobCreate ─────────────────────
+# REVERSED 2026-09-09 (sponsor decision): "reverse the blind review to be off
+# by default, keep the on switch button." Blind review is now opt-in per job.
+# This section pinned decision 4's ``True`` default until this reversal — the
+# per-job toggle (``PATCH /jobs/{id}`` -> ``blind_review``, and the button on
+# the job page) is completely unaffected; only the create-time default flips.
 
 
-def test_job_create_blind_review_defaults_true() -> None:
-    """hris defaulted this False; the port flips it to match the DDL default."""
+def test_job_create_blind_review_defaults_false() -> None:
+    """2026-09-09 reversal — hris also defaulted this False; the port now
+    matches hris again, on purpose, for an unrelated reason (opt-in review,
+    not parity)."""
     job = JobCreate(title="Dev", description_raw=_DESC)
+    assert job.blind_review is False
+
+
+def test_job_create_blind_review_still_accepts_an_explicit_true() -> None:
+    """The reversal changes the DEFAULT only — a caller (the job-page toggle,
+    a manifest row) must still be able to opt IN explicitly."""
+    job = JobCreate(title="Dev", description_raw=_DESC, blind_review=True)
     assert job.blind_review is True
 
 

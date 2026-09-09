@@ -11,7 +11,9 @@ The DDL is the schema contract for the whole port. These tests pin:
   in,
 * **PII at rest** — name/email/phone/cover-letter-text are ``BYTEA``
   (pgcrypto), and only the email *hash* is plaintext,
-* **blind review ON by default** (decision 4),
+* **blind review OFF by default, opt-in per job** (2026-09-09 sponsor
+  reversal of decision 4 — the per-job toggle button/endpoint is unchanged;
+  only the CREATE-TABLE/ALTER default flips),
 * **attributable audit** — ``audit_log`` carries an actor-identity CHECK
   distinguishing a human actor from a service actor (ADR-019 §1.4/§6).
 * **résumé withdrawal lifecycle** (ADR-026 decision 1, FU-8) — a dedicated,
@@ -351,13 +353,63 @@ def test_tables_are_created_before_the_tables_that_reference_them() -> None:
 # ── jobs ───────────────────────────────────────────────────────────────────
 
 
-def test_jobs_blind_review_defaults_true() -> None:
-    """Decision 4 — DEVIATION from hris, whose default was FALSE."""
+def test_jobs_blind_review_defaults_false() -> None:
+    """REVERSED 2026-09-09 (sponsor decision): blind review moves from
+    default-ON to opt-in-per-job. The per-job toggle (``PATCH
+    /jobs/{id}`` -> ``blind_review``) is completely unchanged; only the
+    CREATE-TABLE default flips. This test's prior form pinned decision 4's
+    ``DEFAULT TRUE`` — that decision is what was reversed, not this test
+    weakened; see ``test_jobs_blind_review_default_reversal_has_an_idempotent_alter``
+    below for the matching ALTER a live deployment also needs."""
     assert re.search(
+        r"blind_review\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+        _table_sql("jobs"),
+        re.IGNORECASE,
+    )
+    # The OLD literal must be gone, not merely absent from a match attempt —
+    # a builder that left both TRUE and FALSE default clauses in the column
+    # list must still fail this.
+    assert not re.search(
         r"blind_review\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+TRUE",
         _table_sql("jobs"),
         re.IGNORECASE,
     )
+
+
+def test_jobs_blind_review_default_reversal_has_an_idempotent_alter() -> None:
+    """``CREATE TABLE IF NOT EXISTS`` never touches an already-existing
+    deployment's column default — the same already-migrated-volume risk
+    every other ALTER in this module guards against (mirrors
+    ``description_sha256``/``shortlist_top_percent``/``users.role``). A
+    dedicated ``ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT
+    FALSE`` is required so the pilot box's already-running deployment is
+    actually reversed, not just a fresh install's CREATE TABLE."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ALTER\s+COLUMN\s+blind_review\s+SET\s+"
+            r"DEFAULT\s+FALSE",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one default-reversal ALTER"
+
+
+def test_jobs_blind_review_default_reversal_alter_runs_after_the_create_table() -> None:
+    """Postgres would reject the ALTER if ``jobs`` did not exist yet."""
+    alter_idx = next(
+        i
+        for i, s in enumerate(_STATEMENTS)
+        if re.search(
+            r"ALTER\s+TABLE\s+jobs\s+ALTER\s+COLUMN\s+blind_review\s+SET\s+"
+            r"DEFAULT\s+FALSE",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    )
+    assert _statement_index("jobs") < alter_idx
 
 
 def test_jobs_retention_days_check() -> None:

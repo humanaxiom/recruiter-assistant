@@ -239,15 +239,71 @@ async def test_pii_round_trip_through_app_pii_key(conn: asyncpg.Connection) -> N
 
 
 @pytest.mark.asyncio
-async def test_jobs_blind_review_defaults_true(conn: asyncpg.Connection) -> None:
+async def test_jobs_blind_review_defaults_false(conn: asyncpg.Connection) -> None:
+    """REVERSED 2026-09-09 (sponsor decision): "reverse the blind review to
+    be off by default, keep the on switch button." An INSERT that omits
+    ``blind_review`` entirely must read back ``FALSE`` against the REAL
+    column default — this test's prior form pinned decision 4's DEFAULT
+    TRUE, and the decision (not the test) is what changed. The per-job
+    toggle itself is untouched by this reversal."""
     job_id = await _insert_job(conn)
     row = await conn.fetchrow(
         "SELECT blind_review, status, retention_days FROM jobs WHERE id = $1", job_id
     )
     assert row is not None
-    assert row["blind_review"] is True
+    assert row["blind_review"] is False
     assert row["status"] == "draft"
     assert row["retention_days"] == 180
+
+
+@pytest.mark.asyncio
+async def test_existing_deployment_blind_review_default_is_reversed(
+    pg_dsn: str,
+) -> None:
+    """The pilot box already ran the OLD DDL (``blind_review`` defaulting
+    TRUE) before this reversal landed. ``CREATE TABLE IF NOT EXISTS`` is a
+    no-op against that already-migrated volume, so only a dedicated,
+    idempotent ``ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT
+    FALSE`` — re-run on every boot, exactly like the ``description_sha256``/
+    ``shortlist_top_percent``/``users.role`` ALTERs this module already
+    proves elsewhere — can actually flip a LIVE deployment's default forward.
+    A green ``test_jobs_blind_review_defaults_false`` above proves only the
+    fresh-install path; this proves the upgrade path."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        # Simulate the OLD deployment's already-applied (pre-reversal) default.
+        await connection.execute(
+            "ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT TRUE"
+        )
+        default_before = await connection.fetchval("""
+            SELECT column_default FROM information_schema.columns
+            WHERE table_name = 'jobs' AND column_name = 'blind_review'
+            """)
+        assert default_before is not None
+        assert "true" in default_before.lower()
+
+        # The only thing a real re-deploy does: re-run the startup DDL.
+        await init_schema(connection)
+
+        default_after = await connection.fetchval("""
+            SELECT column_default FROM information_schema.columns
+            WHERE table_name = 'jobs' AND column_name = 'blind_review'
+            """)
+        assert default_after is not None
+        assert "false" in default_after.lower()
+
+        job_id = await connection.fetchval(
+            "INSERT INTO jobs (title, description_raw) VALUES ($1, $2) " "RETURNING id",
+            "Reversal Check",
+            "A description long enough to clear the fifty-char floor here.",
+        )
+        row_value = await connection.fetchval(
+            "SELECT blind_review FROM jobs WHERE id = $1", job_id
+        )
+        assert row_value is False
+    finally:
+        await connection.close()
 
 
 @pytest.mark.asyncio
