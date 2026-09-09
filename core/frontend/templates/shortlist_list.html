@@ -37,5 +37,23 @@
   <strong>parsed</strong> before generating a shortlist.</p>
 {% endif %}
 {% endif %}
+{#
+  Live demo, 2026-09-09: a degraded parse (FU-7 §4 / ADR-030) is never
+  projected and never ranked, but every résumé on the job still showed
+  `parsed` -- the page had nothing to say about the one that silently never
+  joined the graph. Parse state, not PII, so this renders for every role and
+  even with no authenticated session at all -- unconditional of `is_writer`.
+#}
+{% set degraded_count = degraded_count|default(0) %}
+{% if degraded_count > 0 %}
+<p class="hint">
+  {% if degraded_count == 1 %}
+  {{ degraded_count }} résumé has a degraded parse and is not ranked --
+  {% else %}
+  {{ degraded_count }} résumés have a degraded parse and are not ranked --
+  {% endif %}
+  open each résumé to see why; a re-upload re-parses it.
+</p>
+{% endif %}
 {% include "shortlist_cards.html" %}
 {% endblock %}

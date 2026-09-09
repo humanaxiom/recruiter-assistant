@@ -670,6 +670,15 @@ def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") == "parsed" for r in resumes)
 
 
+def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
+    """Live demo, 2026-09-09: a degraded parse (FU-7 §4 / ADR-030) is never
+    projected and never ranked, but the shortlist page said nothing about it —
+    every résumé showed ``parsed`` while one silently never joined the graph.
+    Counts only résumés whose skills pass fell back to the keyword scan, not
+    the whole pool and not the ranked remainder."""
+    return sum(1 for r in resumes if r.get("degraded"))
+
+
 def _render_job_detail(
     job_id: UUID, *, error: str | None = None, status_code: int = 200
 ) -> Any:
@@ -1062,6 +1071,7 @@ def job_shortlist(job_id: UUID) -> Any:
         entries=entries,
         shortlist_status=shortlist_status,
         any_resume_parsed=_any_resume_parsed(resumes),
+        degraded_count=_degraded_resume_count(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
         # The included `shortlist_cards.html` carries one reveal form per card,
