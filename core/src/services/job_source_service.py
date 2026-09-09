@@ -74,7 +74,9 @@ class ExternalJobUpsert:
     department: str | None = None
     location: str | None = None
     employment_type: str | None = None
-    blind_review: bool = True
+    # Default reversed 2026-09-09 with ``JobCreate.blind_review`` (sponsor
+    # decision); a Taleo import behaves like any other job create.
+    blind_review: bool = False
 
 
 @dataclass(frozen=True)

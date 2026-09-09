@@ -9,7 +9,12 @@ originally cut too, but ADR-019 (FU-5) reverses that: ``users`` and
 
 Deviations from hris, all deliberate:
 
-* ``jobs.blind_review`` defaults ``TRUE`` (hris: ``FALSE``) — decision 4.
+* ``jobs.blind_review`` defaults ``FALSE`` (hris: also ``FALSE``) — decision 4
+  set it ``TRUE``; reversed 2026-09-09 at the sponsor's request ("reverse the
+  blind review to be off by default, keep the on switch button"). The
+  per-job toggle is unchanged. A dedicated ``ALTER ... SET DEFAULT FALSE``
+  below reverses an already-migrated deployment's default too — see its
+  comment for why ``CREATE TABLE IF NOT EXISTS`` alone cannot.
 * ``jobs.created_by`` / ``resumes.uploaded_by`` are nullable ``TEXT`` actor
   labels, not UUID FKs — this predates ADR-019's ``users`` table and is not
   yet wired to it (FU-5 slice 1 is schema only).
@@ -133,7 +138,7 @@ _STATEMENTS: tuple[str, ...] = (
                           CHECK (retention_days BETWEEN 30 AND 730),
         shortlist_top_percent INTEGER NOT NULL DEFAULT 100
                           CHECK (shortlist_top_percent BETWEEN 1 AND 100),
-        blind_review      BOOLEAN NOT NULL DEFAULT TRUE,
+        blind_review      BOOLEAN NOT NULL DEFAULT FALSE,
         additional_requirements        TEXT,
         additional_requirements_parsed JSONB,
         source            TEXT NOT NULL DEFAULT 'manual'
@@ -612,6 +617,15 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS job_assignees_user_idx
         ON job_assignees (user_id, assigned_at DESC)
     """,
+    # 2026-09-09 sponsor decision reverses ``jobs.blind_review`` from
+    # default-ON back to default-OFF (decision 4, above). ``CREATE TABLE IF
+    # NOT EXISTS`` never touches an already-existing deployment's column
+    # default, and the pilot box has 26 rows created under the old one — so
+    # a dedicated, idempotent ALTER (mirrors ``description_sha256`` /
+    # ``shortlist_top_percent`` / ``users.role`` elsewhere in this module) is
+    # required to actually reverse a LIVE deployment, not just a fresh
+    # install's CREATE TABLE. Must run after ``jobs`` exists.
+    "ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT FALSE",
 )
 
 

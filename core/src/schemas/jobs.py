@@ -80,9 +80,12 @@ class JobCreate(BaseModel):
     # DEVIATION: dropped hris ``approval_required_2nd_review`` — the 2nd-review
     # workflow is cut and the Phase 0 DDL has no such column.
     # When true, the review surfaces hide candidate identity (blind review).
-    # DEVIATION: hris defaulted this False; flipped to True to match the Phase 0
-    # DDL default (blind-by-default, decision 4).
-    blind_review: bool = True
+    # DEVIATION: hris defaulted this False; Phase 0 flipped it to True
+    # (blind-by-default, decision 4). REVERSED 2026-09-09 at the sponsor's
+    # request ("reverse the blind review to be off by default, keep the on
+    # switch button") — back to hris's own False. The per-job toggle itself
+    # is unchanged.
+    blind_review: bool = False
     # Sponsor 2026-09-02 §I4: the hiring manager's own special skills /
     # experience, which "might or might not be in the job posting".
     #

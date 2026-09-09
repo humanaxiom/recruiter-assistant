@@ -118,7 +118,9 @@ class Settings(BaseSettings):
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
-    blind_review_default: bool = True  # decision 4 — redaction ON by default
+    # Reversed 2026-09-09 (sponsor decision) to match JobCreate/DDL — has no
+    # reader in src/ (nothing wires it up); kept only as a pinned setting.
+    blind_review_default: bool = False
     # ADR-008 — the salt folded into every NON-VOCAB skill's canonical Skill-
     # graph key (``h:sha256(salt + normalised_name)[:32]``). Empty by default,
     # same discipline as ``pii_key`` above: ``src.worker.main.startup`` refuses

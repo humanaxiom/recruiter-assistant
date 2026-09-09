@@ -24,6 +24,10 @@ Postgres access is raw asyncpg with hand-written SQL (porting the source's prove
 ### 4. Three deliberate schema deviations from the source
 
 - **`jobs.blind_review` DEFAULT TRUE** (source: `FALSE`). Blind review is on by default (decision 4); reveal is opt-in and audited.
+  **Amended 2026-09-09:** default reversed to `FALSE` at the sponsor's request ("reverse the blind
+  review to be off by default, keep the on switch button"). The per-job switch and its audit are
+  unchanged; an already-running deployment gets an idempotent `ALTER ... SET DEFAULT FALSE` at
+  startup, and existing rows created under the old default get `scripts/backfill_blind_review_default.py`.
 - **`created_by` / `uploaded_by` are nullable `TEXT`** (source: `UUID` FK → `users(id)`). There is no users/auth table in v1 (CAS was cut; minimal auth arrives in Phase 6), so these are plain nullable actor labels.
 - **`score_final` unified to `DOUBLE PRECISION` + `CHECK (score_final BETWEEN 0 AND 1)`** across both `shortlist_entries` and `reverse_match_entries`. The source typed one `NUMERIC(5,4)` and its twin `DOUBLE PRECISION`, so asyncpg returned a `Decimal` from one and a `float` from the other. Unifying removes that footgun. `reverse_match_entries.rank` also gains the `> 0` CHECK its twin already had.
 

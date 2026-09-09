@@ -8,7 +8,7 @@ Ported from the resume-ranking feature of an internal HRIS onto the offline-firs
 
 ## What it does
 
-- **Blind by default** — candidate name / email / phone are redacted in the viewer and excluded from embeddings; reveal is opt-in and audited (decision 4).
+- **Blind review is opt-in per job** — a recruiter switches it on per requisition; when on, candidate name / email / phone are redacted in the viewer and excluded from embeddings, and reveal is opt-in and audited (decision 4, reversed 2026-09-09).
 - **Evidence-backed** — the LLM produces per-requirement evidence, then an anti-fabrication pass fuzzy-matches every quote (≥ 0.85) against its cited resume chunk; unverifiable quotes are blanked.
 - **Hybrid ranking** — Neo4j vector recall + a structured skill/experience/education/seniority score + evidence completeness + motivation.
 - **Offline** — all model calls go through an OpenAI-compatible client pointed at Ollama on a local or tailnet peer (default: `aria-gb10` over Tailscale, configurable via `.env`). No cloud endpoint exists anywhere in the code or compose.
@@ -90,7 +90,7 @@ erDiagram
         text description_raw
         jsonb description_parsed
         job_status status
-        bool blind_review "DEFAULT TRUE"
+        bool blind_review "DEFAULT FALSE"
         text created_by "nullable actor label"
     }
     resumes {

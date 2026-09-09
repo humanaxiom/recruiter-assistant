@@ -62,6 +62,10 @@ commented inline with `DEVIATION`:
   decision 4). The `JobCreate` schema default is flipped to `True` so the schema default matches the
   DDL / decision-4 default. `JobUpdate.blind_review` stays `bool | None = None` (a PATCH omit means
   "unchanged").
+  **Amended 2026-09-09:** both the DDL and `JobCreate` defaults reversed back to `FALSE` at the
+  sponsor's request; the per-job switch and its audit are unchanged, existing deployments get the
+  ALTER at startup and `scripts/backfill_blind_review_default.py` for rows created under the old
+  default.
 - **`approval_required_2nd_review` dropped** (also a CUT above): the DDL has no such column, so the
   DTO does not carry it.
 
