@@ -45,7 +45,7 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 | **Work authorization, as clicked** (2026-09-09) | **Fixed** — the first human click on the §O2 control returned 403, because the reveal re-render minted none of the page's one-shot tokens. Reported with *"the declaration is a critical eval parameter"*, so every shortlist card now carries the control and the list says how many candidates have no declaration. |
 | **Blind review off by default** (sponsor, 2026-09-09) | **Done** — *"reverse the blind review to be off by default, keep the on switch button."* DDL default, create schema, Taleo default, the create form; an idempotent `ALTER` for existing deployments and `scripts/backfill_blind_review_default.py` for rows created under the old default (a job someone toggled by hand keeps their choice). And the defect it exposed: a non-blind shortlist card was labelled `None` and a non-blind résumé page showed no name — now the candidate's name, as the résumé list already did. |
 | **The demo stall** (2026-09-09) | **Fixed** — a résumé whose skills pass fell back is deliberately never projected (ADR-030), but the ranking guard counted it as eligible and deferred 20 × 45 s for a projection that could not come. The guard now counts only what will be projected, and the shortlist says how many résumés are excluded as degraded. |
-| **S3** CSV · **S7** notify · **S8** posting URL | **S3 UNBLOCKED 2026-09-09** — the sponsor delivered a 315-row export; in progress on `feat/candidate-roster-csv`, and it corrected two things this plan had guessed wrong (see §S3). S7 and S8 not started. |
+| **S3** CSV · **S7** notify · **S8** posting URL | **S3 ✅ DELIVERED 2026-09-09** on `feat/candidate-roster-csv` — built against the sponsor's real 315-row export, which corrected two things this plan had guessed wrong (see §S3). Verified live: **every parsed résumé matched its roster row.** S7 and S8 not started. |
 
 Findings from building it, recorded because they change what a future session
 should expect rather than because they were interesting. **The last two came
@@ -399,7 +399,7 @@ The single highest value-per-hour item in the set.
 - **Tests:** a fixture combined PDF splits to the expected manifest; a `LOW TEXT` (scanned) segment is flagged and not silently ingested; segmentation failure falls back to the heuristic and says so; the confirmation step is *required* — an accept-less request ingests nothing.
 - **Amend ADR-017** — do not write a sibling (`CLAUDE.md` §0a).
 
-**S3 · Candidate CSV roster (I1)** *(~1.5 days)* — **UNBLOCKED 2026-09-09, in progress on `feat/candidate-roster-csv`**
+**S3 · Candidate CSV roster (I1)** — ✅ **DELIVERED 2026-09-09** on `feat/candidate-roster-csv` (20 commits, gates green, unpushed pending the user's Codex review)
 
 > ⓘ **The sample export arrived and contradicted this section.** S3 was blocked
 > on "a sample Taleo CSV export" (§"What I need from you", item 1). The DTO

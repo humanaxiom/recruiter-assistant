@@ -6,6 +6,36 @@ record: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
+## ⏸ START HERE — work is PAUSED, and the next session is not a build session
+
+**The user paused feature work on 2026-09-09** after seeing that a
+315-candidate requisition needs ~11 hours of parsing:
+
+> *"this is not very good. a human can rank those at a fraction of the time. so
+> maybe we are not ready to proceed until the data center hardware is ready…
+> I will use my Codex credits in the meantime to validate the code… Will get
+> back to you in a separate session after reviewing codex recommendations and
+> talking to our infra team."*
+
+**Two inputs are owed before anything is built**, and neither is yours to
+produce: a Codex review of `feat/candidate-roster-csv`, and an infra
+conversation about GPU capacity. **The next session starts from those, not from
+the ROADMAP menu.**
+
+**Do not**, in the meantime: optimise the queue, raise `max_jobs`, push the
+branch, or start a new feature. The throughput ceiling is measured and
+hardware-bound (ROADMAP §0) — a session spent tuning it is a session spent
+against a wall.
+
+**Do, if asked for something useful:** the four recorded-not-fixed items in §3.
+All are small, none touches the ceiling.
+
+**The branch is finished and green** — 20 commits, `verify.sh all` clean, both
+merge-blocking gates satisfied, verified against the sponsor's real data. It is
+deliberately **unpushed**, pending that review.
+
+---
+
 ### 1. The objective — it changed on 2026-08-27
 
 > **The four people on the pilot box can do their real hiring work in it, and
@@ -425,7 +455,8 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **`feat/candidate-roster-csv`**, 16 commits, gates green, **NOT pushed** — see §3 |
+| Branch in flight | **`feat/candidate-roster-csv`**, 20 commits, gates green, **NOT pushed — awaiting the user's Codex review** (see START HERE) |
+| Pilot box contents | The DTO's **Business Analyst** req + 75 résumés + the 315-row roster reconciled. Parsing was **still running** when the session ended (~47/75 parsed); a shortlist was triggered and sits in `shortlist_state='ranking'` behind the parse queue. Everything that predated this — 29 jobs, 48 résumés — was **wiped** at the user's request. |
 | Gates, last local run | `verify.sh all` → 6084 unit @ 91.66% + 625 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
 | PR | none yet for the roster branch. [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104) MERGED |
 | ⚠️ Before pushing | The branch history was **rewritten four times** to purge committed candidate PII. A `backup-pre-redact-*` branch still holds the unredacted history — **delete it before any push**, and re-run the 925-token scan in §3 if you rewrite again. |

@@ -46,6 +46,37 @@ interesting card on the menu.
 
 # Open work
 
+> ## ⏸ 0. PAUSED — throughput is a hardware ceiling (user decision, 2026-09-09)
+>
+> **Feature work is paused pending datacenter hardware.** Shown that a
+> 315-candidate requisition needs ~11 hours of parsing, the user's call was:
+> *"this is not very good. a human can rank those at a fraction of the time. so
+> maybe we are not ready to proceed until the data center hardware is ready."*
+>
+> **The arithmetic supports it.** One résumé parse is 2–3 SEQUENTIAL LLM calls
+> (`resume_core_v1`, `resume_skills_v2`, `cover_letter_v1` when present), so
+> `max_jobs=4` puts up to **twelve concurrent requests on one GPU** serving a
+> 20B model — relocating the queue into Ollama rather than raising throughput.
+> Against the profile's ~35s uncontended call, the floor for 75 résumés is
+> ≈1.8 h; observed ≈2.5 h. **Within ~1.4× of the floor**, so tuning is worth
+> ~30%, not 10×. Measured with gb10 verified free of foreign workload.
+>
+> **Do not spend a session optimising the queue against this ceiling**, and
+> specifically do not raise `max_jobs` — §"Never diagnose the model on a
+> contended peer" and `HANDOFF.md` lesson 7 both apply. A step change needs
+> more or faster GPUs, a smaller model, or fewer calls per résumé.
+>
+> **The comparison that actually matters is not wall-clock.** 11 machine-hours
+> cost ~0 human attention; a recruiter screening 315 résumés at two minutes
+> each spends ~10.5 of their own. On cost the tool already wins. The damage is
+> **iteration latency** — a wrong JD or manager prompt is discovered tomorrow.
+> That is what better hardware genuinely buys, and it is the argument to make
+> to the infra team.
+>
+> **In parallel:** the user is reviewing `feat/candidate-roster-csv` with Codex
+> and talking to the infra team. Next session starts from those two inputs, not
+> from this menu.
+
 Ordered. Items 1–2 are what a live deployment now demands; 3–5 are carried
 engineering residuals that the pilot has made either more or less urgent.
 
@@ -95,16 +126,24 @@ There are no backups and no restore drill.
 
 ## 2. Capture what the four users hit
 
-There is currently **no channel from a pilot user's confusion back into this
-repo** except someone reporting it in conversation. Every defect the pilot has
-produced so far arrived that way, and each was worth more than a week of
-inspection: 20 dead jobs, a withdraw form that collected no reason, hashed skill
-labels where words belonged.
+✅ **DONE 2026-09-09** — [docs/pilot-feedback.md](pilot-feedback.md) exists,
+newest-first, with the DTO's bundle request recorded verbatim and the three
+2026-09-09 reports that #104 closed. **It earned its keep immediately**: the
+DTO's report is what produced the roster feature, and the file is now where
+four measured findings live that no test could have produced (the
+parse-ordering dependency, the ~29 résumés/hour ceiling, the full-export vs
+subset asymmetry, and the Windows-1252 JD encoding).
 
-The cheapest version is a file, not a feature: a `docs/pilot-feedback.md` that
-each report lands in verbatim, dated, with who hit it. Promote from there. Do
-this before building anything on the menu below — it is what tells you which card
-to pick.
+⚠️ **It carries a standing PII warning at the top, and that warning was
+earned.** Real candidate details were committed to that file by the session
+that created it — while documenting PII hygiene. Caught before push, history
+rewritten. **Read the warning before adding an entry**: describe the defect,
+never the person, and redact identifiers out of a quoted user report.
+
+The original reasoning, kept because it still holds: every defect the pilot has
+produced arrived by someone mentioning it in conversation, and each was worth
+more than a week of inspection — 20 dead jobs, a withdraw form that collected
+no reason, hashed skill labels where words belonged.
 
 ## 3. The remaining 45.2% of a real posting
 
