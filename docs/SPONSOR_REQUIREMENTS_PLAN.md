@@ -45,7 +45,7 @@ Branch `feat/sponsor-requirements`, off `main` at `ec2f2d2`.
 | **Work authorization, as clicked** (2026-09-09) | **Fixed** — the first human click on the §O2 control returned 403, because the reveal re-render minted none of the page's one-shot tokens. Reported with *"the declaration is a critical eval parameter"*, so every shortlist card now carries the control and the list says how many candidates have no declaration. |
 | **Blind review off by default** (sponsor, 2026-09-09) | **Done** — *"reverse the blind review to be off by default, keep the on switch button."* DDL default, create schema, Taleo default, the create form; an idempotent `ALTER` for existing deployments and `scripts/backfill_blind_review_default.py` for rows created under the old default (a job someone toggled by hand keeps their choice). And the defect it exposed: a non-blind shortlist card was labelled `None` and a non-blind résumé page showed no name — now the candidate's name, as the résumé list already did. |
 | **The demo stall** (2026-09-09) | **Fixed** — a résumé whose skills pass fell back is deliberately never projected (ADR-030), but the ranking guard counted it as eligible and deferred 20 × 45 s for a projection that could not come. The guard now counts only what will be projected, and the shortlist says how many résumés are excluded as degraded. |
-| **S3** CSV · **S7** notify · **S8** posting URL | Not started. **S3 is blocked on a sample export** — ask the sponsor for one. |
+| **S3** CSV · **S7** notify · **S8** posting URL | **S3 UNBLOCKED 2026-09-09** — the sponsor delivered a 315-row export; in progress on `feat/candidate-roster-csv`, and it corrected two things this plan had guessed wrong (see §S3). S7 and S8 not started. |
 
 Findings from building it, recorded because they change what a future session
 should expect rather than because they were interesting. **The last two came
@@ -399,13 +399,24 @@ The single highest value-per-hour item in the set.
 - **Tests:** a fixture combined PDF splits to the expected manifest; a `LOW TEXT` (scanned) segment is flagged and not silently ingested; segmentation failure falls back to the heuristic and says so; the confirmation step is *required* — an accept-less request ingests nothing.
 - **Amend ADR-017** — do not write a sibling (`CLAUDE.md` §0a).
 
-**S3 · Candidate CSV roster (I1)** *(~1.5 days)*
+**S3 · Candidate CSV roster (I1)** *(~1.5 days)* — **UNBLOCKED 2026-09-09, in progress on `feat/candidate-roster-csv`**
 
-- `parse_candidate_csv` beside `parse_csv_manifest`, with the same hardening (size cap, case/space-insensitive headers, per-row `ManifestError` carrying a line number).
-- Columns: candidate identifier, name, email, **work-authorization declaration**, cover-letter flag, and the Taleo attachment filename(s) for reconciliation.
-- **Reconciliation is the real work.** The CSV row and the split PDF have to find each other. Match on attachment filename first (deterministic), fall back to email, then to normalised name. **Every unmatched row on either side is surfaced, never silently dropped** — that is ADR-017's existing "nothing is silently dropped" invariant and it must hold here.
-- The CSV carries PII. It goes through the same encryption boundary as `candidate_name`/`candidate_email`, and is **never** embedded (ADR-008).
-- **Tests:** all three match strategies; unmatched-in-both-directions surfaces; a CSV with no auth column yields `unknown` for every row (never `not_eligible`); formula-injection neutralisation on any cell that round-trips to the export.
+> ⓘ **The sample export arrived and contradicted this section.** S3 was blocked
+> on "a sample Taleo CSV export" (§"What I need from you", item 1). The DTO
+> supplied one on 2026-09-09 — 315 rows, for an SFU IT Services Business
+> Analyst req, and explicitly *"sample data, so BA is NOT the only job"*. Two
+> bullets below were written against a guess at the format and were **wrong**;
+> they are corrected in place rather than left to mislead the next session.
+> The full report is in [pilot-feedback.md](pilot-feedback.md).
+
+- `parse_candidate_csv` beside `parse_csv_manifest`, with the same hardening (size cap, case/space-insensitive headers, per-row `ManifestError` carrying a line number). **Done** — plus underscore/repeated-whitespace tolerance in header matching, and a UTF-8 BOM on the real file's first header.
+- **The real columns** are `Flagged, Name, SFU ID, Work Authorization, Resume, Email, APSA Internal, CUPE Internal, Keyboarding, Req. Based Status, Next Steps (Req), Req Rank, Submission Date`. Note what is **absent**: there is no attachment-filename column, and `Resume` is blank on all 315 rows. There is no cover-letter flag either.
+- ~~Match on attachment filename first (deterministic), fall back to email, then to normalised name.~~ **Filename matching is impossible** — see above. Reconciliation is **email-hash first, then normalised name**, and that was measured before being committed to: of 21 résumés split out of one combined PDF, **19 matched the CSV by exact email with zero false matches**; the two misses carry no email anywhere in their text. **Every unmatched row on either side is still surfaced, never silently dropped** — ADR-017's invariant holds, extended to a case ADR-017 did not have: a name matching *two* résumés is reported as ambiguous, never resolved arbitrarily to one.
+- **Work authorization is four strings, not a flag**: `No Restrictions` (180), `Work Permit` (123), `Not eligible to work in Canada` (7), `Study Permit` (5), zero blanks. Sponsor decision 2026-09-09: **`Work Permit` maps to `eligible`**, so 12 rows band last rather than 135. An unrecognised value maps to `unknown`, **never** `not_eligible`.
+- **APSA/CUPE internal status is new** and nothing in the repo modelled it: `APSA Internal = I` on 6 rows, `CUPE Internal = I` on 5. Sponsor: "SFU employee gets high marks". Shipped as a **+5-of-100 configurable, disclosed uplift** inside `score_final` — not a hard band above all externals, which would put 11 people on top regardless of fit.
+- The CSV carries PII. It goes through the same encryption boundary as `candidate_name`/`candidate_email`, and is **never** embedded (ADR-008). The reconciliation report carries counts and line numbers only — never a decrypted name or email, and neither does its audit event.
+- **Tests:** both surviving match strategies; unmatched-in-both-directions surfaces; ambiguous-name is refused not guessed; duplicate rows with **conflicting** declarations are refused and reported, never last-wins (the real export contains exactly this case); a CSV with no auth column yields `unknown` for every row (never `not_eligible`); formula-injection neutralisation on any cell that round-trips to the export.
+- ⚠️ **What this sample does not exercise.** All 315 rows carry a recognised declaration, so the `unknown` state — which exists precisely so an undeclared candidate is never banded last on a protected ground — is never reached by real data. Its only coverage is the synthetic vendor fixture. A clean run against a real export is **not** evidence that path works.
 
 ### PR 3 — "The list the sponsor described"
 
@@ -521,14 +532,23 @@ measurement the skill-family classifier has never had.
 The answers are in [§0](#0-decisions--answered-2026-09-02). What they left open,
 and what is now worth asking next:
 
-1. **A sample Taleo CSV export.** Answer 1 deferred the CSV ("TBD") and made the
-   recruiter the interim source, which is shipped. S3 stays blocked on knowing
-   the real column names — in particular *whether the export carries the
-   candidate's own work-authorization prescreen answer*, which is what would let
-   the declaration come from the candidate rather than from a recruiter
-   re-keying it. **One real export file settles it.**
-2. **One real combined PDF**, to build S1's splitter confirmation screen against
-   real segmentation behaviour rather than a synthetic fixture.
+1. ~~**A sample Taleo CSV export.**~~ **ANSWERED 2026-09-09 — delivered.** And
+   it settled the open question in the affirmative: the export **does** carry
+   the candidate's own work-authorization prescreen answer, on every one of its
+   315 rows, so the declaration now comes from the candidate rather than from a
+   recruiter re-keying it. Option **A** of §2.1 — the one the plan recommended
+   and answer 1 deferred — is therefore live, with the shipped recruiter-entered
+   path (option C) surviving as the correction mechanism for rows the CSV does
+   not cover. See §S3 above.
+2. ~~**One real combined PDF**~~ **ANSWERED 2026-09-09 — four delivered**, and
+   they were worth more than the confirmation screen they were requested for.
+   Run against real segmentation, the splitter **silently dropped a full résumé
+   page on two of the four exports** and could not segment a third at all
+   (`max_tokens` was 4096, half the repo's measured floor). Both fixed on
+   `feat/candidate-roster-csv`; page loss is now detected and exits non-zero.
+   The confirmation screen is still owed, and this is the evidence for why §2.0
+   calls it mandatory: even with a correct budget, LLM segmentation left pages
+   unassigned on half of the real exports.
 3. **Who signs off on the Taleo egress carve-out?** hris's ADR-0012 records that
    production go-live with `TALEO_ENABLED=true` needs **counsel + privacy-officer
    sign-off**, and that the firewall must enumerate `tre.tbe.taleo.net:443`. The
