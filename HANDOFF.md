@@ -30,6 +30,33 @@ against a wall.
 **Do, if asked for something useful:** the four recorded-not-fixed items in §3.
 All are small, none touches the ceiling.
 
+> 🔴 **THE FIRST THING TO FIX WHEN WORK RESUMES — a user-reported defect
+> (2026-09-10): a job with ZERO extracted requirements ranks anyway, silently.**
+>
+> Reported as *"Resume short listing was geerated against the additional hiring
+> manager input, and 0 against the JD?!! basically core functioning system
+> feature gone"*. Measured on 50 real entries: `skill = 0.000` for **every**
+> candidate, `experience`/`education` trivially 1.000, and `manager_prompt`
+> (weight **0.10**) the only discriminator — so it became **100% of the
+> signal** and the ordering was arbitrary in merit terms.
+>
+> The proximate cause was operator error: the job was built from
+> `About This Role.txt` (a 1,118-char blurb with no qualifications section)
+> instead of `JD.pdf`. **But the defect is that nothing said so.** Empty
+> `required_skills` is checked in exactly ONE place —
+> `orchestrator.py:804`, inside stage-3 evidence, where it silently returns
+> `None` — and the product produced a normal-looking shortlist of 50 real
+> people. A recruiter would have believed it.
+>
+> This is the ADR-040/041 failure class (a fabricated zero must be DISCLOSED,
+> never silent), and the guard exists on the other side already: ADR-017
+> decision 1 refuses to rank until ≥1 résumé is parsed. **The mirror guard on
+> the JD side is missing.** Fix: refuse to rank a job with zero required AND
+> zero nice-to-have skills, reason on screen; and consider flagging at PARSE
+> time when a non-trivial JD yields no requirements, which would have caught
+> this hours earlier. Full write-up in
+> [docs/pilot-feedback.md](docs/pilot-feedback.md).
+
 **The branch is finished and green** — 20 commits, `verify.sh all` clean, both
 merge-blocking gates satisfied, verified against the sponsor's real data. It is
 deliberately **unpushed**, pending that review.

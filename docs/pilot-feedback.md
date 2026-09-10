@@ -164,6 +164,75 @@ not be identified" (investigate).
 ("71 of 75 résumés matched a roster row; 4 did not — here they are") and treat
 the CSV-side remainder as a bare count, not an enumeration.
 
+## 2026-09-10 — user — "core functioning system feature gone"
+
+> "Resume short listing was geerated against the additional hiring manager
+> input, and 0 against the JD?!! basically core functioning system feature
+> gone, it seems"
+
+**Correct, and the numbers are worse than the report.** Measured on the 50
+ranked entries:
+
+| | |
+|---|---|
+| `skill` | **0.000 for all 50** |
+| `experience`, `education` | 1.000 for all 50 (nothing to fail) |
+| `manager_prompt` | 0.00 (7) · 0.50 (21) · 1.00 (22) — **the only discriminator** |
+| `score_final` | 0.24 – 0.45 |
+
+A dimension weighted **0.10** became **100% of the signal**, because every
+other dimension was constant across every candidate. The ordering of that
+shortlist was, in merit terms, arbitrary.
+
+### Two causes, and only one of them is a defect
+
+**1. Operator error (mine).** The job was created from `About This Role.txt`
+— 1,118 characters of company boilerplate and a three-sentence role summary,
+which the user's own covering note had described as *"for additional
+details"*. The real posting is `JD.pdf`. `jd_extract_v2` correctly extracted
+zero requirements because there are none in that text. A job created the same
+day from the real JD has **18** required skills.
+
+**2. A real product defect, and this is the finding worth keeping: the
+product ranked 50 real candidates against ZERO requirements and disclosed
+nothing.** No banner, no warning, no marker — a normal-looking shortlist.
+
+`required_skills` being empty is checked in exactly one place:
+[orchestrator.py:804](../core/src/pipeline/matching/orchestrator.py#L804),
+inside stage-3 evidence, where it silently `return None`s and skips evidence
+generation. Nothing refuses to rank. Nothing surfaces it.
+
+**This is the exact failure class this repo has two ADRs about.** ADR-040 and
+ADR-041 require a fabricated zero to be **disclosed rather than silently
+adjusted**, and that discipline is implemented per-dimension —
+`manager_prompt_measured` exists precisely so a 0.0 from an unasked question
+is distinguishable from a 0.0 earned. But there is no guard for *"the JD
+yielded no requirements at all, so every dimension is fabricated and the
+ranking is meaningless."* The product already refuses to generate a shortlist
+until at least one résumé is parsed (ADR-017 decision 1). **The mirror guard
+on the JD side does not exist.**
+
+A recruiter would have read that list as authoritative. That is the whole
+harm, and it is worse than a crash: a crash tells you something is wrong.
+
+**Recommended fix**, consistent with the precedents above and cheap:
+
+- **Refuse to rank** a job whose extraction yields zero required AND zero
+  nice-to-have skills — same shape as the existing "no parsed résumé" gate,
+  disabling the Generate control with the reason on screen.
+- If ranking such a job is ever wanted deliberately, it must carry a
+  **prominent on-card disclosure**, not silence — the ADR-041 pattern.
+- Worth considering alongside it: a JD parse that extracts **zero
+  requirements from a non-trivial description** is itself a signal the
+  operator gave the wrong text, and saying so at parse time would have caught
+  this hours earlier.
+
+**Status:** recorded, NOT fixed — feature work is paused (see below). This is
+a defect a user hit, so under `CLAUDE.md` §Economy 0 it outranks everything on
+the menu when work resumes.
+
+---
+
 **Is this a hardware bound or a software one? Measured: hardware.**
 (User, 2026-09-09, on being shown the 11-hour figure: *"this is not very good.
 a human can rank those at a fraction of the time. so maybe we are not ready to
