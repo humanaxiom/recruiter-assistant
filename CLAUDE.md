@@ -59,6 +59,18 @@ rendered HTML) plus `./scripts/doctor.sh` (invariants against the data that is
 actually there). **Where the feature's own path is not covered by `smoke.sh`,
 drive that path by hand against the running stack and paste what came back.**
 
+**Which stack each one runs against — this distinction is load-bearing.**
+`smoke.sh` requires CAS **off** and FAILS rather than skips when it is on, so
+it runs against a **local dev stack with CAS off**, never against a pilot or
+production box. **This rule is never a licence to turn authentication off on a
+box that has real users** — that would collide head-on with the standing "CAS
+on by default" order, and with `doctor.sh`'s own `deploy.auth_disabled`
+finding, which exists to nag exactly that state. Against an authenticated
+deployment the obligation is `doctor.sh` plus the by-hand drive of the
+feature's path, signed in as a real principal. If a feature can only be
+exercised with authentication disabled, say so in the hand-over rather than
+disabling it.
+
 This exists because green gates have repeatedly *not* meant a working product
 here, and every instance cost a user rather than a test:
 

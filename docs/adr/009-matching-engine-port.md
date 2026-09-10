@@ -325,7 +325,7 @@ shim exists only because a missing key silently violates a *sum* validator, and
 ### Why a uplift and not a band
 
 A hard band above all externals was the live alternative and was rejected by
-the user: 11 of 315 roster rows carry the flag, and a band would put all 11 on
+the user: 7 of 315 roster rows carry the flag (6 APSA, 5 CUPE, 4 both), and a band would put all 7 on
 top **regardless of fit**. The uplift is disclosed on the card with its amount,
 so a review can explain the difference between two candidates rather than
 discovering an invisible sort key. It is also clamped, so a perfect candidate

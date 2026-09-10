@@ -147,9 +147,11 @@ The accent fold is not defensive coding; it came from the data. **The two
 sides of this comparison are encoded differently**: Taleo ASCII-folds its
 export (zero of 315 rows carry a non-ASCII byte) while the résumé side is
 parsed from the candidate's own PDF and keeps its diacritics. The delivered
-bundle contains exactly that pair — CSV an ASCII-folded surname against résumé `a candidate
-Ernesto a surname with an acute accent`. Unfolded, `[^A-Za-z]+` treats `í` as a separator and
-shatters `that surname` into `{d, az}`, so one surname shares no token with itself.
+bundle contains exactly that pair: an ASCII-folded surname in the CSV against
+the same surname carrying an acute accent on the résumé. Unfolded,
+`[^A-Za-z]+` treats a character like `í` as a **separator** and shatters such
+a surname into two meaningless fragments, so one name shares no token with
+itself.
 **No unit test would have produced this pair**, because a fixture author
 writes the same name on both sides of a match.
 

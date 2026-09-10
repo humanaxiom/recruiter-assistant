@@ -135,11 +135,17 @@ none.
 ## Consequences
 
 - **The roster CSV becomes a screening-data path, with the obligations that
-  implies.** It carries PII, so it crosses the same encryption boundary as
-  `candidate_name`/`candidate_email` and is never embedded (ADR-008). The
-  reconciliation report and its audit event carry counts, line numbers and
-  résumé ids only — never a decrypted name or email — which matters because
-  the name fallback decrypts names in bulk.
+  implies.** It carries PII — 315 names and emails — and the property it
+  actually has is **stronger** than the encryption boundary the rest of this
+  repo relies on: *none of it is persisted at all*. The upload is parsed in
+  memory, matched, and discarded; the only things that outlive the request are
+  the three screening columns on `resumes`, plus counts and line numbers in the
+  report and its audit event. It is never embedded (ADR-008). The report and
+  audit event carry no decrypted name or email, which matters because the name
+  fallback decrypts names in bulk to do its matching — and that decrypt is the
+  one place this path holds cleartext PII for more than a moment. Keep it that
+  way: persisting the roster to "explain" a reconciliation later would trade a
+  strong property for a convenience.
 - **Every write is audited and idempotent**, through `set_work_authorization`
   and `set_internal_status`. There is no second write path to either column,
   deliberately: a screening fact with two writers has no single audit trail.

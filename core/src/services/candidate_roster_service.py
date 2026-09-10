@@ -73,14 +73,15 @@ def _normalize_name(name: str) -> frozenset[str]:
     Taleo ASCII-folds its export — zero of the 315 rows in the sponsor's real
     roster carry a non-ASCII character — while the résumé side is parsed out
     of the candidate's own PDF and keeps its diacritics. The delivered bundle
-    contains exactly that pair: the CSV row reads `an ASCII-folded surname` and the
-    résumé reads ``a surname carrying an acute accent``.
+    contains exactly that pair: a surname spelled without accents in the CSV
+    and with an acute accent on the résumé.
 
-    Without the fold, ``[^A-Za-z]+`` treats ``í`` as a SEPARATOR and shatters
-    ``that surname`` into ``{d, az}``, so the two spellings of one surname could never
+    Without the fold, ``[^A-Za-z]+`` treats a character like ``í`` as a
+    SEPARATOR, shattering such a surname into two meaningless fragments
+    (``Ruíz`` -> ``{ru, z}``), so the two spellings of one name could never
     produce a common token — a mismatch caused entirely by which side of the
-    integration a name happened to arrive from. NFKD then dropping combining
-    marks maps both spellings onto ``ferran``.
+    integration the name arrived from, which is not a fact about the
+    candidate. NFKD then dropping combining marks maps both onto ``ruiz``.
 
     This only ever makes two names MORE likely to be judged equal, so it
     cannot introduce a false match that strict equality would have refused.
