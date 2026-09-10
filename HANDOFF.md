@@ -25,10 +25,22 @@ this repository gold-plating itself.
 ### 2. Do this first — the pilot box is not this box
 
 Everything in `docs/ROADMAP.md` §"Where things stand" describes the *product*.
-**Recorded 2026-09-09: this box IS the pilot box.** The 28 jobs, the 35
-résumés, the DTO's own ranked job and the director demo all live on the stack
-at `:29500`/`:29800` on this machine, booted from this checkout's `.env` plus
-the untracked override below. It was rebuilt from the branch head on
+**Recorded 2026-09-09: this box IS the pilot box.** It runs at
+`:29500`/`:29800` on this machine, booted from this checkout's `.env` plus the
+untracked override below.
+
+> ⚠️ **The pilot data was WIPED on 2026-09-09 at the user's explicit request**
+> ("the pilot data can be wiped clean"), to load the DTO's bundle onto a clean
+> box. Removed: 29 jobs, 48 résumés, 32 shortlist entries, 88 outbox rows and
+> 52 blobs — including the DTO's own ranked job and the director-demo job that
+> earlier entries in this file describe as live. **Those are gone; do not go
+> looking for them.** `users` and `audit_log` were KEPT, which is a deliberate
+> asymmetry worth knowing: the audit log still references candidates whose data
+> no longer exists. The user was told and did not ask for it to be purged.
+>
+> What is on the box now: the **Business Analyst** requisition from the DTO's
+> bundle, with the manager's prompt attached, 75 résumés, and the 315-row
+> roster reconciled onto them. It was rebuilt from the branch head on
 2026-09-09 (three times that day, each after a gate), `doctor.sh` has run
 against it after every deploy, and the one finding it reports is the CAS-off
 decision. `FLASK_SECRET_KEY` is no longer committed anywhere; the quickstart
@@ -48,7 +60,70 @@ every visitor is an anonymous admin, including on the audit-log viewer.
 `doctor.sh` fails with `deploy.auth_disabled` for exactly as long as it is
 there, which is the intended nag — do not silence it.
 
-### 3. The sponsor picked the next feature — and it is none of the three cards
+### 3. IN FLIGHT — the candidate roster CSV (`feat/candidate-roster-csv`)
+
+**The DTO delivered a real Taleo bundle on 2026-09-09** and confirmed *"this is
+sample data, so BA is NOT the only job"* — so this is a general capability, not
+one requisition. 16 commits, gates green, **not pushed**. Full report:
+[docs/pilot-feedback.md](docs/pilot-feedback.md).
+
+**Delivered:** `parse_candidate_csv` + reconciliation (email-hash → normalised
+name, both refusing ambiguity rather than guessing), `resumes.internal_apsa`/
+`internal_cupe`, `set_internal_status`, `POST /jobs/{id}/candidate-roster`, a
++0.05 disclosed uplift for SFU-internal candidates, the card chip, the upload
+form, ADR-047 + amendments to ADR-009/ADR-017, and two splitter fixes.
+
+**Verified on the live box, not only in tests:** 75 résumés uploaded, and
+**every parsed résumé matched its roster row — 39 of 39 at last count, 100%.**
+One real candidate is both APSA and CUPE internal; one real candidate is
+`not_eligible` **and** CUPE-internal, which is the two mechanisms in tension on
+a real person — the band wins, the uplift cannot resurrect them, both facts
+disclosed. No fixture would have produced that case.
+
+**Four things a future session must not rediscover:**
+
+1. **The workflow is Upload → Parse → ROSTER → Rank.** `candidate_email_hash`
+   and `candidate_name` are NULL until the parse extracts them, and they are
+   the only two reconciliation keys. A roster uploaded before parsing finishes
+   matches **0 of 315** and says nothing about why. Recorded, not fixed.
+2. **Parsing runs ~29 résumés/hour** (batches of 4, ~8 min each, measured).
+   75 résumés ≈ 2.5 h; a full 315-candidate requisition ≈ **11 hours**. That is
+   a real constraint on "upload, parse, rank" at Taleo scale and it is a
+   hardware/concurrency question, not a code one.
+3. **The CSV is the FULL export; the résumés are a subset.** ~240 unmatched CSV
+   rows are the NORMAL state, forever. The report currently enumerates them,
+   which buries the number that matters: **résumé-side** coverage. Recorded.
+4. **`About This Role.txt` arrived as Windows-1252, not UTF-8.** Uploaded raw it
+   pushes mojibake into the JD text and every screen rendering it. Convert with
+   `iconv -f WINDOWS-1252 -t UTF-8` before ingest.
+
+**Two gate failures worth remembering, because everything was green for both:**
+
+- The roster upload **503'd on first real use** — `pgp_sym_decrypt` with no
+  transaction, so no PII key. 6067 unit tests passed because they mock
+  `pii_service` wholesale, and `reconcile_candidate_roster` had **no
+  integration test at all**. A mock agrees with any transaction state you ask
+  it about.
+- A mutant flipping `if resolved_wa != "unknown":` to `if True:` **survived all
+  6067 unit tests** — a blank CSV cell would overwrite a recruiter's audited
+  screening decision. Both now pinned.
+
+**⚠️ And the one that was self-inflicted:** real candidate PII (a name, a phone
+number, an email) was **committed** to `docs/pilot-feedback.md` and three other
+files while documenting PII hygiene. Caught by the security gate before push.
+History rewritten; verified clean by extracting **all 925 name and email tokens
+from the real roster** and scanning the entire branch diff and every commit
+message against them. **That scan is the only method that worked** — three
+earlier passes using remembered patterns each missed something (a name split
+across a line break, lowercase token forms, a 4-character surname excluded by
+my own length filter). A standing warning now sits at the top of
+`pilot-feedback.md`.
+
+**Remaining, recorded not fixed:** the parse-ordering message; the report's
+CSV-side emphasis; an unbounded `_JOB_RESUMES_SQL` fetch; cover-letter-only
+applicants whose pages are written but excluded from `manifest.json`.
+
+#### What came before — the sponsor set, delivered as PR #104 (merged 2026-09-09)
 
 The DTO/CIO sent a requirements set on 2026-09-02 and answered all four open
 decisions the same day. Plan of record:
@@ -333,9 +408,10 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **none.** The DTO's new major changes start on a new branch, new session. |
-| Gates, last local run | see the merge commit message — **re-run, do not cite** |
-| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), MERGED at the user's request |
+| Branch in flight | **`feat/candidate-roster-csv`**, 16 commits, gates green, **NOT pushed** — see §3 |
+| Gates, last local run | `verify.sh all` → 6084 unit @ 91.66% + 625 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
+| PR | none yet for the roster branch. [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104) MERGED |
+| ⚠️ Before pushing | The branch history was **rewritten four times** to purge committed candidate PII. A `backup-pre-redact-*` branch still holds the unredacted history — **delete it before any push**, and re-run the 925-token scan in §3 if you rewrite again. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
