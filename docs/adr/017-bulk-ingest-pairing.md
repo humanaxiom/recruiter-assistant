@@ -156,8 +156,8 @@ itself.
 writes the same name on both sides of a match.
 
 **3. The comparison stays strict set equality** — deliberately, and at a known
-cost. A résumé carrying a middle name (`{marcel, ernesto, ferran, iturbe}`) does
-not match a two-token CSV cell (`{ferran, marcel}`). Relaxing to a subset test
+cost. A résumé carrying a middle name and a second surname (four tokens) does
+not match a two-token CSV cell. Relaxing to a subset test
 would make the fallback markedly more useful, and would also let `Kim, Min`
 match the wrong `Min Ji Kim`. What gets written is a screening decision on a
 protected ground ([ADR-047](047-screening-facts-are-declared-never-inferred.md)),
