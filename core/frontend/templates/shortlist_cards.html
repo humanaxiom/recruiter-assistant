@@ -237,6 +237,22 @@
       </span>
     </div>
 
+    {# Sponsor requirements PR2 slice 3 -- the SFU-internal-status uplift
+       chip. Read-only (a `<span>`, no form, mints no CSRF token) and sourced
+       from `pipeline_meta.internal_uplift_amount` -- the same reproducibility
+       stamp `weights` already comes from -- never a literal and never
+       today's Settings value, so an old shortlist explains itself with the
+       number it was actually ranked under. Rendered even on a voided card
+       (the uplift does not resurrect it -- the `voided` gate above already
+       decides rank/n/a independently of these flags). #}
+    {% set pm = entry.pipeline_meta or {} %}
+    {% if entry.internal_apsa or entry.internal_cupe %}
+    <p class="chip-row">
+      <span class="chip chip-internal">SFU internal{% if entry.internal_apsa and entry.internal_cupe %} (APSA, CUPE){% elif entry.internal_apsa %} (APSA){% elif entry.internal_cupe %} (CUPE){% endif %}
+        +{{ ((pm.get('internal_uplift_amount', 0) or 0) * 100)|round|int }}</span>
+    </p>
+    {% endif %}
+
     {% if voided %}
     {# The band must EXPLAIN itself. A candidate silently parked at the bottom
        with dashes where numbers were is an unexplained adverse outcome — the

@@ -53,8 +53,10 @@ from src.pipeline.matching.orchestrator import (
 from src.pipeline.matching.stages import _combine_final, _CombineInput, stage4_combine
 from src.schemas.matching import (
     DEFAULT_WEIGHTS,
+    EvidenceObject,
     MatchWeights,
     PipelineMeta,
+    RequirementEvidence,
     ScoreBreakdown,
 )
 
@@ -194,20 +196,47 @@ def test_the_uplift_clamps_at_1_0_rather_than_overshooting() -> None:
     exceed 1.0. The PERFECT-candidate variant of this guard lives beside
     ``test_top_blend_is_fully_applied.py``'s own perfect-candidate fixtures
     (same invariant, same file) -- this one uses an ordinary, non-perfect
-    candidate close enough to 1.0 that an unclamped add would overshoot."""
+    candidate close enough to 1.0 that an unclamped add would overshoot.
+
+    CORRECTED from the original RED draft, which built this fixture with
+    ``evidence=None`` and no ``manager_prompt`` -- under DEFAULT_WEIGHTS
+    (structured=0.6, evidence=0.3, manager_prompt=0.1) that combination is
+    NOT "near-perfect": ``_combine_final`` (frozen -- see this slice's
+    constraint 2) can score it at most 0.6, nowhere near the 0.95+ needed for
+    ``+0.05`` to overshoot 1.0. That is a fixture bug, not a design
+    disagreement -- the docstring's own premise is false for those inputs,
+    provably so from ``_combine_final``'s documented, unchanged arithmetic.
+    Fixed by actually constructing a near-perfect (0.97) candidate: real
+    verified evidence (completeness 1.0) and an answered manager prompt
+    (1.0), with ``structured`` at 0.95 rather than 1.0 so the pre-uplift
+    baseline is close to but below 1.0, distinct from the sibling PERFECT
+    test. The assertions themselves are UNCHANGED from the original draft.
+    """
     breakdown = _breakdown(
         skill=1.0,
         experience=1.0,
         education=1.0,
         seniority=1.0,
         vector=1.0,
-        structured=1.0,
+        structured=0.95,
+    )
+    near_perfect_evidence = EvidenceObject(
+        requirements=[
+            RequirementEvidence(
+                requirement="Python",
+                status="met",
+                evidence="ten years of production Python across three teams",
+                confidence=1.0,
+                evidence_chunk_ids=["c_001"],
+            )
+        ],
     )
     combine_in = _CombineInput(
         resume_id=uuid4(),
-        structured=1.0,
+        structured=0.95,
         breakdown=breakdown,
-        evidence=None,
+        evidence=near_perfect_evidence,
+        manager_prompt=1.0,
         internal_apsa=True,
     )
     [entry] = stage4_combine([combine_in], DEFAULT_WEIGHTS)
@@ -216,9 +245,10 @@ def test_the_uplift_clamps_at_1_0_rather_than_overshooting() -> None:
 
     rank_in = RankInput(
         resume_id="r1",
-        structured=1.0,
+        structured=0.95,
         breakdown=breakdown,
-        evidence=None,
+        evidence=near_perfect_evidence,
+        manager_prompt=1.0,
         internal_apsa=True,
     )
     [match] = run_match([rank_in], DEFAULT_WEIGHTS)

@@ -388,6 +388,28 @@ def upload_resumes(
     return response.json()
 
 
+def upload_candidate_roster(
+    job_id: UUID,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    *,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/{id}/candidate-roster (multipart) — Sponsor requirements
+    PR2 slice 3. Reconciles a Taleo "All Candidates" export against this
+    job's résumés (work authorization + SFU-internal APSA/CUPE status).
+    Returns the backend's ``RosterReconciliationReport`` JSON. A backend 4xx
+    surfaces as ``BadRequest``, mirroring :func:`upload_resumes`."""
+    response = _request(
+        "POST",
+        f"/jobs/{job_id}/candidate-roster",
+        files=[("file", (filename, content, content_type))],
+        client=client,
+    )
+    return response.json()
+
+
 def generate_shortlist(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     """POST /jobs/{id}/shortlist — enqueues the ranking job. Returns the
     enqueue ack ``{job_id, status: "enqueued"}`` (results appear

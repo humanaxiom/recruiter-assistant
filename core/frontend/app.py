@@ -808,6 +808,69 @@ def _summarise_upload(results: Any) -> list[str]:
     return messages
 
 
+def _summarise_roster_report(report: Any) -> list[str]:
+    """Build the post-import flash summary for a Taleo candidate-roster
+    upload (Sponsor requirements PR2 slice 3). The stale-shortlist sentence
+    is UNCONDITIONAL — always present, never gated on whether anything
+    actually changed — since the uplift is applied at RANK time and this
+    reconciliation is not: an existing shortlist genuinely cannot reflect an
+    import that happened after it was generated, and detecting whether it
+    matters is out of scope (a plain, always-correct sentence is the
+    requirement, not stale-shortlist detection)."""
+    report = report if isinstance(report, dict) else {}
+    matched = report.get("matched", 0)
+    wa_changed = report.get("work_authorization_changed", 0)
+    apsa_changed = report.get("internal_apsa_changed", 0)
+    cupe_changed = report.get("internal_cupe_changed", 0)
+    unmatched = len(report.get("unmatched_csv_rows") or [])
+    messages = [
+        f"{matched} matched ({wa_changed} work-authorization change(s), "
+        f"{apsa_changed} APSA change(s), {cupe_changed} CUPE change(s))"
+    ]
+    if unmatched:
+        messages.append(f"{unmatched} roster row(s) could not be matched to a résumé.")
+    messages.append(
+        "Any existing shortlist for this job does not reflect this import "
+        "until it is regenerated."
+    )
+    return messages
+
+
+@app.post("/jobs/<uuid:job_id>/candidate-roster")
+def upload_candidate_roster(job_id: UUID) -> Any:
+    """Sponsor requirements PR2 slice 3 — upload a Taleo "All Candidates"
+    export to reconcile work-authorization + SFU-internal (APSA/CUPE) status
+    onto this job's résumés. Guarded by the ORDINARY ``_csrf_gate`` page
+    token (the opt-out hook), exactly like ``upload_resumes`` — no new
+    one-shot slot."""
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return _render_job_detail(
+            job_id,
+            error="Select a candidate-roster CSV file to upload.",
+            status_code=400,
+        )
+    content = upload.read()
+    try:
+        report = api_client.upload_candidate_roster(
+            job_id,
+            upload.filename,
+            content,
+            upload.content_type or "text/csv",
+        )
+    except api_client.BadRequest as exc:
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    for message in _summarise_roster_report(report):
+        flash(message)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
 @app.get("/jobs/<uuid:job_id>/resumes-table")
 def resumes_table(job_id: UUID) -> Any:
     """HTMX poll fragment. While any résumé row is still uploaded/parsing it

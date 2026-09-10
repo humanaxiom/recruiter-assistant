@@ -262,6 +262,25 @@ class Settings(BaseSettings):
     # this value. See docs/model-profiles/gpt-oss-20b.json.
     match_evidence_max_tokens: int = 8192
 
+    # Sponsor requirements PR2 slice 3 — the bounded, DISCLOSED SFU-internal-
+    # status uplift ("APSA/CUPE indicate SFU employee gets high marks",
+    # resolved as a bonus inside score_final, not a hard band above every
+    # external candidate). **This is a hiring-policy number, not an
+    # engineering one** — it was set by the user, not measured or tuned here,
+    # against a real spread: ten candidates on a real job scored 19-50 (~31
+    # points of competitive range), and +5 moves someone two to four places
+    # in that range. Do not let a future session "tune" this without HR —
+    # see MatchWeights' own manager_prompt/motivation precedent for why a
+    # hiring-policy decimal belongs on a settings field, ratifiable, and
+    # never a literal at a call site.
+    #
+    # Bounded ge=0/le=0.1: 0 is "feature present but switched off", and 0.1
+    # is a sanity ceiling (a bonus larger than manager_prompt's own weight
+    # would need its own sign-off, not a config typo). Deliberately NOT a
+    # MatchWeights field — see MatchingContext.internal_uplift_amount's own
+    # docstring for the defect that constraint prevents.
+    match_internal_uplift: float = Field(default=0.05, ge=0, le=0.1)
+
     # ── FU-7 (ADR-021 §3): honest résumé parse status ─────────────────────────
     # The arq JOB-layer retry ceiling `parse_resume`'s `LLMUnavailableError`
     # boundary reads (via `ctx["job_try"]`, arq's 1-based per-job attempt
