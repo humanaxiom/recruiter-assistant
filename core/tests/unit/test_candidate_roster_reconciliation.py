@@ -153,9 +153,32 @@ def _resume_row(
     }
 
 
+def _acm(return_value: Any = None) -> MagicMock:
+    """An async-context-manager double, matching the helper in
+    ``test_internal_status_write_path.py``."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=return_value)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
 def _mock_conn(resume_rows: list[dict[str, Any]]) -> MagicMock:
     conn = MagicMock(name="conn")
     conn.fetch = AsyncMock(return_value=resume_rows)
+    conn.execute = AsyncMock(return_value="SET")
+    # The reconciler decrypts names inside ``conn.transaction()`` with the PII
+    # key set -- ``app.pii_key`` is transaction-scoped (``set_config(...,
+    # is_local => true)``), so a bare-connection decrypt raises
+    # ``ExternalRoutineInvocationError`` against real pgcrypto. This double
+    # has to model the transaction or the call fails on ``__aenter__``.
+    #
+    # It cannot VERIFY the fix, though, and that is the point worth
+    # remembering: ``pii_service`` is monkeypatched away in these tests, so the
+    # decrypt is a no-op here whatever the transaction state. The 503 this
+    # guards against is only reachable against a real database --
+    # ``tests/integration/test_candidate_roster_reconciliation_pg.py`` is what
+    # actually proves it.
+    conn.transaction = MagicMock(return_value=_acm())
     return conn
 
 

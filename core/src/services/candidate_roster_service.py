@@ -141,14 +141,31 @@ async def reconcile_candidate_roster(
     # Decrypt every résumé name up front — cheap relative to the network
     # round trip already paid for `conn.fetch`, and it lets the matching
     # logic below stay synchronous.
+    #
+    # ``set_pii_key`` runs inside a transaction and STRICTLY FIRST. It is not
+    # optional and it is not defensive: ``app.pii_key`` is set with
+    # ``set_config(..., is_local => true)``, so it is TRANSACTION-SCOPED, and
+    # ``pgp_sym_decrypt`` outside one gets an empty key and raises
+    # ``ExternalRoutineInvocationError: Illegal argument to function``. Every
+    # other keyed read in this repo already does this (see
+    # ``resume_service._encrypt_pii``); this path did not, and shipped a 503
+    # on the live box the first time a real roster was uploaded.
+    #
+    # The unit suite CANNOT see this — it mocks ``pii_service`` wholesale, so
+    # the decrypt is a no-op there no matter what the transaction state is.
+    # Only a real Postgres with real pgcrypto raises it. See
+    # ``tests/integration/test_candidate_roster_reconciliation_pg.py``.
     resume_name_tokens: dict[UUID, frozenset[str]] = {}
-    for r in resumes:
-        if r["candidate_name"] is not None:
-            plain = await pii_service.decrypt(conn, r["candidate_name"])
-            if plain:
-                tokens = _normalize_name(plain)
-                if tokens:
-                    resume_name_tokens[r["id"]] = tokens
+    encrypted_names = [r for r in resumes if r["candidate_name"] is not None]
+    if encrypted_names:
+        async with conn.transaction():
+            await pii_service.set_pii_key(conn)
+            for r in encrypted_names:
+                plain = await pii_service.decrypt(conn, r["candidate_name"])
+                if plain:
+                    tokens = _normalize_name(plain)
+                    if tokens:
+                        resume_name_tokens[r["id"]] = tokens
 
     row_by_line: dict[int, CandidateRosterRow] = {row.line_no: row for row in rows}
 
