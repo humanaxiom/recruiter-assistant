@@ -123,6 +123,40 @@ def test_stage4_combine_applies_the_whole_top_blend(weights: MatchWeights) -> No
 
 
 @pytest.mark.parametrize("weights", _BLENDS)
+def test_a_perfect_candidate_with_the_internal_uplift_still_clamps_to_1_0(
+    weights: MatchWeights,
+) -> None:
+    """Sponsor requirements PR2 slice 3 — the bounded SFU-internal-status
+    uplift (+0.05 default, applied AFTER this blend in stage4_combine/
+    run_match, never inside it). Belongs beside the perfect-candidate test
+    directly above: same invariant (a perfect candidate never exceeds 1.0),
+    now under the added pressure of a bonus term. If the uplift is ever
+    added un-clamped, this is the test that catches the overshoot — the
+    plain perfect-candidate test above cannot, because it never sets either
+    internal flag.
+    """
+    [entry] = stage4_combine(
+        [
+            _CombineInput(
+                resume_id="r1",
+                structured=1.0,
+                breakdown=_perfect_breakdown(),
+                evidence=_perfect_evidence(),
+                manager_prompt=1.0,
+                internal_apsa=True,
+            )
+        ],
+        weights,
+    )
+    assert entry.score_final <= 1.0, (
+        f"a perfect candidate plus the internal uplift scored "
+        f"{entry.score_final:.4f} > 1.0 — the uplift must be clamped, not "
+        "just added"
+    )
+    assert entry.score_final == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("weights", _BLENDS)
 def test_run_match_applies_the_whole_top_blend(weights: MatchWeights) -> None:
     """``run_match`` duplicates ``stage4_combine``'s arithmetic for the eval
     harness. Two copies of a formula drift; both are asserted."""
