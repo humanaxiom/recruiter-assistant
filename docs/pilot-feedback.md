@@ -164,6 +164,35 @@ not be identified" (investigate).
 ("71 of 75 résumés matched a roster row; 4 did not — here they are") and treat
 the CSV-side remainder as a bare count, not an enumeration.
 
+**Is this a hardware bound or a software one? Measured: hardware.**
+(User, 2026-09-09, on being shown the 11-hour figure: *"this is not very good.
+a human can rank those at a fraction of the time. so maybe we are not ready to
+proceed until the data center hardware is ready."* That is the right read, and
+here is the arithmetic behind it.)
+
+**One résumé parse is 2–3 SEQUENTIAL LLM calls**, not one: `resume_core_v1`,
+`resume_skills_v2`, and `cover_letter_v1` when a cover letter is present, plus
+embeddings. So `max_jobs=4` is not 4 concurrent model calls — it is **up to 12
+in flight against a single GPU** serving a 20B model. Firing more requests at
+one GPU does not raise throughput; it moves the queue from arq into Ollama.
+
+Against the committed profile's ~35s per uncontended call, the theoretical
+floor for 75 résumés on this hardware is `75 × ~2.5 calls × 35s ≈ 1.8 hours`.
+Observed: ~2.5 hours. **We are within ~1.4× of the floor**, which means
+software tuning is worth perhaps 30%, not 10×.
+
+**So the conclusion is honest and unwelcome: a step change needs different
+hardware** (more GPUs, or a faster one), **or a smaller model, or fewer calls
+per résumé.** Not queue tuning, and specifically not raising `max_jobs`.
+
+**The fair comparison to a human, stated carefully.** 11 hours of *machine*
+wall-clock costs ~0 human attention; a recruiter screening 315 résumés at two
+minutes each spends ~10.5 hours of their own. On cost the tool wins. **The
+real damage is iteration latency**: get the JD or the manager's prompt wrong
+and you find out tomorrow. That, not the raw hours, is what makes it feel
+worse than doing it by hand — and it is why the queue-visibility item below
+matters even though it makes nothing faster.
+
 **"Generate shortlist" queues behind every parse, on the same four slots.**
 Measured 2026-09-09 with 75 résumés mid-ingest: clicking Generate returned
 200, set `shortlist_state = 'ranking'`, and then **did nothing for hours**,

@@ -87,9 +87,18 @@ disclosed. No fixture would have produced that case.
    the only two reconciliation keys. A roster uploaded before parsing finishes
    matches **0 of 315** and says nothing about why. Recorded, not fixed.
 2. **Parsing runs ~29 résumés/hour** (batches of 4, ~8 min each, measured).
-   75 résumés ≈ 2.5 h; a full 315-candidate requisition ≈ **11 hours**. That is
-   a real constraint on "upload, parse, rank" at Taleo scale and it is a
-   hardware/concurrency question, not a code one.
+   75 résumés ≈ 2.5 h; a full 315-candidate requisition ≈ **11 hours**.
+   **This is a HARDWARE bound and the arithmetic says so.** One parse is 2–3
+   SEQUENTIAL LLM calls (`resume_core_v1`, `resume_skills_v2`, and
+   `cover_letter_v1` when present), so `max_jobs=4` puts **up to 12 concurrent
+   requests on a single GPU** running a 20B model — which relocates the queue
+   into Ollama rather than raising throughput. Against the profile's ~35s
+   uncontended call, the floor for 75 résumés is ≈1.8 h and we observe ≈2.5 h:
+   **within ~1.4× of the floor.** Tuning buys ~30%, not 10×. A step change
+   needs more/faster GPUs, a smaller model, or fewer calls per résumé.
+   **The user's call, 2026-09-09: pause feature work until the datacenter
+   hardware is ready.** Do not spend sessions optimising the queue against
+   this ceiling.
    **And the sharp edge of it: "Generate shortlist" QUEUES BEHIND every
    parse.** arq is FIFO at `max_jobs=4`; with ~1,400 jobs queued the request
    returns 200, sets `shortlist_state='ranking'`, and then sits for hours. It
