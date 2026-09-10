@@ -442,11 +442,19 @@ async def test_conflicting_work_authorization_is_refused_and_reported(
 async def test_conflicting_internal_flag_is_refused_and_reported(
     field: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Same refuse-and-report policy for the internal-employee flags. Because
-    ``set_internal_status`` writes BOTH flags in one guarded call, a conflict
-    on EITHER sub-field blocks the whole call for that résumé this run — there
-    is no way to apply "just the agreed half" through that API shape, and
-    guessing would risk writing a value nobody actually agreed on."""
+    """Refuse-and-report policy for the internal-employee flags, per FIELD --
+    not per pair. This docstring previously claimed "there is no way to apply
+    'just the agreed half' through that API shape" -- that was factually
+    wrong (2026-09-09 review finding): the implementation twelve lines below
+    ``apsa_conflict``/``cupe_conflict`` already fills an untouched field from
+    ``existing[...]`` for the ``None`` case, and the same mechanism can fill
+    the AGREED field when only its sibling conflicts. This test only
+    exercises ONE field conflicting with the other field carrying no signal
+    at all (``internal_apsa``-only rows leave ``internal_cupe`` absent, and
+    vice versa), so it says nothing about what happens when the two fields
+    disagree AND agree at once -- see
+    ``test_a_conflict_on_one_internal_flag_does_not_suppress_the_agreed_
+    sibling`` below for that case, which the code as shipped gets WRONG."""
     resume_id = uuid4()
     resume = _resume_row(resume_id=resume_id, email="dup@example.invalid")
     conn = _mock_conn([resume])
@@ -805,12 +813,17 @@ def test_accented_and_folded_spellings_of_one_surname_normalise_alike(
     Taleo ASCII-folds its export — zero of the 315 rows in the sponsor's real
     roster carry a non-ASCII byte — while the résumé side is parsed from the
     candidate's own PDF and keeps its diacritics. The delivered bundle holds
-    exactly this pair: CSV `an ASCII-folded surname` against résumé ``a surname with an acute accent
-    ``.
+    exactly this pair: a surname written without accents in the CSV and with
+    an acute accent on the résumé.
 
-    Before the NFKD fold, ``[^A-Za-z]+`` treated ``í`` as a separator and
-    shattered ``that surname`` into ``{d, az}``, so the two spellings shared no token
-    at all.
+    Before the NFKD fold, ``[^A-Za-z]+`` treated a character like ``í`` as a
+    separator and shattered such a surname into two meaningless fragments, so
+    the two spellings shared no token at all.
+
+    The pairs below are synthetic. Do not substitute the real candidate's
+    name from the bundle — see the warning at the top of
+    ``docs/pilot-feedback.md``; this file is tracked and the remotes are
+    public.
     """
     from src.services.candidate_roster_service import _normalize_name
 
@@ -837,3 +850,259 @@ def test_name_normalisation_is_order_invariant_across_the_two_conventions() -> N
     from src.services.candidate_roster_service import _normalize_name
 
     assert _normalize_name("Nolan, Bree") == _normalize_name("Bree Nolan")
+
+
+# ── Major 1 (2026-09-09 review finding): the email path must refuse an ─────
+#    ambiguous hash exactly like the name path already refuses an ambiguous
+#    name, never collapse two résumés sharing one email hash to "last row
+#    wins" out of an ORDER BY-less SELECT.
+#
+# ``resumes.candidate_email_hash`` carries only a plain partial index (see
+# ``core/src/models/ddl.py``) -- the table's only uniqueness is
+# ``UNIQUE (job_id, sha256)``, on FILE CONTENT, not on the candidate's email.
+# Two résumés in one job CAN legitimately carry the same email hash (the
+# Taleo splitter's known duplicate-person mis-split; a candidate re-applying
+# with an updated PDF). ADR-047 Consequences says reconciliation "refuses
+# rather than guesses" UNCONDITIONALLY, and the ADR-017 amendment promises
+# ambiguity is "reported, never resolved arbitrarily" -- neither carve-out
+# for "but it's the email path, not the name path" exists in either ADR.
+
+
+@pytest.mark.asyncio
+async def test_duplicate_email_hash_across_two_resumes_matches_neither_and_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two résumés in ONE job share an email hash; one CSV row carries that
+    email. The row must match NEITHER résumé, write NOTHING for either, and
+    be reported as ambiguous -- never collapse to whichever résumé happened
+    to sort last out of an ORDER BY-less ``SELECT``."""
+    resume_a = uuid4()
+    resume_b = uuid4()
+    shared_email = "dup.person@example.invalid"
+    resumes = [
+        _resume_row(resume_id=resume_a, email=shared_email),
+        _resume_row(resume_id=resume_b, email=shared_email),
+    ]
+    conn = _mock_conn(resumes)
+    set_wa, set_internal = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    row = _row(
+        2,
+        email=shared_email,
+        work_authorization="eligible",
+        internal_apsa=True,
+    )
+    await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    written = set(_resume_ids_written_by(set_wa)) | set(
+        _resume_ids_written_by(set_internal)
+    )
+    assert resume_a not in written, (
+        "the email-hash path collapsed a 2-résumé collision instead of "
+        "refusing it -- last row out of an unordered SELECT won"
+    )
+    assert resume_b not in written
+
+
+@pytest.mark.asyncio
+async def test_duplicate_email_hash_ambiguity_is_reported_under_its_own_email_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The label a human reads must name the EMAIL cause, not the NAME cause
+    -- ``report.unmatched_resumes`` is the wrong bucket (it reads as "the
+    roster had no row for this person", the opposite of the truth: the
+    roster had a row, and it was ambiguous). Pinned as a SIBLING field,
+    ``ambiguous_email_matches``, distinct from ``ambiguous_name_matches`` --
+    reusing the name bucket would tell a recruiter the wrong thing matched."""
+    from src.services.candidate_roster_service import AmbiguousEmailMatch
+
+    resume_a = uuid4()
+    resume_b = uuid4()
+    shared_email = "dup.person@example.invalid"
+    resumes = [
+        _resume_row(resume_id=resume_a, email=shared_email),
+        _resume_row(resume_id=resume_b, email=shared_email),
+    ]
+    conn = _mock_conn(resumes)
+    _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    row = _row(2, email=shared_email, work_authorization="eligible")
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert report.ambiguous_email_matches, (
+        "a colliding email hash must surface under its OWN field, "
+        "ambiguous_email_matches -- not silently absorbed into "
+        "unmatched_resumes/unmatched_csv_rows, and not folded into the "
+        "unrelated ambiguous_name_matches bucket"
+    )
+    [match] = report.ambiguous_email_matches
+    assert isinstance(match, AmbiguousEmailMatch)
+    assert match.csv_line_nos == [2]
+    assert set(match.resume_ids) == {resume_a, resume_b}
+    # The report must never carry the colliding email itself -- see the
+    # existing no-PII test below; this only pins the SHAPE, not re-proves
+    # no-PII (that is `test_report_and_audit_details_never_contain_pii`).
+    assert report.ambiguous_name_matches == []
+
+
+@pytest.mark.asyncio
+async def test_email_hash_ambiguity_does_not_double_report_the_csv_row_as_unmatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row absorbed into ``ambiguous_email_matches`` must not ALSO appear in
+    ``unmatched_csv_rows`` -- that would tell a recruiter two contradictory
+    things about the same line (mirrors the existing name-side convention:
+    ``ambiguous_all_line_nos`` is excluded from ``unmatched_csv_rows``)."""
+    resume_a = uuid4()
+    resume_b = uuid4()
+    shared_email = "dup.person@example.invalid"
+    resumes = [
+        _resume_row(resume_id=resume_a, email=shared_email),
+        _resume_row(resume_id=resume_b, email=shared_email),
+    ]
+    conn = _mock_conn(resumes)
+    _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    row = _row(2, email=shared_email, work_authorization="eligible")
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert 2 not in report.unmatched_csv_rows
+    assert report.matched == 0
+
+
+@pytest.mark.asyncio
+async def test_a_single_resume_per_email_hash_still_matches_by_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION GUARD, not a new behaviour: the ordinary, non-colliding
+    case (exactly one résumé per email hash in the job) must keep matching
+    exactly as ``test_happy_path_matches_by_email_hash_and_writes_all_three_
+    fields`` above already proves. This is expected to PASS ON ARRIVAL --
+    it exists so the ambiguity guard this file's other new tests demand
+    cannot be implemented by, e.g., refusing every email-hash match
+    unconditionally."""
+    resume_id = uuid4()
+    resume = _resume_row(resume_id=resume_id, email="solo.person@example.invalid")
+    conn = _mock_conn([resume])
+    set_wa, _ = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    row = _row(2, email="solo.person@example.invalid", work_authorization="eligible")
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert report.matched == 1
+    assert resume_id in _resume_ids_written_by(set_wa)
+
+
+# ── Minor 3 (2026-09-09 review finding): a conflict on ONE internal flag ────
+#    must not suppress a write for the OTHER, agreeing flag.
+
+
+@pytest.mark.asyncio
+async def test_a_conflict_on_one_internal_flag_does_not_suppress_the_agreed_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two CSV rows resolve to one résumé. They DISAGREE on ``internal_apsa``
+    (conflict, must be refused and reported) but AGREE on ``internal_cupe``
+    (``True`` on both -- no conflict at all). The reconciler already fills an
+    untouched field from ``existing[...]`` when a field carries NO signal at
+    all; the same mechanism must fill the AGREED field here, rather than the
+    current ``if not apsa_conflict and not cupe_conflict:`` guard refusing
+    BOTH because one of the two disagrees. Today's code writes neither field
+    and the report reads ``internal_cupe_changed == internal_cupe_unchanged
+    == 0`` -- indistinguishable from "no CUPE signal at all", which is
+    false: two rows agreed on it."""
+    resume_id = uuid4()
+    resume = _resume_row(
+        resume_id=resume_id,
+        email="mixed-conflict@example.invalid",
+        internal_cupe=False,
+    )
+    conn = _mock_conn([resume])
+    _, set_internal = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    rows = [
+        _row(
+            2,
+            email="mixed-conflict@example.invalid",
+            internal_apsa=True,
+            internal_cupe=True,
+        ),
+        _row(
+            14,
+            email="mixed-conflict@example.invalid",
+            internal_apsa=False,
+            internal_cupe=True,
+        ),
+    ]
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        rows,
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    apsa_conflicts = [
+        c
+        for c in report.conflicting
+        if c.resume_id == resume_id and c.field == "internal_apsa"
+    ]
+    assert len(apsa_conflicts) == 1, "the disagreeing field must still be refused"
+
+    cupe_conflicts = [
+        c
+        for c in report.conflicting
+        if c.resume_id == resume_id and c.field == "internal_cupe"
+    ]
+    assert cupe_conflicts == [], "the agreeing field must never be reported conflicting"
+
+    assert resume_id in _resume_ids_written_by(set_internal), (
+        "internal_cupe agreed on by both rows must still be written even "
+        "though internal_apsa disagreed -- a conflict on one flag must not "
+        "suppress the write for the other"
+    )
+    call = set_internal.await_args_list[0]
+    kwargs = call.kwargs
+    assert kwargs.get("internal_cupe") is True
+    assert report.internal_cupe_changed == 1
+    assert report.internal_apsa_changed == 0
+    assert report.internal_apsa_unchanged == 0

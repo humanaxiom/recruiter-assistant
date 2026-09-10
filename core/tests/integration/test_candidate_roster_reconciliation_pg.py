@@ -299,3 +299,73 @@ async def test_the_audit_event_carries_no_decrypted_pii(
     assert "nolan" not in blob
     assert "bree" not in blob
     assert "example.invalid" not in blob
+
+
+@pytest.mark.asyncio
+async def test_two_real_resumes_sharing_an_email_hash_are_refused_not_collapsed(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Major 1 (2026-09-09 review finding), against a REAL schema: the
+    collision the unit suite can only simulate with a mock ``conn.fetch`` is
+    possible here for real, because ``resumes.candidate_email_hash`` carries
+    only a plain partial index (``resumes_email_hash_idx``), not a unique
+    constraint -- the table's only uniqueness is ``UNIQUE (job_id, sha256)``,
+    on file content. Two real rows are inserted with the SAME email, so the
+    SAME candidate_email_hash, in the same job; Postgres accepts both without
+    complaint. The reconciler must refuse to guess between them rather than
+    writing whichever one its ``by_email_hash`` dict comprehension happened
+    to keep last."""
+    job_id = await _insert_job(pg_pool)
+    shared_email = "collision@example.invalid"
+    resume_a = await _insert_resume(
+        pg_pool, job_id, name="First Applicant", email=shared_email
+    )
+    resume_b = await _insert_resume(
+        pg_pool, job_id, name="Second Applicant", email=shared_email
+    )
+
+    async with pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT candidate_email_hash FROM resumes WHERE id = $1", resume_a
+        )
+        row_b = await conn.fetchrow(
+            "SELECT candidate_email_hash FROM resumes WHERE id = $1", resume_b
+        )
+    assert row is not None and row_b is not None
+    assert row["candidate_email_hash"] == row_b["candidate_email_hash"], (
+        "the fixture must actually produce a real collision at the schema "
+        "level -- if this fails, the DDL grew a uniqueness constraint on "
+        "candidate_email_hash and this test (and the review finding it "
+        "pins) is moot"
+    )
+
+    async with pg_pool.acquire() as conn:
+        report = await candidate_roster_service.reconcile_candidate_roster(
+            conn,
+            job_id,
+            [
+                _row(
+                    2,
+                    name="Someone, Else",
+                    email=shared_email,
+                    work_authorization="eligible",
+                )
+            ],
+            actor_kind="service",
+            actor_user_id=None,
+            actor_service=_ACTOR,
+        )
+
+    assert report.matched == 0, (
+        "a colliding email hash must resolve to NEITHER résumé, not "
+        "whichever one the unordered SELECT happened to return last"
+    )
+    async with pg_pool.acquire() as conn:
+        stored_a = await conn.fetchval(
+            "SELECT work_authorization FROM resumes WHERE id = $1", resume_a
+        )
+        stored_b = await conn.fetchval(
+            "SELECT work_authorization FROM resumes WHERE id = $1", resume_b
+        )
+    assert stored_a == "unknown", "resume A must not have been written"
+    assert stored_b == "unknown", "resume B must not have been written"

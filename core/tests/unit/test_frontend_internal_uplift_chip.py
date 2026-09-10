@@ -276,3 +276,92 @@ def test_the_chip_mints_no_token_at_50_cards(monkeypatch: Any, client: Any) -> N
     chip_count = len(_session_mapping(client))
 
     assert chip_count == plain_count
+
+
+# ── Minor 4 (2026-09-09 review finding): the chip must disclose what THIS ──
+#    candidate actually received, never the nominal configured amount.
+#
+# ``shortlist_cards.html`` renders ``pm.get('internal_uplift_amount', 0)`` --
+# the NOMINAL configured amount stamped on the run -- not
+# ``ScoreBreakdown.internal_uplift_applied``, whose own docstring says it is
+# "the bonus this candidate ACTUALLY received (post-clamp)". Two ways that
+# is a lie to a recruiter, both pinned below from a real
+# ``ShortlistEntry(...).model_dump(mode="json")`` fixture, never a hand-built
+# dict.
+
+
+def test_a_clamped_candidate_does_not_claim_the_nominal_uplift_amount(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A near-perfect candidate's uplift was CLAMPED: base 0.97 -> +0.03, not
+    the nominal +0.05 the run was configured with. The chip must show the
+    bonus this candidate actually received, not the run's nominal setting."""
+    from src.schemas.matching import ScoreBreakdown
+
+    job_id = uuid4()
+    clamped_breakdown = ScoreBreakdown(
+        **_breakdown_kwargs(),
+        internal_apsa=True,
+        internal_uplift_applied=0.03,
+    )
+    entry = _shortlist_entry(
+        job_id,
+        uuid4(),
+        internal_apsa=True,
+        pipeline_meta=_pipeline_meta(internal_uplift_amount=0.05),
+        score_breakdown=clamped_breakdown,
+    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+
+    body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
+
+    assert "+5" not in body, (
+        "the card claims the nominal configured +5 for a candidate whose "
+        "uplift was clamped to +3 -- a positive false claim about what this "
+        "candidate actually received"
+    )
+    assert "+3" in body, (
+        "the chip must disclose ScoreBreakdown.internal_uplift_applied (the "
+        "post-clamp bonus this candidate actually received), not the "
+        "nominal pipeline_meta.internal_uplift_amount"
+    )
+
+
+def test_an_unreadable_pipeline_meta_does_not_make_the_chip_claim_plus_zero(
+    monkeypatch: Any, client: Any
+) -> None:
+    """``_parse_pipeline_meta`` returns ``None`` when the stored stamp is
+    unreadable, so ``pm = entry.pipeline_meta or {}`` degrades to ``{}`` and
+    ``pm.get('internal_uplift_amount', 0)`` silently claims +0 for a
+    candidate who actually received +5. ``ShortlistEntry``'s own docstring
+    calls a confident 0.0 where the truth is unknown "a POSITIVE FALSE CLAIM
+    about a candidate" -- the chip must not make that claim just because the
+    reproducibility stamp it prefers to read from is gone. The real applied
+    value is still available on ``score_breakdown.internal_uplift_applied``,
+    which does NOT depend on ``pipeline_meta`` at all."""
+    from src.schemas.matching import ScoreBreakdown
+
+    job_id = uuid4()
+    breakdown_with_real_uplift = ScoreBreakdown(
+        **_breakdown_kwargs(),
+        internal_apsa=True,
+        internal_uplift_applied=0.05,
+    )
+    entry = _shortlist_entry(
+        job_id,
+        uuid4(),
+        internal_apsa=True,
+        pipeline_meta=None,
+        score_breakdown=breakdown_with_real_uplift,
+    )
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=[entry]))
+
+    body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
+
+    assert "SFU internal" in body
+    assert "+0" not in body, (
+        "an unreadable/absent pipeline_meta must never make the chip render "
+        "a confident +0 for a candidate score_breakdown says actually "
+        "received +5 -- show the real value or say it is unavailable, "
+        "never a confident wrong number"
+    )
