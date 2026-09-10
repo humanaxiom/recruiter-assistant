@@ -32,6 +32,7 @@ from typing import Final, get_args
 
 from src.errors import AppError
 from src.schemas.jobs import EmploymentType, Seniority
+from src.schemas.resumes import WorkAuthorization
 
 # An uploaded file as this repo models it: ``(filename, content)``.
 UploadedFile = tuple[str, bytes]
@@ -421,14 +422,163 @@ def parse_csv_manifest(blob: bytes) -> dict[str, JobManifestRow]:
     return out
 
 
+# ── Taleo candidate-roster CSV (Sponsor Requirements PR2 · S3/I1) ────────
+#
+# The real Taleo "All Candidates" export (arrived 2026-09-09; see
+# ``docs/SPONSOR_REQUIREMENTS_PLAN.md`` ~line 402) has NO attachment-filename
+# column — ``Resume`` is blank on all 315 real data rows — so there is nothing
+# to key an upload-pairing dict by. ``parse_candidate_csv`` therefore returns
+# an ordered ``list[CandidateRosterRow]`` (line-numbered), not a dict: the
+# fixture also has one person submitted twice with CONFLICTING work-
+# authorization declarations, and collapsing on any key would silently hide
+# that conflict from the recruiter who needs to see it.
+_HEADER_NORM_RE: Final = re.compile(r"[\s_]+")
+
+
+def _normalize_header(h: str) -> str:
+    """Collapse whitespace/underscore runs to a single space before
+    strip+lower, so ``"Work Authorization"``, ``"work_authorization"`` and
+    ``"  Work  Authorization  "`` all key to the same column."""
+    return _HEADER_NORM_RE.sub(" ", h or "").strip().lower()
+
+
+# The single place a raw Taleo work-authorization string is spelled. Two
+# choices here are screening decisions, not formatting ones, so they get
+# recorded rather than left to be "corrected" by a future reader:
+#
+# 1. ``"Work Permit" -> "eligible"`` is the sponsor's explicit, dated answer
+#    (2026-09-09) — not this codebase's guess — and it is not a minor case: it
+#    decides 123 of the 315 real rows. If that answer ever changes, it changes
+#    here, in one place, with a new sponsor decision to cite.
+# 2. Every key below is a declaration Taleo actually emits; a string that
+#    ISN'T one of these keys is handled by the caller as ``"unknown"``, never
+#    ``"not_eligible"``. Silently banding a real candidate last because the
+#    parser met a string it didn't recognise would be an adverse decision on a
+#    protected ground (BC Human Rights Code) that nobody actually made — the
+#    raw cell survives in ``work_authorization_source`` so a recruiter can be
+#    told the tool didn't understand it, instead of a state nobody chose being
+#    recorded silently. All 315 real rows carry one of these four recognised
+#    declarations (180 / 123 / 7 / 5 respectively, zero blanks) — the
+#    "unknown" branch is only exercised by the synthetic tests/vendor fixture,
+#    so a clean run against a real export is not evidence that branch works.
+WORK_AUTHORIZATION_MAP: Final[dict[str, WorkAuthorization]] = {
+    "no restrictions": "eligible",
+    "work permit": "eligible",  # sponsor-confirmed 2026-09-09; 123/315 real rows
+    "study permit": "not_eligible",
+    "not eligible to work in canada": "not_eligible",
+}
+
+
+@dataclass(frozen=True)
+class CandidateRosterRow:
+    """One row of a parsed Taleo candidate-roster CSV, line-numbered so
+    duplicates/conflicts survive rather than being collapsed by a dict key."""
+
+    line_no: int
+    name: str | None
+    email: str | None
+    sfu_id: str | None
+    # The Literal, not ``str``: the three states are the whole point of this
+    # field, and typing it loosely would let a typo'd fourth state ("not-
+    # eligible") type-check here and only fail later at the DDL's CHECK
+    # constraint — or reach a path that has no constraint at all. mypy is the
+    # enforcement; this repo's characteristic defect is an invariant stated in
+    # prose with nothing checking it.
+    work_authorization: WorkAuthorization
+    work_authorization_source: str | None
+    internal_apsa: bool
+    internal_cupe: bool
+    submission_date: str | None
+
+
+def parse_candidate_csv(blob: bytes) -> list[CandidateRosterRow]:
+    """Parse a Taleo "All Candidates" export into an ordered list of rows.
+
+    At least one of ``name``/``email`` columns must be present (matched
+    case/space/underscore-insensitively, like ``parse_csv_manifest``'s
+    ``headers`` dict); a row with neither a name nor an email is a blank/
+    placeholder line and is skipped, not an error. ``line_no`` is the real CSV
+    line (header is line 1), preserved even when a preceding row was skipped.
+    Raises :class:`ManifestError` (422) on oversize bytes or an empty file, or
+    when neither a name nor an email column is present at all.
+    """
+    if len(blob) > _MAX_MANIFEST_BYTES:
+        raise ManifestError(
+            f"manifest is {len(blob)} bytes; the cap is {_MAX_MANIFEST_BYTES}"
+        )
+    reader = csv.DictReader(io.StringIO(_decode(blob)))
+    if reader.fieldnames is None:
+        raise ManifestError("the manifest is empty")
+
+    headers = {_normalize_header(h): (h or "") for h in reader.fieldnames}
+    if "name" not in headers and "email" not in headers:
+        raise ManifestError("manifest has neither a 'name' nor an 'email' column")
+
+    def cell(row: dict[str, str], key: str) -> str | None:
+        if key not in headers:
+            return None
+        raw = row.get(headers[key])
+        if raw is None:
+            return None
+        return raw.strip() or None
+
+    def raw_cell(row: dict[str, str], key: str) -> str | None:
+        # UNLIKE cell(): returns the value verbatim (no strip), because the
+        # work-authorization mapping test pins that ``work_authorization_source``
+        # carries the exact raw declaration Taleo sent, whitespace and all.
+        if key not in headers:
+            return None
+        return row.get(headers[key])
+
+    rows: list[CandidateRosterRow] = []
+    for line_no, row in enumerate(reader, start=2):  # row 1 is the header
+        name = cell(row, "name")
+        email = cell(row, "email")
+        if name is None and email is None:
+            continue  # blank/placeholder row, not an error
+
+        wa_raw = raw_cell(row, "work authorization")
+        work_authorization: WorkAuthorization
+        work_authorization_source: str | None
+        if wa_raw is None or not wa_raw.strip():
+            work_authorization = "unknown"
+            work_authorization_source = None
+        else:
+            work_authorization_source = wa_raw
+            # ``.get(..., "unknown")`` is the load-bearing default: an
+            # unrecognised declaration must never fall through to
+            # ``not_eligible``. See WORK_AUTHORIZATION_MAP above.
+            work_authorization = WORK_AUTHORIZATION_MAP.get(
+                wa_raw.strip().lower(), "unknown"
+            )
+
+        rows.append(
+            CandidateRosterRow(
+                line_no=line_no,
+                name=name,
+                email=email,
+                sfu_id=cell(row, "sfu id"),
+                work_authorization=work_authorization,
+                work_authorization_source=work_authorization_source,
+                internal_apsa=(cell(row, "apsa internal") or "").lower() == "i",
+                internal_cupe=(cell(row, "cupe internal") or "").lower() == "i",
+                submission_date=cell(row, "submission date"),
+            )
+        )
+    return rows
+
+
 __all__ = [
     "ApplicantFiles",
+    "CandidateRosterRow",
     "JobManifestRow",
     "ManifestError",
     "PairingResult",
     "UploadedFile",
+    "WORK_AUTHORIZATION_MAP",
     "basename_lower",
     "pair_applicants",
+    "parse_candidate_csv",
     "parse_csv_manifest",
     "parse_pairing_manifest",
     "title_from_filename",
