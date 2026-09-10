@@ -90,6 +90,14 @@ disclosed. No fixture would have produced that case.
    75 résumés ≈ 2.5 h; a full 315-candidate requisition ≈ **11 hours**. That is
    a real constraint on "upload, parse, rank" at Taleo scale and it is a
    hardware/concurrency question, not a code one.
+   **And the sharp edge of it: "Generate shortlist" QUEUES BEHIND every
+   parse.** arq is FIFO at `max_jobs=4`; with ~1,400 jobs queued the request
+   returns 200, sets `shortlist_state='ranking'`, and then sits for hours. It
+   reproduces the exact pilot complaint of 2026-09-09 ("Generate shortlist has
+   not been producing anything") from an unrelated cause, and the page still
+   says "several minutes". Surfacing the real queue depth is cheap and removes
+   the whole "is it broken?" class; a separate lane for interactive work is
+   the real fix. **Do not just raise `max_jobs`** — lesson 7 applies.
 3. **The CSV is the FULL export; the résumés are a subset.** ~240 unmatched CSV
    rows are the NORMAL state, forever. The report currently enumerates them,
    which buries the number that matters: **résumé-side** coverage. Recorded.

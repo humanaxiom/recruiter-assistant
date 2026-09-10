@@ -164,6 +164,43 @@ not be identified" (investigate).
 ("71 of 75 résumés matched a roster row; 4 did not — here they are") and treat
 the CSV-side remainder as a bare count, not an enumeration.
 
+**"Generate shortlist" queues behind every parse, on the same four slots.**
+Measured 2026-09-09 with 75 résumés mid-ingest: clicking Generate returned
+200, set `shortlist_state = 'ranking'`, and then **did nothing for hours**,
+because arq is FIFO with `max_jobs=4` and all four slots were held by
+`parse_resume` tasks running **570–840s each** with **~1,400 jobs queued**
+behind them.
+
+**This reproduces, from a completely different cause, the exact complaint a
+pilot user made on 2026-09-09** — *"Generate shortlist has not been producing
+anything"*. That one was the 2048-token evidence budget. This one is queue
+starvation. A recruiter cannot tell the two apart, and in both cases the
+screen says the same reassuring thing.
+
+The shortlist page's own copy — *"a full pass realistically takes several
+minutes"* — is **wrong by two orders of magnitude** under these conditions,
+and it is the only thing the user has to go on.
+
+**Recorded, not fixed. The options, roughly in order of cost:**
+
+1. **Say the true thing.** The queue depth is already known to the worker
+   (`j_ongoing`, `queued` are in its health line). Surfacing *"ranking is
+   queued behind N parse jobs; expect ~H hours"* costs one query and removes
+   the entire class of "is it broken?" It does not make it faster, but it
+   stops it looking broken, which is the actual damage.
+2. **Give user-triggered work its own lane** — a second queue name, or a
+   dedicated worker, so an interactive request never waits on bulk background
+   ingest. This is the real fix and it is a deployment change more than a code
+   one.
+3. Raise `max_jobs`, which trades against the LLM host's own concurrency
+   limits — and `HANDOFF.md` lesson 7 is explicit that budgets measured at one
+   concurrency tell you nothing about another. **Do not raise it without
+   re-measuring.**
+
+At the sponsor's real scale — 315 candidates — this is not a corner case: it
+is ~11 hours of parsing during which the product's headline feature appears
+to be broken.
+
 **The workflow is not the three steps it looks like.** Driving the real
 bundle end to end on 2026-09-09 found an ordering dependency nothing tells the
 user about. The DTO asked for *"Upload, Parse and rank"*. It is actually
