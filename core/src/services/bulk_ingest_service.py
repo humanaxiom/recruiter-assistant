@@ -486,8 +486,20 @@ class CandidateRosterRow:
     # prose with nothing checking it.
     work_authorization: WorkAuthorization
     work_authorization_source: str | None
-    internal_apsa: bool
-    internal_cupe: bool
+    # ``bool | None``, mirroring ``work_authorization``'s absent/declared
+    # distinction: ``None`` means the "APSA Internal"/"CUPE Internal" column
+    # was not present in this export at all; ``False`` means the column WAS
+    # present and this row declares the candidate is not internal; ``True``
+    # means internal. Collapsing "absent" into ``False`` (as slice 1
+    # originally did) would make a `False` write indistinguishable from "no
+    # opinion", and since Taleo exports are snapshots re-uploaded as
+    # applicants trickle in, a wrongly-set ``True`` would become impossible to
+    # ever clear by re-uploading a corrected roster —
+    # ``candidate_roster_service.reconcile_candidate_roster`` writes internal
+    # status only for rows where the value is not ``None``, and a declared
+    # ``False`` DOES clear a previously-set ``True``.
+    internal_apsa: bool | None
+    internal_cupe: bool | None
     submission_date: str | None
 
 
@@ -530,6 +542,14 @@ def parse_candidate_csv(blob: bytes) -> list[CandidateRosterRow]:
             return None
         return row.get(headers[key])
 
+    def internal_flag(row: dict[str, str], key: str) -> bool | None:
+        # ``None`` when the column is absent from the export altogether
+        # (checked once against ``headers``, not per-cell) — a present-but-
+        # blank cell is a declared ``False``, not an absence.
+        if key not in headers:
+            return None
+        return (cell(row, key) or "").lower() == "i"
+
     rows: list[CandidateRosterRow] = []
     for line_no, row in enumerate(reader, start=2):  # row 1 is the header
         name = cell(row, "name")
@@ -560,8 +580,8 @@ def parse_candidate_csv(blob: bytes) -> list[CandidateRosterRow]:
                 sfu_id=cell(row, "sfu id"),
                 work_authorization=work_authorization,
                 work_authorization_source=work_authorization_source,
-                internal_apsa=(cell(row, "apsa internal") or "").lower() == "i",
-                internal_cupe=(cell(row, "cupe internal") or "").lower() == "i",
+                internal_apsa=internal_flag(row, "apsa internal"),
+                internal_cupe=internal_flag(row, "cupe internal"),
                 submission_date=cell(row, "submission date"),
             )
         )

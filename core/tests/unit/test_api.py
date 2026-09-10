@@ -133,6 +133,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         "/jobs/{job_id}/status",
         "/jobs/{job_id}/reparse",
         "/jobs/{job_id}/resumes",
+        # Sponsor Requirements PR2 slice 2 — Taleo candidate-roster CSV
+        # reconciliation, same writer role gate as the résumé upload above.
+        "/jobs/{job_id}/candidate-roster",
         "/resumes/{resume_id}",
         "/resumes/{resume_id}/reveal",
         "/resumes/{resume_id}/match-jobs",

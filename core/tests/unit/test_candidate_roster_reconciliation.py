@@ -65,16 +65,23 @@ counts and line numbers/ids only, mirroring ``set_work_authorization``'s own
 
 ## internal_apsa/internal_cupe and a roster with no APSA/CUPE columns
 
-``CandidateRosterRow.internal_apsa``/``internal_cupe`` are always populated
-booleans (``bulk_ingest_service.parse_candidate_csv`` defaults an absent
-column to ``False`` per row, identically to a present-but-blank cell — slice
-1 is already merged and this file must not touch it). That means the ONLY
-signal ``reconcile_candidate_roster`` can use to tell "this roster has no
-APSA/CUPE columns at all" from "every candidate in it happens to be
-non-internal" is: **no row in the WHOLE roster declares that field ``True``**.
-When that holds for a field, the reconciler must never attempt to write it
-for anyone this run — an unconditional apply would silently CLEAR a flag a
-PREVIOUS roster legitimately set. This is pinned directly below.
+**CONTRACT CHANGE from the original slice-1 shape**, made together with this
+slice rather than bent to fit it: ``CandidateRosterRow.internal_apsa``/
+``internal_cupe`` are now ``bool | None`` — ``None`` means the column was
+absent from THIS export; ``False`` means the column was present and this row
+declares "not internal"; ``True`` means internal. The earlier "no row in the
+whole roster declares the field ``True``" heuristic (inferring absence from
+an all-``False`` roster) conflated "the column is absent" with "the column
+is present and nobody is internal", and made a wrongly-set flag impossible
+to clear by re-uploading a corrected roster. ``None`` says directly what the
+heuristic had to guess: when every row contributing to a résumé's group is
+``None`` for a field, the reconciler must never attempt to write that field
+for that résumé — an unconditional apply would silently CLEAR a flag a
+PREVIOUS roster legitimately set — but a declared ``False`` DOES clear a
+previously-set ``True``, because that is the point: Taleo exports are
+snapshots re-uploaded as applicants trickle in, and a stale ``True``
+outliving the roster that set it is a live data-quality bug. This is pinned
+directly below.
 
 All I/O is mocked. ``pii.email_hash`` is a pure function and is used for
 real (no mocking needed); ``pii.decrypt`` is monkeypatched at
@@ -105,8 +112,8 @@ def _row(
     email: str | None = None,
     work_authorization: str = "unknown",
     work_authorization_source: str | None = None,
-    internal_apsa: bool = False,
-    internal_cupe: bool = False,
+    internal_apsa: bool | None = None,
+    internal_cupe: bool | None = None,
     sfu_id: str | None = None,
     submission_date: str | None = None,
 ) -> CandidateRosterRow:
@@ -621,13 +628,14 @@ async def test_a_genuinely_blank_work_authorization_cell_is_not_unrecognised(
 async def test_roster_with_no_apsa_cupe_signal_never_writes_internal_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every row in this roster carries ``internal_apsa=False`` and
-    ``internal_cupe=False`` — indistinguishable, from ``CandidateRosterRow``
-    alone, from "these columns weren't in the CSV at all". The matched
-    résumé was PREVIOUSLY marked ``internal_apsa=True, internal_cupe=True`` by
-    an earlier roster. Applying this roster's flags unconditionally would
-    silently CLEAR that — exactly what must never happen: the reconciler must
-    not attempt the internal-status write for anyone this run."""
+    """This roster's CSV row carries ``internal_apsa=None``/
+    ``internal_cupe=None`` — the "column absent from this export" contract
+    (see the module docstring's CONTRACT CHANGE section). The matched résumé
+    was PREVIOUSLY marked ``internal_apsa=True, internal_cupe=True`` by an
+    earlier roster. Applying ``None`` as though it were a declared ``False``
+    would silently CLEAR that — exactly what must never happen: the
+    reconciler must not attempt the internal-status write for anyone this
+    run when it has no signal at all for that field."""
     resume_id = uuid4()
     resume = _resume_row(
         resume_id=resume_id,
@@ -644,8 +652,8 @@ async def test_roster_with_no_apsa_cupe_signal_never_writes_internal_status(
         2,
         email="already-internal@example.invalid",
         work_authorization="eligible",
-        internal_apsa=False,
-        internal_cupe=False,
+        internal_apsa=None,
+        internal_cupe=None,
     )
     report = await _reconcile(
         conn,

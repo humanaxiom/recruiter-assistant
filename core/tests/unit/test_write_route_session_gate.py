@@ -84,6 +84,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("PATCH", "/jobs/{job_id}/status"),
     ("POST", "/jobs/{job_id}/reparse"),
     ("POST", "/jobs/{job_id}/resumes"),
+    # Sponsor Requirements PR2 slice 2 — a batch of the same kind of write as
+    # the résumé upload above (audited screening declarations against real
+    # people), so it carries the identical writer/session-role gate.
+    ("POST", "/jobs/{job_id}/candidate-roster"),
     ("POST", "/resumes/{resume_id}/reveal"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),

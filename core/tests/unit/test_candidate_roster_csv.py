@@ -230,7 +230,9 @@ def test_apsa_internal_i_case_and_whitespace_tolerant_sets_flag_true(
     blob = _csv_bytes(f'Name,"APSA Internal"\n"Smith, Jordan","{raw}"\n')
     rows = parse_candidate_csv(blob)
     assert rows[0].internal_apsa is True
-    assert rows[0].internal_cupe is False
+    # Contract change (slice 2): "CUPE Internal" has no column at all here,
+    # so it is None (absent), not False (present-and-not-internal).
+    assert rows[0].internal_cupe is None
 
 
 @pytest.mark.parametrize("raw", ["I", "i", " I ", " i "])
@@ -240,7 +242,9 @@ def test_cupe_internal_i_case_and_whitespace_tolerant_sets_flag_true(
     blob = _csv_bytes(f'Name,"CUPE Internal"\n"Smith, Jordan","{raw}"\n')
     rows = parse_candidate_csv(blob)
     assert rows[0].internal_cupe is True
-    assert rows[0].internal_apsa is False
+    # Contract change (slice 2): "APSA Internal" has no column at all here,
+    # so it is None (absent), not False (present-and-not-internal).
+    assert rows[0].internal_apsa is None
 
 
 def test_blank_apsa_and_cupe_cells_are_false() -> None:
@@ -260,12 +264,18 @@ def test_apsa_cupe_any_other_non_blank_value_is_false_not_guessed(raw: str) -> N
     assert rows[0].internal_cupe is False
 
 
-def test_no_apsa_cupe_columns_yields_false_for_every_row_and_does_not_raise() -> None:
+def test_no_apsa_cupe_columns_yields_none_for_every_row_and_does_not_raise() -> None:
+    """Contract change (slice 2): the ABSENT-column case must be
+    distinguishable from a present-but-blank cell, so
+    ``reconcile_candidate_roster`` can tell "this roster has no APSA/CUPE
+    columns at all" from "every candidate in it happens to be non-internal"
+    and skip writing the field entirely rather than clearing a previously-set
+    flag. ``None`` means absent; ``False`` means present-and-not-internal."""
     blob = _csv_bytes('Name\n"Smith, Jordan"\n"Doe, Alex"\n')
     rows = parse_candidate_csv(blob)
     assert len(rows) == 2
-    assert all(r.internal_apsa is False for r in rows)
-    assert all(r.internal_cupe is False for r in rows)
+    assert all(r.internal_apsa is None for r in rows)
+    assert all(r.internal_cupe is None for r in rows)
 
 
 # ── formula injection: parser must not mutate cells ──────────────────────
