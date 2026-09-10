@@ -758,3 +758,59 @@ async def test_the_resume_query_is_scoped_to_the_given_job_id(
         for a in list(call.args) + list(call.kwargs.values())
     ]
     assert job_id in flat
+
+
+# ── name normalisation: the two sides are encoded differently ────────────
+
+
+@pytest.mark.parametrize(
+    ("csv_spelling", "resume_spelling"),
+    [
+        ("Ferran", "that surname"),
+        ("Delacroix", "Delacroîx"),
+        ("Muller", "Müller"),
+        ("Nunez", "Núñez"),
+        ("Strom", "Ström"),
+    ],
+)
+def test_accented_and_folded_spellings_of_one_surname_normalise_alike(
+    csv_spelling: str, resume_spelling: str
+) -> None:
+    """A surname must not fail to match itself because of which side it came
+    from.
+
+    Taleo ASCII-folds its export — zero of the 315 rows in the sponsor's real
+    roster carry a non-ASCII byte — while the résumé side is parsed from the
+    candidate's own PDF and keeps its diacritics. The delivered bundle holds
+    exactly this pair: CSV `an ASCII-folded surname` against résumé ``a surname with an acute accent
+    ``.
+
+    Before the NFKD fold, ``[^A-Za-z]+`` treated ``í`` as a separator and
+    shattered ``that surname`` into ``{d, az}``, so the two spellings shared no token
+    at all.
+    """
+    from src.services.candidate_roster_service import _normalize_name
+
+    assert _normalize_name(csv_spelling) == _normalize_name(resume_spelling)
+
+
+def test_accent_folding_does_not_collapse_genuinely_different_names() -> None:
+    """The fold must only ever make one name match ITSELF across encodings.
+
+    It widens nothing else: two different surnames stay different, so the fold
+    cannot introduce a false match that strict set equality would have
+    refused.
+    """
+    from src.services.candidate_roster_service import _normalize_name
+
+    assert _normalize_name("that surname") != _normalize_name("Diez")
+    assert _normalize_name("Núñez") != _normalize_name("Nunes")
+
+
+def test_name_normalisation_is_order_invariant_across_the_two_conventions() -> None:
+    """The CSV writes ``Last, First``; a parsed résumé does not. Comparing as
+    a set is what keeps the match symmetric rather than privileging either
+    source's convention."""
+    from src.services.candidate_roster_service import _normalize_name
+
+    assert _normalize_name("Nolan, Bree") == _normalize_name("Bree Nolan")

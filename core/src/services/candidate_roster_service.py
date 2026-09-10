@@ -39,6 +39,7 @@ line numbers/ids only.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from typing import Any, Literal
 from uuid import UUID
@@ -59,11 +60,34 @@ _JOB_RESUMES_SQL = """
 
 # Split on any non-letter character (mirrors the module docstring's pinned
 # normalisation) — digits, punctuation, and whitespace are all separators.
+# ASCII-only BY DESIGN, because the two sides are folded to ASCII first.
 _NON_LETTER_RE = re.compile(r"[^A-Za-z]+")
 
 
 def _normalize_name(name: str) -> frozenset[str]:
-    return frozenset(t for t in _NON_LETTER_RE.split(name.lower()) if t)
+    """Lower-case, accent-fold, and split a name into an order-invariant token
+    set.
+
+    The accent fold is load-bearing and comes from the real data, not from
+    caution. **The two sides of this comparison are encoded differently.**
+    Taleo ASCII-folds its export — zero of the 315 rows in the sponsor's real
+    roster carry a non-ASCII character — while the résumé side is parsed out
+    of the candidate's own PDF and keeps its diacritics. The delivered bundle
+    contains exactly that pair: the CSV row reads `an ASCII-folded surname` and the
+    résumé reads ``a surname carrying an acute accent``.
+
+    Without the fold, ``[^A-Za-z]+`` treats ``í`` as a SEPARATOR and shatters
+    ``that surname`` into ``{d, az}``, so the two spellings of one surname could never
+    produce a common token — a mismatch caused entirely by which side of the
+    integration a name happened to arrive from. NFKD then dropping combining
+    marks maps both spellings onto ``ferran``.
+
+    This only ever makes two names MORE likely to be judged equal, so it
+    cannot introduce a false match that strict equality would have refused.
+    """
+    folded = unicodedata.normalize("NFKD", name.lower())
+    stripped = "".join(c for c in folded if not unicodedata.combining(c))
+    return frozenset(t for t in _NON_LETTER_RE.split(stripped) if t)
 
 
 class AmbiguousNameMatch(BaseModel):
