@@ -797,7 +797,7 @@ async def test_the_resume_query_is_scoped_to_the_given_job_id(
 @pytest.mark.parametrize(
     ("csv_spelling", "resume_spelling"),
     [
-        ("Ferran", "that surname"),
+        ("Ferran", "Ferrán"),
         ("Delacroix", "Delacroîx"),
         ("Muller", "Müller"),
         ("Nunez", "Núñez"),
@@ -839,7 +839,7 @@ def test_accent_folding_does_not_collapse_genuinely_different_names() -> None:
     """
     from src.services.candidate_roster_service import _normalize_name
 
-    assert _normalize_name("that surname") != _normalize_name("Diez")
+    assert _normalize_name("Ferrán") != _normalize_name("Ferrer")
     assert _normalize_name("Núñez") != _normalize_name("Nunes")
 
 
@@ -1106,3 +1106,123 @@ async def test_a_conflict_on_one_internal_flag_does_not_suppress_the_agreed_sibl
     assert report.internal_cupe_changed == 1
     assert report.internal_apsa_changed == 0
     assert report.internal_apsa_unchanged == 0
+
+
+# ── security minor 2 (2026-09-09 review finding): the "never write         ──
+#    `unknown`" guard is unpinned. `if resolved_wa != "unknown":` at
+#    candidate_roster_service.py:288/343 is correct as shipped, but nothing
+#    in this suite fails if it regresses to `if True:` — a security-gate
+#    mutation run flipped exactly that line and all 6067 unit tests stayed
+#    green. Mirrors
+#    `test_roster_with_no_apsa_cupe_signal_never_writes_internal_status`
+#    above, one field over.
+
+
+@pytest.mark.asyncio
+async def test_a_matched_resume_resolving_to_unknown_work_authorization_never_writes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matched résumé whose group resolves to ``work_authorization ==
+    'unknown'`` (a blank/unrecognised cell, never declared otherwise by any
+    contributing row) must produce ZERO ``set_work_authorization`` calls.
+    Writing ``unknown`` would overwrite a recruiter's own audited
+    ``eligible``/``not_eligible`` declaration with "no signal", from a CSV
+    row that never actually said that."""
+    resume_id = uuid4()
+    resume = _resume_row(
+        resume_id=resume_id,
+        email="already-eligible@example.invalid",
+        work_authorization="eligible",
+    )
+    conn = _mock_conn([resume])
+    set_wa, _ = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {})
+
+    row = _row(
+        2,
+        email="already-eligible@example.invalid",
+        work_authorization="unknown",
+    )
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert resume_id not in _resume_ids_written_by(set_wa), (
+        "a group with no non-'unknown' declaration must never call "
+        "set_work_authorization -- doing so would silently overwrite an "
+        "existing audited declaration with 'no signal'"
+    )
+    assert report.work_authorization_changed == 0
+    assert report.work_authorization_unchanged == 1
+
+
+# ── security minor 3 (2026-09-09 review finding): unconditional bulk       ──
+#    decrypt. Names must be decrypted ONLY for résumés email-hash matching
+#    (step 1) left unresolved -- never every résumé in the job up front,
+#    which decrypts PII for candidates the request never needed it for and
+#    pays N sequential round trips instead of however many step 2 actually
+#    needs.
+
+
+@pytest.mark.asyncio
+async def test_decrypt_runs_only_for_resumes_still_unresolved_after_email_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_matched = uuid4()
+    resume_unresolved = uuid4()
+    cipher_matched = b"cipher-matched-by-email"
+    cipher_unresolved = b"cipher-needs-name-fallback"
+    resumes = [
+        _resume_row(
+            resume_id=resume_matched,
+            email="matched@example.invalid",
+            name_ciphertext=cipher_matched,
+        ),
+        _resume_row(
+            resume_id=resume_unresolved,
+            email=None,
+            name_ciphertext=cipher_unresolved,
+        ),
+    ]
+    conn = _mock_conn(resumes)
+    _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+
+    decrypt_calls: list[bytes] = []
+
+    async def _decrypt(_conn: Any, ciphertext: bytes | None) -> str | None:
+        if ciphertext is None:
+            return None
+        decrypt_calls.append(ciphertext)
+        return {
+            cipher_matched: "Matched Person",
+            cipher_unresolved: "Unresolved Person",
+        }[ciphertext]
+
+    monkeypatch.setattr(pii_service, "decrypt", AsyncMock(side_effect=_decrypt))
+
+    rows = [
+        _row(2, email="matched@example.invalid", work_authorization="eligible"),
+        _row(9, name="Unresolved Person", work_authorization="eligible"),
+    ]
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        rows,
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert cipher_unresolved in decrypt_calls
+    assert cipher_matched not in decrypt_calls, (
+        "the résumé already resolved by email hash must never be "
+        "decrypted -- step 2 never needs its name"
+    )
+    assert report.matched == 2
