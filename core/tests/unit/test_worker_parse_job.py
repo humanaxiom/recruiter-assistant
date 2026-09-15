@@ -400,3 +400,129 @@ async def test_summary_embed_transient_failure_escapes_uncaught_for_arq_retry() 
 
     record_failure.assert_not_awaited()
     enqueue.assert_not_awaited()
+
+
+# ── zero-requirements disclosure (pilot defect 2026-09-10) ─────────────────
+#
+# fix/zero-requirements-rank-guard: a JD extraction that yields BOTH zero
+# required_skills AND zero nice_to_have_skills must be logged distinctly
+# (marker "parse_job.zero_requirements") so an operator can find these jobs
+# in the logs even before the API-level 409 guard ever fires against them --
+# a job in this state was, until this fix, silently indistinguishable from
+# any other successful parse.
+
+
+@pytest.mark.asyncio
+async def test_happy_path_logs_zero_requirements_marker_when_both_lists_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job_id = uuid4()
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
+    extracted = JDExtracted(title="Senior Backend Engineer")
+    assert extracted.required_skills == []
+    assert extracted.nice_to_have_skills == []
+    llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
+    embedder = MagicMock(embed=AsyncMock(return_value=[[0.1] * 8]))
+    ctx = _make_ctx(conn, llm, embedder)
+
+    with (
+        patch("src.worker.tasks.load_prompt", return_value=_fake_prompt()),
+        patch(
+            "src.worker.tasks.job_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("src.worker.tasks.outbox_service.enqueue_outbox", new_callable=AsyncMock),
+        caplog.at_level("WARNING", logger="src.worker.tasks"),
+    ):
+        result = await parse_job(ctx, str(job_id))
+
+    assert result == "parsed"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("parse_job.zero_requirements" in r.getMessage() for r in warnings), (
+        "expected a WARNING carrying the 'parse_job.zero_requirements' marker "
+        f"when both skill lists are empty; got: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_happy_path_logs_ok_not_zero_requirements_when_skills_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job_id = uuid4()
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
+    extracted = JDExtracted(
+        title="Senior Backend Engineer", required_skills=[Skill(name="Python")]
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
+    embedder = MagicMock(embed=AsyncMock(return_value=[[0.1] * 8]))
+    ctx = _make_ctx(conn, llm, embedder)
+
+    with (
+        patch("src.worker.tasks.load_prompt", return_value=_fake_prompt()),
+        patch(
+            "src.worker.tasks.job_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("src.worker.tasks.outbox_service.enqueue_outbox", new_callable=AsyncMock),
+        caplog.at_level("INFO", logger="src.worker.tasks"),
+    ):
+        result = await parse_job(ctx, str(job_id))
+
+    assert result == "parsed"
+    assert any("parse_job.ok" in r.getMessage() for r in caplog.records)
+    assert not any(
+        "parse_job.zero_requirements" in r.getMessage() for r in caplog.records
+    ), "a parse with required_skills present must not carry the zero_requirements marker"
+
+
+@pytest.mark.asyncio
+async def test_happy_path_logs_ok_not_zero_requirements_when_only_nice_to_have(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job_id = uuid4()
+    conn = _make_conn(
+        {
+            "description_raw": "Build things.",
+            "additional_requirements": None,
+            "status": "draft",
+        }
+    )
+    extracted = JDExtracted(
+        title="Senior Backend Engineer",
+        required_skills=[],
+        nice_to_have_skills=[Skill(name="Terraform")],
+    )
+    llm = MagicMock(chat_json=AsyncMock(return_value=extracted))
+    embedder = MagicMock(embed=AsyncMock(return_value=[[0.1] * 8]))
+    ctx = _make_ctx(conn, llm, embedder)
+
+    with (
+        patch("src.worker.tasks.load_prompt", return_value=_fake_prompt()),
+        patch(
+            "src.worker.tasks.job_service.record_parsed",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("src.worker.tasks.outbox_service.enqueue_outbox", new_callable=AsyncMock),
+        caplog.at_level("INFO", logger="src.worker.tasks"),
+    ):
+        result = await parse_job(ctx, str(job_id))
+
+    assert result == "parsed"
+    assert not any(
+        "parse_job.zero_requirements" in r.getMessage() for r in caplog.records
+    )
