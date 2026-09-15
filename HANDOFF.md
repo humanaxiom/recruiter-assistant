@@ -31,7 +31,7 @@ against a wall.
 All are small, none touches the ceiling.
 
 > 🟢 **FIXED 2026-09-15 on `fix/zero-requirements-rank-guard`, branched off
-> `main` — see that branch's HANDOFF.md for the hand-drive evidence. The
+> `main`, **merged as PR #105 on 2026-09-15** — see main's HANDOFF.md for the hand-drive evidence. The
 > write-up below is kept as the record of what was reported. When this branch
 > is next synced with `main`, ADR-017 conflicts on two appended amendments:
 > keep both, in date order.**
@@ -488,10 +488,11 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **`feat/candidate-roster-csv`**, 20 commits, gates green, **NOT pushed — awaiting the user's Codex review** (see START HERE) |
+| Branch in flight | **`feat/candidate-roster-csv`**, synced with `main` (PR #105, the zero-requirements guard) on 2026-09-15, gates green, **NOT pushed — awaiting the user's Codex review** (see START HERE). The sync conflicted on ADR-017 (two amendments, both kept) and on this file (roster side kept). |
 | Pilot box contents | The DTO's **Business Analyst** req + 75 résumés + the 315-row roster reconciled. Parsing was **still running** when the session ended (~47/75 parsed); a shortlist was triggered and sits in `shortlist_state='ranking'` behind the parse queue. Everything that predated this — 29 jobs, 48 résumés — was **wiped** at the user's request. |
 | Gates, last local run | `verify.sh all` → 6084 unit @ 91.66% + 625 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
-| PR | none yet for the roster branch. [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104) MERGED |
+| PR | none yet for the roster branch. [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104) and [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) MERGED |
+| `smoke.sh` | 2026-09-15 on this branch + the guard: **10 passed in 693s**; two earlier runs failed for reasons outside the change (a `git checkout` mid-run — the stack bind-mounts `./core`, see main's HANDOFF §8 — then one degraded résumé rightly not ranked). |
 | ⚠️ Before pushing | The branch history was **rewritten four times** to purge committed candidate PII. A `backup-pre-redact-*` branch still holds the unredacted history — **delete it before any push**, and re-run the 925-token scan in §3 if you rewrite again. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
@@ -604,3 +605,15 @@ No usable Python on this host (only the WindowsApps stub) — use
 exits 0. Publish unique host ports (29xxx) — many other containers on this
 machine collide on stock 5432/8000/5000. Two Claude sessions drive this repo at
 once: re-read git and PR state in the same call that commits, pushes, or merges.
+
+**The stack serves the WORKING TREE, not an image.** `docker-compose.yml`
+bind-mounts `./core:/app` into api, worker and frontend, with uvicorn
+`--reload` and Flask `--debug`. `docker compose up -d --build` pins nothing:
+a `git checkout` changes what the box executes and renders within seconds.
+On 2026-09-15 a checkout to a `main`-based branch, made while `smoke.sh` was
+running against a database the roster branch had written, 500'd every
+shortlist list on `ScoreBreakdown extra_forbidden` and failed the run after
+24 minutes. **Never switch branches while smoke, doctor, a hand-drive, or a
+user is on the stack**; to edit another branch meanwhile, use a `git
+worktree`. Hand-drive evidence is only valid for the branch that was checked
+out when it was gathered.

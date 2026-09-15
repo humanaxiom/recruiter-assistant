@@ -64,13 +64,29 @@
    both belong in this OR. Do not collapse them into one flag: each drives a
    distinctly-worded banner below, and merging them would silently pick the
    wrong message for whichever state actually applies. #}
-{% set polling = (a < m) and ((not entries) or ranking or awaiting_llm) %}
+{# Pilot defect 2026-09-10: the zero-requirements refusal is a TERMINAL
+   outcome, not a transient failure -- no run was ever queued (or ever could
+   be), so there is nothing to poll for and the fragment must not keep
+   re-requesting/promising one. TWO distinct sources land here:
+   `conflict_reason` (a 409 JUST returned from a POST Generate) and
+   `jd_has_no_requirements` (the STANDING state on a full page load / poll
+   fragment, fetched tolerantly by `_fetch_jd_has_no_requirements` -- review
+   MAJOR 2: before this fix `polling` consulted only the former, so a plain
+   page load or the standalone poll route for an already-refused job still
+   rendered "Generating…" with a 3s `hx-trigger` for up to ~20 minutes). #}
+{% set conflict_reason = conflict_reason|default(none) %}
+{% set jd_has_no_requirements = jd_has_no_requirements|default(false) %}
+{% set terminal_refusal = (conflict_reason is not none) or jd_has_no_requirements %}
+{% set polling = (not terminal_refusal) and (a < m) and ((not entries) or ranking or awaiting_llm) %}
 <div id="shortlist-cards"
   {%- if polling %}
      hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
+  {% if conflict_reason %}
+  <p id="jd-no-requirements" class="warning">{{ conflict_reason }}</p>
+  {% endif %}
   {% if entries %}
   {# SPONSOR 2026-09-02 §O2 follow-on: "the declaration is a critical eval
      parameter", so a recruiter needs to see at a glance how many candidates
@@ -157,6 +173,16 @@
     takes several minutes and scales with the number of résumés involved.
     <br>
     <span class="elapsed">~{{ a * 3 }}s elapsed</span>
+  </p>
+  {% elif conflict_reason %}
+  {# MINOR (review): the banner at the top of this fragment already states
+     the refusal reason -- do not ALSO tell the recruiter to "click Generate
+     again", which is exactly the request that was just refused. Nothing
+     further to render here. #}
+  {% elif jd_has_no_requirements %}
+  <p class="muted">
+    This job description has no requirements to rank against. Re-parse or
+    replace the JD first.
   </p>
   {% else %}
   <p class="muted">

@@ -33,5 +33,13 @@
     <span class="muted">No required skills parsed.</span>
     {% endif %}
   </div>
+  {% if job.description_parsed
+      and not job.description_parsed.required_skills
+      and not job.description_parsed.nice_to_have_skills %}
+  <p id="jd-no-requirements-warning" class="warning">
+    This job description yielded no requirements at all (no required and no
+    nice-to-have skills) — wrong text uploaded? Re-parse or replace the JD.
+  </p>
+  {% endif %}
   {% endif %}
 </div>

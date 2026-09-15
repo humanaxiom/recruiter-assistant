@@ -606,11 +606,24 @@ def _summarise_bulk(results: Any) -> dict[str, int]:
 
 
 def _format_error(detail: Any) -> str:
-    """Render a backend validation ``detail`` into a short human message.
+    """Render a backend error body into a short human message.
 
-    FastAPI/pydantic 422 bodies carry ``detail`` as a list of error dicts
-    (``{"type": ..., "loc": [...], "msg": ..., "input": ...}``) — never show
-    that raw ``repr`` to a recruiter; join the human ``msg`` fields instead.
+    ``detail`` here is the WHOLE parsed JSON body (``api_client._raise_for_
+    status`` passes ``response.json()`` through unmodified) — it arrives in
+    two different shapes depending on which backend layer raised:
+
+    * FastAPI/pydantic 422 validation bodies: ``{"detail": [{"type": ...,
+      "loc": [...], "msg": ..., "input": ...}, ...]}`` — the pydantic error
+      list is nested one level under ``"detail"``.
+    * Our own ``AppError`` handler (``src/api/main.py``'s
+      ``_app_error_handler``): ``{"code": ..., "message": ..., **context}`` —
+      there is NO ``"detail"`` key at all here, so reading one would silently
+      fall through to stringifying the whole envelope (a raw Python dict
+      ``repr`` shown to a recruiter — the review finding this fixes).
+
+    ``detail.get("detail") or detail.get("message")`` tries the FastAPI shape
+    first, then ours, and recurses so a nested pydantic list still gets the
+    ``msg``-joining treatment below rather than its own raw ``repr``.
     """
     if detail is None:
         return "Please correct the highlighted fields and try again."
@@ -624,8 +637,10 @@ def _format_error(detail: Any) -> str:
             return "The upload was rejected: " + "; ".join(messages)
         return "Please correct the highlighted fields and try again."
     if isinstance(detail, dict):
-        inner = detail.get("detail", detail)
-        return str(inner)
+        inner = detail.get("detail") or detail.get("message")
+        if inner is not None:
+            return _format_error(inner)
+        return str(detail)
     return str(detail)
 
 
@@ -668,6 +683,49 @@ def _any_resume_pending(resumes: list[dict[str, Any]]) -> bool:
 
 def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") == "parsed" for r in resumes)
+
+
+def _jd_yielded_no_requirements(job: dict[str, Any]) -> bool:
+    """Pilot defect 2026-09-10: a JD parse that yielded ZERO
+    ``required_skills`` AND ZERO ``nice_to_have_skills`` gave the recruiter no
+    signal at all. NIT (review): this does NOT mirror the backend's own
+    all-zero refusal (``shortlist_service.assert_job_has_requirements``) —
+    the API 409s a NEVER-parsed job too (``description_parsed`` NULL reads
+    back as the same coalesced zero), whereas this UI check deliberately
+    requires ``parsed_at`` to be set first, so a job that simply has not been
+    parsed yet renders the ordinary "parsing…" state, not this disclosure.
+
+    ``True`` only when the job HAS actually been parsed (``parsed_at``
+    truthy) AND ``description_parsed`` is present with both skill lists
+    empty. A never-parsed job (``parsed_at`` falsy, or ``description_parsed``
+    still ``None`` despite a set ``parsed_at`` — a degenerate wire shape) is
+    NOT this case; it has nothing to evaluate at all."""
+    if not job.get("parsed_at"):
+        return False
+    parsed = job.get("description_parsed")
+    if not isinstance(parsed, dict):
+        return False
+    return not parsed.get("required_skills") and not parsed.get("nice_to_have_skills")
+
+
+def _fetch_jd_has_no_requirements(job_id: UUID) -> bool:
+    """Shared by ``job_shortlist`` (full page load) and
+    ``_render_shortlist_cards`` (the poll fragment + the POST Generate
+    response) so the two routes cannot disagree about whether a job's JD
+    carries no requirements — review MAJOR 2, the poll fragment used to have
+    no way to know this at all and kept polling/promising "Generating…" for
+    an already-refused job.
+
+    Fetches ``get_job`` TOLERANTLY: a failure here just means the disclosure
+    defaults to "nothing to disclose" (``False``) rather than taking the
+    whole page/fragment down — this is a secondary, best-effort read
+    alongside whichever primary read (``list_shortlist``/``list_resumes``)
+    already owns the real 404/503 handling for its caller."""
+    try:
+        job = api_client.get_job(job_id)
+    except (api_client.NotFound, api_client.BackendUnavailable):
+        return False
+    return _jd_yielded_no_requirements(job)
 
 
 def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
@@ -1119,6 +1177,14 @@ def job_shortlist(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    # Pilot defect 2026-09-10: fetched SEPARATELY from the pair above, and
+    # tolerantly (`_fetch_jd_has_no_requirements`) — every pre-existing caller
+    # of this route only ever stubbed `list_shortlist`/`list_resumes`, so a
+    # job-detail fetch entangled with their own NotFound/BackendUnavailable
+    # handling would 404/503 every one of them. A failure here just means the
+    # disclosure defaults to "nothing to disclose" rather than taking the
+    # whole page down.
+    jd_has_no_requirements = _fetch_jd_has_no_requirements(job_id)
     # F1 (review findings, 2026-08-18): a full page load must fetch and honor
     # the ranking status EXACTLY like `_render_shortlist_cards` already does —
     # otherwise a reload during an in-flight Regenerate (`shortlist_state =
@@ -1134,6 +1200,7 @@ def job_shortlist(job_id: UUID) -> Any:
         entries=entries,
         shortlist_status=shortlist_status,
         any_resume_parsed=_any_resume_parsed(resumes),
+        jd_has_no_requirements=jd_has_no_requirements,
         degraded_count=_degraded_resume_count(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
@@ -1166,6 +1233,15 @@ def generate_shortlist(job_id: UUID) -> Any:
     ranked entries appear."""
     try:
         api_client.generate_shortlist(job_id)
+    except api_client.Conflict as exc:
+        # Pilot defect 2026-09-10: the zero-requirements refusal
+        # (`shortlist_service.assert_job_has_requirements`) is a well-formed,
+        # expected 409 -- NOT an error state to abort out to. `Conflict`
+        # subclasses `BadRequest`, so this must be caught FIRST or the
+        # generic handler below would abort(409) instead of disclosing why.
+        return _render_shortlist_cards(
+            job_id, conflict_reason=_format_error(exc.detail)
+        )
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -1214,7 +1290,9 @@ def _fetch_shortlist_status(job_id: UUID) -> dict[str, Any] | None:
         return None
 
 
-def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
+def _render_shortlist_cards(
+    job_id: UUID, *, attempt: int = 0, conflict_reason: str | None = None
+) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the card-render
     # read is unconditionally redacted, exactly like the list read above.
     try:
@@ -1224,11 +1302,19 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     shortlist_status = _fetch_shortlist_status(job_id)
+    # Review MAJOR 2: the standalone poll route (GET /shortlist-cards) has no
+    # other path to this fact, so it must fetch it the SAME tolerant way
+    # `job_shortlist` does — otherwise a poll against an already-refused job
+    # keeps rendering "Generating…" with a live `hx-trigger` for up to
+    # ~20 minutes.
+    jd_has_no_requirements = _fetch_jd_has_no_requirements(job_id)
     return render_template(
         "shortlist_cards.html",
         job_id=job_id,
         entries=entries,
         shortlist_status=shortlist_status,
+        conflict_reason=conflict_reason,
+        jd_has_no_requirements=jd_has_no_requirements,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
         # Each poll re-renders the cards; `_mint_card_tokens` (S2:

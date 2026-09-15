@@ -20,19 +20,40 @@
 
 {# Gate Generate until ≥1 résumé is parsed — otherwise ranking yields an empty
    shortlist and an endless "Generating…" poll. `any_resume_parsed` defaults to
-   true so an unknown context never wrongly disables the button. #}
-{% set can_generate = any_resume_parsed|default(true) %}
+   true so an unknown context never wrongly disables the button.
+
+   Pilot defect 2026-09-10: also gate on the JD itself carrying no
+   requirements at all (`jd_has_no_requirements`) -- mirrors the backend's
+   own all-zero refusal (`shortlist_service.assert_job_has_requirements`), so
+   Generate never invites a request the API is about to 409. #}
+{% set jd_has_no_requirements = jd_has_no_requirements|default(false) %}
+{% set can_generate = (any_resume_parsed|default(true)) and not jd_has_no_requirements %}
+{% if jd_has_no_requirements %}
+{# Review MAJOR 3: the refusal is intended even when the manager typed
+   additional requirements -- the pilot complaint this whole guard exists for
+   was ranking on the manager's prompt ALONE, with no signal from the JD
+   itself. The previous wording ("only the manager's additional requirements
+   would move the ranking") read as an escape hatch and contradicted the
+   refusal it sat next to; say plainly that the manager's requirements are
+   not sufficient on their own. #}
+<p id="jd-no-requirements" class="warning">
+  This job description yielded no requirements at all (no required and no
+  nice-to-have skills). The manager's additional requirements alone are not
+  enough to rank against. Re-parse or replace the JD.
+</p>
+{% endif %}
 {% if is_writer %}
 <button class="btn btn-primary"
         {% if can_generate %}
         hx-post="{{ url_for('generate_shortlist', job_id=job_id) }}"
         hx-target="#shortlist-cards" hx-swap="outerHTML"
         hx-indicator="#shortlist-spinner"
+        {% elif jd_has_no_requirements %}disabled title="This job description has no requirements to rank against"
         {% else %}disabled title="Upload résumés and wait for them to parse first"{% endif %}>
   {{ 'Regenerate shortlist' if entries else 'Generate shortlist' }}
   <span id="shortlist-spinner" class="htmx-indicator spinner">working…</span>
 </button>
-{% if not can_generate %}
+{% if not can_generate and not jd_has_no_requirements %}
 <p class="hint">No parsed résumés yet — upload résumés and wait for them to show
   <strong>parsed</strong> before generating a shortlist.</p>
 {% endif %}
