@@ -188,6 +188,30 @@ def test_the_job_detail_page_renders_a_bare_job(
     assert resp.status_code == 200, resp.get_data(as_text=True)[:400]
 
 
+def test_the_job_detail_page_shows_zero_requirements_warning(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED pin -- fix/zero-requirements-rank-guard (pilot defect 2026-09-10):
+    a job whose JD parse extracted zero required_skills and zero
+    nice_to_have_skills must render the on-page disclosure, built here from a
+    REAL JDExtracted DTO, model_dump(mode='json')'d, never a hand-written
+    dict (this file's own rule)."""
+    from src.schemas import JDExtracted
+
+    jd = JDExtracted(title="x").model_dump(mode="json")
+    monkeypatch.setattr(
+        api_client,
+        "get_job",
+        lambda jid, **kw: _detail(description_parsed=jd, parsed_at=_TS.isoformat()),
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+    resp = client.get(f"/jobs/{uuid4()}")
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200, body[:400]
+    assert 'id="jd-no-requirements-warning"' in body
+    assert "no requirements" in body.lower()
+
+
 # ── the filter itself ───────────────────────────────────────────────────────
 
 

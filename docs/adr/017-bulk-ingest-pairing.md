@@ -111,3 +111,39 @@ synchronously inside the async upload route. `_classify` now **caps the stem at 
 regexes (over-length names short-circuit to a plain résumé; no real name is that long) — restoring linear
 behaviour. Gates green: reviewer APPROVE, security PASS, `./scripts/verify.sh all` = 3977 unit @ 92.64% +
 422 integration. Scoring/ranking code untouched (ranking-evals N/A).
+
+## Amendment 2026-09-15 — the mirror guard on the JD side
+
+Decision 1 above gated the **résumé** side of ranking in the UI only (Generate disabled until ≥1 parsed
+résumé). It had no counterpart on the **JD** side. Reported by the pilot user in conversation on
+2026-09-10: a job whose JD parse yielded zero required skills AND zero nice-to-have skills still ranked 50
+candidates — the manager's additional-requirements prompt (weight 0.10, ADR-041) ended up as 100% of the
+ranking signal, and nothing on screen said so.
+
+Fixed on `fix/zero-requirements-rank-guard`:
+
+(a) `shortlist_service.assert_job_has_requirements` runs FIRST in `POST /jobs/{job_id}/shortlist`, before
+`set_shortlist_ranking`, and raises a 409 `resource.conflict` when both counts are zero. Because it runs
+before the state write, a refused job never pins `shortlist_state='ranking'`. Both counts are read
+`coalesce`d over the `description_parsed` JSONB in one query, so a never-parsed JD and a parsed blob simply
+missing the keys refuse identically — never a silent 202. A nonexistent job is left to the route's own
+404 handling (the guard returns silently on no row), so that pre-existing behaviour is unchanged. The gate
+is on BOTH counts being zero, not `required_count` alone: nice-to-have skills with no hard requirements are
+still a real signal and are not refused.
+
+(b) The frontend disables the Generate button with the reason, banners over an already-ranked shortlist
+(any role, since it's parse state, not PII), and warns in the job page's parse status. A refusal surfaced
+mid-poll (`generate_shortlist`'s `Conflict` branch, caught ahead of the generic 409 handler since
+`Conflict` subclasses `BadRequest`) re-renders the shortlist-cards fragment with the reason and stops
+polling, rather than aborting to a bare error page.
+
+(c) The signal is DERIVED from `description_parsed` rather than a new column deliberately: the
+`record_parsed` write nulls `failure_reason` on every successful parse, and that column already drives
+both the parse-status poll and the job page's Re-parse button, so a warning wired through it would grow a
+spurious retry loop for a state re-parsing cannot fix. `description_raw` already has a `min_length` of 50,
+so "the JD had a non-trivial description" holds by construction independent of this guard.
+
+(d) `parse_job` logs a WARNING (`parse_job.zero_requirements`), not INFO, at the moment the counts are
+known, so an operator can find these jobs without waiting for a recruiter to hit Generate.
+
+Same shape as decision 1 and as ADR-040/041: refuse and disclose, never silently degrade.
