@@ -447,7 +447,8 @@ async def test_happy_path_logs_zero_requirements_marker_when_both_lists_empty(
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("parse_job.zero_requirements" in r.getMessage() for r in warnings), (
         "expected a WARNING carrying the 'parse_job.zero_requirements' marker "
-        f"when both skill lists are empty; got: {[r.getMessage() for r in caplog.records]}"
+        "when both skill lists are empty; got: "
+        f"{[r.getMessage() for r in caplog.records]}"
     )
 
 
@@ -486,7 +487,10 @@ async def test_happy_path_logs_ok_not_zero_requirements_when_skills_present(
     assert any("parse_job.ok" in r.getMessage() for r in caplog.records)
     assert not any(
         "parse_job.zero_requirements" in r.getMessage() for r in caplog.records
-    ), "a parse with required_skills present must not carry the zero_requirements marker"
+    ), (
+        "a parse with required_skills present must not carry the "
+        "zero_requirements marker"
+    )
 
 
 @pytest.mark.asyncio

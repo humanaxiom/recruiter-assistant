@@ -41,8 +41,6 @@ from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import get_db
 
-
-
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 

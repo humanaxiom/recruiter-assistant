@@ -670,6 +670,26 @@ def _any_resume_parsed(resumes: list[dict[str, Any]]) -> bool:
     return any(r.get("status") == "parsed" for r in resumes)
 
 
+def _jd_yielded_no_requirements(job: dict[str, Any]) -> bool:
+    """Pilot defect 2026-09-10: a JD parse that yielded ZERO
+    ``required_skills`` AND ZERO ``nice_to_have_skills`` gave the recruiter no
+    signal at all — mirrors the backend's own all-zero refusal
+    (``shortlist_service.assert_job_has_requirements``), so the UI discloses
+    exactly the state the API now refuses to rank.
+
+    ``True`` only when the job HAS actually been parsed (``parsed_at``
+    truthy) AND ``description_parsed`` is present with both skill lists
+    empty. A never-parsed job (``parsed_at`` falsy, or ``description_parsed``
+    still ``None`` despite a set ``parsed_at`` — a degenerate wire shape) is
+    NOT this case; it has nothing to evaluate at all."""
+    if not job.get("parsed_at"):
+        return False
+    parsed = job.get("description_parsed")
+    if not isinstance(parsed, dict):
+        return False
+    return not parsed.get("required_skills") and not parsed.get("nice_to_have_skills")
+
+
 def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
     """Live demo, 2026-09-09: a degraded parse (FU-7 §4 / ADR-030) is never
     projected and never ranked, but the shortlist page said nothing about it —
@@ -1056,6 +1076,16 @@ def job_shortlist(job_id: UUID) -> Any:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
+    # Pilot defect 2026-09-10: fetched SEPARATELY from the pair above, and
+    # tolerantly — every pre-existing caller of this route only ever stubbed
+    # `list_shortlist`/`list_resumes`, so a job-detail fetch entangled with
+    # their own NotFound/BackendUnavailable handling would 404/503 every one
+    # of them. A failure here just means the disclosure defaults to "nothing
+    # to disclose" rather than taking the whole page down.
+    try:
+        job = api_client.get_job(job_id)
+    except (api_client.NotFound, api_client.BackendUnavailable):
+        job = {}
     # F1 (review findings, 2026-08-18): a full page load must fetch and honor
     # the ranking status EXACTLY like `_render_shortlist_cards` already does —
     # otherwise a reload during an in-flight Regenerate (`shortlist_state =
@@ -1071,6 +1101,7 @@ def job_shortlist(job_id: UUID) -> Any:
         entries=entries,
         shortlist_status=shortlist_status,
         any_resume_parsed=_any_resume_parsed(resumes),
+        jd_has_no_requirements=_jd_yielded_no_requirements(job),
         degraded_count=_degraded_resume_count(resumes),
         attempt=0,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
@@ -1103,6 +1134,15 @@ def generate_shortlist(job_id: UUID) -> Any:
     ranked entries appear."""
     try:
         api_client.generate_shortlist(job_id)
+    except api_client.Conflict as exc:
+        # Pilot defect 2026-09-10: the zero-requirements refusal
+        # (`shortlist_service.assert_job_has_requirements`) is a well-formed,
+        # expected 409 -- NOT an error state to abort out to. `Conflict`
+        # subclasses `BadRequest`, so this must be caught FIRST or the
+        # generic handler below would abort(409) instead of disclosing why.
+        return _render_shortlist_cards(
+            job_id, conflict_reason=_format_error(exc.detail)
+        )
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -1151,7 +1191,9 @@ def _fetch_shortlist_status(job_id: UUID) -> dict[str, Any] | None:
         return None
 
 
-def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
+def _render_shortlist_cards(
+    job_id: UUID, *, attempt: int = 0, conflict_reason: str | None = None
+) -> Any:
     # Blind by design: no `reveal` kwarg is ever passed here — the card-render
     # read is unconditionally redacted, exactly like the list read above.
     try:
@@ -1166,6 +1208,7 @@ def _render_shortlist_cards(job_id: UUID, *, attempt: int = 0) -> Any:
         job_id=job_id,
         entries=entries,
         shortlist_status=shortlist_status,
+        conflict_reason=conflict_reason,
         attempt=attempt,
         max_attempts=_MAX_SHORTLIST_POLL_ATTEMPTS,
         # Each poll re-renders the cards; `_mint_card_tokens` (S2:

@@ -58,7 +58,12 @@ async def generate_shortlist(
     ``'ranking'`` BEFORE the job is handed to the queue, so the state is
     already true the instant this returns and the frontend's very first poll
     sees it, rather than racing the worker to set it. The worker
-    clears/overwrites it on every terminal path (see ``matching_tasks.py``)."""
+    clears/overwrites it on every terminal path (see ``matching_tasks.py``).
+
+    ``fix/zero-requirements-rank-guard`` — the zero-requirements refusal runs
+    FIRST, before any ranking-state write, so a refused job never flips to
+    ``'ranking'`` and never enqueues."""
+    await shortlist_service.assert_job_has_requirements(db, job_id)
     await shortlist_service.set_shortlist_ranking(db, job_id)
     await arq.enqueue_job("shortlist_job", str(job_id))
     return {"job_id": str(job_id), "status": "enqueued"}

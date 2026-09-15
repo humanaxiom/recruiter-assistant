@@ -174,12 +174,24 @@ async def parse_job(ctx: dict[str, Any], job_id_str: str) -> str:
                 },
             )
 
-    log.info(
-        "parse_job.ok job_id=%s required_skills=%d nice_to_have=%d",
-        job_id_str,
-        len(extracted.required_skills),
-        len(extracted.nice_to_have_skills),
-    )
+    if not extracted.required_skills and not extracted.nice_to_have_skills:
+        # pilot defect 2026-09-10 — a JD parse yielding NEITHER required NOR
+        # nice-to-have skills is otherwise indistinguishable from any other
+        # successful parse in the logs, even before the API-level 409 guard
+        # (``shortlist_service.assert_job_has_requirements``) ever fires
+        # against it. WARNING, not INFO, so an operator can find these jobs.
+        log.warning(
+            "parse_job.zero_requirements job_id=%s note=%s",
+            job_id_str,
+            "JD extraction yielded zero required and zero nice-to-have skills",
+        )
+    else:
+        log.info(
+            "parse_job.ok job_id=%s required_skills=%d nice_to_have=%d",
+            job_id_str,
+            len(extracted.required_skills),
+            len(extracted.nice_to_have_skills),
+        )
     return "parsed"
 
 

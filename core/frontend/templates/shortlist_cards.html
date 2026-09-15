@@ -64,13 +64,21 @@
    both belong in this OR. Do not collapse them into one flag: each drives a
    distinctly-worded banner below, and merging them would silently pick the
    wrong message for whichever state actually applies. #}
-{% set polling = (a < m) and ((not entries) or ranking or awaiting_llm) %}
+{# Pilot defect 2026-09-10: the zero-requirements refusal (a well-formed 409
+   from `assert_job_has_requirements`) is a TERMINAL outcome, not a
+   transient failure -- no run was ever queued, so there is nothing to poll
+   for and the fragment must not keep re-requesting the same refusal. #}
+{% set conflict_reason = conflict_reason|default(none) %}
+{% set polling = (conflict_reason is none) and (a < m) and ((not entries) or ranking or awaiting_llm) %}
 <div id="shortlist-cards"
   {%- if polling %}
      hx-get="{{ url_for('shortlist_cards', job_id=job_id) }}?attempt={{ a + 1 }}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
   {%- endif %}>
+  {% if conflict_reason %}
+  <p id="jd-no-requirements" class="warning">{{ conflict_reason }}</p>
+  {% endif %}
   {% if entries %}
   {# SPONSOR 2026-09-02 §O2 follow-on: "the declaration is a critical eval
      parameter", so a recruiter needs to see at a glance how many candidates

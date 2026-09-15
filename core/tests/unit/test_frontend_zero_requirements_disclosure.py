@@ -84,7 +84,8 @@ def _no_ranking_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _job(**over: Any) -> dict[str, Any]:
     """A real ``JobOut`` DTO, ``model_dump(mode='json')``'d -- never a
-    hand-written dict (HANDOFF lesson 6 / ``test_templates_render_api_shaped_rows.py``)."""
+    hand-written dict (HANDOFF lesson 6 /
+    ``test_templates_render_api_shaped_rows.py``)."""
     base: dict[str, Any] = {
         "id": uuid4(),
         "title": "Multimedia Specialist",
@@ -187,7 +188,8 @@ def test_generate_enabled_when_only_nice_to_have_present(
     job_id = uuid4()
     job = _job(
         description_parsed=_jd(
-            required_skills=[], nice_to_have_skills=[Skill(name="Terraform").model_dump()]
+            required_skills=[],
+            nice_to_have_skills=[Skill(name="Terraform").model_dump()],
         )
     )
     monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=job))
