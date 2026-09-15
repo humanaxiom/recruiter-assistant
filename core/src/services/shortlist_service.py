@@ -232,9 +232,12 @@ async def set_shortlist_ranking(conn: DbConn, job_id: UUID) -> None:
 
 
 _JOB_REQUIREMENT_COUNTS_SQL = (
-    "SELECT coalesce(jsonb_array_length(description_parsed -> 'required_skills'), 0) "
+    "SELECT "
+    "CASE WHEN jsonb_typeof(description_parsed -> 'required_skills') = 'array' "
+    "THEN jsonb_array_length(description_parsed -> 'required_skills') ELSE 0 END "
     "AS required_count, "
-    "coalesce(jsonb_array_length(description_parsed -> 'nice_to_have_skills'), 0) "
+    "CASE WHEN jsonb_typeof(description_parsed -> 'nice_to_have_skills') = 'array' "
+    "THEN jsonb_array_length(description_parsed -> 'nice_to_have_skills') ELSE 0 END "
     "AS nice_count "
     "FROM jobs WHERE id = $1"
 )
@@ -248,10 +251,13 @@ async def assert_job_has_requirements(conn: DbConn, job_id: UUID) -> None:
     Deliberately gated on BOTH counts being zero, not just ``required_count``:
     a JD that only ever yields nice-to-have skills (no hard requirements) is
     still a meaningful ranking signal, so only the all-zero case -- meaning
-    NOTHING at all would move the score -- is refused. A never-parsed JD
-    (``description_parsed`` NULL) reads back as the same coalesced zero on
-    both sides via the SQL above, so it is refused identically to a
-    parsed-but-empty JD, never a silent 202.
+    NOTHING at all would move the score -- is refused. The SQL above guards
+    each side with ``jsonb_typeof(...) = 'array'`` (a ``CASE WHEN``, not a bare
+    ``coalesce``): ``jsonb_array_length`` raises inside Postgres on a scalar
+    jsonb value, so a never-parsed JD (``description_parsed`` NULL), a blob
+    missing the key entirely, and a blob carrying an explicit JSON ``null``
+    for the key ALL read back as 0 rather than 500ing the route -- and are
+    refused identically to a parsed-but-empty JD, never a silent 202.
 
     A nonexistent job (``fetchrow`` returns ``None``) returns SILENTLY --
     diagnosing a missing job is the route's job, not this guard's, and the

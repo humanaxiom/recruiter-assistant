@@ -10,11 +10,12 @@ route still 202s and sets ``shortlist_state='ranking'`` on an all-zero JD.
 RED half of the TDD cycle.
 
 What a REAL Postgres proves that a mocked-conn unit test cannot: the actual
-``coalesce(jsonb_array_length(description_parsed -> 'required_skills'), 0)``
-expression evaluates correctly against real JSONB (including a genuinely
-NULL ``description_parsed`` column and a parsed blob that lacks either key
-entirely -- neither of which a hand-typed mock row can misrepresent the same
-way a real driver's NULL handling can).
+``CASE WHEN jsonb_typeof(description_parsed -> 'required_skills') = 'array'
+THEN jsonb_array_length(...) ELSE 0 END`` expression evaluates correctly
+against real JSONB (including a genuinely NULL ``description_parsed`` column,
+a parsed blob that lacks either key entirely, and a blob carrying an explicit
+JSON ``null`` for a key -- ``jsonb_array_length`` RAISES on that last shape,
+which a hand-typed mock row cannot reproduce the way a real driver can).
 
 Harness mirrored from ``test_shortlist_ranking_state_pg.py`` (fixtures,
 ``_insert_job``, ``_build_app``, ``_client``, ``_job_state_row``).
@@ -31,11 +32,11 @@ from uuid import UUID
 import asyncpg
 import pytest
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from testcontainers.postgres import PostgresContainer
 
 from src.api.deps import Role, get_arq, resolve_role
+from src.api.main import _app_error_handler
 from src.api.routes import shortlist as shortlist_routes
 from src.errors import AppError
 from src.models.ddl import init_schema
@@ -95,11 +96,11 @@ def _build_app(pool: asyncpg.Pool, *, arq: MagicMock) -> FastAPI:
     app.dependency_overrides[get_arq] = lambda: arq
     app.dependency_overrides[resolve_role] = lambda: Role.ADMIN
 
-    @app.exception_handler(AppError)
-    async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status, content={"detail": exc.message, "code": exc.code}
-        )
+    # The REAL AppError handler (src/api/main.py) -- review MAJOR 1: a hand-
+    # faked ``{"detail": ...}`` envelope here would hide the fact that the
+    # real handler emits ``{"code", "message", **context}`` with no
+    # ``"detail"`` key at all.
+    app.add_exception_handler(AppError, _app_error_handler)
 
     return app
 
@@ -195,9 +196,38 @@ async def test_description_parsed_missing_both_keys_refuses_409_not_500(
     pg_pool: asyncpg.Pool,
 ) -> None:
     """A parsed blob that predates either skills field, or an LLM extraction
-    that dropped them entirely -- ``jsonb_array_length(NULL)`` on a missing
-    key must ``coalesce`` to 0, not raise inside Postgres and 500 the route."""
+    that dropped them entirely -- the ``jsonb_typeof(...) = 'array'`` guard
+    must read a missing key as 0, not raise inside Postgres and 500 the
+    route."""
     job_id = await _insert_job(pg_pool, description_parsed='{"title": "x"}')
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, arq=arq)
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 409
+    arq.enqueue_job.assert_not_awaited()
+
+
+# ── (e) description_parsed carries an explicit JSON null for a key -> 409, not 500 ──
+
+
+@pytest.mark.asyncio
+async def test_description_parsed_key_is_json_null_refuses_409_not_500(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Review MINOR: ``jsonb_array_length`` RAISES inside Postgres when given a
+    scalar jsonb value -- an explicit JSON ``null`` for either key (distinct
+    from the key being absent entirely, case (d) above) is exactly that
+    scalar case, so a bare ``coalesce`` around ``jsonb_array_length`` does NOT
+    save this -- the guard must check ``jsonb_typeof(...) = 'array'`` first."""
+    job_id = await _insert_job(
+        pg_pool,
+        description_parsed=(
+            '{"title": "x", "required_skills": null, "nice_to_have_skills": null}'
+        ),
+    )
     arq = MagicMock(enqueue_job=AsyncMock())
     app = _build_app(pg_pool, arq=arq)
 

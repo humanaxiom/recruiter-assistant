@@ -26,10 +26,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
 from src.api.deps import Role, get_arq, resolve_role
+from src.api.main import _app_error_handler
 from src.api.routes import shortlist as shortlist_routes
 from src.errors import AppError, ConflictError
 from src.models.pool import get_db
@@ -78,11 +78,12 @@ def _build_app(
     )
     app.dependency_overrides[resolve_role] = lambda: role
 
-    @app.exception_handler(AppError)
-    async def _app_error_handler(_request: Any, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status, content={"detail": exc.message, "code": exc.code}
-        )
+    # The REAL AppError handler (src/api/main.py), not a hand-faked envelope
+    # -- review MAJOR 1: a fake ``{"detail": ...}`` shape here let
+    # ``_format_error``'s wire-shape bug pass every test while the real
+    # handler's ``{"code", "message", **context}`` body rendered a raw dict
+    # repr in production.
+    app.add_exception_handler(AppError, _app_error_handler)
 
     return app
 
@@ -126,7 +127,7 @@ async def test_generate_shortlist_409_message_names_the_cause() -> None:
         resp = await client.post(f"/jobs/{job_id}/shortlist")
 
     assert resp.status_code == 409
-    detail = resp.json()["detail"].lower()
+    detail = resp.json()["message"].lower()
     assert "requirement" in detail or "skill" in detail
 
 

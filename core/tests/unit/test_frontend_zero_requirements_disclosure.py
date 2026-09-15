@@ -182,6 +182,30 @@ def test_generate_disabled_when_parsed_and_both_lists_empty(
     assert _MARKER in body.lower()
 
 
+def test_zero_req_job_with_no_entries_has_no_polling_or_generating_message(
+    monkeypatch: pytest.MonkeyPatch, client: Any
+) -> None:
+    """Review MAJOR 2: a full page load for an already-refused zero-
+    requirements job used to render ``shortlist_cards.html``'s "Generating…"
+    branch WITH a live ``hx-trigger`` (a false progress promise -- nothing was
+    ever queued and nothing ever will be). Both must be gone once
+    ``jd_has_no_requirements`` reaches the fragment."""
+    job_id = uuid4()
+    job = _job(description_parsed=_jd(required_skills=[], nice_to_have_skills=[]))
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=job))
+    monkeypatch.setattr(
+        api_client, "list_resumes", MagicMock(return_value=[_parsed_resume()])
+    )
+    # `_no_ranking_state` (autouse) already stubs `list_shortlist` to `[]`.
+
+    resp = _get_shortlist(client, job_id)
+    body = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert "hx-trigger" not in body
+    assert "generating" not in body.lower()
+
+
 def test_generate_enabled_when_only_nice_to_have_present(
     monkeypatch: pytest.MonkeyPatch, client: Any
 ) -> None:
@@ -435,14 +459,24 @@ def test_post_generate_conflict_does_not_return_a_raw_409(
     instead. Uses ``csrf_client`` (a page token supplied) so the request
     reaches the route body at all -- a bare client 403s at the CSRF guard
     before ``api_client.generate_shortlist`` is ever called, which would make
-    this test pass for the wrong reason."""
+    this test pass for the wrong reason.
+
+    Review MAJOR 1: ``detail`` is the REAL ``AppError`` handler's envelope
+    (``src/api/main.py``'s ``{"code", "message", **context}`` -- there is no
+    ``"detail"`` key at all), not a hand-faked ``{"detail": ...}`` shape --
+    the fake shape masked ``_format_error`` rendering a raw dict repr in
+    production."""
     job_id = uuid4()
 
     def _raise_conflict(*_a: Any, **_kw: Any) -> Any:
         raise api_client.Conflict(
             "job has no required or nice-to-have skills",
             status_code=409,
-            detail={"detail": "job has no required or nice-to-have skills"},
+            detail={
+                "code": "resource.conflict",
+                "message": "job has no required or nice-to-have skills",
+                "job_id": str(job_id),
+            },
         )
 
     monkeypatch.setattr(api_client, "generate_shortlist", _raise_conflict)
@@ -456,13 +490,20 @@ def test_post_generate_conflict_does_not_return_a_raw_409(
 def test_post_generate_conflict_body_contains_the_reason(
     monkeypatch: pytest.MonkeyPatch, csrf_client: Any
 ) -> None:
+    """Review MAJOR 1: same real-envelope shape as the test above -- and this
+    one is the one that would have caught the raw-repr regression, since it
+    asserts on the RENDERED banner text, not just the status code."""
     job_id = uuid4()
 
     def _raise_conflict(*_a: Any, **_kw: Any) -> Any:
         raise api_client.Conflict(
             "job has no required or nice-to-have skills",
             status_code=409,
-            detail={"detail": "job has no required or nice-to-have skills"},
+            detail={
+                "code": "resource.conflict",
+                "message": "job has no required or nice-to-have skills",
+                "job_id": str(job_id),
+            },
         )
 
     monkeypatch.setattr(api_client, "generate_shortlist", _raise_conflict)
@@ -472,3 +513,7 @@ def test_post_generate_conflict_body_contains_the_reason(
     body = resp.get_data(as_text=True)
 
     assert _MARKER in body.lower() or "skill" in body.lower()
+    assert "{'code'" not in body, (
+        "the banner must render the human 'message', never the raw dict repr "
+        "of the AppError envelope"
+    )

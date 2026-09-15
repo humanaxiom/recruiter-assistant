@@ -29,10 +29,17 @@
 {% set jd_has_no_requirements = jd_has_no_requirements|default(false) %}
 {% set can_generate = (any_resume_parsed|default(true)) and not jd_has_no_requirements %}
 {% if jd_has_no_requirements %}
+{# Review MAJOR 3: the refusal is intended even when the manager typed
+   additional requirements -- the pilot complaint this whole guard exists for
+   was ranking on the manager's prompt ALONE, with no signal from the JD
+   itself. The previous wording ("only the manager's additional requirements
+   would move the ranking") read as an escape hatch and contradicted the
+   refusal it sat next to; say plainly that the manager's requirements are
+   not sufficient on their own. #}
 <p id="jd-no-requirements" class="warning">
   This job description yielded no requirements at all (no required and no
-  nice-to-have skills) — only the manager's additional requirements would
-  move the ranking. Re-parse or replace the JD.
+  nice-to-have skills). The manager's additional requirements alone are not
+  enough to rank against. Re-parse or replace the JD.
 </p>
 {% endif %}
 {% if is_writer %}
