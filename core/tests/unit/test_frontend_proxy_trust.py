@@ -47,11 +47,14 @@ from src.settings import Settings
 def test_install_proxy_fix_leaves_wsgi_app_untouched_when_trust_is_off() -> None:
     settings = Settings(trust_proxy_headers=False)
     flask_app = Flask(__name__)
-    original_wsgi_app = flask_app.wsgi_app
+    # `Flask.wsgi_app` is a METHOD, so every access yields a new bound-method
+    # object and an `is` comparison can never hold, whatever the installer
+    # does. "Untouched" means: no instance-level override was installed.
+    assert "wsgi_app" not in vars(flask_app)
 
     _install_proxy_fix(flask_app, settings)
 
-    assert flask_app.wsgi_app is original_wsgi_app
+    assert "wsgi_app" not in vars(flask_app)
     assert not isinstance(flask_app.wsgi_app, ProxyFix)
 
 

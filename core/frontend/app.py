@@ -32,12 +32,13 @@ from flask import (
     url_for,
 )
 from pydantic import ValidationError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
-from src.settings import get_settings, validate_startup_session_secret
+from src.settings import Settings, get_settings, validate_startup_session_secret
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,55 @@ def _entry_header(raw: dict[str, Any]) -> _EntryHeader:
 # limits have a chance to run.
 MAX_UPLOAD_BYTES = 210 * 1024 * 1024  # 20 files * 10 MB + headroom
 
+
+def _install_proxy_fix(flask_app: Flask, settings: Settings) -> None:
+    """fix/serve-behind-tls-proxy — the app is served at https://sfuai.ca
+    behind an nginx TLS-terminating reverse proxy, so the raw WSGI request
+    Flask sees is always ``http://`` on the proxy's internal hop and the
+    upstream's own hostname, not the browser's. ``frontend.csrf.same_origin``
+    compares the browser's ``Origin``/``Referer`` against ``request.host_url``
+    (~csrf.py line 304), so left alone every real POST behind the proxy would
+    403 as a same-origin mismatch.
+
+    ``ProxyFix`` fixes that by rewriting the WSGI environ from
+    ``X-Forwarded-Proto``/``X-Forwarded-Host`` — but only do that when we KNOW
+    the value in those headers was SET (not appended/forwarded) by a proxy we
+    control, never a value a client could inject directly. That is exactly
+    what ``settings.trust_proxy_headers`` (default OFF) gates: off, this is a
+    no-op and ``wsgi_app`` is untouched; on, it is wrapped with
+    ``x_for=x_proto=x_host=settings.proxy_hops`` (nginx alone = 1 hop) and
+    ``x_prefix=0`` (we do not run behind a URL sub-path).
+    """
+    if not settings.trust_proxy_headers:
+        return
+    hops = settings.proxy_hops
+    flask_app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+        flask_app.wsgi_app,
+        x_for=hops,
+        x_proto=hops,
+        x_host=hops,
+        x_prefix=0,
+    )
+
+
+def _configure_session_cookie(flask_app: Flask, settings: Settings) -> None:
+    """Flask's OWN signed-session cookie (``flask.session`` — used by the CAS
+    login flow's ``next``/flash state, distinct from the ``ra_session`` API
+    cookie `auth.py` already sets with ``secure=settings.session_cookie_secure``)
+    must follow the same setting, or it would leak the session cookie over
+    plain HTTP even when the API cookie correctly requires TLS.
+
+    Browsers treat ``localhost`` as a trustworthy origin (the "potentially
+    trustworthy origin" carve-out in the Secure-cookie spec), so
+    ``SESSION_COOKIE_SECURE=True`` still lets a cookie be set and read over
+    plain ``http://localhost`` in local dev. It does NOT extend to a bare LAN
+    IP like ``http://the box LAN address`` — that is a normal insecure origin, and a
+    Secure cookie set there is silently dropped by the browser. Only
+    ``localhost``/loopback and real TLS origins (``https://sfuai.ca``) work.
+    """
+    flask_app.config["SESSION_COOKIE_SECURE"] = bool(settings.session_cookie_secure)
+
+
 _settings = get_settings()
 app = Flask(__name__)
 # ROADMAP open item 1 — refuse to serve a real deployment with a forgeable
@@ -120,6 +170,8 @@ app = Flask(__name__)
 validate_startup_session_secret(_settings)
 app.secret_key = _settings.flask_secret_key
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+_install_proxy_fix(app, _settings)
+_configure_session_cookie(app, _settings)
 API = _settings.api_base_url
 
 
