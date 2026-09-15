@@ -30,7 +30,13 @@ against a wall.
 **Do, if asked for something useful:** the four recorded-not-fixed items in §3.
 All are small, none touches the ceiling.
 
-> 🔴 **THE FIRST THING TO FIX WHEN WORK RESUMES — a user-reported defect
+> 🟢 **FIXED 2026-09-15 on `fix/zero-requirements-rank-guard`, branched off
+> `main` — see that branch's HANDOFF.md for the hand-drive evidence. The
+> write-up below is kept as the record of what was reported. When this branch
+> is next synced with `main`, ADR-017 conflicts on two appended amendments:
+> keep both, in date order.**
+>
+> 🔴 (as reported) **a user-reported defect
 > (2026-09-10): a job with ZERO extracted requirements ranks anyway, silently.**
 >
 > Reported as *"Resume short listing was geerated against the additional hiring

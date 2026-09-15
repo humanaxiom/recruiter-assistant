@@ -227,9 +227,14 @@ harm, and it is worse than a crash: a crash tells you something is wrong.
   operator gave the wrong text, and saying so at parse time would have caught
   this hours earlier.
 
-**Status:** recorded, NOT fixed — feature work is paused (see below). This is
-a defect a user hit, so under `CLAUDE.md` §Economy 0 it outranks everything on
-the menu when work resumes.
+**Status:** FIXED 2026-09-15 on `fix/zero-requirements-rank-guard` (branched
+off `main`, not off this branch). `POST /jobs/{id}/shortlist` now refuses with
+`409 resource.conflict` before any ranking state is written; the shortlist
+page disables Generate with the reason and banners over an existing shortlist;
+the job page's parse status warns; the worker logs
+`parse_job.zero_requirements`. Driven by hand against this box's own
+zero-requirements job and against a freshly parsed requirements-free blurb.
+ADR-017 amended in place.
 
 ---
 
