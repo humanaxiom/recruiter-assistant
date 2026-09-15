@@ -22,7 +22,7 @@ from src.api.routes import audit, auth, job_assignees, jobs, resumes, shortlist,
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
-from src.settings import get_settings, validate_startup_auth_config
+from src.settings import Settings, get_settings, validate_startup_auth_config
 from src.storage.blob_store import BlobStore
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
@@ -73,11 +73,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_pool(app)
 
 
-app = FastAPI(
-    title="Recruiter Assistant API",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+def _build_app(settings: Settings) -> FastAPI:
+    """security audit 2026-09-15 (L1) — ``/docs``, ``/redoc`` and
+    ``/openapi.json`` are wired by FastAPI before any
+    ``Depends(require_role_assigned)`` gate can apply, so they are
+    unauthenticated by construction. The M2/M3 nginx runbook only proxies
+    ``/auth/cas/`` to this API from the internet, but ``:29800`` also stays
+    published on the LAN (see ``docs/deploy/sfuai-ca.md``'s residuals) — a
+    real deployment (``settings.cas_enabled``) must not serve them there
+    either. Local dev (``cas_enabled=False``) keeps them.
+    """
+    if settings.cas_enabled:
+        return FastAPI(
+            title="Recruiter Assistant API",
+            version="0.1.0",
+            lifespan=lifespan,
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
+        )
+    return FastAPI(
+        title="Recruiter Assistant API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+
+app = _build_app(get_settings())
 
 # auth stays UNGATED — a no-role user must still be able to see their own
 # status (GET /auth/cas/user) and log out; every business router below is

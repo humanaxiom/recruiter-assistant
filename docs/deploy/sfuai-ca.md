@@ -7,8 +7,8 @@ drops the port. This is a runbook, not an essay — steps and verification only.
 
 ```mermaid
 flowchart LR
-    U[Browser, off-LAN] -- HTTPS :8000 --> DNS[IONOS DNS sfuai.ca -> the router public IP]
-    DNS --> R[Telus router<br/>NAT: TCP the forwarded port range -> the box LAN address:the forwarded port range<br/>port 443 NOT forwarded]
+    U[Browser, off-LAN] -- HTTPS :8000 --> DNS[IONOS DNS sfuai.ca -> the box's public IP]
+    DNS --> R[Telus router<br/>NAT: the router forwards a public TCP port range to this box<br/>port 443 NOT forwarded]
     R --> N[sfuai-web container, nginx:1.27-alpine<br/>C:\repos\web, non-git compose project<br/>publishes 8000:443 and 10443:443<br/>Let's Encrypt cert via lego/IONOS DNS-01]
     N -- "location /auth/cas/" --> API[host.docker.internal:29800<br/>recruiter-assistant API<br/>CAS routes only]
     N -- "location /" --> FE[host.docker.internal:29500<br/>recruiter-assistant Flask frontend]
@@ -18,58 +18,100 @@ flowchart LR
 Two separate `docker compose` projects on the same box: this repo's
 (`C:\repos\recruiter-assistant`) and the non-git nginx project
 (`C:\repos\web`). Nginx is the only thing with a published port reachable from
-the internet; the API and frontend stay on `host.docker.internal` and are also
-reachable on the LAN (see Residuals).
+the internet; the app ports are published on the LAN interface too (see
+Residuals).
 
 ## nginx config — `C:\repos\web\nginx\default.conf`
 
-Full file content after cutover:
+Full file content after cutover — this is the EXACT deployed file
+(`C:\repos\web\nginx\default.conf`), not a paraphrase:
 
 ```nginx
+# sfuai.ca — reverse proxy to the recruiter assistant (cutover 2026-09-15).
+# Runbook: C:\repos\recruiter-assistant\docs\deploy\sfuai-ca.md
+# Revert to the placeholder site: replace `location /` with
+#   try_files $uri $uri/ =404;
+# and drop the /auth/cas/ block. Nothing else changes.
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    http2 on;
+    server_tokens off;
     server_name sfuai.ca www.sfuai.ca;
 
-    ssl_certificate     /etc/nginx/certs/sfuai.ca.crt;
-    ssl_certificate_key /etc/nginx/certs/sfuai.ca.key;
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
 
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Above the Flask BFF's own 210 MiB MAX_CONTENT_LENGTH so the app's 413
+    # is the one a recruiter sees, not an opaque nginx one.
     client_max_body_size 220m;
-    proxy_read_timeout 300s;
-    proxy_buffering off;
+    client_body_timeout  300s;
 
+    # Container healthcheck. Deliberately shadows the app so a CAS-gated
+    # frontend cannot fail it.
     location = /health {
-        # container healthcheck target — unchanged
-        return 200 "ok";
-        add_header Content-Type text/plain;
+        default_type text/plain;
+        return 200 "ok\n";
     }
 
+    # The CAS ticket dance is owned by the FastAPI backend (ADR-019 §10) and
+    # must be reachable by the BROWSER at this public origin. ONLY this prefix
+    # is proxied to the API: /docs, /openapi.json and every data route stay
+    # unreachable from the internet.
     location /auth/cas/ {
         proxy_pass http://host.docker.internal:29800;
-        proxy_set_header Host $server_name;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $server_name;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Host  "sfuai.ca:8000";
+        proxy_set_header X-Forwarded-Port  $server_port;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout    120s;
+        proxy_send_timeout    120s;
     }
 
     location / {
         proxy_pass http://host.docker.internal:29500;
-        proxy_set_header Host $server_name;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $server_name;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Port $server_port;
+        # $http_host keeps the :8000 the browser used, so Flask's host_url
+        # (behind ProxyFix) equals the browser's Origin for the CSRF check.
+        proxy_set_header X-Forwarded-Host  "sfuai.ca:8000";
+        proxy_set_header X-Forwarded-Port  $server_port;
+        proxy_connect_timeout 10s;
+        # No browser request runs a model synchronously; 300s covers a
+        # 210 MiB bulk upload.
+        proxy_read_timeout    300s;
+        proxy_send_timeout    300s;
+        proxy_buffering       off;
     }
+
+    error_page 404 /404.html;
+    location = /404.html { internal; }
+
+    access_log /var/log/nginx/access.log;
+    error_log  /var/log/nginx/error.log warn;
 }
 
-# Default-deny catch-all: any request whose TLS SNI/Host does not match
-# `sfuai.ca`/`www.sfuai.ca` above (e.g. a forged `Host` header aimed at
-# reaching the frontend's `/console` debugger route, or a bare-IP probe)
-# lands here instead of falling through to the first server block nginx
-# would otherwise pick by default. `return 444` closes the connection with
-# no HTTP response at all — not even a 4xx page confirms anything is
-# listening.
+# Catch-all: any request whose Host/SNI is not sfuai.ca is dropped without a
+# response. A forged Host header must never reach the app (review 2026-09-15:
+# it reached the Werkzeug debugger console through the proxy).
 server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
@@ -81,18 +123,29 @@ server {
 ```
 
 Only `/auth/cas/` is proxied to the API — `/docs`, `/openapi.json` and every
-data route on :29800 stay unreachable from the internet. Headers are **set**,
-not appended, so `$http_host` still carries `:8000` and Flask's `host_url`
-matches the browser's `Origin` for `csrf.same_origin`. `Host` is set to the
-**fixed** `$server_name`, never `$host` — `$host` echoes whatever `Host` the
-client sent, so forwarding it would hand the frontend/API the client's own
-(possibly forged) Host instead of the deployment's real one.
+data route on :29800 stay unreachable from the internet (as of 2026-09-15
+they are also refused by the app itself when `CAS_ENABLED=true` — see L1 in
+`core/src/api/main.py`). `X-Forwarded-Host` is the **literal string**
+`"sfuai.ca:8000"`, not `$http_host` — that is what makes a client-supplied
+`Host` header unable to survive to Flask, not "set, not appended" on its own
+(nginx's own `Host` header sent upstream is still `$server_name`, likewise
+fixed). The real backstop against a forged `Host`/SNI is the default-deny
+catch-all `server { server_name _; return 444; }` block above: any request
+that doesn't match `sfuai.ca`/`www.sfuai.ca` at the TLS layer never reaches a
+`location` block at all.
+
+**Do not enable `CAS_SERVICE_FROM_REQUEST` with this config.** The literal
+`X-Forwarded-Host` here means the app already gets a fixed, non-spoofable
+value for the CAS service URL; deriving it from the request instead would
+throw that guarantee away for no benefit under this nginx config.
 
 The frontend itself runs `flask ... --reload --no-debugger` (see
 `docker-compose.yml`) — `--no-debugger` disables the Werkzeug interactive
-console. That is defence in depth alongside this catch-all: the catch-all
-stops a forged-`Host` request from reaching the app at all; `--no-debugger`
-means even a request that DID reach the app could not open a console.
+console. **This is the load-bearing fix for the debugger exposure**; the
+catch-all above is what stops a forged-`Host` request from reaching the app
+at all in the first place, and the two together are defence in depth — the
+catch-all addresses Host injection, not the debugger itself, and
+`--no-debugger` addresses the debugger, not Host injection.
 
 Revert `location /`:
 
@@ -170,11 +223,18 @@ Values only, no secrets:
    default-deny catch-all `server_name _` block returns `444`). Compare
    against the honest-host request:
    ```
-   curl -sS -k -o /dev/null -w "%{http_code}\n" --resolve sfuai.ca:8000:127.0.0.1 https://sfuai.ca:8000/console
+   curl -sS -k --resolve sfuai.ca:8000:127.0.0.1 "https://sfuai.ca:8000/?__debugger__=yes&cmd=resource&f=debugger.js"
    ```
-   Expected: NOT `200` (the route does not exist behind `--no-debugger`, so a
-   redirect/404/403 from the CAS gate or Flask's router, never the debugger
-   console).
+   Expected: `302` to CAS, **never `200`**. `/console` proves nothing here —
+   the Werkzeug debugger middleware sits OUTSIDE Flask's own routing (it
+   wraps the WSGI app before any URL rule, including the CAS gate), so a
+   `404`/`403` on `/console` only shows that path isn't a real Flask route,
+   not that the debugger itself is off. The `__debugger__=yes` resource
+   request is the actual debugger entry point; getting a CAS redirect instead
+   of the debugger's `debugger.js` is what proves `--no-debugger` (below) is
+   doing its job. **`--no-debugger` is the load-bearing fix here** — the
+   `444` catch-all above addresses Host injection, a separate exposure, not
+   this one.
 7. Run `./scripts/doctor.sh`. Expected: the `deploy.auth_disabled` finding is
    gone.
 8. `smoke.sh` cannot run on this box any more (it requires CAS off and fails
@@ -206,7 +266,7 @@ fixable from this box — SFU IT Services must register
 
 ## Dropping the `:8000` port later
 
-Add a router NAT rule `TCP 443 -> the box LAN address:10443` (the existing
+Add a router NAT rule forwarding public `TCP 443` to this box's `10443` (the existing
 `10443:443` publish already serves the same cert and would-be `location /`
 config). Once that rule exists, `CAS_SERVICE_BASE_URL` and
 `CAS_FRONTEND_BASE_URL` drop the `:8000` suffix and nothing else changes —
@@ -219,13 +279,16 @@ the `8000:443` publish and its NAT rule can then be removed.
   only) and lands on `pending_access.html`.
 - `:29500` and `:29800` stay published on `0.0.0.0` (the nginx container
   reaches them via `host.docker.internal`, which needs the host publish) —
-  `http://the box LAN address:29800/docs` is readable by anything on the LAN.
+  the API's `/docs` is reachable on the LAN port, by anything on the LAN.
+  (As of 2026-09-15 the app itself also refuses to serve `/docs` at all when
+  `CAS_ENABLED=true`, independent of this residual — see L1 in
+  `core/src/api/main.py`.)
 - `sessions.ip` records the nginx container's address, not the real client
   IP — uvicorn is deliberately not given `--proxy-headers`, because with
   `:29800` also reachable directly on the LAN, trusting `X-Forwarded-For`
   there would let a LAN peer poison `sessions.ip`.
-- After cutover, the LAN URL `http://the box LAN address:29500` is a dead end for a
-  human: CAS_FRONTEND_BASE_URL is now the public `https://sfuai.ca:8000`, so
-  any login started from the bare LAN address redirects the browser to the
+- After cutover, the bare LAN frontend address is a dead end for a human:
+  CAS_FRONTEND_BASE_URL is now the public `https://sfuai.ca:8000`, so any
+  login started from the bare LAN address redirects the browser to the
   public host anyway. It stays reachable (see the `:29500`/`:29800` residual
   above) but is no longer a usable entry point on its own.

@@ -114,10 +114,20 @@ stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 (`C:\repos\web`, container `sfuai-web`, nginx) that terminates TLS with a
 Let's Encrypt cert and reverse-proxies `/auth/cas/` to the API (`:29800`) and
 everything else to the frontend (`:29500`); `:8000` rather than `:443` because
-the router only forwards `the forwarded port range`. The untracked
-`docker-compose.override.yml` that forced CAS off is retired (moved to the
-scratchpad). Full runbook — topology, exact nginx config, `.env` keys, cutover
-and revert steps, residuals — is [docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md).
+the router only forwards a public TCP port range to this box, and 443 isn't
+in it. The untracked `docker-compose.override.yml` that forced CAS off is
+retired (moved to the scratchpad). Full runbook — topology, exact nginx
+config, `.env` keys, cutover and revert steps, residuals — is
+[docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md).
+
+**Same day, a debugger exposure was found and closed.** A forged `Host`
+header could reach the Werkzeug interactive debugger through the proxy. Fixed
+same-day with `--no-debugger` on the frontend (load-bearing) plus a
+default-deny `444` catch-all in nginx for any request whose Host/SNI isn't
+`sfuai.ca` (a second, independent layer — Host injection, not the debugger
+itself). `FLASK_SECRET_KEY` and the four `API_KEY_*` values were rotated the
+same day (2026-09-15) as a precaution; rotating `FLASK_SECRET_KEY` logs
+everyone out.
 
 **`smoke.sh` can no longer run on this box** — it requires CAS off and fails
 rather than skips when CAS is on. The obligation is now `doctor.sh` (run

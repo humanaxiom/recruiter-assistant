@@ -159,11 +159,18 @@ def _configure_session_cookie(flask_app: Flask, settings: Settings) -> None:
     trustworthy origin" carve-out in the Secure-cookie spec), so
     ``SESSION_COOKIE_SECURE=True`` still lets a cookie be set and read over
     plain ``http://localhost`` in local dev. It does NOT extend to a bare LAN
-    IP like ``http://the box LAN address`` — that is a normal insecure origin, and a
-    Secure cookie set there is silently dropped by the browser. Only
+    IP — that is a normal insecure origin, and a Secure cookie set there is
+    silently dropped by the browser. Only
     ``localhost``/loopback and real TLS origins (``https://sfuai.ca``) work.
     """
     flask_app.config["SESSION_COOKIE_SECURE"] = bool(settings.session_cookie_secure)
+    # security audit 2026-09-15 (L2) — SAMESITE was never wired through at
+    # all, so Flask's own session cookie kept Werkzeug's default regardless
+    # of `settings.session_cookie_samesite`. Flask expects the werkzeug-cased
+    # value ("Lax"/"Strict"/"None"), not the lowercase settings value.
+    flask_app.config["SESSION_COOKIE_SAMESITE"] = (
+        settings.session_cookie_samesite.capitalize()
+    )
 
 
 _settings = get_settings()

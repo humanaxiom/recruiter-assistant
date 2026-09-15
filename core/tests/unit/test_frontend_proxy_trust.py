@@ -197,6 +197,27 @@ def test_configure_session_cookie_matches_setting(secure: bool) -> None:
     assert flask_app.config["SESSION_COOKIE_SECURE"] is secure
 
 
+# security audit 2026-09-15 (L2) — `_configure_session_cookie` set
+# `SESSION_COOKIE_SECURE` but never `SESSION_COOKIE_SAMESITE`, so Flask's own
+# signed-session cookie (used by the CAS login flow's `next`/flash state) kept
+# whatever Flask/Werkzeug defaults to regardless of `settings.
+# session_cookie_samesite`. Flask expects the werkzeug-cased value
+# ("Lax"/"Strict"/"None"), not the lowercase settings value directly.
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("lax", "Lax"), ("strict", "Strict"), ("none", "None")],
+)
+def test_configure_session_cookie_also_sets_samesite(
+    configured: str, expected: str
+) -> None:
+    settings = Settings(session_cookie_samesite=configured)
+    flask_app = Flask(__name__)
+
+    _configure_session_cookie(flask_app, settings)
+
+    assert flask_app.config["SESSION_COOKIE_SAMESITE"] == expected
+
+
 def test_configure_session_cookie_is_applied_on_the_real_module_level_app() -> None:
     """The production `app` object (imported at module load) must actually
     have wired this through, not just the helper in isolation."""
@@ -205,4 +226,22 @@ def test_configure_session_cookie_is_applied_on_the_real_module_level_app() -> N
 
     assert (
         real_app.config["SESSION_COOKIE_SECURE"] is real_settings.session_cookie_secure
+    )
+    assert (
+        real_app.config["SESSION_COOKIE_SAMESITE"]
+        == real_settings.session_cookie_samesite.capitalize()
+    )
+
+
+# security audit 2026-09-15 (N2) — the real module-level `app`'s `wsgi_app`
+# must actually be wrapped in ProxyFix iff the real settings'
+# `trust_proxy_headers` is on; the helper-level tests above only prove
+# `_install_proxy_fix` works in isolation, not that `frontend.app` actually
+# calls it on the production app object.
+def test_install_proxy_fix_is_applied_on_the_real_module_level_app() -> None:
+    from frontend.app import _settings as real_settings
+    from frontend.app import app as real_app
+
+    assert isinstance(real_app.wsgi_app, ProxyFix) is bool(
+        real_settings.trust_proxy_headers
     )

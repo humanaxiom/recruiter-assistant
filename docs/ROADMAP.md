@@ -188,7 +188,9 @@ Small, real, and none of them blocking. Fix one when you are already in the file
   - Any SFU CAS user can authenticate; a first login by anyone other than the
     default admin creates an unbounded `users` row (NetID only, role `NULL`).
   - `:29500`/`:29800` stay published on `0.0.0.0` for `host.docker.internal` to
-    reach them, so `http://the box LAN address:29800/docs` is readable on the LAN.
+    reach them, so the API's `/docs` is reachable on the LAN port. (As of
+    2026-09-15 the app itself also refuses to serve `/docs` at all when
+    `CAS_ENABLED=true`, independent of this residual.)
   - `sessions.ip` records the nginx container's address, not the real client
     IP (uvicorn deliberately not given `--proxy-headers`, to avoid trusting
     `X-Forwarded-For` from a LAN peer that can reach `:29800` directly).

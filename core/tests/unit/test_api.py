@@ -347,6 +347,39 @@ async def test_lifespan_does_not_raise_when_skill_hash_salt_is_configured(
             pass  # must not raise
 
 
+# ── security audit 2026-09-15 (L1) — docs/openapi off when CAS is enabled ──
+#
+# `/docs`, `/redoc` and `/openapi.json` are unauthenticated by construction
+# (FastAPI wires them before any `Depends(require_role_assigned)` gate could
+# apply) and the M3/M2 nginx runbook only proxies `/auth/cas/` to the API, so
+# they are already unreachable from the internet in the deployed topology —
+# but `:29800` also stays published on the LAN (see the sfuai-ca.md
+# residuals), where they ARE reachable. A real deployment (`cas_enabled=True`)
+# must not serve them at all; local dev (`cas_enabled=False`) keeps them for
+# the terminal.
+def test_docs_routes_are_disabled_when_cas_is_enabled() -> None:
+    from src.api.main import _build_app
+    from src.settings import Settings
+
+    built = _build_app(Settings(cas_enabled=True, skill_hash_salt="a-real-salt"))
+    client = TestClient(built)
+
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_docs_routes_are_enabled_when_cas_is_disabled() -> None:
+    from src.api.main import _build_app
+    from src.settings import Settings
+
+    built = _build_app(Settings(cas_enabled=False, skill_hash_salt="a-real-salt"))
+    client = TestClient(built)
+
+    assert client.get("/docs").status_code == 200
+    assert client.get("/openapi.json").status_code == 200
+
+
 def test_get_blob_store_returns_the_store_from_app_state() -> None:
     from src.storage.blob_store import get_blob_store
 
