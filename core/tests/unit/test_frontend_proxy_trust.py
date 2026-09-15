@@ -70,6 +70,12 @@ def test_install_proxy_fix_wraps_wsgi_app_in_proxy_fix_when_trust_is_on() -> Non
     assert wrapped.x_proto == 1
     assert wrapped.x_host == 1
     assert wrapped.x_prefix == 0
+    # x_port stays 0 regardless of proxy_hops: nginx sends
+    # X-Forwarded-Port: 443 (its own TLS listener) while the browser's real
+    # URL is https://sfuai.ca:8000 — trusting a forwarded port would rewrite
+    # host_url to sfuai.ca:443 and 403 every real POST as a same-origin
+    # mismatch.
+    assert wrapped.x_port == 0
 
 
 def test_install_proxy_fix_honours_configured_hop_count() -> None:
@@ -84,6 +90,7 @@ def test_install_proxy_fix_honours_configured_hop_count() -> None:
     assert wrapped.x_proto == 2
     assert wrapped.x_host == 2
     assert wrapped.x_prefix == 0
+    assert wrapped.x_port == 0
 
 
 # ── externally observable effect on same_origin, driven over real WSGI ────

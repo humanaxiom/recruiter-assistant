@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # werkzeug's ProxyFix so it trusts exactly that many hops of forwarded
     # headers and no more.
     trust_proxy_headers: bool = False
-    proxy_hops: int = 1
+    proxy_hops: int = Field(default=1, ge=1)
     # ADR-019 §10a — the ratified default-admin CAS allowlist value. A real
     # operational identity, deliberately committed (not PII), env-overridable
     # per deployment.

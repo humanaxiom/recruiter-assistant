@@ -54,6 +54,8 @@ new field itself.
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from src.settings import Settings, validate_startup_auth_config
@@ -240,3 +242,14 @@ def test_env_override_proxy_hops(monkeypatch: MonkeyPatch) -> None:
 def test_proxy_hops_is_a_positive_int() -> None:
     assert isinstance(Settings().proxy_hops, int)
     assert Settings().proxy_hops > 0
+
+
+def test_proxy_hops_zero_is_rejected() -> None:
+    """`proxy_hops=0` would tell ProxyFix to trust ZERO hops of forwarded
+    headers, which is indistinguishable from `trust_proxy_headers=False` but
+    silently — a deployer who typed `PROXY_HOPS=0` expecting "off" would get
+    a config that passes construction and does nothing, instead of a loud
+    rejection. `Field(..., ge=1)` (mirroring `shortlist_max_tries`'s bound)
+    makes that fail at construction instead."""
+    with pytest.raises(ValidationError):
+        Settings(proxy_hops=0)

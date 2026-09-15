@@ -129,6 +129,12 @@ def _install_proxy_fix(flask_app: Flask, settings: Settings) -> None:
     no-op and ``wsgi_app`` is untouched; on, it is wrapped with
     ``x_for=x_proto=x_host=settings.proxy_hops`` (nginx alone = 1 hop) and
     ``x_prefix=0`` (we do not run behind a URL sub-path).
+
+    ``x_port`` is deliberately left at ``0`` (never ``hops``): nginx sends
+    ``X-Forwarded-Port: 443`` (its own TLS listener), while the browser's
+    real, bookmarked URL is ``https://sfuai.ca:8000`` — trusting that header
+    would rewrite ``request.host_url`` to ``sfuai.ca:443`` and 403 every real
+    POST as a same-origin mismatch.
     """
     if not settings.trust_proxy_headers:
         return
