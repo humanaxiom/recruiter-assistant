@@ -103,6 +103,21 @@ class Settings(BaseSettings):
     session_idle_refresh_hours: int = 1
     session_cookie_secure: bool = False
     session_cookie_samesite: str = "lax"
+    # fix/serve-behind-tls-proxy — the app is served at https://sfuai.ca
+    # behind an nginx TLS-terminating reverse proxy. Reading a forwarded
+    # header (X-Forwarded-Proto/Host/For) is trusting whoever sent it, so
+    # this defaults OFF: a fresh checkout, CI, and any deployment that has
+    # not explicitly opted in must never let a client-supplied header spoof
+    # our own notion of scheme/host (which `frontend.csrf.same_origin`
+    # reads via `request.host_url`). Only turn this on behind a proxy we
+    # control that SETS (not appends/forwards) X-Forwarded-Proto/Host on
+    # every request it passes through, so a client-sent value can never
+    # survive to reach the app. `proxy_hops` is the number of such proxies
+    # directly in front of this process (nginx alone = 1) — it is passed to
+    # werkzeug's ProxyFix so it trusts exactly that many hops of forwarded
+    # headers and no more.
+    trust_proxy_headers: bool = False
+    proxy_hops: int = Field(default=1, ge=1)
     # ADR-019 §10a — the ratified default-admin CAS allowlist value. A real
     # operational identity, deliberately committed (not PII), env-overridable
     # per deployment.

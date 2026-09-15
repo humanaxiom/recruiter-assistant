@@ -147,7 +147,7 @@ services:
     build:
       context: ./core
       dockerfile: Dockerfile
-    command: flask --app frontend.app run --host 0.0.0.0 --port 5000 --debug
+    command: flask --app frontend.app run --host 0.0.0.0 --port 5000 --reload --no-debugger
     ports: ["${FRONTEND_PORT:-5000}:5000"]
     environment:
       API_BASE_URL: http://api:8000

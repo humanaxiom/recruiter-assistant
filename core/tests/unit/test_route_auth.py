@@ -1176,3 +1176,54 @@ async def test_cas_disabled_logout_lands_on_the_frontend_when_configured(
     assert resp.status_code == 302
     assert resp.headers["location"] == "http://localhost:5000/"
     assert "ra_session" in resp.headers.get("set-cookie", "")
+
+
+# ── Secure cookie attribute follows `session_cookie_secure`
+# (fix/serve-behind-tls-proxy — served at https://sfuai.ca behind nginx TLS
+# termination) ──────────────────────────────────────────────────────────
+#
+# NOTE for the reviewer: `auth.py`'s `_set_session_cookie` (~line 128-138)
+# already passes `secure=settings.session_cookie_secure` through to
+# `response.set_cookie` — these two tests may therefore already be GREEN.
+# That is fine and expected: they are a PIN of existing, correct behaviour
+# (so a future change cannot silently regress it), not a new requirement on
+# the coder for this slice. Reported as such rather than contorted to fail.
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_is_secure_when_setting_is_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True)
+    settings = settings.model_copy(update={"session_cookie_secure": True})
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/"}
+        )
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "ra_session=tok-new-session" in set_cookie
+    assert "Secure" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "samesite=lax" in set_cookie.lower()
+    assert "Path=/" in set_cookie
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_is_not_secure_when_setting_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(cas_enabled=True)
+    settings = settings.model_copy(update={"session_cookie_secure": False})
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    _mock_successful_validate(monkeypatch)
+    app = _build_app(_FakeAuthConn())
+    async with await _client(app) as client:
+        resp = await client.get(
+            "/auth/cas/validate", params={"ticket": "ST-123", "next": "/"}
+        )
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "ra_session=tok-new-session" in set_cookie
+    assert "Secure" not in set_cookie

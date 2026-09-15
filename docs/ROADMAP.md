@@ -222,6 +222,17 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - **FU-7 decision 1 — LLM provider failover chain.** Genuinely useful now: a second Ollama host would let an `aria-gb10` outage fail *over* rather than fail *closed*.
 
 **Privacy / access**
+- **TLS cutover (2026-09-15) creates three residuals** — see
+  [docs/deploy/sfuai-ca.md](deploy/sfuai-ca.md) for the full topology:
+  - Any SFU CAS user can authenticate; a first login by anyone other than the
+    default admin creates an unbounded `users` row (NetID only, role `NULL`).
+  - `:29500`/`:29800` stay published on `0.0.0.0` for `host.docker.internal` to
+    reach them, so the API's `/docs` is reachable on the LAN port. (As of
+    2026-09-15 the app itself also refuses to serve `/docs` at all when
+    `CAS_ENABLED=true`, independent of this residual.)
+  - `sessions.ip` records the nginx container's address, not the real client
+    IP (uvicorn deliberately not given `--proxy-headers`, to avoid trusting
+    `X-Forwarded-For` from a LAN peer that can reach `:29800` directly).
 - **🔴 GitHub Support PII purge — still open, ~15 minutes of someone's time.** Real candidate résumés remain fetchable by SHA on a public repo. Deleting the branch did **not** stop GitHub serving them (tested, not assumed). Both `humanaxiom/` and `sfu-aria/` are public. This is the oldest unactioned item in the file and the only one with a live external exposure.
 - The shortlist card's quick withdraw still collects no reason (`shortlist_cards.html:151-158`) — deliberate: a text input on every card is poor UX. Consequence: those withdrawals record `None`, so the audited reveal has nothing to offer for them. **Revisit if pilot users withdraw mostly from cards** — now checkable.
 - Reveals are not rate-limited. The audit trail *is* the control (option C records access rather than preventing it), but nothing alerts on the pattern.

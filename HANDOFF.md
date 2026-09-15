@@ -114,14 +114,33 @@ The local dev stack is still up on `:29500` UI · `:29800` API · `:29432` pg ·
 stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 `.env.example` (`:29800` API, `:29500` frontend, `LLM_TIMEOUT_S=900`).
 
-**CAS is OFF on this box as of 2026-09-09**, at the user's request — *"this is
-still a dev/test box… we'll switch it on when users start playing around with
-it next week."* It is off via an untracked, gitignored
-`docker-compose.override.yml`, which also carries the `LLM_TIMEOUT_S` correction
-below. **Delete that file before anyone real touches the box**: with CAS off
-every visitor is an anonymous admin, including on the audit-log viewer.
-`doctor.sh` fails with `deploy.auth_disabled` for exactly as long as it is
-there, which is the intended nag — do not silence it.
+**CAS is ON as of 2026-09-15.** The box is now served at
+`https://sfuai.ca:8000` through a second, non-git compose project
+(`C:\repos\web`, container `sfuai-web`, nginx) that terminates TLS with a
+Let's Encrypt cert and reverse-proxies `/auth/cas/` to the API (`:29800`) and
+everything else to the frontend (`:29500`); `:8000` rather than `:443` because
+the router only forwards a public TCP port range to this box, and 443 isn't
+in it. The untracked `docker-compose.override.yml` that forced CAS off is
+retired (moved to the scratchpad). Full runbook — topology, exact nginx
+config, `.env` keys, cutover and revert steps, residuals — is
+[docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md).
+
+**Same day, a debugger exposure was found and closed.** A forged `Host`
+header could reach the Werkzeug interactive debugger through the proxy. Fixed
+same-day with `--no-debugger` on the frontend (load-bearing) plus a
+default-deny `444` catch-all in nginx for any request whose Host/SNI isn't
+`sfuai.ca` (a second, independent layer — Host injection, not the debugger
+itself). `FLASK_SECRET_KEY` and the four `API_KEY_*` values were rotated the
+same day (2026-09-15) as a precaution; rotating `FLASK_SECRET_KEY` logs
+everyone out.
+
+**`smoke.sh` can no longer run on this box** — it requires CAS off and fails
+rather than skips when CAS is on. The obligation is now `doctor.sh` (run
+after every deploy; the `deploy.auth_disabled` finding should be gone) plus a
+by-hand drive **from off the LAN** (hairpin NAT blocks an on-LAN client from
+reaching the public IP): CAS login as a real principal, land on the jobs
+list, one real write that does not 403. That off-LAN drive has not yet been
+run and is owed before this state is trusted.
 
 ### 3. IN FLIGHT — the candidate roster CSV (`feat/candidate-roster-csv`)
 
@@ -365,14 +384,11 @@ new branch; these are what remains of the first set.)
    reproduce at the real fan-out before raising it, and raise
    `LLM_TIMEOUT_S` with it.
 
-**Two config duties that outrank all four**, both created by a live-ish box and
-neither fixable from an agent session:
-
-- **`.env` still sets `LLM_TIMEOUT_S=120`.** The override masks it; deleting
-  that file re-breaks parsing and ranking. Set `.env` to 838+ properly.
-- **Delete `docker-compose.override.yml` before real users arrive** (stated as
-  "next week" on 2026-09-09). CAS is off through it — every visitor is an
-  anonymous admin, audit-log viewer included.
+**Two config duties that outranked all four — both discharged 2026-09-15.**
+`.env` now sets `LLM_TIMEOUT_S=900` directly (no longer masked by an
+override); `docker-compose.override.yml` is deleted and CAS is on. See
+[docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md) for the cutover that did
+this and §2 above for what it leaves owed (the off-LAN drive).
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
