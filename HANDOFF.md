@@ -6,6 +6,76 @@ record: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
+## 🟢 2026-09-15 — the zero-requirements ranking defect is fixed (`fix/zero-requirements-rank-guard`)
+
+**The user-reported defect of 2026-09-10** — *"Resume short listing was
+generated against the additional hiring manager input, and 0 against the
+JD?!!"* — a job whose JD parse yielded zero required AND zero nice-to-have
+skills ranked 50 real people with the manager prompt (weight 0.10) as 100% of
+the signal, disclosed nowhere. It is the mirror of ADR-017 decision 1 on the
+JD side, and ADR-017 is amended in place (no new ADR).
+
+What shipped, three commits (red → green → refactor), `verify.sh all` green
+after each:
+
+- **API refuses:** `shortlist_service.assert_job_has_requirements` runs
+  BEFORE `set_shortlist_ranking` in `POST /jobs/{id}/shortlist` → `409
+  resource.conflict`, so a refused job never pins `shortlist_state='ranking'`.
+  Counted over the JSONB with a `jsonb_typeof` guard, so a never-parsed JD, a
+  blob missing the keys and a JSON `null` all refuse rather than 500. A
+  nonexistent job keeps its pre-existing 202. Zero-AND-zero, not
+  zero-required: nice-to-have alone is still a signal. **The manager's
+  additional requirements alone are deliberately not enough** — ranking on
+  them alone was the complaint.
+- **Screens disclose:** Generate disabled with the reason; a banner over an
+  already-ranked shortlist for every role; the job page's parse status warns;
+  a 409 re-renders the cards fragment with the API's `message` and stops
+  polling. Signal is DERIVED from `description_parsed`, not a new column —
+  `failure_reason` is nulled by every successful parse and drives the poll
+  and the Re-parse button.
+- **Worker logs** `parse_job.zero_requirements` at WARNING the moment the
+  counts are known.
+
+**Driven by hand against the running stack (CAS off), 2026-09-15:**
+
+- The pilot's own zero-requirements job (`57ab5151…`, 50 entries, 72 parsed
+  résumés): shortlist page 200 with the `jd-no-requirements` banner, the
+  button rendered `disabled title="This job description has no requirements
+  to rank against"`, zero `hx-trigger` polls, zero "Generating"; job page
+  200 with `jd-no-requirements-warning` and **no** Re-parse button.
+- Browser POST Generate with a page token → 200 fragment carrying the API's
+  message, no raw dict, no poll, no "Generate again". The API's own client
+  from inside the frontend container → `Conflict` with
+  `{'code': 'resource.conflict', 'message': 'job … has no required or
+  nice-to-have skills to rank against', 'job_id': …}`. Afterwards
+  `shortlist_state` and `shortlist_state_at` both still NULL, 50 entries
+  untouched.
+- The healthy draft built from `JD.pdf` (18 required): 19 pills, no warning.
+- **The parse-time path, live:** a job created from a title-bearing blurb
+  with no qualifications parsed to `req=0 nice=0`, `failure_reason` NULL, the
+  fragment rendered the warning, and the worker logged
+  `parse_job.zero_requirements job_id=69e1ae82…`. (A blurb with no title at
+  all fails on `title: string_too_short` instead — the pre-existing path.)
+  Both drive jobs deleted from Postgres and Neo4j afterwards.
+- `doctor.sh`: two findings — `deploy.auth_disabled` (the CAS-off decision,
+  intended) and **`neo4j.unprojected_jobs` for the zero-requirements job
+  itself**: no skills → no `REQUIRES` edges, and the remedy text ("re-parse,
+  check the outbox drainer") misdiagnoses it. Recorded in ROADMAP §5.
+- `smoke.sh`: 10 passed in 693s on the merged checkout (§4 has the two failed runs and why).
+
+**Recorded, not fixed:** an auditor's shortlist page view now also writes a
+`read_job` audit row (the page fetches the job to decide the banner);
+`doctor.py`'s unprojected-jobs remedy text.
+
+**Two branches, one order.** This fix branched off `main`, not off
+`feat/candidate-roster-csv` (still unpushed, still awaiting the user's Codex
+review). `docs/pilot-feedback.md` exists only on the roster branch; its
+status line and its START-HERE block were flipped there in a docs-only
+commit. When the roster branch is next synced with `main`, ADR-017 conflicts
+on two appended amendments — keep both, in date order.
+
+---
+
 ### 1. The objective — it changed on 2026-08-27
 
 > **The four people on the pilot box can do their real hiring work in it, and
@@ -333,9 +403,10 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **none.** The DTO's new major changes start on a new branch, new session. |
-| Gates, last local run | see the merge commit message — **re-run, do not cite** |
-| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), MERGED at the user's request |
+| Branch in flight | `fix/zero-requirements-rank-guard` (this fix, see top) — plus **`feat/candidate-roster-csv`, 21 commits, unpushed, awaiting the user's Codex review**; its own HANDOFF.md is the fuller one for that work |
+| Gates, last local run | `verify.sh all` on the fix branch: 5963 unit @ 91.82%, 609 integration, ALL GATES GREEN; reviewer CHANGES REQUIRED → all applied; security PASS — **re-run, do not cite** |
+| `smoke.sh` | 2026-09-15, on the roster+fix merged checkout: **10 passed in 693s**. Two earlier runs failed for reasons outside this change: a `git checkout` mid-run swapped the served code (§8), then one of three résumés parsed degraded and was rightly not ranked (lesson 9 on the roster branch). Re-run confirmed, not assumed. |
+| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), MERGED at the user's request; the fix branch's PR is opened by the same session that wrote this line |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |
@@ -447,3 +518,15 @@ No usable Python on this host (only the WindowsApps stub) — use
 exits 0. Publish unique host ports (29xxx) — many other containers on this
 machine collide on stock 5432/8000/5000. Two Claude sessions drive this repo at
 once: re-read git and PR state in the same call that commits, pushes, or merges.
+
+**The stack serves the WORKING TREE, not an image.** `docker-compose.yml`
+bind-mounts `./core:/app` into api, worker and frontend, with uvicorn
+`--reload` and Flask `--debug`. `docker compose up -d --build` pins nothing:
+a `git checkout` changes what the box executes and renders within seconds.
+On 2026-09-15 a checkout to a `main`-based branch, made while `smoke.sh` was
+running against a database the roster branch had written, 500'd every
+shortlist list on `ScoreBreakdown extra_forbidden` and failed the run after
+24 minutes. **Never switch branches while smoke, doctor, a hand-drive, or a
+user is on the stack**; to edit another branch meanwhile, use a `git
+worktree`. Hand-drive evidence is only valid for the branch that was checked
+out when it was gathered.
