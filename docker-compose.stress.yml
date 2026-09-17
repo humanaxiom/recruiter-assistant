@@ -1,0 +1,18 @@
+# ISOLATED end-to-end / stress stack. Use ONLY as:
+#   docker compose -f docker-compose.yml -f docker-compose.stress.yml -p recruiter-stress up -d
+# from a checkout whose .env is the STRESS env (scripts/e2e.sh writes it):
+# distinct 28xxx host ports, CAS off, its own named volumes. The base file
+# bind-mounts ./data into api and worker — that is the live blob store when
+# run from the pilot checkout — so both are replaced here with a named volume.
+name: recruiter-stress
+services:
+  api:
+    volumes: !override
+      - "./core:/app"
+      - "stressdata:/data"
+  worker:
+    volumes: !override
+      - "./core:/app"
+      - "stressdata:/data"
+volumes:
+  stressdata:

@@ -25,6 +25,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from neo4j.exceptions import ClientError, TransientError
 
 from src.settings import get_settings
 from src.worker.neo4j_bootstrap import _STATEMENTS, bootstrap_neo4j_schema
@@ -311,3 +312,98 @@ async def test_bootstrap_propagates_driver_errors() -> None:
     session.run = AsyncMock(side_effect=RuntimeError("neo4j unavailable"))
     with pytest.raises(RuntimeError, match="neo4j unavailable"):
         await bootstrap_neo4j_schema(driver)
+
+
+# ── First-boot deadlock retry (real defect, 2026-09-17) ────────────────────
+#
+# api and worker both call ``bootstrap_neo4j_schema`` on a fresh Neo4j; one of
+# them can lose a lock-ordering race and get back
+# ``neo4j.exceptions.TransientError`` (Neo4j's own DeadlockDetected class),
+# which today propagates straight out of ``session.run`` and fails API
+# startup. Contract: retry each STATEMENT (not the whole bootstrap) on
+# ``TransientError`` with bounded backoff — up to 5 attempts — and re-raise
+# after the last one. A non-transient ``Neo4jError`` must NOT be retried.
+
+
+def _flaky_session(fail_times: int) -> tuple[Any, Any, dict[str, int]]:
+    """A session whose FIRST statement raises ``TransientError`` ``fail_times``
+    times before succeeding; every later statement succeeds immediately."""
+    calls = {"n": 0}
+
+    async def run(stmt: str, *args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] <= fail_times:
+            raise TransientError("DeadlockDetected")
+        return None
+
+    session = MagicMock()
+    session.run = AsyncMock(side_effect=run)
+    driver = MagicMock()
+    driver.session.return_value.__aenter__.return_value = session
+    driver.session.return_value.__aexit__.return_value = None
+    return driver, session, calls
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_retries_transient_error_then_succeeds() -> None:
+    """Two TransientErrors on the first statement, then success: the
+    statement runs 3 times total, the OTHER 12 statements run once each, and
+    the retry sleeps exactly twice (between the 3 attempts)."""
+    driver, session, calls = _flaky_session(fail_times=2)
+    sleeps = AsyncMock()
+
+    await bootstrap_neo4j_schema(driver, sleep=sleeps)
+
+    assert session.run.await_count == len(_STATEMENTS) + 2
+    assert calls["n"] == len(_STATEMENTS) + 2
+    assert sleeps.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_raises_after_five_transient_attempts() -> None:
+    """Bounded backoff: at most 5 attempts per statement, then re-raise."""
+    driver, session = _fake_driver()
+    session.run = AsyncMock(side_effect=TransientError("DeadlockDetected"))
+    sleeps = AsyncMock()
+
+    with pytest.raises(TransientError):
+        await bootstrap_neo4j_schema(driver, sleep=sleeps)
+
+    assert session.run.await_count == 5
+    # 5 attempts -> 4 gaps between them.
+    assert sleeps.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_does_not_retry_a_non_transient_neo4j_error() -> None:
+    """A ClientError (e.g. bad Cypher) is a real bug, not a lock race — it
+    must fail FAST, on the first attempt, never sleep-and-retry."""
+    driver, session = _fake_driver()
+    session.run = AsyncMock(
+        side_effect=ClientError("Neo.ClientError.Statement.SyntaxError")
+    )
+    sleeps = AsyncMock()
+
+    with pytest.raises(ClientError):
+        await bootstrap_neo4j_schema(driver, sleep=sleeps)
+
+    assert session.run.await_count == 1
+    sleeps.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_retry_sleep_defaults_to_asyncio_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``sleep=`` kwarg supplied: the retry must fall back to
+    ``asyncio.sleep`` (patched here) rather than silently skipping the
+    backoff or requiring every caller to thread one through."""
+    import asyncio
+
+    driver, session, _calls = _flaky_session(fail_times=1)
+    patched = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", patched)
+
+    await bootstrap_neo4j_schema(driver)
+
+    patched.assert_awaited()
