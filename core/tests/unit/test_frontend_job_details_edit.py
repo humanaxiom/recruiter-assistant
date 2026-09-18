@@ -45,6 +45,7 @@ def _job(job_id: Any, **over: Any) -> dict[str, Any]:
         "parsed_at": "2026-09-01T00:00:00Z",
         "description_parsed": None,
         "failure_reason": None,
+        "description_raw": "An existing job description. " * 3,
     }
     base.update(over)
     return base
@@ -246,3 +247,133 @@ def test_an_empty_submission_does_not_reach_the_backend(
     resp = client.post(f"/jobs/{uuid4()}/details", data={})
     assert resp.status_code == 302
     assert not called
+
+
+# ── Item 5 — the description_raw textarea (zero-requirements JD recovery) ──
+#
+# A ``<textarea name="description_raw">`` prefilled with the current JD text,
+# rendered ONLY when ``is_writer`` and ``job.status == 'draft'`` — the same
+# draft gate ``PATCH /jobs/{id}`` now enforces for this field (409 on any
+# other status). Its own route, ``POST /jobs/<job_id>/description``,
+# forwards ONLY ``description_raw`` to ``api_client.patch_job``; a backend
+# 409 (``api_client.Conflict``) re-renders the page with the reason rather
+# than aborting.
+
+
+def test_the_description_textarea_renders_when_draft_and_writer(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client,
+        "get_job",
+        lambda jid, **kw: _job(jid, status="draft", description_raw="Current JD text."),
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+
+    html = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+
+    assert f"/jobs/{job_id}/description" in html
+    assert 'name="description_raw"' in html
+    assert "Current JD text." in html
+
+
+def test_the_description_textarea_is_absent_when_not_draft(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        api_client, "get_job", lambda jid, **kw: _job(jid, status="open")
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+
+    html = client.get(f"/jobs/{uuid4()}").get_data(as_text=True)
+
+    assert 'name="description_raw"' not in html
+
+
+def test_the_description_textarea_is_hidden_for_a_non_writer_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from frontend import app as frontend_app_module
+    from frontend.app import app as flask_app
+    from src.settings import Settings
+
+    settings = Settings(cas_enabled=True)
+    monkeypatch.setattr(frontend_app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        api_client,
+        "get_cas_user",
+        lambda **kw: {
+            "authenticated": True,
+            "username": "jordan",
+            "cas_enabled": True,
+            "role": "hiring_manager",
+        },
+    )
+    monkeypatch.setattr(
+        api_client, "get_job", lambda jid, **kw: _job(jid, status="draft")
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+
+    flask_app.config.update(TESTING=True)
+    plain_client = flask_app.test_client()
+    resp = plain_client.get(
+        f"/jobs/{uuid4()}", headers={"Cookie": "ra_session=tok-live"}
+    )
+
+    assert 'name="description_raw"' not in resp.get_data(as_text=True)
+
+
+def test_the_description_route_sends_only_description_raw(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+    seen: dict[str, Any] = {}
+
+    def fake(jid: UUID, payload: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        seen["job_id"] = jid
+        seen["payload"] = payload
+        return _job(jid)
+
+    monkeypatch.setattr(api_client, "patch_job", fake)
+    resp = client.post(
+        f"/jobs/{job_id}/description",
+        data={"description_raw": "A brand new JD text. " * 5},
+    )
+    assert resp.status_code == 302
+    assert str(job_id) in resp.headers["Location"]
+    assert seen["job_id"] == job_id
+    assert seen["payload"] == {"description_raw": "A brand new JD text. " * 5}
+
+
+def test_the_description_route_conflict_re_renders_with_the_reason(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = uuid4()
+
+    def fake(jid: UUID, payload: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        raise api_client.Conflict(
+            "job is not a draft",
+            status_code=409,
+            detail={"code": "resource.conflict", "message": "job is not a draft"},
+        )
+
+    monkeypatch.setattr(api_client, "patch_job", fake)
+    resp = client.post(
+        f"/jobs/{job_id}/description", data={"description_raw": "Rewritten. " * 5}
+    )
+    assert resp.status_code == 409
+    assert "job is not a draft" in resp.get_data(as_text=True)
+
+
+def test_the_description_route_404s_when_the_job_does_not_exist(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake(jid: UUID, payload: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        raise api_client.NotFound("no such job")
+
+    monkeypatch.setattr(api_client, "patch_job", fake)
+    resp = client.post(
+        f"/jobs/{uuid4()}/description", data={"description_raw": "x" * 60}
+    )
+    assert resp.status_code == 404

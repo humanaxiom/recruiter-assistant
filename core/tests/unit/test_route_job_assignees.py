@@ -579,4 +579,166 @@ async def test_delete_assignee_422_on_non_uuid_user_id_path(
     assert resp.status_code == 422
 
 
+
+
+# ── GET /jobs/{job_id}/assignees — Item 2 (ADR-020 §2, read, same gate) ────
+#
+# Contract pinned here (task instruction): the read gate is the SAME
+# ``_ASSIGNERS`` (admin/recruiter) role gate as POST/DELETE, but it is NOT
+# gated by ``_require_real_assigner`` — reading who is assigned is not an
+# attributable write, so the CAS-disabled dev-admin sentinel (which 403s
+# POST/DELETE) must be allowed to GET. Backed by a new
+# ``job_assignee_service.list_assignees(conn, job_id) -> list[User]``.
+
+
+def _assignee_row(
+    *, user_id: Any = None, cas_username: str = "hm", role: str = "hiring_manager"
+) -> User:
+    return User(
+        id=user_id or uuid4(),
+        cas_username=cas_username,
+        display_name=cas_username,
+        email=None,
+        role=role,
+        active=True,
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+
+
+def _patch_list_assignees(
+    monkeypatch: pytest.MonkeyPatch, users: list[User]
+) -> AsyncMock:
+    from src.api.routes import job_assignees as job_assignees_routes
+
+    mock = AsyncMock(return_value=users)
+    monkeypatch.setattr(
+        job_assignees_routes.job_assignee_service, "list_assignees", mock
+    )
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_as_admin_returns_200_and_the_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    users = [_assignee_row(cas_username="dana")]
+    _patch_list_assignees(monkeypatch, users)
+    app = _build_app(_mock_conn(), role=Role.ADMIN)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["cas_username"] == "dana"
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_as_recruiter_returns_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    _patch_list_assignees(monkeypatch, [])
+    app = _build_app(_mock_conn(), role=Role.RECRUITER)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_403_for_hiring_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    list_assignees = _patch_list_assignees(monkeypatch, [])
+    app = _build_app(_mock_conn(), role=Role.HIRING_MANAGER)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 403
+    list_assignees.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_403_for_auditor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    list_assignees = _patch_list_assignees(monkeypatch, [])
+    app = _build_app(_mock_conn(), role=Role.AUDITOR)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 403
+    list_assignees.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_200_for_the_dev_admin_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read gate is NOT ``_require_real_assigner`` — unlike POST/DELETE,
+    the CAS-disabled synthetic dev-admin sentinel is allowed to GET (it is a
+    read, not an attributable write)."""
+    job_id = uuid4()
+    _patch_list_assignees(monkeypatch, [])
+    app = _build_app(_mock_conn(), role=Role.ADMIN)
+    app.dependency_overrides[resolve_user] = lambda: _sentinel_dev_admin_user()
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_sentinel_may_still_not_post_or_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairs with the test above: the sentinel's GET-only exemption must not
+    have widened to the write routes — POST/DELETE still 403 it."""
+    job_id = uuid4()
+    target_user_id = uuid4()
+    assign, unassign, _audit = _patch_services(monkeypatch)
+    app = _build_app(_mock_conn(), role=Role.ADMIN)
+    app.dependency_overrides[resolve_user] = lambda: _sentinel_dev_admin_user()
+    async with await _client(app) as client:
+        get_resp = await client.get(f"/jobs/{job_id}/assignees")
+        post_resp = await client.post(
+            f"/jobs/{job_id}/assignees", json={"user_id": str(target_user_id)}
+        )
+        delete_resp = await client.delete(f"/jobs/{job_id}/assignees/{target_user_id}")
+    assert get_resp.status_code == 200
+    assert post_resp.status_code == 403
+    assert delete_resp.status_code == 403
+    assign.assert_not_awaited()
+    unassign.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_calls_service_with_job_id_and_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    list_assignees = _patch_list_assignees(monkeypatch, [])
+    app = _build_app(conn, role=Role.ADMIN)
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/assignees")
+    assert resp.status_code == 200
+    list_assignees.assert_awaited_once()
+    args = list_assignees.await_args.args
+    assert conn in args
+    assert job_id in args
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_422_on_non_uuid_job_id_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_list_assignees(monkeypatch, [])
+    app = _build_app(_mock_conn(), role=Role.ADMIN)
+    async with await _client(app) as client:
+        resp = await client.get("/jobs/not-a-uuid/assignees")
+    assert resp.status_code == 422
+
+
 __all__: list[str] = []
