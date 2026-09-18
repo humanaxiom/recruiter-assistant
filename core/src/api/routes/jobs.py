@@ -31,7 +31,7 @@ from src.api.deps import (
     resolve_user,
     scoped_user_id_or_403,
 )
-from src.errors import FileRejectedError
+from src.errors import ConflictError, FileRejectedError
 from src.models.pool import Db
 from src.schemas.auth import User
 from src.schemas.jobs import (
@@ -285,7 +285,29 @@ async def update_job(
     payload actually flips ``blind_review``. Unlike ``POST
     /resumes/{id}/reveal``, this route is NOT human-only: a bare service-key
     caller (``user is None``) is forwarded as ``actor_kind='service'`` /
-    ``actor_service='api'`` rather than 403ing."""
+    ``actor_service='api'`` rather than 403ing.
+
+    **Item 5 (zero-requirements JD recovery) — ``description_raw`` is
+    draft-gated at THIS route.** A change of description is an intent to
+    re-parse the posting from scratch, not a cosmetic edit, so it is only
+    ever safe while the job is still 'draft' (mirrors ``reparse_job``'s own
+    'draft' gate). Off 'draft' it 409s with NOTHING updated — no
+    ``job_service.update_job`` call, no ``clear_parse_output``, no enqueue —
+    so a client editing an unrelated field on an open job is unaffected. On
+    'draft' the update applies, the stale ``description_parsed``/
+    ``parsed_at``/``failure_reason`` are cleared (``job_service.
+    clear_parse_output``, a second SQL-level ``status = 'draft'`` guard) and
+    exactly one ``parse_job`` is enqueued — auto re-parse rather than a
+    second manual button, so a JD that parsed to zero requirements has a
+    clean, one-step recovery."""
+    if "description_raw" in payload.model_fields_set:
+        current = await job_service.get_job(db, job_id)
+        if current.status != "draft":
+            raise ConflictError(
+                f"job {job_id} is '{current.status}', not 'draft' — "
+                "description_raw can only be changed on a draft job",
+                job_id=str(job_id),
+            )
     actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
     job = await job_service.update_job(
         db,
@@ -314,6 +336,9 @@ async def update_job(
     # an LLM call.
     if "additional_requirements" in payload.model_fields_set:
         await arq.enqueue_job("extract_manager_prompt", str(job_id))
+    if "description_raw" in payload.model_fields_set:
+        await job_service.clear_parse_output(db, job_id)
+        await arq.enqueue_job("parse_job", str(job_id))
     return job
 
 

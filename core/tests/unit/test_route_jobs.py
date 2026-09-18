@@ -1557,3 +1557,125 @@ async def test_clearing_the_note_still_enqueues() -> None:
                 f"/jobs/{job_id}", json={"additional_requirements": None}
             )
     arq.enqueue_job.assert_awaited_once_with("extract_manager_prompt", str(job_id))
+
+
+# ── Item 5 — zero-requirements JD recovery: PATCH description_raw ─────────
+#
+# Contract pinned here (task instruction): a PATCH touching
+# ``description_raw`` is draft-gated at the ROUTE. On a 'draft' job it
+# updates, clears the stale parse output (``job_service.clear_parse_output``)
+# and enqueues exactly one ``parse_job``. On any other status it 409s with
+# NOTHING updated — no ``job_service.update_job`` call, no clear, no enqueue.
+# A PATCH that never touches ``description_raw`` (e.g. ``department``) is
+# unaffected regardless of the job's status.
+
+
+def _job_out_with_status(status: str, job_id: UUID | None = None) -> JobOut:
+    return JobOut(**_job_row(job_id=job_id, status=status))
+
+
+@pytest.mark.asyncio
+async def test_patch_description_raw_on_a_draft_job_updates_and_enqueues_once() -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, status="draft"))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    get_job_mock = AsyncMock(return_value=_job_out_with_status("draft", job_id))
+    update_job_mock = AsyncMock(return_value=_job_out_with_status("draft", job_id))
+    clear_parse_output_mock = AsyncMock(return_value=None)
+    with patch.multiple(
+        jobs_routes.job_service,
+        get_job=get_job_mock,
+        update_job=update_job_mock,
+        clear_parse_output=clear_parse_output_mock,
+    ):
+        async with await _client(app) as client:
+            resp = await client.patch(
+                f"/jobs/{job_id}",
+                json={"description_raw": "A brand new JD text. " * 5},
+            )
+    assert resp.status_code == 200, resp.text
+    update_job_mock.assert_awaited_once()
+    clear_parse_output_mock.assert_awaited_once()
+    assert clear_parse_output_mock.await_args.args[-1] == job_id
+    arq.enqueue_job.assert_awaited_once_with("parse_job", str(job_id))
+
+
+@pytest.mark.asyncio
+async def test_patch_description_raw_on_an_open_job_409s_and_updates_nothing() -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, status="open"))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    get_job_mock = AsyncMock(return_value=_job_out_with_status("open", job_id))
+    update_job_mock = AsyncMock(return_value=_job_out_with_status("open", job_id))
+    clear_parse_output_mock = AsyncMock(return_value=None)
+    with patch.multiple(
+        jobs_routes.job_service,
+        get_job=get_job_mock,
+        update_job=update_job_mock,
+        clear_parse_output=clear_parse_output_mock,
+    ):
+        async with await _client(app) as client:
+            resp = await client.patch(
+                f"/jobs/{job_id}",
+                json={"description_raw": "A brand new JD text. " * 5},
+            )
+    assert resp.status_code == 409, resp.text
+    update_job_mock.assert_not_awaited()
+    clear_parse_output_mock.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_description_raw_on_a_closed_job_409s() -> None:
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, status="closed"))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    get_job_mock = AsyncMock(return_value=_job_out_with_status("closed", job_id))
+    update_job_mock = AsyncMock(return_value=_job_out_with_status("closed", job_id))
+    with patch.multiple(
+        jobs_routes.job_service,
+        get_job=get_job_mock,
+        update_job=update_job_mock,
+        clear_parse_output=AsyncMock(return_value=None),
+    ):
+        async with await _client(app) as client:
+            resp = await client.patch(
+                f"/jobs/{job_id}",
+                json={"description_raw": "A brand new JD text. " * 5},
+            )
+    assert resp.status_code == 409
+    update_job_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_patch_an_unrelated_field_on_an_open_job_is_unaffected() -> None:
+    """``department`` never touches ``description_raw`` — the draft gate
+    must not fire, regardless of the job's status."""
+    job_id = uuid4()
+    conn = _mock_conn(fetchrow=_job_row(job_id=job_id, status="open"))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+    get_job_mock = AsyncMock(return_value=_job_out_with_status("open", job_id))
+    update_job_mock = AsyncMock(
+        return_value=JobOut(
+            **_job_row(job_id=job_id, status="open", department="Engineering")
+        )
+    )
+    clear_parse_output_mock = AsyncMock(return_value=None)
+    with patch.multiple(
+        jobs_routes.job_service,
+        get_job=get_job_mock,
+        update_job=update_job_mock,
+        clear_parse_output=clear_parse_output_mock,
+    ):
+        async with await _client(app) as client:
+            resp = await client.patch(
+                f"/jobs/{job_id}", json={"department": "Engineering"}
+            )
+    assert resp.status_code == 200, resp.text
+    update_job_mock.assert_awaited_once()
+    clear_parse_output_mock.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()

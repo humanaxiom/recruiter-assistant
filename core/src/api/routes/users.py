@@ -27,7 +27,7 @@ from typing import Annotated
 from uuid import UUID
 
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import actor_fields_from_user, get_arq, resolve_user
 from src.errors import ConflictError, NotFoundError
@@ -59,12 +59,36 @@ async def _require_admin_session(
     return user
 
 
+async def _require_admin_or_recruiter_session(
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> User:
+    """403 unless ``user`` is a real, ACTIVE session with ``role`` in
+    ``{"admin", "recruiter"}`` (Item 2) — used ONLY for the FILTERED read
+    (``GET /users?role=...``), never the unfiltered listing.
+
+    A recruiter session builds the hiring-manager-assignment screen and must
+    be able to fetch the assignable ``hiring_manager`` roster; the plain
+    ``_require_admin_session`` gate would 403 it. The unfiltered ``GET
+    /users`` stays admin-only — this gate is deliberately not used there."""
+    if user is None or user.role not in ("admin", "recruiter") or not user.active:
+        raise HTTPException(
+            status_code=403,
+            detail="admin or recruiter session required for this route",
+        )
+    return user
+
+
 @router.get("/users")
 async def list_users(
     db: Db,
-    _admin: Annotated[User, Depends(_require_admin_session)],
+    user: Annotated[User | None, Depends(resolve_user)],
+    role: str | None = Query(default=None),
 ) -> list[User]:
-    return await user_service.list_users(db)
+    if role is not None:
+        await _require_admin_or_recruiter_session(user)
+    else:
+        await _require_admin_session(user)
+    return await user_service.list_users(db, role=role)
 
 
 @router.post("/admin/jobs/sync", status_code=202)
