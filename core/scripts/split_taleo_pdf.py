@@ -458,6 +458,73 @@ def _write_pairing_manifest(
     return path
 
 
+def _zip_outputs(out_dir: Path, resumes: list[Path], covers: list[Path]) -> Path:
+    """Zip the given résumé + cover-letter PDFs into ``applicants.zip`` —
+    PDFs ONLY, never ``manifest.json``, even though it lives in the SAME
+    ``out_dir`` (``_write_pairing_manifest`` writes it there). The in-app
+    paired uploader accepts ``pairing_manifest`` as its OWN multipart field;
+    a ``manifest.json`` zipped alongside the résumés trips the zip
+    allowlist (json isn't an accepted résumé extension) and rejects the
+    WHOLE upload."""
+    zip_path = out_dir / "applicants.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in [*resumes, *covers]:
+            zf.write(p, arcname=p.name)
+    return zip_path
+
+
+def _zippable(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+) -> tuple[list[Path], list[Path]]:
+    """Résumé/cover paths to include in ``applicants.zip``.
+
+    A cover-only row (LLM manifest emitted cover-letter pages but no résumé
+    pages for that applicant) is EXCLUDED entirely — there is no résumé for
+    the cover letter to pair with. This mirrors two promises that must stay
+    true together: ``_write_pairing_manifest``'s own ``resume_path is not
+    None`` filter (cover-only applicants never appear in ``manifest.json``),
+    and ``report_cover_only``'s printed claim that such applicants "are
+    EXCLUDED from manifest.json and applicants.zip" — before this helper
+    existed, the zip's ``covers`` list was built from every row with a cover
+    path regardless of whether that row also had a résumé, so a cover-only
+    applicant's cover letter WAS zipped despite the printed promise
+    (security audit finding, 2026-09-18)."""
+    resumes = [r for _, r, _, _ in emitted if r is not None]
+    covers = [c for _, r, c, _ in emitted if r is not None and c is not None]
+    return resumes, covers
+
+
+def report_cover_only(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+) -> int:
+    """Print a loud block listing applicants whose LLM-manifest row carried
+    cover-letter pages but NO résumé pages at all, and return the count.
+
+    Such a row has no résumé to ingest — already excluded from
+    ``manifest.json`` by ``_write_pairing_manifest``'s ``resume_path is not
+    None`` filter — so silently excluding it there is not enough; the
+    operator must be told an applicant was dropped rather than discovering it
+    only by counting. The CLI exits non-zero when this is > 0.
+    """
+    cover_only = [
+        (name, cover_path)
+        for name, resume_path, cover_path, _pages in emitted
+        if resume_path is None and cover_path is not None
+    ]
+    if not cover_only:
+        return 0
+    print("\n" + "!" * 60)
+    print(f"! {len(cover_only)} APPLICANT(S) HAVE A COVER LETTER BUT NO RÉSUMÉ")
+    for name, cover_path in cover_only:
+        print(f"!   {name or '?'}: {cover_path}")
+    print(
+        "!   These are EXCLUDED from manifest.json and applicants.zip. Fix "
+        "the split (--ranges), or ask the applicant to resubmit a résumé."
+    )
+    print("!" * 60 + "\n")
+    return len(cover_only)
+
+
 def _run_llm_mode(
     doc: fitz.Document,
     texts: list[str],
@@ -477,28 +544,25 @@ def _run_llm_mode(
         return 1
     print(f"output: {out_dir}\n")
     emitted = _emit_from_manifest(doc, texts, manifest, out_dir, min_text)
-    resumes = [r for _, r, _, _ in emitted if r is not None]
-    covers = [c for _, _, c, _ in emitted if c is not None]
-    manifest_path = _write_pairing_manifest(emitted, out_dir)
+    resumes, covers = _zippable(emitted)
+    _write_pairing_manifest(emitted, out_dir)
     if do_zip and resumes:
-        zip_path = out_dir / "applicants.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in [*resumes, *covers, manifest_path]:
-                zf.write(p, arcname=p.name)
+        zip_path = _zip_outputs(out_dir, resumes, covers)
         print(
             f"\nzipped {len(resumes)} résumé(s) + {len(covers)} "
-            f"cover letter(s) + manifest -> {zip_path}"
+            f"cover letter(s) -> {zip_path}"
         )
     print(
         f"\n{len(resumes)} résumé(s) + {len(covers)} cover letter(s). Review "
-        "them, then bulk-upload applicants.zip (or the whole output dir) on "
-        "the job's Resumes section: the cover letters pair to their applicant "
-        "automatically via manifest.json (Feature 2).\n"
+        "them, then upload applicants.zip in Résumé file(s) AND manifest.json "
+        "in Pairing manifest on the job's Resumes section: the cover letters "
+        "pair to their applicant automatically (Feature 2).\n"
     )
     assigned = [pages for _, _, _, pages in emitted]
     missing, duplicated = page_accounting(len(texts), assigned)
     clean = report_page_accounting(missing, duplicated)
-    return 0 if clean else 1
+    cover_only_count = report_cover_only(emitted)
+    return 0 if clean and cover_only_count == 0 else 1
 
 
 def _run_deterministic_mode(

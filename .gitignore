@@ -33,3 +33,12 @@ compose.override.yml
 *.roster.csv
 .env.*
 !.env.example
+
+# split_taleo_pdf.py output — real candidate résumés/cover letters split out
+# of a combined Taleo export, plus a manifest naming them. Same PII class as
+# `fixtures/` above; there is a recorded incident of `git add -A` pushing
+# résumés to this (public) remote. Never commit these regardless of where the
+# operator ran the splitter from.
+*_split/
+applicants.zip
+manifest.json
