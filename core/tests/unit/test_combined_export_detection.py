@@ -54,7 +54,9 @@ _MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 _MIME_TXT = "text/plain"
 
 
-def _insert_lines(page: fitz.Page, lines: list[str], *, y0: float = 72, dy: float = 14) -> None:
+def _insert_lines(
+    page: fitz.Page, lines: list[str], *, y0: float = 72, dy: float = 14
+) -> None:
     for i, line in enumerate(lines):
         if line:
             page.insert_text((72, y0 + i * dy), line, fontsize=10)

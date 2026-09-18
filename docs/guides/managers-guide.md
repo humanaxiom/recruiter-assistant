@@ -365,9 +365,13 @@ name. The rules, exactly:
   underscore** — they are interchangeable, and case does not matter. So
   `A Smith_Resume.pdf` pairs with `A Smith Cover Letter.pdf`.
 - A file with **no recognised suffix is treated as a résumé**.
-- A cover-letter-named file with **no matching résumé is ingested as a résumé
-  anyway**, with a warning on the results summary — a stray name never loses a
-  document.
+- A cover-letter-named file with **no matching résumé is usually ingested as a
+  résumé anyway**, with a warning on the results summary — a stray name never
+  loses a document. **Exception (2026-09-18):** if the tool reads the file's
+  actual text and it looks like a real cover letter (a salutation, a sign-off,
+  "I am writing to apply"), it is **rejected instead**, with a reason
+  explaining a cover letter must never be ranked as a résumé. It is never
+  silently dropped — it shows up as a rejected row, same as any other refusal.
 
 ### Pairing by manifest
 
@@ -389,6 +393,22 @@ silently dropped.
 > **The manifest must be its own upload field, not inside the résumé zip.** A
 > `manifest.json` zipped with the résumés is rejected, with a message telling you
 > exactly that.
+>
+> Using `scripts/split-taleo.sh`'s LLM mode with `--zip`: upload `applicants.zip`
+> in **Résumé file(s)** and the separate `manifest.json` it writes to the same
+> output folder in **Pairing manifest** — two fields, not one zip with both.
+
+### A combined (unsplit) Taleo export is refused, not mis-ingested
+
+A raw Taleo download concatenates many applicants — résumés and cover letters —
+into one PDF. Uploaded as-is, it would previously become **one** résumé row
+with every applicant's pages, cover letters included, parsed as a single
+candidate. It is now **refused** instead: the results summary shows a
+rejected row whose reason names the page count and how many distinct
+applicant e-mails it found in the page headers, and tells you to split it
+first with `scripts/split-taleo.sh` (or `.ps1`) and re-upload the
+per-applicant files it produces. The rest of a mixed batch (any normal
+résumés alongside the combined file) still goes through.
 
 ### What happens next
 

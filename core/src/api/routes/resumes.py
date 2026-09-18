@@ -13,6 +13,7 @@ in blind form (D2) but may never un-blind one.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -42,6 +43,7 @@ from src.api.deps import (
 )
 from src.errors import FileRejectedError, NotFoundError
 from src.models.pool import Db
+from src.pipeline.parsing.extract import extract_text
 from src.schemas.auth import User
 from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import (
@@ -56,6 +58,7 @@ from src.services import (
     audit_service,
     bulk_ingest_service,
     candidate_roster_service,
+    combined_export,
     resume_service,
     # FU-5 slice 8 (ADR-019 §6): no longer CALLED from this module — the
     # reveal route now writes `audit_log` via `audit_service` instead. KEPT
@@ -147,6 +150,54 @@ async def upload_resumes(
         else:
             expanded.append((filename, data))
 
+    # Combined-Taleo-export detection (refuse, don't mis-ingest): a combined
+    # export PDF concatenates MANY applicants; uploaded as-is it would become
+    # ONE résumé row with every page (cover letters included) parsed as that
+    # one applicant. Run the cheap heuristic on every expanded PDF part —
+    # off the event loop (PyMuPDF is sync/CPU-bound) — and turn a flagged
+    # file into a rejected row rather than killing the whole batch.
+    combined_rejected: list[ResumeUploadResult] = []
+    kept: list[tuple[str, bytes]] = []
+    for name, data in expanded:
+        reason: str | None = None
+        if name.lower().endswith(".pdf"):
+            reason = await asyncio.to_thread(
+                combined_export.looks_like_combined_export, data, "application/pdf"
+            )
+        if reason is not None:
+            combined_rejected.append(
+                ResumeUploadResult(
+                    original_filename=name, outcome="rejected", reason=reason
+                )
+            )
+        else:
+            kept.append((name, data))
+    expanded = kept
+
+    # An orphaned cover-NAMED file (no matching résumé) must never be
+    # promoted to a résumé when its ACTUAL text reads as a cover letter
+    # (ADR-017 amendment, 2026-09-18). Extracting text needs a thread (sync,
+    # CPU-bound PyMuPDF/python-docx), which a plain callable can't do — so
+    # extract up front for every cover-NAMED file and hand ``pair_applicants``
+    # a sync lookup callable instead.
+    cover_named = [
+        f for f in expanded if bulk_ingest_service._classify(f[0])[0] == "cover"
+    ]
+    cover_text_map: dict[str, str] = {}
+    for cover_name, cover_data in cover_named:
+        text = ""
+        try:
+            cover_mime = resume_service.detect_mime(cover_name, cover_data)
+            extracted = await asyncio.to_thread(extract_text, cover_data, cover_mime)
+            text = extracted.full_text
+        except Exception:
+            text = ""
+        cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = text
+
+    def _is_cover_content(f: tuple[str, bytes]) -> bool:
+        text = cover_text_map.get(bulk_ingest_service.basename_lower(f[0]), "")
+        return combined_export.is_cover_letter_text(text)
+
     # FU-3 Slice 3: an explicit résumé↔cover pairing manifest (its own field).
     # A malformed manifest raises ``ManifestError`` (AppError, 422) → the global
     # handler renders it before any body is persisted.
@@ -167,7 +218,9 @@ async def upload_resumes(
     # (when supplied) takes precedence; everything it doesn't name falls back to
     # the filename convention. A plain no-suffix upload with no manifest pairs
     # no cover → empty maps → today's behaviour.
-    pairing = bulk_ingest_service.pair_applicants(expanded, manifest=manifest)
+    pairing = bulk_ingest_service.pair_applicants(
+        expanded, manifest=manifest, is_cover_content=_is_cover_content
+    )
     resume_files: list[tuple[str, bytes]] = []
     cover_letter_map: dict[str, tuple[str, bytes]] = {}
     warnings_map: dict[str, list[str]] = {}
@@ -219,6 +272,19 @@ async def upload_resumes(
                 original_filename=missing_name, outcome="rejected", reason=reason
             )
         )
+
+    # A cover-shaped orphan (ADR-017 amendment) and a refused combined export
+    # both surface as rejected rows too — never silently dropped, never
+    # ingested as a résumé.
+    for unattached_name, unattached_reason in pairing.unattached:
+        results.append(
+            ResumeUploadResult(
+                original_filename=unattached_name,
+                outcome="rejected",
+                reason=unattached_reason,
+            )
+        )
+    results.extend(combined_rejected)
 
     for r in results:
         if r.outcome == "accepted" and r.resume_id is not None:

@@ -26,6 +26,7 @@ import csv
 import io
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Final, get_args
@@ -78,6 +79,15 @@ _MAX_STEM_LEN: Final = 256
 # STATIC English pairing notes — never interpolate a filename (blind invariant).
 _DEMOTED_COVER_NOTE: Final = (
     "looked like a cover letter but had no matching résumé; ingested as a résumé"
+)
+# ADR-017 amendment (2026-09-18): the reversal from "promote" to "disclose".
+# When the caller supplies ``is_cover_content`` and it says the orphan's
+# ACTUAL text reads as a cover letter, that file is NEVER demoted to a
+# résumé — a cover letter must never be ranked as a résumé — it is reported
+# in ``PairingResult.unattached`` instead, with this static reason.
+_UNATTACHED_COVER_REASON: Final = (
+    "a cover letter with no matching résumé — not ingested, since a cover "
+    "letter must never be ranked as a résumé"
 )
 _MANIFEST_MISSING_COVER_NOTE: Final = (
     "a cover letter named in the manifest wasn't in the upload"
@@ -215,6 +225,13 @@ class PairingResult:
 
     pairs: list[ApplicantFiles] = field(default_factory=list)
     rejected: list[tuple[str, str]] = field(default_factory=list)  # (filename, reason)
+    # ADR-017 amendment (2026-09-18): an orphan cover-named file whose ACTUAL
+    # content reads as a cover letter (per ``is_cover_content``) — disclosed
+    # here rather than promoted to a résumé. Defaults to empty so every
+    # existing caller (``is_cover_content`` omitted) is byte-identical to
+    # before this field existed.
+    # (filename, reason)
+    unattached: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _pair_from_manifest(
@@ -251,10 +268,22 @@ def pair_applicants(
     files: list[UploadedFile],
     *,
     manifest: dict[str, str | None] | None = None,
+    is_cover_content: Callable[[UploadedFile], bool] | None = None,
 ) -> PairingResult:
     """Pair each cover letter to its résumé. ``manifest`` (résumé→cover keys)
     takes precedence; everything it doesn't cover falls back to the filename
-    convention. Input order of résumés is preserved. Pure — no I/O."""
+    convention. Input order of résumés is preserved. Pure — no I/O.
+
+    ``is_cover_content`` is ADDITIVE and OPTIONAL (ADR-017 amendment,
+    2026-09-18 — the reversal from "promote" to "disclose"): a caller (the
+    upload route) can supply it to check a file's ACTUAL extracted text, not
+    just its filename. It is consulted ONLY on a leftover cover-named file
+    that has no matching résumé (never on a résumé that pairs cleanly with
+    its own cover letter). When it returns True, that file is NEVER demoted
+    to a standalone résumé — it goes to ``PairingResult.unattached`` instead
+    (filename, static reason) and is absent from every ``ApplicantFiles``. A
+    False/None return preserves today's demote-with-note behaviour.
+    ``is_cover_content=None`` (the default) is byte-identical to omitting it."""
     by_name = {basename_lower(f[0]): f for f in files}
     used: set[str] = set()
     result = PairingResult()
@@ -285,7 +314,10 @@ def pair_applicants(
     #    note, so nothing is silently lost.
     for cands in covers_by_base.values():
         for f in cands:
-            result.pairs.append(ApplicantFiles(resume=f, note=_DEMOTED_COVER_NOTE))
+            if is_cover_content is not None and is_cover_content(f):
+                result.unattached.append((f[0], _UNATTACHED_COVER_REASON))
+            else:
+                result.pairs.append(ApplicantFiles(resume=f, note=_DEMOTED_COVER_NOTE))
 
     return result
 
