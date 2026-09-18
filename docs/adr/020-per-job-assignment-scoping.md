@@ -213,6 +213,20 @@ hiring_manager defence in depth rather than dead code, and why extending it furt
 (ROADMAP A1 step (iii)) is deliberately not needed once `require_session_role` gates
 every write route's allowed set down to `{admin, recruiter}`, both unscoped by design.
 
+### 10. Amendment (2026-09-17) — an assignment screen closes the §8 deferred-UI residual
+
+The Flask viewer now exposes the assignment workflow §8 deferred: `GET
+/jobs/{job_id}/assignees` (a new read, gated by the SAME `_ASSIGNERS`
+admin/recruiter pair as §2's write routes, but deliberately not the
+real-assigner attribution gate — reading who is assigned is not itself an
+attributable write) backs an "Assigned hiring managers" section on the job
+detail page, reachable from the job page itself rather than only via a raw
+API call or a CSV backfill. To populate the assignment form's picker, a
+recruiter session can now fetch the assignable `hiring_manager` roster
+through `GET /users?role=hiring_manager` — closing a gap `GET /users`
+otherwise left admin-only (the unfiltered listing stays admin-only; only the
+filtered read gains the recruiter allowance).
+
 ## Consequences
 
 - **The shipped `hiring_manager` API key becomes useless until assignments exist.** On first deployment, any hiring_manager credential resolves to an empty job set (no assignments yet). An admin must run an assignment backfill (bulk INSERT into `job_assignees` from a CSV or JSON file naming which users own which jobs) or use the `POST /jobs/{job_id}/assignees` route to assign jobs one by one. The assignment workflow must be documented in the deployment guide so a deployer knows to backfill **before** distributing hiring_manager credentials to users.

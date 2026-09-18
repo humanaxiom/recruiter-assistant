@@ -116,12 +116,8 @@ def test_assignees_section_renders_with_current_assignees_and_a_select(
     candidate = _user(cas_username="priya", display_name="Priya Singh")
     monkeypatch.setattr(api_client, "get_job", lambda jid, **kw: _job(jid))
     monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
-    monkeypatch.setattr(
-        api_client, "list_job_assignees", lambda jid, **kw: [assignee]
-    )
-    monkeypatch.setattr(
-        api_client, "list_users", lambda **kw: [assignee, candidate]
-    )
+    monkeypatch.setattr(api_client, "list_job_assignees", lambda jid, **kw: [assignee])
+    monkeypatch.setattr(api_client, "list_users", lambda **kw: [assignee, candidate])
 
     html = client.get(f"/jobs/{job_id}").get_data(as_text=True)
 
@@ -189,9 +185,7 @@ def test_section_is_hidden_for_a_non_writer_session(
     monkeypatch.setattr(api_client, "list_job_assignees", fail_if_called)
     monkeypatch.setattr(api_client, "list_users", fail_if_called)
 
-    resp = client.get(
-        f"/jobs/{job_id}", headers={"Cookie": "ra_session=tok-live"}
-    )
+    resp = client.get(f"/jobs/{job_id}", headers={"Cookie": "ra_session=tok-live"})
     html = resp.get_data(as_text=True)
 
     assert resp.status_code == 200

@@ -485,11 +485,51 @@ def get_match_results(resume_id: UUID, *, client: httpx.Client | None = None) ->
     return response.json()
 
 
-def list_users(*, client: httpx.Client | None = None) -> Any:
+def list_users(*, role: str | None = None, client: httpx.Client | None = None) -> Any:
     """GET /users — the admin-only user roster (user-admin-roles slice 6/7).
-    Same ``_request``/error-mapping plumbing as :func:`list_jobs`."""
-    response = _request("GET", "/users", client=client)
+    Same ``_request``/error-mapping plumbing as :func:`list_jobs`.
+
+    Item 2: an optional ``role`` filter (e.g. ``"hiring_manager"``) forwards
+    ``?role=`` — the backend then gates on ``_require_admin_or_recruiter_
+    session`` instead of admin-only, so a recruiter session building the
+    hiring-manager-assignment screen can fetch the assignable roster. The
+    bare call (``role`` omitted) is UNCHANGED — still the admin-only listing
+    ``admin_users`` uses."""
+    params: dict[str, Any] = {}
+    if role is not None:
+        params["role"] = role
+    response = _request("GET", "/users", params=params or None, client=client)
     return response.json()
+
+
+def list_job_assignees(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /jobs/{job_id}/assignees — the hiring managers currently assigned
+    to ``job_id`` (Item 2, the assignment screen's read)."""
+    response = _request("GET", f"/jobs/{job_id}/assignees", client=client)
+    return response.json()
+
+
+def add_job_assignee(
+    job_id: UUID,
+    user_id: UUID,
+    *,
+    note: str | None = None,
+    client: httpx.Client | None = None,
+) -> None:
+    """POST /jobs/{job_id}/assignees (JSON ``{user_id, note}``) — 201, no
+    body, so the response is not parsed as JSON (mirrors the backend route's
+    own ``None`` return)."""
+    payload: dict[str, Any] = {"user_id": str(user_id)}
+    if note is not None:
+        payload["note"] = note
+    _request("POST", f"/jobs/{job_id}/assignees", json=payload, client=client)
+
+
+def remove_job_assignee(
+    job_id: UUID, user_id: UUID, *, client: httpx.Client | None = None
+) -> None:
+    """DELETE /jobs/{job_id}/assignees/{user_id} — 204, no body."""
+    _request("DELETE", f"/jobs/{job_id}/assignees/{user_id}", client=client)
 
 
 def set_user_role(

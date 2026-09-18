@@ -208,14 +208,92 @@
     Deliberately OUTSIDE the polled `#parse-status` fragment above: that
     fragment is swapped wholesale every 3s, which would tear out a form the
     user is mid-click on.
+
+    Item 5 (zero-requirements JD recovery) — the SECOND shape this button now
+    covers: a JD that parsed CLEANLY (`failure_reason` is null) but yielded
+    ZERO required/nice-to-have skills. That job has no failure to explain, so
+    it fell through this gate entirely and had no recovery path once the
+    text itself was fixed. Restricted to a DRAFT job with a COMPLETED parse
+    (`parsed_at` set) — offering it on an open job would dead-end the click,
+    since `update_job` 409s a `description_raw` PATCH off 'draft'; offering
+    it mid-parse would queue a second run of work already underway.
   #}
-  {% if is_writer and job.failure_reason %}
+  {% set jd_yielded_no_requirements = (
+    job.status == 'draft' and job.parsed_at and job.description_parsed
+    and not job.description_parsed.required_skills
+    and not job.description_parsed.nice_to_have_skills
+  ) %}
+  {% if is_writer and (job.failure_reason or jd_yielded_no_requirements) %}
   <div class="parse-failed">
-    <form action="{{ url_for('reparse_job', job_id=job.id) }}" method="post">
+    <form action="{{ url_for('reparse_job', job_id=job_id|default(job.id)) }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
       <button class="btn btn-secondary btn-sm" type="submit">Re-parse JD</button>
     </form>
   </div>
+  {% endif %}
+
+  {# Item 5 — a draft-only editor for the job description text itself. Only
+     ONE of the two recovery paths matters for a zero-requirements JD: either
+     re-parse the SAME text (above, when the parse itself might just have
+     missed something), or fix the text and let the PATCH auto-enqueue a
+     fresh parse (here). Gated on the SAME draft-only rule `update_job`
+     enforces at the route (a `description_raw` PATCH 409s off 'draft'). #}
+  {% if is_writer and job.status == 'draft' %}
+  <details class="card" style="margin-top:12px">
+    <summary>Edit job description</summary>
+    <form action="{{ url_for('edit_job_description', job_id=job.id) }}"
+          method="post" style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-description-raw">Job description</label>
+        <textarea class="textarea" id="job-description-raw"
+                  name="description_raw" style="min-height:160px"
+                  >{{ job.description_raw or '' }}</textarea>
+        <p class="hint">
+          Saving re-parses this job from the new text — the current parsed
+          requirements are cleared and a fresh parse is queued.
+        </p>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save &amp; re-parse</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {# Item 2 (ADR-020 §2) — assign/unassign the hiring manager(s) this
+     requisition is visible to. A job with NO assignee is invisible to every
+     hiring_manager session (row-scoping, ADR-020 §3/§4) — the sentence below
+     says so plainly rather than leaving that silent. #}
+  {% if is_writer %}
+  <h3>Assigned hiring managers</h3>
+  {% if job_assignees %}
+  <ul class="assignee-list">
+    {% for assignee in job_assignees %}
+    <li>
+      {{ assignee.display_name or assignee.cas_username }}
+      <form action="{{ url_for('remove_job_assignee_route', job_id=job.id, user_id=assignee.id) }}"
+            method="post" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+        <button class="btn btn-secondary btn-sm" type="submit">Remove</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="warning">No hiring manager is assigned — this requisition is invisible to hiring managers.</p>
+  {% endif %}
+  <form action="{{ url_for('add_job_assignee_route', job_id=job.id) }}"
+        method="post" class="form-actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <select name="user_id">
+      {% for hm in hiring_managers %}
+      <option value="{{ hm.id }}">{{ hm.display_name or hm.cas_username }}
+        ({{ hm.cas_username }})</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn-primary btn-sm" type="submit">Add</button>
+  </form>
   {% endif %}
 
   {% if is_writer %}

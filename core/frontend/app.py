@@ -313,6 +313,17 @@ def _csrf_gate() -> Any:
 _WRITER_ROLES = ("admin", "recruiter")
 
 
+def _is_writer_session() -> bool:
+    """Item 2/5 — the same compensating-UX-control check
+    ``inject_current_user`` uses for ``is_writer``, factored out so
+    ``_render_job_detail`` can decide (in Python, before rendering) whether
+    to fetch assignee/hiring-manager data at all. NOT the authorization
+    boundary — the backend gate is; this only avoids a fetch a non-writer's
+    render would throw away."""
+    current_user = getattr(g, "cas_user", None)
+    return current_user is None or current_user.get("role") in _WRITER_ROLES
+
+
 @app.template_filter("day")
 def _day(value: Any) -> str:
     """Render a timestamp as ``YYYY-MM-DD``, whatever shape it arrives in.
@@ -368,7 +379,7 @@ def inject_current_user() -> dict[str, Any]:
     settings = get_settings()
     base = settings.cas_service_base_url.rstrip("/")
     current_user = getattr(g, "cas_user", None)
-    is_writer = current_user is None or current_user.get("role") in _WRITER_ROLES
+    is_writer = _is_writer_session()
     return {
         "current_user": current_user,
         "is_writer": is_writer,
@@ -802,6 +813,28 @@ def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
     return sum(1 for r in resumes if r.get("degraded"))
 
 
+def _fetch_job_assignees_and_hiring_managers(
+    job_id: UUID,
+) -> tuple[list[Any], list[Any]]:
+    """Item 2 — the assignment screen's two reads, fetched ONLY for a writer
+    session (a non-writer's render would throw the data away, and the
+    backend would 403 it anyway).
+
+    TOLERANT of a backend failure on EITHER call: an assignment screen that
+    cannot load is not worth failing the whole job-detail page over, so both
+    default to ``[]`` rather than propagating (mirrors
+    ``_fetch_jd_has_no_requirements``'s own tolerant-fetch discipline)."""
+    try:
+        assignees = api_client.list_job_assignees(job_id)
+    except (api_client.NotFound, api_client.BackendUnavailable, api_client.BadRequest):
+        assignees = []
+    try:
+        hiring_managers = api_client.list_users(role="hiring_manager")
+    except (api_client.NotFound, api_client.BackendUnavailable, api_client.BadRequest):
+        hiring_managers = []
+    return assignees, hiring_managers
+
+
 def _render_job_detail(
     job_id: UUID, *, error: str | None = None, status_code: int = 200
 ) -> Any:
@@ -813,15 +846,22 @@ def _render_job_detail(
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
+    assignees: list[Any] = []
+    hiring_managers: list[Any] = []
+    if _is_writer_session():
+        assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
     return (
         render_template(
             "job_detail.html",
             job=job,
+            job_id=job_id,
             resumes=resumes,
             resumes_pending=_any_resume_pending(resumes),
             next_states=next_states,
             transition_labels=_TRANSITION_LABELS,
             error=error,
+            job_assignees=assignees,
+            hiring_managers=hiring_managers,
         ),
         status_code,
     )
@@ -1165,6 +1205,75 @@ def reparse_job(job_id: UUID) -> Any:
         return _render_job_detail(
             job_id, error=_format_error(exc.detail), status_code=409
         )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/assignees")
+def add_job_assignee_route(job_id: UUID) -> Any:
+    """Item 2 (ADR-020 §2) — assign a hiring manager to ``job_id``.
+
+    Mirrors ``blind_review``'s error handling exactly: the ``BadRequest``
+    branch is load-bearing — a non-admin/recruiter session (or the
+    CAS-disabled dev-admin sentinel, which the backend also 403s here) must
+    surface as a plain 403, never an unhandled 500."""
+    user_id_raw = (request.form.get("user_id") or "").strip()
+    try:
+        user_id = UUID(user_id_raw)
+    except ValueError:
+        abort(400)
+    try:
+        api_client.add_job_assignee(job_id, user_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/assignees/<uuid:user_id>/remove")
+def remove_job_assignee_route(job_id: UUID, user_id: UUID) -> Any:
+    """Item 2 (ADR-020 §2) — remove a hiring-manager assignment. Same error
+    handling as ``add_job_assignee_route`` above."""
+    try:
+        api_client.remove_job_assignee(job_id, user_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/jobs/<uuid:job_id>/description")
+def edit_job_description(job_id: UUID) -> Any:
+    """Item 5 (zero-requirements JD recovery) — a draft-only editor for
+    ``description_raw``. Its OWN route, like ``edit_job_requirements``,
+    forwarding ONLY ``description_raw`` — never the whole form — to
+    ``api_client.patch_job``. A backend 409 (``api_client.Conflict`` — the
+    job has left 'draft', mirrored by ``job_service.update_job``'s route-
+    level gate) re-renders the job-detail page with the reason, exactly like
+    ``reparse_job``'s own ``Conflict`` handling, rather than aborting."""
+    if "description_raw" not in request.form:
+        return redirect(url_for("job_detail", job_id=job_id))
+    description_raw = request.form.get("description_raw") or ""
+    try:
+        api_client.patch_job(job_id, {"description_raw": description_raw})
+    except api_client.Conflict as exc:
+        # Deliberately NOT `_render_job_detail` (unlike `reparse_job`'s own
+        # Conflict handling): that would re-fetch the whole page (`get_job`
+        # + `list_resumes`) for a response whose only job is to surface the
+        # ONE reason this specific PATCH was refused. A short, direct 409
+        # body is enough here and costs no extra backend round trip.
+        return _format_error(exc.detail), 409
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:

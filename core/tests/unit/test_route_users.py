@@ -383,7 +383,6 @@ async def test_get_users_calls_list_users_with_the_injected_connection(
     assert list_users.await_args.args[0] is conn
 
 
-
 # ── GET /users?role=... — Item 2: admin OR recruiter session, filtered ────
 #
 # Contract pinned here (task instruction): a NEW gate

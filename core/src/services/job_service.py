@@ -198,6 +198,27 @@ async def clear_parse_failure(conn: DbConn, job_id: UUID) -> None:
     await conn.execute(_CLEAR_FAILURE_SQL, job_id)
 
 
+_CLEAR_PARSE_OUTPUT_SQL = """
+UPDATE jobs SET
+    description_parsed = NULL,
+    parsed_at = NULL,
+    failure_reason = NULL
+WHERE id = $1 AND status = 'draft'
+"""
+
+
+async def clear_parse_output(conn: DbConn, job_id: UUID) -> None:
+    """Wipe the stale parse output after ``description_raw`` changes (Item 5,
+    zero-requirements JD recovery).
+
+    Called by ``PATCH /jobs/{id}`` BEFORE it enqueues a fresh ``parse_job``,
+    once the route has already confirmed the job is 'draft' — the ``status =
+    'draft'`` predicate here is a SECOND, SQL-level guard against the same
+    invariant, not a substitute for the route's own check.
+    """
+    await conn.execute(_CLEAR_PARSE_OUTPUT_SQL, job_id)
+
+
 # ── CRUD / status state machine (Phase 6) ───────────────────────────────────
 
 _JOB_COLS = (

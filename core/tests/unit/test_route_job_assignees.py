@@ -579,8 +579,6 @@ async def test_delete_assignee_422_on_non_uuid_user_id_path(
     assert resp.status_code == 422
 
 
-
-
 # ── GET /jobs/{job_id}/assignees — Item 2 (ADR-020 §2, read, same gate) ────
 #
 # Contract pinned here (task instruction): the read gate is the SAME
