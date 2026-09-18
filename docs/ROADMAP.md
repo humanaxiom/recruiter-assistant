@@ -220,6 +220,13 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - **No `POST /resumes/{id}/reparse` route** — a degraded résumé cannot be recovered without re-upload. The JD side has one; the résumé side does not.
 - `resume_parse_max_tries` has no upper sanity cap.
 - **FU-7 decision 1 — LLM provider failover chain.** Genuinely useful now: a second Ollama host would let an `aria-gb10` outage fail *over* rather than fail *closed*.
+- **A second "Generate" while a run is in progress is dropped with no acknowledgement** (measured 2026-09-17, e2e run). The worker discards it as `already_running` — find that return in the shortlist task in `core/src/worker/`. Recommended fix: remember that a re-run was requested and run it when the current one ends.
+- **A credential suffix after a name defeats the roster match** ("First Last, CSM" vs. Taleo's "Last, First" with no email) — `core/src/services/candidate_roster_service.py`, `_normalize_name`. Pinned as an expected failure in `core/tests/unit/test_stress_roster.py`.
+- **The entry-detail ("Why this rank?") page is unreachable by link** — `core/frontend/app.py`, `shortlist_entry_detail`. It renders when addressed directly; no card or export carries its address.
+- **No screen assigns a requisition to a hiring manager** — `core/src/api/routes/job_assignees.py` has the route; nothing in the frontend calls it. A hiring manager who signs in today sees an empty job list.
+- **A JD that parses to zero requirements has no in-UI recovery.** The warning says re-parse or replace the JD; the Re-parse button appears only after a failed parse, and the description is not editable. Today's only path is creating the job again from the right document.
+- **`stub_llm` reads `request.json()` with no model validation** (measured 2026-09-17, stress build). Fine for its purpose — a throwaway load-test double — but worth knowing if it is ever reused for anything that matters. Recorded only, not a defect in the product.
+- **Every export is anonymised, including on non-blind jobs** (design, not a bug): names become "Candidate A", email and phone are blank, regardless of the job's blind-review setting.
 
 **Privacy / access**
 - **TLS cutover (2026-09-15) creates three residuals** — see

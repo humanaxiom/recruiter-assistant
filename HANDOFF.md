@@ -6,66 +6,77 @@ record: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
-## ⏸ START HERE — work is PAUSED, and the next session is not a build session
+## ▶ START HERE — the site is LIVE; this branch carries a guide, a findings doc, and an isolated stress stack
 
-**The user paused feature work on 2026-09-09** after seeing that a
-315-candidate requisition needs ~11 hours of parsing:
+**Resumed 2026-09-15**, superseding the 2026-09-09 pause: the zero-requirements
+guard shipped (PR #105, merged), and the site went live at
+**https://sfuai.ca:8000** with CAS on (PR #106, open). **On 2026-09-17 the user
+asked for three more things before sharing the product with the DTO**: a
+manager's guide, an end-to-end run of it, and a multi-user stress build. All
+three are on this branch, `feat/e2e-stress-build`.
 
-> *"this is not very good. a human can rank those at a fraction of the time. so
-> maybe we are not ready to proceed until the data center hardware is ready…
-> I will use my Codex credits in the meantime to validate the code… Will get
-> back to you in a separate session after reviewing codex recommendations and
-> talking to our infra team."*
+**What's on this branch:**
+- [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,
+  derived from the deployed code, with "Be aware" boxes for gaps.
+- [docs/guides/e2e-findings-2026-09-17.md](docs/guides/e2e-findings-2026-09-17.md) —
+  the guide driven step by step against an **isolated** copy of the product
+  (`docker compose -p recruiter-stress`, 28xxx ports, CAS off, its own
+  Postgres/Neo4j/blob volumes, the real `gpt-oss:20b`). **The live site was
+  never touched** — CAS on means every write needs a real SFU login, which a
+  script cannot do.
+- `scripts/e2e.sh` (one user, whole guide, real model, isolated stack) and
+  `scripts/stress.sh` (N concurrent users, `STRESS_LLM=stub` by default,
+  `STRESS_LLM=real` requires explicit confirmation and is capped at 30
+  résumés/run).
+- A first-boot Neo4j bootstrap retry fix — on an empty graph, the API and
+  worker raced to create schema and the API exited; the pilot box never hit
+  this because its graph predates the race. Any fresh box for the DTO would
+  have.
 
-**Two inputs are owed before anything is built**, and neither is yours to
-produce: a Codex review of `feat/candidate-roster-csv`, and an infra
-conversation about GPU capacity. **The next session starts from those, not from
-the ROADMAP menu.**
+**Results, this session:**
+- `smoke.sh` on the isolated stack, real model: **10 of 10 passed, 901s**.
+- `scripts/stress.sh USERS=3 RESUMES_PER_USER=3` (stub model): **PASS — 3
+  users × 16 steps, 48 samples, 0 errors, 0 timeouts**.
+- `scripts/e2e.sh` (one user, real model): **PASS — smoke 10 of 10 in 1046 s, then all 16 driver steps with 0 errors and 0 timeouts (JD parse 265 s, three résumés plus a cover letter 660 s, ranking 215 s); doctor reports only the CAS-off state, which is the isolated stack's design** (to be
+  filled in when that run completes/is re-run).
 
-**Do not**, in the meantime: optimise the queue, raise `max_jobs`, push the
-branch, or start a new feature. The throughput ceiling is measured and
-hardware-bound (ROADMAP §0) — a session spent tuning it is a session spent
-against a wall.
+**What the DTO must do by hand** (not scriptable — real CAS only; see the
+findings doc's "What only you can check"):
+- Sign in with SFU CAS from **outside the LAN**; confirm a first-time
+  colleague lands on pending-access and can be granted a role from the admin
+  screen.
+- Make one real write (a declaration or a withdraw) on the live site and
+  confirm it does not 403 behind the proxy.
+- Know that a hiring manager's view is empty today (no assignment screen —
+  see below) until either that's built or an assignment is made via the API.
 
-**Do, if asked for something useful:** the four recorded-not-fixed items in §3.
-All are small, none touches the ceiling.
+**Next candidate fixes, in priority order** (from the findings doc, none done
+yet on this branch):
+1. A second "Generate" while a run is in progress is silently dropped
+   (`already_running`). Recommended fix: remember a re-run was requested and
+   run it when the current one ends.
+2. No screen assigns a requisition to a hiring manager — the API supports it,
+   the UI does not.
+3. The "Why this rank?" entry-detail page exists but nothing links to it.
+4. A credential suffix after a name ("First Last, CSM") defeats the roster
+   name match when the row has no email.
+5. A JD that parses to zero requirements has no in-UI recovery path (no
+   description editor, no on-demand re-parse for a clean draft).
 
-> 🟢 **FIXED 2026-09-15 on `fix/zero-requirements-rank-guard`, branched off
-> `main`, **merged as PR #105 on 2026-09-15** — see main's HANDOFF.md for the hand-drive evidence. The
-> write-up below is kept as the record of what was reported. When this branch
-> is next synced with `main`, ADR-017 conflicts on two appended amendments:
-> keep both, in date order.**
->
-> 🔴 (as reported) **a user-reported defect
-> (2026-09-10): a job with ZERO extracted requirements ranks anyway, silently.**
->
-> Reported as *"Resume short listing was geerated against the additional hiring
-> manager input, and 0 against the JD?!! basically core functioning system
-> feature gone"*. Measured on 50 real entries: `skill = 0.000` for **every**
-> candidate, `experience`/`education` trivially 1.000, and `manager_prompt`
-> (weight **0.10**) the only discriminator — so it became **100% of the
-> signal** and the ordering was arbitrary in merit terms.
->
-> The proximate cause was operator error: the job was built from
-> `About This Role.txt` (a 1,118-char blurb with no qualifications section)
-> instead of `JD.pdf`. **But the defect is that nothing said so.** Empty
-> `required_skills` is checked in exactly ONE place —
-> `orchestrator.py:804`, inside stage-3 evidence, where it silently returns
-> `None` — and the product produced a normal-looking shortlist of 50 real
-> people. A recruiter would have believed it.
->
-> This is the ADR-040/041 failure class (a fabricated zero must be DISCLOSED,
-> never silent), and the guard exists on the other side already: ADR-017
-> decision 1 refuses to rank until ≥1 résumé is parsed. **The mirror guard on
-> the JD side is missing.** Fix: refuse to rank a job with zero required AND
-> zero nice-to-have skills, reason on screen; and consider flagging at PARSE
-> time when a non-trivial JD yields no requirements, which would have caught
-> this hours earlier. Full write-up in
-> [docs/pilot-feedback.md](docs/pilot-feedback.md).
+**Standing rules that changed or newly apply:**
+- **The stack serves the working tree, not an image.** Never `git checkout`
+  while a stack (smoke/stress/e2e/hand-drive) is running against it — use a
+  separate worktree, exactly as this task did.
+- **Scripted `e2e.sh`/`stress.sh` never target the live site** — isolated
+  stack only, CAS off, own volumes/ports.
+- **Stress in real-LLM mode is capped at 30 résumés/run** and needs explicit
+  confirmation — it spends the shared GPU's time, which pilot users need.
 
-**The branch is finished and green** — 20 commits, `verify.sh all` clean, both
-merge-blocking gates satisfied, verified against the sponsor's real data. It is
-deliberately **unpushed**, pending that review.
+**The roster branch is unchanged and still unpushed.** `feat/candidate-roster-csv`
+is `main` + the proxy/TLS work; this e2e/stress branch is not merged into it yet. Still pending the
+user's own review before push — see §3 below for what it carries; the
+roster-specific "must not rediscover" points there are still true and are not
+repeated here.
 
 ---
 
@@ -504,11 +515,11 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **`feat/candidate-roster-csv`**, synced with `main` (PR #105, the zero-requirements guard) on 2026-09-15, gates green, **NOT pushed — awaiting the user's Codex review** (see START HERE). The sync conflicted on ADR-017 (two amendments, both kept) and on this file (roster side kept). |
-| Pilot box contents | The DTO's **Business Analyst** req + 75 résumés + the 315-row roster reconciled. Parsing was **still running** when the session ended (~47/75 parsed); a shortlist was triggered and sits in `shortlist_state='ranking'` behind the parse queue. Everything that predated this — 29 jobs, 48 résumés — was **wiped** at the user's request. |
-| Gates, last local run | `verify.sh all` → 6084 unit @ 91.66% + 625 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
-| PR | none yet for the roster branch. [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104) and [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) MERGED |
-| `smoke.sh` | 2026-09-15 on this branch + the guard: **10 passed in 693s**; two earlier runs failed for reasons outside the change (a `git checkout` mid-run — the stack bind-mounts `./core`, see main's HANDOFF §8 — then one degraded résumé rightly not ranked). |
+| Branch in flight | **`feat/candidate-roster-csv`** is now `main` + [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy) + this session's `feat/e2e-stress-build` work (guide, findings, isolated stress stack) — **still not pushed, still awaiting the user's own review** (see START HERE). |
+| Live site | **https://sfuai.ca:8000, CAS on.** [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) (zero-requirements guard) MERGED 2026-09-15. [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy hardening) OPEN. |
+| Pilot box contents | Unchanged since 2026-09-15's cutover — see §2. The isolated stress stack (`-p recruiter-stress`, 28xxx ports) is a **separate**, throwaway copy built for this session's smoke/stress/e2e runs; it does not touch the pilot box's data. |
+| Gates, last local run | `verify.sh all` → 6246 unit @ 92.15% + 630 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
+| Smoke / stress / e2e (this session, isolated stack) | `smoke.sh`: **10/10 passed, 901s**, real model. `stress.sh USERS=3 RESUMES_PER_USER=3` (stub): **PASS, 48 samples, 0 errors**. `e2e.sh` (one user, real model, whole guide): **PASS — smoke 10 of 10 in 1046 s, then all 16 driver steps with 0 errors and 0 timeouts (JD parse 265 s, three résumés plus a cover letter 660 s, ranking 215 s); doctor reports only the CAS-off state, which is the isolated stack's design**. |
 | ⚠️ Before pushing | The branch history was **rewritten four times** to purge committed candidate PII. A `backup-pre-redact-*` branch still holds the unredacted history — **delete it before any push**, and re-run the 925-token scan in §3 if you rewrite again. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |

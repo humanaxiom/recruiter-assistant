@@ -139,8 +139,12 @@ REDIS_PORT="$(_env_var REDIS_PORT 28379)"
 NEO4J_HTTP_PORT="$(_env_var NEO4J_HTTP_PORT 28474)"
 NEO4J_BOLT_PORT="$(_env_var NEO4J_BOLT_PORT 28687)"
 
+# Ports already published by THIS project are ours: `up -d` is idempotent, so
+# a second run against a live isolated stack must proceed, not refuse.
+OWN_PORTS="$(docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format "{{.Ports}}" 2>/dev/null | tr "," "\n" | grep -o ":[0-9]*->" | tr -d ":>-" | sort -u | tr "\n" " ")"
+
 for port in "$API_PORT" "$FRONTEND_PORT" "$POSTGRES_PORT" "$REDIS_PORT" "$NEO4J_HTTP_PORT" "$NEO4J_BOLT_PORT" 28900; do
-  if ! _port_free "$port"; then
+  if ! _port_free "$port" && [[ " $OWN_PORTS " != *" $port "* ]]; then
     echo "🔴 e2e: port $port is already in use — stop whatever owns it first" >&2
     exit 1
   fi
