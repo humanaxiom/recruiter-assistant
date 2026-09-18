@@ -47,21 +47,18 @@ findings doc's "What only you can check"):
   screen.
 - Make one real write (a declaration or a withdraw) on the live site and
   confirm it does not 403 behind the proxy.
-- Know that a hiring manager's view is empty today (no assignment screen —
-  see below) until either that's built or an assignment is made via the API.
+- Assign yourself (or another recruiter) as hiring manager on a job from the
+  new "Assigned hiring managers" section on the job page, then confirm a
+  hiring-manager sign-in shows that job and no others.
 
-**Next candidate fixes, in priority order** (from the findings doc, none done
-yet on this branch):
-1. A second "Generate" while a run is in progress is silently dropped
-   (`already_running`). Recommended fix: remember a re-run was requested and
-   run it when the current one ends.
-2. No screen assigns a requisition to a hiring manager — the API supports it,
-   the UI does not.
-3. The "Why this rank?" entry-detail page exists but nothing links to it.
-4. A credential suffix after a name ("First Last, CSM") defeats the roster
-   name match when the row has no email.
-5. A JD that parses to zero requirements has no in-UI recovery path (no
-   description editor, no on-demand re-parse for a clean draft).
+**All five candidate fixes from the findings doc are done, on
+`feat/complete-build-gaps`**: a dropped second Generate is now queued and
+re-run automatically; the job page has an "Assigned hiring managers" section
+(add/remove, admins and recruiters); every shortlist card carries a "Why this
+rank?" link to the entry-detail page; the roster name match strips a trailing
+credential suffix (CA/BA/MA excepted); and a draft JD that parsed to zero
+requirements gets a Re-parse button plus a description editor that re-parses
+on save (refused on an open job).
 
 **Standing rules that changed or newly apply:**
 - **The stack serves the working tree, not an image.** Never `git checkout`
@@ -515,7 +512,7 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **`feat/candidate-roster-csv`** is now `main` + [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy) + this session's `feat/e2e-stress-build` work (guide, findings, isolated stress stack) — **still not pushed, still awaiting the user's own review** (see START HERE). |
+| Branch in flight | **`feat/complete-build-gaps`** — `feat/candidate-roster-csv` (`main` + #106 TLS/proxy + the e2e/stress-build guide and findings) with three merged lanes closing all five candidate fixes: dropped-regenerate queueing, hiring-manager assignment screen, "Why this rank?" card link, roster credential-suffix match, and zero-requirements JD recovery (Re-parse + description editor). Gates: GATES_PLACEHOLDER. Still not pushed, still awaiting the user's own review (see START HERE). |
 | Live site | **https://sfuai.ca:8000, CAS on.** [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) (zero-requirements guard) MERGED 2026-09-15. [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy hardening) OPEN. |
 | Pilot box contents | Unchanged since 2026-09-15's cutover — see §2. The isolated stress stack (`-p recruiter-stress`, 28xxx ports) is a **separate**, throwaway copy built for this session's smoke/stress/e2e runs; it does not touch the pilot box's data. |
 | Gates, last local run | `verify.sh all` → 6246 unit @ 92.15% + 630 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |

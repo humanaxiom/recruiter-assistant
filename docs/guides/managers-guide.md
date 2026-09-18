@@ -94,6 +94,24 @@ action — the controls are not rendered for them at all.
 
 **How long:** instant.
 
+### How an admin or recruiter assigns a hiring manager to a requisition
+
+A **role** decides what someone can do in general; an **assignment** decides
+which specific requisitions a hiring manager can see. On any job page, writers
+see an **Assigned hiring managers** section:
+
+- A list of the hiring managers currently assigned, each with a **Remove**
+  button.
+- A select box of the hiring managers not yet assigned, with an **Add**
+  button.
+- If nobody is assigned, the section says so plainly: **"No hiring manager is
+  assigned — this requisition is invisible to hiring managers."**
+
+A hiring manager's own Jobs list shows only requisitions they are assigned to.
+Assigning and removing are both written to the access record.
+
+**How long:** instant.
+
 **What can go wrong:** demoting the **last remaining admin** is refused with a
 message on the page — the system will not let you lock the organisation out of
 its own administration.
@@ -107,12 +125,10 @@ its own administration.
 > - **Any SFU CAS user can authenticate**, which creates a no-role account row.
 >   They can do nothing, but the account list will grow with people who were
 >   just curious.
-> - **There is no screen for assigning a requisition to a hiring manager.** The
->   capability exists in the API, but no page in the product calls it — so a
->   hiring manager signing in today will see an **empty job list**, because
->   "their" requisitions cannot be assigned through the interface. Until that is
->   built, hiring managers should be given the `recruiter` role or shown
->   shortlists by a recruiter.
+> - **A hiring manager sees nothing until someone assigns them a requisition.**
+>   Use the "Assigned hiring managers" section on the job page (above). A
+>   requisition with no assignee is invisible to every hiring manager, on
+>   purpose — the job page says so.
 > - **Rotating the application's session key logs everyone out at once.** If
 >   that is ever done for security reasons, warn the four users first or it
 >   reads as a fault.
@@ -216,9 +232,12 @@ value you entered.
 >   but there is no screen for them.
 > - **Shortlist size (%) can only be set when the job is created.** There is no
 >   screen to change it afterwards.
-> - **The Description cannot be edited after creation.** The only editable
->   fields on an existing job are department, campus, additional requirements and
->   the blind-review switch. If the wrong text was uploaded, create a new job.
+> - **The Description cannot be edited in general.** The only editable fields
+>   on an existing job are department, campus, additional requirements and the
+>   blind-review switch — **except** the one recovery case in §3: a draft job
+>   whose parse found zero requirements gets a description editor. If the wrong
+>   text was uploaded to a job that already parsed successfully, create a new
+>   job.
 > - **A duplicate in a bulk upload is detected on the JD text**, so re-uploading
 >   the same posting reports "duplicate" rather than creating a second job.
 
@@ -251,11 +270,22 @@ queues them and takes correspondingly longer.
 |---|---|---|
 | **Parsed** | Skill pills | Continue to "Open for applicants" |
 | **Parse failed** | A red **Parse failed: &lt;reason&gt;** line, and a **Re-parse JD** button | Press **Re-parse JD** |
-| **Parsed, but nothing found** | Skill pills area says "No required skills parsed", plus an orange warning: *"This job description yielded no requirements at all… wrong text uploaded? Re-parse or replace the JD."* | See the Be aware box below |
+| **Parsed, but nothing found** | Skill pills area says "No required skills parsed", plus an orange warning: *"This job description yielded no requirements at all… wrong text uploaded? Re-parse or replace the JD."* | Press **Re-parse**, or edit the description (see below) |
 
-The **Re-parse JD** button only appears when the parse actually *failed*, and it
-only works while the job is still in **draft**. This is deliberate — offering a
-retry during a healthy in-flight parse would queue the same work twice.
+The **Re-parse JD** button appears when the parse failed **or** landed with
+zero requirements, and it only works while the job is still in **draft**. This
+is deliberate — offering a retry during a healthy in-flight parse would queue
+the same work twice.
+
+### Fixing a zero-requirements draft by editing the description
+
+On a **draft** job whose parse produced no requirements, writers also get a
+**description editor** next to the warning. Editing and saving the description
+clears the previous (empty) parse and re-parses automatically — there is no
+separate "re-parse" step to remember. **This editor exists only for this
+recovery case**: once the job is **open**, editing the description is refused
+(409), and the advice is still to create a new requisition rather than change
+the text under a live shortlist.
 
 ### Opening the job
 
@@ -281,11 +311,11 @@ the switch is recorded in the access record.
 
 > ### ⚠️ Be aware
 >
-> - **A JD that parses to zero requirements has no recovery path in the
->   interface.** The warning says "Re-parse or replace the JD", but the Re-parse
->   button only renders when the parse *failed*, and there is no screen to
->   replace the description text. In practice: **create the requisition again
->   with better JD text.** This is the single most likely thing to strand you.
+> - **A JD that parses to zero requirements now has a recovery path — on a
+>   draft job only.** Press Re-parse to try the same text again, or use the
+>   description editor to fix the text and let it re-parse automatically. Once
+>   the job is **open**, neither path is available and the advice is still:
+>   create the requisition again with better JD text.
 > - **A thin JD produces a thin ranking.** The requirement set the model
 >   extracts is all the shortlist has to compare against. A careers-page summary
 >   is not the same document as the full posting.
@@ -478,6 +508,16 @@ The import deliberately leaves things unwritten rather than picking:
 These are reported and left alone. A wrong attribution is worse than an absent
 one, because it is invisible.
 
+### Credential suffixes no longer block a name-only match
+
+A résumé name like "First Last, PMP" or "First Last, CPA" used to fail to
+match a roster row that had no email, because the credential letters were
+read as part of the name. The match now strips a trailing credential after
+the last comma against a fixed list (PMP, CPA, CSM and similar) before
+comparing names. **CA, BA and MA are excluded from that list** — they are
+too easily a real name fragment (initials, a surname) rather than a
+credential, so a row shaped like that still needs an email to match reliably.
+
 > ### ⚠️ Be aware
 >
 > - **Importing a roster overwrites a recruiter's manual declaration.** If you
@@ -587,6 +627,12 @@ On a **Regenerate**, the previous candidates stay on screen underneath, clearly
 labelled *"from the previous run — a new run is in progress and will replace this
 list automatically."*
 
+**Clicking Generate again while a run is already in progress is no longer
+lost.** The page shows: *"A run is in progress; your regenerate request will
+run when it finishes."* The request is remembered and the worker runs it once
+more as soon as the current run reaches a terminal state — you do not need to
+watch for it to finish and click again yourself.
+
 **How long:** minutes, scaling with the pool size. There is no measured figure to
 quote here.
 
@@ -619,7 +665,9 @@ quote here.
 >   anything"*. **Wait for the résumé table to go quiet before generating.**
 > - **The page cannot show you the queue depth.** There is no "you are 900th in
 >   line" indicator. "Several minutes" is what it says regardless.
-> - **A second Regenerate during a run is silently dropped** with no message.
+> - **A second Regenerate during a run is now queued, not dropped** — see
+>   above. It still runs only once, even if you click Generate several more
+>   times while the first re-run is queued.
 > - **A run that takes longer than an hour** may be reported as stale by the
 >   page's own staleness check even though it is still going.
 
@@ -637,6 +685,8 @@ Each candidate is a card. Top row, left to right:
 - **Reveal identity (audited)** — only on a blind job.
 - **Withdraw candidate**.
 - **The headline score**, 0–100 — or **n/a** for an ineligible candidate.
+- **"Why this rank?"** — a link on every card to that candidate's entry-detail
+  page (see below).
 
 ### What the score actually means
 
@@ -735,13 +785,12 @@ Three buttons at the top of the shortlist:
 >   "not assessed."** A `0` on the `seniority` or `education` tile may mean
 >   "could not be measured", not "measured and poor". The honest version of that
 >   distinction lives on the "Why this rank?" page — see the next bullet.
-> - **The "Why this rank?" page cannot be reached by clicking.** The product
->   contains a full score-composition and disclosure page per candidate (weights,
->   score, weight × score contribution, and explicit "not assessed" paragraphs
->   for evidence beyond the cut-off, unmeasurable seniority, an unstated
->   experience or education bar, and unreadable education). **Nothing links to
->   it**, and the entry identifier it needs is not in any export. Today it is
->   effectively unavailable to a user.
+> - **The "Why this rank?" page is now reachable from every card.** It is a
+>   full score-composition and disclosure page per candidate (weights, score,
+>   weight × score contribution, and explicit "not assessed" paragraphs for
+>   evidence beyond the cut-off, unmeasurable seniority, an unstated experience
+>   or education bar, and unreadable education). The entry identifier is still
+>   not in any export — reach it from the card link, not from a CSV row.
 > - **Evidence is only extracted for the top 15 candidates** by structured score.
 >   Everyone below that has evidence and motivation stored as 0, which on a card
 >   looks like a measured zero. Their headline scores are therefore **not
@@ -928,16 +977,16 @@ Read this before you conclude something is broken.
 - **No notifications of any kind** — no email, no in-app badge, no "your
   shortlist is ready". You must come back and look. (An in-app notification
   centre is designed but not built.)
-- **No way to assign a requisition to a hiring manager** from the interface, so
-  the hiring-manager role currently shows an empty job list.
-- **No way to edit a job's description** after creation, which is also why a JD
-  that parsed to zero requirements has no in-product recovery — create the job
-  again.
+- **A requisition is invisible to a hiring manager until someone assigns them
+  to it** on the job page's "Assigned hiring managers" section.
+- **A job's description cannot be edited in general** — only a draft JD that
+  parsed to zero requirements gets a description editor, as the recovery path
+  for that one case (§3). Any other job needs a new requisition if the text
+  was wrong.
 - **No Re-parse for a résumé** — re-upload instead.
 - **No way to refresh a job's search index without re-running the whole JD
   parse**, which can change the extracted requirements underneath a shortlist
   someone is reading.
-- **The "Why this rank?" explanation page is not linked from anywhere.**
 - **Shortlist size (%) can only be set at creation.**
 
 **Data quality**
@@ -974,7 +1023,7 @@ All paths are relative to the repository root.
 | §1 sign-in, CAS gate, pending access | `core/frontend/app.py:196-231`, `core/frontend/templates/pending_access.html`, `core/frontend/templates/base.html:15-37` |
 | §1 role capabilities | `core/frontend/app.py:313` (`_WRITER_ROLES`), `:409` (`_ASSIGNABLE_ROLES`), `:412-436` (admin page), `:443,469-489` (audit page), `:495-530` (hiring-manager scoped list); backend: `core/src/api/routes/jobs.py:54`, `resumes.py:77,84`, `shortlist.py:38`, `audit.py:40`, `job_assignees.py:54`; `core/src/api/deps.py:466-496` (auditor reads are logged) |
 | §1 granting a role, last-admin guard | `core/frontend/app.py:1933-1945,2064-2092`, `core/frontend/templates/admin_users.html`, `docs/adr/025-user-admin-roles.md` §3–§4 |
-| §1 no assignee screen | `core/src/api/routes/job_assignees.py` exists; no reference in `core/frontend/` (grep for "assignee" returns nothing) |
+| §1 hiring-manager assignment screen | `core/frontend/templates/job_detail.html:269-` (Assigned hiring managers section), `core/frontend/app.py:816-835` (`_fetch_job_assignees_and_hiring_managers`), `:1217` (`POST /jobs/<id>/assignees`), `:1241` (`POST /jobs/<id>/assignees/<user_id>/remove`), `core/frontend/api_client.py:505-532` (`list_job_assignees`/assign/unassign wrapping `GET/POST/DELETE /jobs/{id}/assignees`) |
 | §2 create form | `core/frontend/templates/index.html:14-109`, `core/frontend/app.py:533-570`, `core/src/schemas/jobs.py:61-102` |
 | §2 blind review off by default | `core/src/schemas/jobs.py:83-88` |
 | §2 shortlist top percent | `core/src/schemas/jobs.py:79`, `core/frontend/templates/index.html:52-56`, `core/src/pipeline/matching/orchestrator.py:922-935` |
@@ -987,7 +1036,7 @@ All paths are relative to the repository root.
 | §3 parse states + polling | `core/frontend/templates/parse_status.html`, `core/frontend/templates/job_detail.html:19-31,196-219` |
 | §3 zero-requirements warning | `core/frontend/templates/parse_status.html:36-43`, `core/src/services/shortlist_service.py:246-272` |
 | §3 re-parse conditions | `core/frontend/templates/job_detail.html:212-219`, `core/frontend/app.py:1153-1174`, `core/src/api/routes/jobs.py:346-382` |
-| §3 no description edit | `core/frontend/app.py:1060-1066` (`_EDITABLE_DETAIL_FIELDS`), `:1137` |
+| §3 no description edit, and the zero-requirements description-editor exception | `core/frontend/app.py:1060-1066` (`_EDITABLE_DETAIL_FIELDS`), `:1137`, `:1257` (`edit_job_description`), `:1274-1276` (409 on an open job) |
 | §3 status transitions / open gate | `core/frontend/app.py:712-724`, `core/frontend/templates/job_detail.html:221-254,273` |
 | §3 blind toggle | `core/frontend/templates/job_detail.html:256-266`, `core/frontend/app.py:1177-1194` |
 | §4 upload form + consent | `core/frontend/templates/job_detail.html:273-316`, `core/frontend/app.py:830-904` |
@@ -1001,6 +1050,7 @@ All paths are relative to the repository root.
 | §5 form + report | `core/frontend/templates/job_detail.html:318-337`, `core/frontend/app.py:934-994` |
 | §5 CSV parsing + mapping | `core/src/services/bulk_ingest_service.py:435-588`, esp. `WORK_AUTHORIZATION_MAP:464-469` |
 | §5 matching + refusals | `core/src/services/candidate_roster_service.py:1-44,180-320,327-457` |
+| §5 credential-suffix stripping, CA/BA/MA exclusion | `core/src/services/candidate_roster_service.py:74-79` (`_CREDENTIAL_VOCAB`), `:111-174` (`_normalize_name`) |
 | §5 overwrite behaviour | `core/src/services/candidate_roster_service.py:353-368`, `core/src/services/resume_service.py:773-776,1037-1098`, `docs/adr/047-screening-facts-are-declared-never-inferred.md` §C |
 | §5 CSV not persisted | `docs/adr/047-...md:135-148` |
 | §5 full-export vs subset | `HANDOFF.md:192-194` |
@@ -1014,7 +1064,7 @@ All paths are relative to the repository root.
 | §7 undeclared count | `core/frontend/templates/shortlist_cards.html:90-109` |
 | §7 degraded excluded | `core/frontend/templates/shortlist_list.html:61-78` |
 | §7 queue behind parses | `HANDOFF.md:184-191` |
-| §7 dropped second regenerate / staleness | `docs/ROADMAP.md:217-218` |
+| §7 queued regenerate (was: dropped second regenerate) / staleness | `core/src/models/ddl.py:333` (`jobs.shortlist_rerun_requested`), `core/src/api/routes/shortlist.py:72-86` (`queued_after_current`), `core/src/services/shortlist_service.py:200-215,356`, `core/src/worker/matching_tasks.py:189,193-227` (`_drain_rerun`), `core/frontend/templates/shortlist_cards.html:95-96` ("A run is in progress…" hint); staleness bound still wall-clock: `docs/ROADMAP.md:217` |
 | §8 weights | `core/src/schemas/matching.py:195-340` (`MatchWeights` defaults, `_sums_close_to_one`) |
 | §8 tiles + chips + manager chips | `core/frontend/templates/shortlist_cards.html:366-417`, `core/src/schemas/matching.py:357-445` |
 | §8 internal chip | `core/frontend/templates/shortlist_cards.html:266-292` |
@@ -1022,7 +1072,7 @@ All paths are relative to the repository root.
 | §8 reveal / withdraw / reinstate | `core/frontend/app.py:1516-1594,1773-1794`, `core/frontend/templates/resume_detail.html:47-157` |
 | §8 export buttons + columns | `core/frontend/templates/shortlist_list.html:11-19`, `core/frontend/app.py:1887-1930`, `core/src/services/shortlist_service.py:1348-1392,1457-1470` |
 | §8 exports always anonymised | `core/src/services/shortlist_service.py:1170-1194`, `core/src/api/routes/shortlist.py:87-110` |
-| §8 "Why this rank?" unreachable | page exists at `core/frontend/app.py:1395-1443` + `core/frontend/templates/shortlist_entry.html`; no template references `shortlist_entry_detail`; entry id absent from `_EXPORT_QUERY` (`core/src/services/shortlist_service.py:1041-1066`) |
+| §8 "Why this rank?" card link | `core/frontend/templates/shortlist_cards.html:230` (`url_for('shortlist_entry_detail', ...)`), page at `core/frontend/app.py:1505` (`shortlist_entry_detail`) + `core/frontend/templates/shortlist_entry.html`; entry id still absent from `_EXPORT_QUERY` (`core/src/services/shortlist_service.py:1041-1066`) |
 | §8 evidence cliff | `core/src/settings.py:240` (`match_evidence_k = 15`), `core/frontend/templates/shortlist_entry.html:80-97`, `docs/adr/040-evidence-cliff-disclosure.md` |
 | §8 not-assessed markers | `core/src/schemas/matching.py:399-430`, `core/frontend/templates/shortlist_entry.html:135-223`, `docs/adr/041-sub-score-measurement-markers.md` |
 | §8 card/CSV show bare numbers | `docs/ROADMAP.md:204` |

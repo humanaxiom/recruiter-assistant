@@ -182,7 +182,11 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
     ITEM 1 (A DROPPED REGENERATE IS REMEMBERED): a thin wrapper around
     ``_shortlist_job_once`` — see the module docstring's own ITEM 1 section
     for the drain contract. ``arq.Retry`` raised by the once-function
-    propagates straight through, untouched."""
+    propagates straight through, untouched.
+
+    The ``_shortlist_job_once`` call below is where ``ensure_projection_caught_up``
+    actually runs — this wrapper delegates to it rather than inlining the
+    projection guard a second time."""
     job_id = UUID(job_id_str)
     status = await _shortlist_job_once(ctx, job_id_str)
     if status in {"persisted", "empty", "not_parsed", "awaiting_llm"}:
@@ -201,8 +205,23 @@ async def _drain_rerun(ctx: dict[str, Any], job_id: UUID, job_id_str: str) -> No
         if drained:
             await set_shortlist_ranking(conn, job_id)
     if drained:
+        # ``worker/main.py::startup`` always sets ``ctx["arq"]`` in the real
+        # worker; ``.get`` (not ``[]``) matches this module's own
+        # ``reconcile.py`` / ``taleo_sync_task.py`` convention so a ctx built
+        # without it (a caller outside the real worker loop) logs LOUDLY and
+        # drops the follow-up enqueue instead of crashing the whole run —
+        # the shortlist itself was already persisted by this point.
+        arq = ctx.get("arq")
+        if arq is None:
+            log.warning(
+                "shortlist_job.rerun_drain_unqueueable job_id=%s — a rerun was "
+                "recorded and consumed but ctx has no 'arq' to enqueue the "
+                "follow-up run",
+                job_id_str,
+            )
+            return
         log.info("shortlist_job.rerun_drained job_id=%s", job_id_str)
-        await ctx["arq"].enqueue_job("shortlist_job", job_id_str)
+        await arq.enqueue_job("shortlist_job", job_id_str)
 
 
 async def _shortlist_job_once(ctx: dict[str, Any], job_id_str: str) -> str:
