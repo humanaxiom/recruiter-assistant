@@ -1043,7 +1043,7 @@ async def test_retry_path_never_consumes_a_pending_rerun() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_job_row_never_consumes_or_enqueues_a_rerun() -> None:
-    """"missing" never drains, per the spec: a job row that vanished between
+    """ "missing" never drains, per the spec: a job row that vanished between
     enqueue and pickup cannot sensibly re-run itself."""
     from src.worker.matching_tasks import shortlist_job
 
@@ -1069,7 +1069,7 @@ async def test_missing_job_row_never_consumes_or_enqueues_a_rerun() -> None:
 
 @pytest.mark.asyncio
 async def test_not_parsed_run_drains_a_pending_rerun() -> None:
-    """"not_parsed" IS a terminal status the spec lists as draining -- a
+    """ "not_parsed" IS a terminal status the spec lists as draining -- a
     dropped regenerate against a job that was unparsed when this run picked
     it up but got parsed (and re-requested) while it ran must still fire."""
     from src.worker.matching_tasks import shortlist_job

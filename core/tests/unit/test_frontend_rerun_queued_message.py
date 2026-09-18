@@ -66,9 +66,7 @@ def test_poll_fragment_shows_the_rerun_queued_hint_when_true(
     monkeypatch.setattr(
         api_client,
         "get_shortlist_status",
-        MagicMock(
-            return_value=_status_payload(job_id=job_id, rerun_requested=True)
-        ),
+        MagicMock(return_value=_status_payload(job_id=job_id, rerun_requested=True)),
     )
 
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
@@ -85,9 +83,7 @@ def test_poll_fragment_omits_the_rerun_queued_hint_when_false(
     monkeypatch.setattr(
         api_client,
         "get_shortlist_status",
-        MagicMock(
-            return_value=_status_payload(job_id=job_id, rerun_requested=False)
-        ),
+        MagicMock(return_value=_status_payload(job_id=job_id, rerun_requested=False)),
     )
 
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
@@ -133,9 +129,7 @@ def test_full_page_shows_the_rerun_queued_hint_when_true(
     monkeypatch.setattr(
         api_client,
         "get_shortlist_status",
-        MagicMock(
-            return_value=_status_payload(job_id=job_id, rerun_requested=True)
-        ),
+        MagicMock(return_value=_status_payload(job_id=job_id, rerun_requested=True)),
     )
 
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
@@ -155,9 +149,7 @@ def test_full_page_omits_the_rerun_queued_hint_when_false(
     monkeypatch.setattr(
         api_client,
         "get_shortlist_status",
-        MagicMock(
-            return_value=_status_payload(job_id=job_id, rerun_requested=False)
-        ),
+        MagicMock(return_value=_status_payload(job_id=job_id, rerun_requested=False)),
     )
 
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)

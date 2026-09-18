@@ -512,7 +512,7 @@ async def test_shortlist_rerun_requested_column_defaults_false(
 
 
 @pytest.mark.asyncio
-async def test_second_post_against_a_real_ranking_row_sets_the_flag_and_enqueues_nothing(
+async def test_second_post_against_a_real_ranking_row_sets_the_flag_and_enqueues_nothing(  # noqa: E501
     pg_pool: asyncpg.Pool,
 ) -> None:
     """The end-to-end route proof: a job genuinely mid-run (real

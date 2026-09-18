@@ -24,6 +24,7 @@ from src.api.deps import (
     resolve_user,
     scoped_user_id_or_403,
 )
+from src.errors import NotFoundError
 from src.models.pool import Db
 from src.schemas.auth import User
 from src.schemas.matching import ShortlistEntry, ShortlistStatusResponse
@@ -62,8 +63,27 @@ async def generate_shortlist(
 
     ``fix/zero-requirements-rank-guard`` — the zero-requirements refusal runs
     FIRST, before any ranking-state write, so a refused job never flips to
-    ``'ranking'`` and never enqueues."""
+    ``'ranking'`` and never enqueues.
+
+    ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — AFTER the requirements
+    guard, read the job's current state. A genuinely in-flight run
+    (``state == 'ranking'``) means a second worker run would just duplicate
+    work already happening: record the drop (``request_shortlist_rerun``)
+    instead of enqueueing, and answer ``queued_after_current`` so the caller
+    knows it was heard rather than silently ignored. A nonexistent job
+    (``get_shortlist_state`` raises ``NotFoundError``) falls through to the
+    ordinary enqueue path unchanged — diagnosing a missing job is the
+    worker's job, not this guard's, matching the pre-existing "a nonexistent
+    job still 202s" contract. ``None``/``'awaiting_llm'`` both mean no run is
+    genuinely in flight, so they enqueue exactly as before."""
     await shortlist_service.assert_job_has_requirements(db, job_id)
+    try:
+        state = await shortlist_service.get_shortlist_state(db, job_id)
+    except NotFoundError:
+        state = None
+    if state is not None and state.state == "ranking":
+        await shortlist_service.request_shortlist_rerun(db, job_id)
+        return {"job_id": str(job_id), "status": "queued_after_current"}
     await shortlist_service.set_shortlist_ranking(db, job_id)
     await arq.enqueue_job("shortlist_job", str(job_id))
     return {"job_id": str(job_id), "status": "enqueued"}
@@ -181,7 +201,17 @@ async def shortlist_status(
     if state is None:
         return ShortlistStatusResponse(job_id=job_id)
     return ShortlistStatusResponse(
-        job_id=job_id, state=state.state, reason=state.reason, at=state.at
+        job_id=job_id,
+        state=state.state,
+        reason=state.reason,
+        at=state.at,
+        # ITEM 1: ``getattr`` with a default, not a bare attribute read — a
+        # handful of pre-existing tests in this file mock ``get_shortlist_state``
+        # with a stand-in ``_State`` object that predates this field and
+        # carries no ``rerun_requested`` attribute at all; a bare read would
+        # 500 those. ``ShortlistStateOut`` itself always carries the field
+        # (with its own ``False`` default), so real callers are unaffected.
+        rerun_requested=getattr(state, "rerun_requested", False),
     )
 
 

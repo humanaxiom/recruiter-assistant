@@ -809,6 +809,15 @@ class ShortlistStateOut(BaseModel):
     state: str
     reason: str | None
     at: dt.datetime
+    # ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — ``jobs.shortlist_rerun_
+    # requested``. ``get_shortlist_state`` only ever builds this DTO on a row
+    # whose ``shortlist_state`` is non-NULL and fresh enough to still count as
+    # 'ranking'/'awaiting_llm'; a STALE 'ranking' row reads back as ``None``
+    # (see that function's own docstring) and so is reported as
+    # ``rerun_requested=False`` too, via ``ShortlistStatusResponse``'s own
+    # default — the worker still drains the real column when it eventually
+    # wakes up, this field just cannot see it in the meantime.
+    rerun_requested: bool = False
 
 
 class ShortlistStatusResponse(BaseModel):
@@ -824,6 +833,10 @@ class ShortlistStatusResponse(BaseModel):
     state: str | None = None
     reason: str | None = None
     at: dt.datetime | None = None
+    # ITEM 1 — mirrors ``ShortlistStateOut.rerun_requested``; ``False`` when
+    # ``state`` is ``None`` (no state row surfaced at all, including a stale
+    # 'ranking' read — see that field's own docstring).
+    rerun_requested: bool = False
 
 
 __all__ = [

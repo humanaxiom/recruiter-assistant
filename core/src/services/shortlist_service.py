@@ -196,8 +196,23 @@ _CLEAR_SHORTLIST_STATE_SQL = (
     "shortlist_state_at = NULL WHERE id = $1"
 )
 _GET_SHORTLIST_STATE_SQL = (
-    "SELECT shortlist_state, shortlist_state_reason, shortlist_state_at "
-    "FROM jobs WHERE id = $1"
+    "SELECT shortlist_state, shortlist_state_reason, shortlist_state_at, "
+    "shortlist_rerun_requested FROM jobs WHERE id = $1"
+)
+# ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — the API route records a
+# Regenerate dropped behind an in-flight run here instead of enqueueing a
+# second worker run behind a FIFO queue.
+_REQUEST_SHORTLIST_RERUN_SQL = (
+    "UPDATE jobs SET shortlist_rerun_requested = TRUE WHERE id = $1"
+)
+# ONE atomic statement: only a row that is ACTUALLY TRUE flips to FALSE and
+# returns a row at all (``RETURNING true``), so two genuinely concurrent
+# callers racing this UPDATE can never both observe ``True`` — Postgres's own
+# row-level lock on the UPDATE serialises them and the second sees zero rows
+# affected once the first has already flipped the flag.
+_CONSUME_SHORTLIST_RERUN_SQL = (
+    "UPDATE jobs SET shortlist_rerun_requested = FALSE "
+    "WHERE id = $1 AND shortlist_rerun_requested RETURNING true"
 )
 # FU-6/ADR-020 §3 single-entity row-scoping predicate, mirroring
 # ``job_service._JOB_ASSIGNEE_EXISTS_SQL`` VERBATIM — keyed on ``jobs.id`` (the
@@ -229,6 +244,22 @@ async def set_shortlist_ranking(conn: DbConn, job_id: UUID) -> None:
     the instant the POST returns and the frontend's very first poll sees
     it."""
     await conn.execute(_SET_SHORTLIST_RANKING_SQL, job_id)
+
+
+async def request_shortlist_rerun(conn: DbConn, job_id: UUID) -> None:
+    """Record a Regenerate dropped behind a genuinely in-flight run. Called
+    by the API route (a second POST while ``shortlist_state == 'ranking'``)
+    and by the worker's own ``already_running`` early return (a concurrent
+    duplicate that never even acquired the lock)."""
+    await conn.execute(_REQUEST_SHORTLIST_RERUN_SQL, job_id)
+
+
+async def consume_shortlist_rerun(conn: DbConn, job_id: UUID) -> bool:
+    """Atomically drain the pending-rerun flag: ``True`` if one was pending
+    (and it is now cleared), ``False`` if not. ONE ``UPDATE ... RETURNING``
+    statement — see ``_CONSUME_SHORTLIST_RERUN_SQL``'s own comment for why
+    this is safe under real concurrency."""
+    return bool(await conn.fetchval(_CONSUME_SHORTLIST_RERUN_SQL, job_id))
 
 
 _JOB_REQUIREMENT_COUNTS_SQL = (
@@ -322,6 +353,7 @@ async def get_shortlist_state(
         state=row["shortlist_state"],
         reason=row["shortlist_state_reason"],
         at=row["shortlist_state_at"],
+        rerun_requested=bool(row["shortlist_rerun_requested"]),
     )
 
 

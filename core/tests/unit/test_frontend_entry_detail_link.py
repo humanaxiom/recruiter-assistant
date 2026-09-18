@@ -162,4 +162,7 @@ def test_link_is_a_plain_get_anchor_not_a_form(monkeypatch: Any, client: Any) ->
 
     body = client.get(f"/jobs/{job_id}/shortlist-cards").get_data(as_text=True)
 
-    assert f'href="/shortlist/{entry_id}"' in body or f"href='/shortlist/{entry_id}'" in body
+    assert (
+        f'href="/shortlist/{entry_id}"' in body
+        or f"href='/shortlist/{entry_id}'" in body
+    )
