@@ -46,6 +46,13 @@ like ``list_shortlist`` does today — the "route forwards user_id" tests
 below pin THAT wiring; the real Postgres row-scoping proof (an unassigned
 hiring_manager's read actually collapses to 0 rows / ``NotFoundError``) is
 ``test_shortlist_fail_closed_pg.py``'s job, mandatory, not optional.
+
+**ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — appended below.** The
+response DTO (``ShortlistStatusResponse``) gains a new ``rerun_requested:
+bool`` field carrying ``jobs.shortlist_rerun_requested``. Every test in the
+new section fails today because the route response never includes that key
+at all (``"rerun_requested" not in body``) and the mocked ``_State`` stand-
+ins used throughout this file carry no such attribute for the route to read.
 """
 
 from __future__ import annotations
@@ -421,3 +428,95 @@ async def test_status_403s_and_never_calls_the_service_for_hiring_manager_key_wi
 
     assert resp.status_code == 403
     get_state.assert_not_awaited()
+
+
+# ── ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — rerun_requested shape ────
+#
+# ``ShortlistStateOut`` (returned by the mocked service) and
+# ``ShortlistStatusResponse`` (the route's own response DTO) both gain a new
+# ``rerun_requested: bool`` field. Every stand-in ``_State`` class below
+# carries the attribute explicitly (rather than relying on a class default)
+# so these tests fail LOUDLY — an ``AttributeError`` inside the route, not a
+# silently-omitted response key — until the route actually reads it.
+
+
+@pytest.mark.asyncio
+async def test_status_reports_rerun_requested_true_when_a_rerun_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn)
+
+    class _State:
+        state = "ranking"
+        reason = None
+        at = _NOW
+        rerun_requested = True
+
+    get_state = AsyncMock(return_value=_State())
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rerun_requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_reports_rerun_requested_false_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overwhelmingly common case: no dropped regenerate is pending.
+    ``get_shortlist_state`` returning ``None`` entirely (no state row at all)
+    must still shape a well-formed ``rerun_requested: false`` in the
+    response, not omit the key."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn)
+    get_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rerun_requested"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_reports_rerun_requested_false_when_state_carries_it_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The positive complement of the two tests above: a genuine state row
+    (e.g. ``awaiting_llm``) that carries ``rerun_requested=False`` must
+    render as ``false``, not be coerced to ``true`` merely because SOME
+    state exists."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    app = _build_app(conn)
+
+    class _State:
+        state = "awaiting_llm"
+        reason = "llm unavailable"
+        at = _NOW
+        rerun_requested = False
+
+    get_state = AsyncMock(return_value=_State())
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service, "get_shortlist_state", get_state
+    )
+
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/shortlist/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rerun_requested"] is False

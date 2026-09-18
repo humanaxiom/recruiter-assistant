@@ -461,3 +461,181 @@ async def test_get_shortlist_state_reports_a_fresh_ranking_row_as_ranking(
 
     assert state is not None
     assert state.state == "ranking"
+
+
+# ── ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) ─────────────────────────────
+#
+# jobs.shortlist_rerun_requested does not exist yet -- every test below fails
+# either at the seeding UPDATE / SELECT (asyncpg.UndefinedColumnError against
+# the real, still-unwidened schema) or at collection (request_shortlist_rerun
+# / consume_shortlist_rerun do not exist on src.services.shortlist_service).
+# RED half of the TDD cycle. What a REAL Postgres proves that a mocked-conn
+# unit test cannot: the column really defaults FALSE on a pre-existing row,
+# the consume UPDATE really is atomic under two genuinely concurrent
+# connections, and the route + worker really drive one whole end-to-end
+# regenerate-while-ranking cycle against real SQL.
+
+
+async def _mark_rerun_requested(pool: asyncpg.Pool, job_id: UUID) -> None:
+    """Test-only seeding helper — stands in for the route's own
+    ``request_shortlist_rerun`` write (proven separately below)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE jobs SET shortlist_rerun_requested = TRUE WHERE id = $1",
+            job_id,
+        )
+
+
+async def _rerun_requested_flag(pool: asyncpg.Pool, job_id: UUID) -> bool:
+    async with pool.acquire() as conn:
+        value: bool = await conn.fetchval(
+            "SELECT shortlist_rerun_requested FROM jobs WHERE id = $1", job_id
+        )
+    return value
+
+
+@pytest.mark.asyncio
+async def test_shortlist_rerun_requested_column_defaults_false(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """A pre-existing row (inserted with no mention of the new column at
+    all, exactly like every job seeded before this migration existed) must
+    read the column back as FALSE, not NULL — the DDL default,
+    ``NOT NULL DEFAULT FALSE``, applies retroactively to every already-boot-
+    strapped ``jobs`` table via the idempotent ``ALTER TABLE ... ADD COLUMN
+    IF NOT EXISTS`` in ``init_schema``."""
+    job_id = await _insert_job(pg_pool)
+
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+
+    assert flag is False
+
+
+@pytest.mark.asyncio
+async def test_second_post_against_a_real_ranking_row_sets_the_flag_and_enqueues_nothing(  # noqa: E501
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The end-to-end route proof: a job genuinely mid-run (real
+    ``shortlist_state = 'ranking'`` row, exactly as the FIRST POST would have
+    left it) receiving a SECOND POST must set the real column via a real SQL
+    UPDATE and must NOT enqueue a second worker run."""
+    job_id = await _insert_job(pg_pool)
+    await _set_ranking(pg_pool, job_id)
+
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, arq=arq)
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "queued_after_current"
+    arq.enqueue_job.assert_not_awaited()
+
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+    assert flag is True, (
+        "a second POST against a genuinely in-flight job must record the "
+        "dropped regenerate on the real column, via a real SQL UPDATE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_run_drains_the_flag_and_enqueues_exactly_one_followup(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The end-to-end worker proof: a run that reaches a terminal status
+    (``"persisted"`` here) with the real column already TRUE must clear it
+    via a real atomic UPDATE and enqueue exactly one follow-up
+    ``shortlist_job`` on the fake ``ArqRedis`` — not zero, not two."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume_with_chunks(pg_pool, job_id)
+    await _set_ranking(pg_pool, job_id)
+    await _mark_rerun_requested(pg_pool, job_id)
+
+    arq = MagicMock(enqueue_job=AsyncMock())
+    ctx = _worker_ctx(pg_pool, _fake_neo4j(resume_id), _working_llm())
+    ctx["arq"] = arq
+
+    result = await shortlist_job(ctx, str(job_id))
+
+    assert result == "persisted"
+    arq.enqueue_job.assert_awaited_once_with("shortlist_job", str(job_id))
+
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+    assert flag is False, "the flag must be DRAINED (consumed), not left set"
+
+    row = await _job_state_row(pg_pool, job_id)
+    assert row is not None
+    assert row["shortlist_state"] == "ranking", (
+        "the drained rerun re-sets the ranking state for the follow-up run "
+        "it just enqueued -- the UI must keep polling across the seam"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_run_with_no_pending_rerun_enqueues_nothing(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The overwhelmingly common terminal case: nobody regenerated while this
+    run was in flight, so the drain is a real no-op UPDATE (affects zero
+    rows / returns NULL) and nothing is enqueued."""
+    from src.worker.matching_tasks import shortlist_job
+
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume_with_chunks(pg_pool, job_id)
+    await _set_ranking(pg_pool, job_id)
+
+    arq = MagicMock(enqueue_job=AsyncMock())
+    ctx = _worker_ctx(pg_pool, _fake_neo4j(resume_id), _working_llm())
+    ctx["arq"] = arq
+
+    result = await shortlist_job(ctx, str(job_id))
+
+    assert result == "persisted"
+    arq.enqueue_job.assert_not_awaited()
+
+    row = await _job_state_row(pg_pool, job_id)
+    assert row is not None
+    assert row["shortlist_state"] is None, (
+        "no pending rerun -- the terminal state clear from the ORIGINAL run "
+        "must stand, not be overwritten back to 'ranking'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consume_shortlist_rerun_is_atomic_under_real_concurrency(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """The load-bearing atomicity claim: with the flag TRUE and TWO genuinely
+    separate connections racing ``consume_shortlist_rerun`` concurrently
+    (real Postgres row-level locking on the single-row ``UPDATE ...
+    RETURNING``), EXACTLY ONE must observe ``True`` — a mocked-conn unit test
+    cannot prove this; both connections could trivially "win" against a
+    mock."""
+    import asyncio
+
+    from src.services.shortlist_service import consume_shortlist_rerun
+
+    job_id = await _insert_job(pg_pool)
+    await _mark_rerun_requested(pg_pool, job_id)
+
+    conn_a = await pg_pool.acquire()
+    conn_b = await pg_pool.acquire()
+    try:
+        results = await asyncio.gather(
+            consume_shortlist_rerun(conn_a, job_id),
+            consume_shortlist_rerun(conn_b, job_id),
+        )
+    finally:
+        await pg_pool.release(conn_a)
+        await pg_pool.release(conn_b)
+
+    assert sorted(results) == [False, True], (
+        "exactly one of two concurrent consumers must observe the pending "
+        f"rerun as True -- got {results!r}"
+    )
+
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+    assert flag is False

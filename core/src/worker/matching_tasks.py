@@ -36,6 +36,18 @@ Status strings:
   WITHOUT persisting a degraded shortlist. ``jobs.shortlist_state`` is left set
   to ``'awaiting_llm'`` (visible; the user can re-Generate). Below the ceiling
   the same failure raises ``arq.Retry`` instead of returning a status.
+
+ITEM 1 (A DROPPED REGENERATE IS REMEMBERED): ``shortlist_job`` wraps the
+actual run (``_shortlist_job_once``). When the advisory lock is already
+held, the dropped regenerate is RECORDED (``request_shortlist_rerun``)
+instead of silently discarded. On every TERMINAL status — ``{"persisted",
+"empty", "not_parsed", "awaiting_llm"}`` — the wrapper drains any pending
+rerun flag on a FRESH pool connection (acquired AFTER the once-function's
+own lock release) and, if one was pending, re-sets the ranking state and
+enqueues exactly one follow-up ``shortlist_job``. ``"missing"`` and
+``"already_running"`` never drain, and neither does a below-ceiling
+``arq.Retry`` (the run is not actually terminal yet — it propagates through
+the wrapper untouched).
 """
 
 from __future__ import annotations
@@ -54,9 +66,12 @@ from src.pipeline.matching.orchestrator import (
 )
 from src.services.shortlist_service import (
     clear_shortlist_state,
+    consume_shortlist_rerun,
     persist_reverse_match,
     persist_shortlist,
+    request_shortlist_rerun,
     set_shortlist_awaiting_llm,
+    set_shortlist_ranking,
 )
 from src.settings import get_settings, weights_from_settings
 from src.worker.job_lock import release_job_lock, try_job_lock
@@ -162,7 +177,36 @@ async def ensure_projection_caught_up(
 
 
 async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
-    """Generate + persist the shortlist for one job."""
+    """Generate + persist the shortlist for one job.
+
+    ITEM 1 (A DROPPED REGENERATE IS REMEMBERED): a thin wrapper around
+    ``_shortlist_job_once`` — see the module docstring's own ITEM 1 section
+    for the drain contract. ``arq.Retry`` raised by the once-function
+    propagates straight through, untouched."""
+    job_id = UUID(job_id_str)
+    status = await _shortlist_job_once(ctx, job_id_str)
+    if status in {"persisted", "empty", "not_parsed", "awaiting_llm"}:
+        await _drain_rerun(ctx, job_id, job_id_str)
+    return status
+
+
+async def _drain_rerun(ctx: dict[str, Any], job_id: UUID, job_id_str: str) -> None:
+    """Atomically consume any pending rerun request on a FRESH pool
+    connection (called only after ``_shortlist_job_once``'s own advisory
+    lock has been released) and, if one was pending, re-arm ``'ranking'``
+    and enqueue exactly one follow-up ``shortlist_job``."""
+    pool = ctx["pg_pool"]
+    async with pool.acquire() as conn:
+        drained = await consume_shortlist_rerun(conn, job_id)
+        if drained:
+            await set_shortlist_ranking(conn, job_id)
+    if drained:
+        log.info("shortlist_job.rerun_drained job_id=%s", job_id_str)
+        await ctx["arq"].enqueue_job("shortlist_job", job_id_str)
+
+
+async def _shortlist_job_once(ctx: dict[str, Any], job_id_str: str) -> str:
+    """One attempt at generating + persisting the shortlist for one job."""
     pool = ctx["pg_pool"]
     job_id = UUID(job_id_str)
     settings = get_settings()
@@ -174,6 +218,11 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
             # touch shortlist_state here. It was set to 'ranking' by that
             # OTHER run's own enqueue (or is about to be), and clearing it
             # from this early return would blank the UI mid-run.
+            #
+            # ITEM 1: the dropped regenerate IS recorded, though — nothing
+            # else will ever drain it if this run never re-checks, since this
+            # run never even started.
+            await request_shortlist_rerun(conn, job_id)
             log.info("shortlist_job.already_running job_id=%s", job_id_str)
             return "already_running"
 
