@@ -71,7 +71,7 @@ import zipfile
 from collections.abc import AsyncIterator
 from io import BytesIO
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import fitz  # type: ignore[import-untyped]
@@ -746,6 +746,95 @@ async def test_upload_resumes_cover_shaped_orphan_is_rejected_not_ranked() -> No
     assert rejected[0]["original_filename"] == "y_cover_letter.pdf"
     assert "must never be ranked as a résumé" in rejected[0]["reason"]
     assert arq.enqueue_job.await_count == 1
+
+
+# ── upload: F2 — text extraction runs ONLY for orphan cover-named files ────
+# (security audit finding, 2026-09-18). A cover-named file that pairs cleanly
+# with its own résumé (by filename convention) must never have its text
+# extracted at all — only leftover cover-named files with no matching résumé
+# reach the extraction step.
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_extracts_cover_text_only_for_the_orphan() -> None:
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for name in ("jane", "bob", "sam"):
+        files.append(("files", (f"{name}_resume.pdf", _PDF_MAGIC, "application/pdf")))
+        files.append(
+            ("files", (f"{name}_cover_letter.pdf", _PDF_MAGIC, "application/pdf"))
+        )
+    files.append(("files", ("orphan_cover_letter.pdf", _PDF_MAGIC, "application/pdf")))
+
+    fake_extracted = MagicMock(full_text="plain résumé-shaped text, not a cover letter")
+    with patch.object(
+        resumes_routes, "extract_text", return_value=fake_extracted
+    ) as mock_extract:
+        async with await _client(app) as client:
+            resp = await client.post(
+                f"/jobs/{uuid4()}/resumes",
+                files=files,
+                data={"consent_acknowledged": "true"},
+            )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    assert len(accepted) == 4  # jane/bob/sam paired + the orphan demoted
+    # Exactly ONE extraction call — for the orphan; jane/bob/sam's covers pair
+    # cleanly and must never reach extraction at all.
+    assert mock_extract.call_count == 1
+
+
+# ── upload: F3 — an unreadable orphan cover-named file is never ingested ───
+# (security audit finding, 2026-09-18). Fails CLOSED, not open: a cover-named
+# orphan whose text can't even be read (encrypted here) must be unattached
+# with a distinct reason, never silently demoted/ingested as a résumé.
+
+
+def _make_encrypted_cover_pdf() -> bytes:
+    doc = fitz.open()
+    doc.new_page()
+    buf = BytesIO()
+    doc.save(
+        buf,
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        owner_pw="owner-secret",
+        user_pw="user-secret",
+        permissions=int(fitz.PDF_PERM_PRINT),
+    )
+    doc.close()
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_unreadable_orphan_cover_is_unattached_not_ingested() -> (
+    None
+):
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    encrypted = _make_encrypted_cover_pdf()
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("mystery_cover_letter.pdf", encrypted, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    rejected = [r for r in body if r["outcome"] == "rejected"]
+    assert accepted == []
+    assert len(rejected) == 1
+    assert rejected[0]["original_filename"] == "mystery_cover_letter.pdf"
+    assert "could not be read" in rejected[0]["reason"]
+    assert arq.enqueue_job.await_count == 0
 
 
 # ── upload: server-generated blob key, retained filename ────────────────

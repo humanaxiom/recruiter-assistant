@@ -89,6 +89,18 @@ _UNATTACHED_COVER_REASON: Final = (
     "a cover letter with no matching résumé — not ingested, since a cover "
     "letter must never be ranked as a résumé"
 )
+# Security audit F3 (2026-09-18): ``is_cover_content`` returning ``None``
+# (as opposed to ``False``) means the caller could not even read the file's
+# text (encrypted/corrupt/oversized) — distinct from "read it fine, doesn't
+# read as a cover letter". The old two-state boolean treated an unreadable
+# file exactly like a plain résumé and DEMOTED it (ingested), which fails
+# OPEN on a hostile or corrupt orphan cover-named upload. This third state
+# always goes to ``unattached`` too, with its own static reason, so nothing
+# is ever silently ingested just because it couldn't be inspected.
+_COULD_NOT_READ_REASON: Final = (
+    "this file could not be read to confirm it is not a cover letter — not "
+    "ingested; upload it with its résumé or as a résumé-named file"
+)
 _MANIFEST_MISSING_COVER_NOTE: Final = (
     "a cover letter named in the manifest wasn't in the upload"
 )
@@ -204,6 +216,18 @@ def _classify(filename: str) -> tuple[str, str]:
     return "resume", _norm_base(stem)
 
 
+def is_cover_named(filename: str) -> bool:
+    """True when ``filename`` classifies as ``"cover"`` by ``_classify``.
+
+    Exported so callers outside this module (the upload route) never need
+    to reach for the private ``_classify`` — reviewer finding, 2026-09-18:
+    ``src.api.routes.resumes`` was importing ``bulk_ingest_service._classify``
+    directly to find cover-named files up front. This is the narrow public
+    surface that needs: "is this filename cover-shaped by naming convention
+    alone", not the full ``(role, base)`` pairing-key tuple."""
+    return _classify(filename)[0] == "cover"
+
+
 @dataclass(frozen=True)
 class ApplicantFiles:
     """One applicant to feed through the résumé upload path: a résumé file and
@@ -264,11 +288,32 @@ def _pair_from_manifest(
         )
 
 
+def leftover_cover_files(
+    files: list[UploadedFile], *, manifest: dict[str, str | None] | None = None
+) -> list[UploadedFile]:
+    """The cover-named files that would be DEMOTED (no matching résumé) by
+    ``pair_applicants(files, manifest=manifest)`` with no ``is_cover_content``
+    supplied — i.e. exactly the set ``is_cover_content`` gets consulted on.
+
+    Exposed so a caller (the upload route) can extract text ONLY for these
+    files, rather than for every cover-named file up front (security audit
+    F2, 2026-09-18) — a cover letter that's about to pair cleanly with its
+    own résumé never needs its text inspected at all. Runs a plain
+    ``pair_applicants`` pass internally (pure, no I/O) and reads off the
+    ``_DEMOTED_COVER_NOTE`` pairs; the real pairing pass with the content
+    callable then reuses the identical leftover set, since both passes are
+    pure functions of the same ``files``/``manifest``."""
+    provisional = pair_applicants(files, manifest=manifest)
+    return [
+        pair.resume for pair in provisional.pairs if pair.note == _DEMOTED_COVER_NOTE
+    ]
+
+
 def pair_applicants(
     files: list[UploadedFile],
     *,
     manifest: dict[str, str | None] | None = None,
-    is_cover_content: Callable[[UploadedFile], bool] | None = None,
+    is_cover_content: Callable[[UploadedFile], bool | None] | None = None,
 ) -> PairingResult:
     """Pair each cover letter to its résumé. ``manifest`` (résumé→cover keys)
     takes precedence; everything it doesn't cover falls back to the filename
@@ -279,10 +324,22 @@ def pair_applicants(
     upload route) can supply it to check a file's ACTUAL extracted text, not
     just its filename. It is consulted ONLY on a leftover cover-named file
     that has no matching résumé (never on a résumé that pairs cleanly with
-    its own cover letter). When it returns True, that file is NEVER demoted
-    to a standalone résumé — it goes to ``PairingResult.unattached`` instead
-    (filename, static reason) and is absent from every ``ApplicantFiles``. A
-    False/None return preserves today's demote-with-note behaviour.
+    its own cover letter). It is TRI-STATE (security audit F3, 2026-09-18):
+
+    * ``True`` — the text reads as a cover letter. Never demoted to a
+      standalone résumé; goes to ``PairingResult.unattached`` instead
+      (filename, ``_UNATTACHED_COVER_REASON``) and is absent from every
+      ``ApplicantFiles``.
+    * ``False`` — read fine, doesn't read as a cover letter. Preserves
+      today's demote-with-note behaviour (``_DEMOTED_COVER_NOTE``).
+    * ``None`` — the caller COULD NOT READ the file at all (encrypted,
+      corrupt, oversized, …). This must NOT fall back to the ``False``
+      (demote/ingest) behaviour — doing so fails OPEN on a hostile or
+      corrupt orphan cover-named upload — so it ALSO goes to
+      ``unattached``, with the distinct ``_COULD_NOT_READ_REASON`` so the
+      operator can tell "confirmed not a cover letter" apart from
+      "couldn't even check".
+
     ``is_cover_content=None`` (the default) is byte-identical to omitting it."""
     by_name = {basename_lower(f[0]): f for f in files}
     used: set[str] = set()
@@ -314,8 +371,11 @@ def pair_applicants(
     #    note, so nothing is silently lost.
     for cands in covers_by_base.values():
         for f in cands:
-            if is_cover_content is not None and is_cover_content(f):
+            verdict = is_cover_content(f) if is_cover_content is not None else False
+            if verdict is True:
                 result.unattached.append((f[0], _UNATTACHED_COVER_REASON))
+            elif verdict is None:
+                result.unattached.append((f[0], _COULD_NOT_READ_REASON))
             else:
                 result.pairs.append(ApplicantFiles(resume=f, note=_DEMOTED_COVER_NOTE))
 
@@ -629,6 +689,8 @@ __all__ = [
     "UploadedFile",
     "WORK_AUTHORIZATION_MAP",
     "basename_lower",
+    "is_cover_named",
+    "leftover_cover_files",
     "pair_applicants",
     "parse_candidate_csv",
     "parse_csv_manifest",

@@ -176,3 +176,47 @@ def test_report_cover_only_zero_when_every_applicant_has_a_resume(
 
 def test_report_cover_only_zero_for_empty_emitted_list() -> None:
     assert _MOD.report_cover_only([]) == 0
+
+
+# ── _zippable: a cover-only row is excluded from BOTH lists (reviewer MAJOR,
+# 2026-09-18) — before this helper existed, ``_run_llm_mode`` built ``covers``
+# from every emitted row with a cover path regardless of whether that row also
+# had a résumé, so a cover-only applicant's cover letter (real candidate PII)
+# was zipped into ``applicants.zip`` despite ``report_cover_only`` printing
+# that such applicants "are EXCLUDED from manifest.json and applicants.zip".
+
+
+def test_zippable_excludes_a_cover_only_row_from_covers(tmp_path: Path) -> None:
+    resume_a = tmp_path / "001_resume.pdf"
+    cover_a = tmp_path / "001_cover_letter.pdf"
+    cover_only = tmp_path / "002_cover_letter.pdf"
+    emitted = [
+        ("A", resume_a, cover_a, [1, 2]),
+        ("B (cover only)", None, cover_only, [3]),
+    ]
+    resumes, covers = _MOD._zippable(emitted)
+    assert resumes == [resume_a]
+    assert covers == [cover_a]
+    assert cover_only not in covers
+
+
+def test_zippable_excludes_a_cover_only_row_even_when_it_sorts_first(
+    tmp_path: Path,
+) -> None:
+    cover_only = tmp_path / "001_cover_letter.pdf"
+    resume_b = tmp_path / "002_resume.pdf"
+    emitted = [
+        ("A (cover only)", None, cover_only, [1]),
+        ("B", resume_b, None, [2]),
+    ]
+    resumes, covers = _MOD._zippable(emitted)
+    assert resumes == [resume_b]
+    assert covers == []
+
+
+def test_zippable_keeps_a_resume_with_no_cover(tmp_path: Path) -> None:
+    resume_only = tmp_path / "001_resume.pdf"
+    emitted = [("A", resume_only, None, [1])]
+    resumes, covers = _MOD._zippable(emitted)
+    assert resumes == [resume_only]
+    assert covers == []

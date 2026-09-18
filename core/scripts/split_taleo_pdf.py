@@ -473,6 +473,27 @@ def _zip_outputs(out_dir: Path, resumes: list[Path], covers: list[Path]) -> Path
     return zip_path
 
 
+def _zippable(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+) -> tuple[list[Path], list[Path]]:
+    """Résumé/cover paths to include in ``applicants.zip``.
+
+    A cover-only row (LLM manifest emitted cover-letter pages but no résumé
+    pages for that applicant) is EXCLUDED entirely — there is no résumé for
+    the cover letter to pair with. This mirrors two promises that must stay
+    true together: ``_write_pairing_manifest``'s own ``resume_path is not
+    None`` filter (cover-only applicants never appear in ``manifest.json``),
+    and ``report_cover_only``'s printed claim that such applicants "are
+    EXCLUDED from manifest.json and applicants.zip" — before this helper
+    existed, the zip's ``covers`` list was built from every row with a cover
+    path regardless of whether that row also had a résumé, so a cover-only
+    applicant's cover letter WAS zipped despite the printed promise
+    (security audit finding, 2026-09-18)."""
+    resumes = [r for _, r, _, _ in emitted if r is not None]
+    covers = [c for _, r, c, _ in emitted if r is not None and c is not None]
+    return resumes, covers
+
+
 def report_cover_only(
     emitted: list[tuple[str, Path | None, Path | None, list[int]]],
 ) -> int:
@@ -523,8 +544,7 @@ def _run_llm_mode(
         return 1
     print(f"output: {out_dir}\n")
     emitted = _emit_from_manifest(doc, texts, manifest, out_dir, min_text)
-    resumes = [r for _, r, _, _ in emitted if r is not None]
-    covers = [c for _, _, c, _ in emitted if c is not None]
+    resumes, covers = _zippable(emitted)
     _write_pairing_manifest(emitted, out_dir)
     if do_zip and resumes:
         zip_path = _zip_outputs(out_dir, resumes, covers)

@@ -35,6 +35,7 @@ import pytest
 
 from src.errors import AppError
 from src.services.bulk_ingest_service import (
+    _COULD_NOT_READ_REASON,
     _DEMOTED_COVER_NOTE,
     ApplicantFiles,
     JobManifestRow,
@@ -42,6 +43,7 @@ from src.services.bulk_ingest_service import (
     PairingResult,
     _classify,
     basename_lower,
+    is_cover_named,
     pair_applicants,
     parse_csv_manifest,
     parse_pairing_manifest,
@@ -676,6 +678,47 @@ def test_manifest_leftover_cover_not_named_goes_unattached_when_cover_shaped() -
 
 def test_pairing_result_unattached_defaults_to_empty_list() -> None:
     assert PairingResult().unattached == []
+
+
+# ── is_cover_content tri-state (security audit F3, 2026-09-18) ─────────────
+#
+# ``None`` means "could not even read the file" — distinct from ``False``
+# ("read fine, not a cover letter"). Must NOT fall back to demote/ingest.
+
+
+def test_is_cover_content_none_goes_unattached_with_could_not_read_reason() -> None:
+    result = pair_applicants(
+        [_f("stray_cover_letter.pdf")], is_cover_content=lambda f: None
+    )
+    assert result.pairs == []
+    assert result.unattached == [("stray_cover_letter.pdf", _COULD_NOT_READ_REASON)]
+    assert not any(p.resume[0] == "stray_cover_letter.pdf" for p in result.pairs)
+
+
+def test_is_cover_content_none_is_never_silently_ingested_as_resume() -> None:
+    """Regression guard against the F3 fail-open bug: an unreadable orphan
+    cover-named file must never appear as an ``ApplicantFiles.resume``."""
+    result = pair_applicants(
+        [_f("jane_cover_letter.pdf")], is_cover_content=lambda f: None
+    )
+    assert len(result.pairs) == 0
+    assert len(result.unattached) == 1
+
+
+def test_could_not_read_reason_is_distinct_from_unattached_cover_reason() -> None:
+    assert _COULD_NOT_READ_REASON != _UNATTACHED_COVER_REASON
+
+
+# ── is_cover_named (reviewer finding — narrow public surface for F2) ───────
+
+
+def test_is_cover_named_true_for_cover_suffix() -> None:
+    assert is_cover_named("jane_cover_letter.pdf") is True
+
+
+def test_is_cover_named_false_for_plain_resume() -> None:
+    assert is_cover_named("jane_resume.pdf") is False
+    assert is_cover_named("jane.pdf") is False
 
 
 # ── title_from_filename (FU-3 Slice 4 — bulk JD) ─────────────────────────

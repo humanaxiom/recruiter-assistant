@@ -174,38 +174,56 @@ async def upload_resumes(
             kept.append((name, data))
     expanded = kept
 
-    # An orphaned cover-NAMED file (no matching résumé) must never be
-    # promoted to a résumé when its ACTUAL text reads as a cover letter
-    # (ADR-017 amendment, 2026-09-18). Extracting text needs a thread (sync,
-    # CPU-bound PyMuPDF/python-docx), which a plain callable can't do — so
-    # extract up front for every cover-NAMED file and hand ``pair_applicants``
-    # a sync lookup callable instead.
-    cover_named = [
-        f for f in expanded if bulk_ingest_service._classify(f[0])[0] == "cover"
-    ]
-    cover_text_map: dict[str, str] = {}
-    for cover_name, cover_data in cover_named:
-        text = ""
-        try:
-            cover_mime = resume_service.detect_mime(cover_name, cover_data)
-            extracted = await asyncio.to_thread(extract_text, cover_data, cover_mime)
-            text = extracted.full_text
-        except Exception:
-            text = ""
-        cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = text
-
-    def _is_cover_content(f: tuple[str, bytes]) -> bool:
-        text = cover_text_map.get(bulk_ingest_service.basename_lower(f[0]), "")
-        return combined_export.is_cover_letter_text(text)
-
     # FU-3 Slice 3: an explicit résumé↔cover pairing manifest (its own field).
     # A malformed manifest raises ``ManifestError`` (AppError, 422) → the global
-    # handler renders it before any body is persisted.
+    # handler renders it before any body is persisted. Parsed BEFORE the
+    # provisional pairing pass below (F2), which needs it to find the same
+    # leftover set the real pairing pass will use.
     manifest: dict[str, str | None] | None = None
     if pairing_manifest is not None:
         manifest = bulk_ingest_service.parse_pairing_manifest(
             await pairing_manifest.read()
         )
+
+    # An orphaned cover-NAMED file (no matching résumé) must never be
+    # promoted to a résumé when its ACTUAL text reads as a cover letter
+    # (ADR-017 amendment, 2026-09-18). Extracting text needs a thread (sync,
+    # CPU-bound PyMuPDF/python-docx), which a plain callable can't do.
+    #
+    # Security audit F2 (2026-09-18): extraction must run ONLY on the
+    # leftover cover-named files that actually reach the demotion branch
+    # (no matching résumé) — NOT on every cover-named file, which wastefully
+    # re-parses a cover letter that's about to pair cleanly with its own
+    # résumé anyway. ``leftover_cover_files`` runs a cheap provisional
+    # pairing pass (pure, no I/O) to learn exactly that set; the real
+    # pairing pass below (with the content callable) reuses the identical
+    # leftover set, since both are pure functions of the same
+    # ``expanded``/``manifest``.
+    orphan_covers = bulk_ingest_service.leftover_cover_files(
+        expanded, manifest=manifest
+    )
+
+    # Security audit F3 (2026-09-18): three states, not two. ``None`` in the
+    # map means "could not extract" (encrypted/corrupt/oversized) — this must
+    # NEVER be treated the same as "extracted fine, not cover-shaped" (which
+    # would silently ingest a file nobody could actually verify).
+    cover_text_map: dict[str, str | None] = {}
+    for cover_name, cover_data in orphan_covers:
+        try:
+            cover_mime = resume_service.detect_mime(cover_name, cover_data)
+            extracted = await asyncio.to_thread(extract_text, cover_data, cover_mime)
+            cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = (
+                extracted.full_text
+            )
+        except Exception:
+            cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = None
+
+    def _is_cover_content(f: tuple[str, bytes]) -> bool | None:
+        key = bulk_ingest_service.basename_lower(f[0])
+        text = cover_text_map.get(key, "")
+        if text is None:
+            return None
+        return combined_export.is_cover_letter_text(text)
 
     cover_file: tuple[str, bytes] | None = None
     if cover_letter_file is not None:
