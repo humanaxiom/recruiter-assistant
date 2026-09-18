@@ -600,6 +600,14 @@ class _CombineInput(Generic[_E]):
     # whose manager typed nothing would silently lose the 10% this weight
     # carries, for a question nobody asked.
     manager_prompt: float | None = None
+    # Sponsor requirements PR2 slice 3 — the SFU-internal-status uplift
+    # flags, read off resumes.internal_apsa/internal_cupe in stage 2. Applied
+    # AFTER _combine_final (see stage4_combine), never inside it — that
+    # function's docstring's contract is that every MatchWeights term is
+    # multiplied in there, and the uplift is deliberately NOT a MatchWeights
+    # term. Default False so every pre-existing call site stays inert.
+    internal_apsa: bool = False
+    internal_cupe: bool = False
 
 
 @dataclass(frozen=True)
@@ -755,20 +763,66 @@ def _combine_final(
     )
 
 
+# Sponsor requirements PR2 slice 3 — kept equal to ``Settings
+# .match_internal_uplift``'s own default; see that field's docstring for why
+# this is a hiring-policy number, not an engineering one.
+_DEFAULT_INTERNAL_UPLIFT = 0.05
+
+
+def _apply_internal_uplift(
+    final: float,
+    *,
+    internal_apsa: bool,
+    internal_cupe: bool,
+    internal_uplift_amount: float,
+) -> tuple[float, float]:
+    """Apply the bounded, disclosed SFU-internal-status uplift AFTER
+    ``_combine_final``'s blend, never inside it — that function's own
+    docstring's contract ("every weight MatchWeights declares is multiplied
+    in here") holds only if this term never enters it, because the uplift is
+    deliberately NOT a ``MatchWeights`` field (see ``PipelineMeta
+    .internal_uplift_amount``'s docstring for the defect that constraint
+    prevents).
+
+    Either flag alone earns the uplift; both together do not double it — the
+    real Taleo roster carries rows with both APSA and CUPE set. Clamped to
+    1.0 so a near-perfect candidate cannot overshoot.
+
+    Returns ``(new_final, applied)`` — ``applied`` is the bonus this
+    candidate ACTUALLY received (post-clamp), for
+    ``ScoreBreakdown.internal_uplift_applied``. ``(final, 0.0)`` when neither
+    flag is set, so the feature is inert by construction until a roster
+    actually sets a flag.
+    """
+    if not (internal_apsa or internal_cupe):
+        return final, 0.0
+    clamped = min(1.0, final + internal_uplift_amount)
+    return clamped, clamped - final
+
+
 def stage4_combine(
-    candidates: Iterable[_CombineInput[_E]], weights: MatchWeights
+    candidates: Iterable[_CombineInput[_E]],
+    weights: MatchWeights,
+    *,
+    internal_uplift_amount: float = _DEFAULT_INTERNAL_UPLIFT,
 ) -> list[_CombineEntry[_E]]:
     """Combine structured + evidence into a final score and rank descending."""
     entries: list[_CombineEntry[_E]] = []
     for c in candidates:
         evidence_completeness = _evidence_completeness(c.evidence, weights=weights)
         motivation = _motivation_score(c.evidence, weights=weights)
-        final = _combine_final(
+        base_final = _combine_final(
             structured=c.structured,
             evidence_completeness=evidence_completeness,
             motivation=motivation,
             manager_prompt=c.manager_prompt,
             weights=weights,
+        )
+        final, uplift_applied = _apply_internal_uplift(
+            base_final,
+            internal_apsa=c.internal_apsa,
+            internal_cupe=c.internal_cupe,
+            internal_uplift_amount=internal_uplift_amount,
         )
         # Surface the deterministic motivation sub-score in the breakdown so the
         # cover-letter contribution is auditable (0.0 when no cover letter /
@@ -780,6 +834,9 @@ def stage4_combine(
                 "motivation": motivation,
                 "manager_prompt": c.manager_prompt or 0.0,
                 "manager_prompt_measured": c.manager_prompt is not None,
+                "internal_apsa": c.internal_apsa,
+                "internal_cupe": c.internal_cupe,
+                "internal_uplift_applied": uplift_applied,
             }
         )
         entries.append(

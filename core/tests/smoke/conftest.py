@@ -20,7 +20,6 @@ rather than a bare assertion failure.
 from __future__ import annotations
 
 import os
-import re
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +27,14 @@ from typing import Any
 
 import httpx
 import pytest
+
+from tests.e2e.driver import (
+    CSRF_HEADER,
+    form_for,
+    hidden_value,
+    page_token,
+    withdraw_ids,
+)
 
 FRONTEND = os.environ.get("SMOKE_FRONTEND", "http://frontend:5000")
 FIXTURES = Path(os.environ.get("SMOKE_FIXTURES", "/repo/fixtures"))
@@ -82,9 +89,9 @@ def _preconditions(client: httpx.Client) -> None:
 
 def _page_token(client: httpx.Client, path: str = "/") -> str:
     body = client.get(path).text
-    match = re.search(r'hx-headers=\'\{"X-CSRF-Token": "([^"]+)"\}\'', body)
-    assert match, f"no page CSRF token on {path}"
-    return match.group(1)
+    token = page_token(body)
+    assert token, f"no page CSRF token on {path}"
+    return token
 
 
 def _wait(what: str, probe: Any, timeout: int) -> Any:
@@ -120,7 +127,7 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         },
-        headers={"X-CSRF-Token": token},
+        headers={CSRF_HEADER: token},
     )
     assert extracted.status_code == 200, extracted.text[:300]
     description = extracted.text
@@ -136,7 +143,7 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
             "shortlist_top_percent": "100",
             "csrf_token": token,
         },
-        headers={"X-CSRF-Token": token},
+        headers={CSRF_HEADER: token},
     )
     assert created.status_code == 302, created.text[:300]
     job_id = created.headers["location"].rstrip("/").rsplit("/", 1)[-1]
@@ -159,7 +166,7 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
     opened = client.post(
         f"/jobs/{job_id}/status",
         data={"to": "open", "csrf_token": token},
-        headers={"X-CSRF-Token": token},
+        headers={CSRF_HEADER: token},
     )
     assert opened.status_code in (200, 302), opened.text[:300]
 
@@ -174,7 +181,7 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
         f"/jobs/{job_id}/resumes",
         data={"consent_acknowledged": "true", "csrf_token": token},
         files=[("files", (r.name, r.read_bytes(), "application/pdf")) for r in resumes],
-        headers={"X-CSRF-Token": token},
+        headers={CSRF_HEADER: token},
         timeout=120.0,
     )
     assert uploaded.status_code in (200, 302), uploaded.text[:300]
@@ -187,7 +194,7 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
     )
 
     token = _page_token(client, f"/jobs/{job_id}/shortlist")
-    client.post(f"/jobs/{job_id}/shortlist", headers={"X-CSRF-Token": token})
+    client.post(f"/jobs/{job_id}/shortlist", headers={CSRF_HEADER: token})
     shortlist_html = _wait(
         "the shortlist to be ranked",
         lambda: (
@@ -198,18 +205,21 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
         _RANK_TIMEOUT,
     )
 
-    ids = re.findall(r"/resumes/([0-9a-f-]{36})/withdraw", shortlist_html)
+    ids = withdraw_ids(shortlist_html)
     assert len(ids) >= 3, f"expected 3 ranked candidates, found {len(ids)}"
 
     # Withdraw the top candidate WITH a reason, through the card's own form —
     # this is the state the "left the shortlist", "marked on the job page" and
     # audited-reveal assertions all read. Done here rather than in a test so no
     # assertion depends on another test having run.
-    form = _form_for(shortlist_html, f"/resumes/{ids[0]}/withdraw")
+    form = form_for(shortlist_html, f"/resumes/{ids[0]}/withdraw")
+    assert form, f"no withdraw form found for {ids[0]}"
+    token_value = hidden_value(form, "csrf_token")
+    assert token_value, "no csrf_token hidden input in withdraw form"
     withdrawn = client.post(
         f"/resumes/{ids[0]}/withdraw",
         data={
-            "csrf_token": _hidden_value(form, "csrf_token"),
+            "csrf_token": token_value,
             "context": "shortlist",
             "job_id": job_id,
             "reason": _REASON,
@@ -226,14 +236,3 @@ def ranked_job(client: httpx.Client) -> dict[str, Any]:
         "page_token": _page_token(client, f"/jobs/{job_id}/shortlist"),
         "withdrawal_reason": _REASON,
     }
-
-
-def _form_for(html: str, needle: str) -> str:
-    idx = html.index(needle)
-    return html[html.rindex("<form", 0, idx) : html.index("</form>", idx) + 7]
-
-
-def _hidden_value(form_html: str, name: str) -> str:
-    match = re.search(rf'name="{name}"\s+value="([^"]*)"', form_html)
-    assert match, f"no hidden input named {name}"
-    return match.group(1)

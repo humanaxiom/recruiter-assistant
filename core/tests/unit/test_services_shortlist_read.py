@@ -1043,3 +1043,152 @@ async def test_non_blind_get_one_sets_pii_key_inside_a_transaction(
 
     spy.assert_awaited_once_with(conn)
     conn.transaction.assert_called()
+
+
+# ── internal-uplift disclosure chain, link 4: the score_breakdown -> ────────
+#    ShortlistEntry projection (2026-09-09 merge-blocking review finding) ────
+#
+# ``test_frontend_internal_uplift_chip.py`` built its ``ShortlistEntry``
+# fixtures by setting ``internal_apsa``/``internal_cupe`` DIRECTLY on the
+# constructor while leaving ``score_breakdown`` at its all-False default --
+# a DTO state the real read path can never produce, since ``_row_to_entry``/
+# ``_row_to_blind_entry`` derive both fields FROM the already-parsed
+# ``score_breakdown`` (see ``shortlist_service.py:791-792`` and
+# ``:961-962``). These tests drive the projection from a STORED ROW instead,
+# mirroring this file's own "landmine 1" tests above and the header's
+# governing rule for this branch: "a new term that reaches ``score_final``
+# needs a test that starts from a STORED ROW, not a hand-built input
+# object."
+#
+# REGRESSION PINS, not bug reports: both projection call sites already do
+# this correctly today. Delete either ``raw["internal_apsa"] = raw[
+# "score_breakdown"].internal_apsa`` line and the chip never renders for
+# anyone, forever, silently, green -- which is exactly the gap
+# ``grep -rn match_internal_uplift core/tests/`` (empty, before this file)
+# revealed.
+
+
+def _breakdown_dict_with_internal_flags(
+    *, internal_apsa: bool = False, internal_cupe: bool = False
+) -> dict[str, Any]:
+    return ScoreBreakdown(
+        skill=0.7,
+        experience=0.6,
+        education=0.5,
+        seniority=0.5,
+        vector=0.4,
+        structured=0.6,
+        internal_apsa=internal_apsa,
+        internal_cupe=internal_cupe,
+    ).model_dump()
+
+
+@pytest.mark.asyncio
+async def test_non_blind_entry_projects_internal_apsa_off_the_stored_breakdown() -> (
+    None
+):
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    row = _entry_row(
+        job_id=job_id,
+        score_breakdown=_breakdown_dict_with_internal_flags(internal_apsa=True),
+    )
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    entry = entries[0]
+    assert entry.internal_apsa is True
+    assert entry.internal_cupe is False
+    # The projection must read the STORED value, never a hardcoded default --
+    # the breakdown itself carries the same flag, so the two must agree.
+    assert entry.score_breakdown.internal_apsa is True
+
+
+@pytest.mark.asyncio
+async def test_non_blind_entry_projects_internal_cupe_off_the_stored_breakdown() -> (
+    None
+):
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    row = _entry_row(
+        job_id=job_id,
+        score_breakdown=_breakdown_dict_with_internal_flags(internal_cupe=True),
+    )
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    entry = entries[0]
+    assert entry.internal_cupe is True
+    assert entry.internal_apsa is False
+
+
+@pytest.mark.asyncio
+async def test_non_blind_entry_with_neither_flag_stored_shows_no_uplift() -> None:
+    """The inert case, driven from a stored row rather than assumed: a
+    résumé never touched by a Taleo roster must project both flags False,
+    not merely default False on a DTO nothing populated."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    row = _entry_row(
+        job_id=job_id, score_breakdown=_breakdown_dict_with_internal_flags()
+    )
+    conn = _mock_conn(blind=False, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    entry = entries[0]
+    assert entry.internal_apsa is False
+    assert entry.internal_cupe is False
+
+
+@pytest.mark.asyncio
+async def test_get_one_projects_internal_flags_off_the_stored_breakdown() -> None:
+    """Same guard, proven through ``get_one``'s own row-to-model path -- a
+    separate code path from ``list_for_job`` in most implementations, exactly
+    like this file's own fold-safety tests above."""
+    from src.services.shortlist_service import get_one
+
+    entry_id = uuid4()
+    row = _entry_row(
+        job_id=uuid4(),
+        entry_id=entry_id,
+        score_breakdown=_breakdown_dict_with_internal_flags(
+            internal_apsa=True, internal_cupe=True
+        ),
+    )
+    conn = _mock_conn(blind=False, row=row)
+
+    entry = await get_one(conn, entry_id)
+
+    assert entry.internal_apsa is True
+    assert entry.internal_cupe is True
+
+
+@pytest.mark.asyncio
+async def test_blind_entry_also_projects_internal_flags_off_the_stored_breakdown() -> (
+    None
+):
+    """``_row_to_blind_entry`` is a SEPARATE function from ``_row_to_entry``
+    (see ``shortlist_service.py:961-962``) -- the non-blind proof above does
+    not cover it. A blinded card must disclose the uplift chip too; blind
+    review masks IDENTITY, not this rank-time folded fact."""
+    from src.services.shortlist_service import list_for_job
+
+    job_id = uuid4()
+    row = _blind_entry_row(
+        job_id=job_id,
+        score_breakdown=_breakdown_dict_with_internal_flags(internal_apsa=True),
+    )
+    conn = _mock_conn(blind=True, rows=[row])
+
+    entries = await list_for_job(conn, job_id=job_id)
+
+    entry = entries[0]
+    assert entry.blinded is True
+    assert entry.internal_apsa is True
+    assert entry.internal_cupe is False

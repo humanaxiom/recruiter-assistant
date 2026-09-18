@@ -1006,3 +1006,69 @@ async def test_load_job_view_drops_non_string_and_blank_field_entries(
 
     assert job is not None
     assert job.education_fields == ("Computer Science",)
+
+
+# ── the internal-status columns actually reach the combine ───────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("apsa", "cupe"),
+    [(True, False), (False, True), (True, True), (False, False)],
+)
+async def test_internal_status_columns_reach_stage2_from_a_real_row(
+    pg_pool: asyncpg.Pool, neo4j_driver: AsyncDriver, apsa: bool, cupe: bool
+) -> None:
+    """A row's ``internal_apsa``/``internal_cupe`` must survive the widened
+    ``SELECT`` into ``Stage2Candidate``.
+
+    **This is the one test that can catch the defect this feature is most
+    likely to ship.** Every unit test of the uplift constructs
+    ``_CombineInput(internal_apsa=True)`` BY HAND, so they prove the
+    arithmetic and nothing about the plumbing. The read at
+    ``_stage2_per_candidate`` uses ``parsed_row.get("internal_apsa")``, so a
+    renamed column, a typo, or a dropped field in the ``SELECT`` yields
+    ``False`` for EVERY candidate — the uplift silently applies to nobody,
+    every unit test still passes, and the failure is invisible to
+    ``ranking-evals`` because uniform non-application reorders no one.
+
+    That is exactly how ``manager_prompt`` shipped declared, validated,
+    surfaced and multiplied in by nothing, leaving every score 10% low behind
+    a green suite (HANDOFF lesson 2). The general rule it earned: a new term
+    needs a test that starts from a real stored row, not from a hand-built
+    input object.
+
+    The ``(False, False)`` case is not filler — it pins that a non-internal
+    row reads back as ``False`` rather than picking up a default from a
+    mis-wired read.
+    """
+    job_id = await _insert_job(pg_pool, required_skills=[])
+    resume_id = await _insert_resume(
+        pg_pool,
+        job_id,
+        parsed={"total_years_experience": 5, "education": [], "experience": []},
+    )
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE resumes SET internal_apsa = $2, internal_cupe = $3 "
+            "WHERE id = $1",
+            resume_id,
+            apsa,
+            cupe,
+        )
+        job = await load_job_view(conn, job_id)
+    assert job is not None
+
+    async with pg_pool.acquire() as conn:
+        ctx = _ctx(conn, neo4j_driver)
+        candidate = Stage1Candidate(resume_id=resume_id, vec_score=1.0)
+        result = await _stage2_per_candidate(ctx, job, candidate, 1.0, DEFAULT_WEIGHTS)
+
+    assert result.internal_apsa is apsa, (
+        "internal_apsa did not survive the SELECT into Stage2Candidate -- the "
+        "uplift would silently apply to nobody"
+    )
+    assert result.internal_cupe is cupe, (
+        "internal_cupe did not survive the SELECT into Stage2Candidate -- the "
+        "uplift would silently apply to nobody"
+    )

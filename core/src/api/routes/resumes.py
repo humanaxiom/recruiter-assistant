@@ -55,6 +55,7 @@ from src.schemas.resumes import (
 from src.services import (
     audit_service,
     bulk_ingest_service,
+    candidate_roster_service,
     resume_service,
     # FU-5 slice 8 (ADR-019 §6): no longer CALLED from this module — the
     # reveal route now writes `audit_log` via `audit_service` instead. KEPT
@@ -224,6 +225,43 @@ async def upload_resumes(
             await arq.enqueue_job("parse_resume", str(r.resume_id))
 
     return results
+
+
+@router.post(
+    "/jobs/{job_id}/candidate-roster",
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
+)
+async def upload_candidate_roster(
+    job_id: UUID,
+    db: Db,
+    user: Annotated[User | None, Depends(resolve_user)],
+    file: Annotated[UploadFile, File()],
+) -> candidate_roster_service.RosterReconciliationReport:
+    """Reconcile a Taleo "All Candidates" export against this job's résumés
+    (Sponsor Requirements PR2 slice 2).
+
+    Same writer/session-role gate as ``upload_resumes`` — a roster import is
+    a batch of the same kind of write (audited screening declarations
+    against real people), not a read. Size-capped by
+    ``bulk_ingest_service.parse_candidate_csv``'s own
+    ``_MAX_MANIFEST_BYTES`` guard, which raises ``ManifestError`` (422)
+    before any résumé is touched — the same trust boundary every other CSV
+    import in this module reuses, rather than a second bare literal here.
+    """
+    blob = await file.read()
+    rows = bulk_ingest_service.parse_candidate_csv(blob)
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    return await candidate_roster_service.reconcile_candidate_roster(
+        db,
+        job_id,
+        rows,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+    )
 
 
 @router.get("/jobs/{job_id}/resumes")

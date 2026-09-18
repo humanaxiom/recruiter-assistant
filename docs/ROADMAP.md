@@ -46,6 +46,37 @@ interesting card on the menu.
 
 # Open work
 
+> ## ⏸ 0. PAUSED — throughput is a hardware ceiling (user decision, 2026-09-09)
+>
+> **Feature work is paused pending datacenter hardware.** Shown that a
+> 315-candidate requisition needs ~11 hours of parsing, the user's call was:
+> *"this is not very good. a human can rank those at a fraction of the time. so
+> maybe we are not ready to proceed until the data center hardware is ready."*
+>
+> **The arithmetic supports it.** One résumé parse is 2–3 SEQUENTIAL LLM calls
+> (`resume_core_v1`, `resume_skills_v2`, `cover_letter_v1` when present), so
+> `max_jobs=4` puts up to **twelve concurrent requests on one GPU** serving a
+> 20B model — relocating the queue into Ollama rather than raising throughput.
+> Against the profile's ~35s uncontended call, the floor for 75 résumés is
+> ≈1.8 h; observed ≈2.5 h. **Within ~1.4× of the floor**, so tuning is worth
+> ~30%, not 10×. Measured with gb10 verified free of foreign workload.
+>
+> **Do not spend a session optimising the queue against this ceiling**, and
+> specifically do not raise `max_jobs` — §"Never diagnose the model on a
+> contended peer" and `HANDOFF.md` lesson 7 both apply. A step change needs
+> more or faster GPUs, a smaller model, or fewer calls per résumé.
+>
+> **The comparison that actually matters is not wall-clock.** 11 machine-hours
+> cost ~0 human attention; a recruiter screening 315 résumés at two minutes
+> each spends ~10.5 of their own. On cost the tool already wins. The damage is
+> **iteration latency** — a wrong JD or manager prompt is discovered tomorrow.
+> That is what better hardware genuinely buys, and it is the argument to make
+> to the infra team.
+>
+> **In parallel:** the user is reviewing `feat/candidate-roster-csv` with Codex
+> and talking to the infra team. Next session starts from those two inputs, not
+> from this menu.
+
 Ordered. Items 1–2 are what a live deployment now demands; 3–5 are carried
 engineering residuals that the pilot has made either more or less urgent.
 
@@ -95,16 +126,24 @@ There are no backups and no restore drill.
 
 ## 2. Capture what the four users hit
 
-There is currently **no channel from a pilot user's confusion back into this
-repo** except someone reporting it in conversation. Every defect the pilot has
-produced so far arrived that way, and each was worth more than a week of
-inspection: 20 dead jobs, a withdraw form that collected no reason, hashed skill
-labels where words belonged.
+✅ **DONE 2026-09-09** — [docs/pilot-feedback.md](pilot-feedback.md) exists,
+newest-first, with the DTO's bundle request recorded verbatim and the three
+2026-09-09 reports that #104 closed. **It earned its keep immediately**: the
+DTO's report is what produced the roster feature, and the file is now where
+four measured findings live that no test could have produced (the
+parse-ordering dependency, the ~29 résumés/hour ceiling, the full-export vs
+subset asymmetry, and the Windows-1252 JD encoding).
 
-The cheapest version is a file, not a feature: a `docs/pilot-feedback.md` that
-each report lands in verbatim, dated, with who hit it. Promote from there. Do
-this before building anything on the menu below — it is what tells you which card
-to pick.
+⚠️ **It carries a standing PII warning at the top, and that warning was
+earned.** Real candidate details were committed to that file by the session
+that created it — while documenting PII hygiene. Caught before push, history
+rewritten. **Read the warning before adding an entry**: describe the defect,
+never the person, and redact identifiers out of a quoted user report.
+
+The original reasoning, kept because it still holds: every defect the pilot has
+produced arrived by someone mentioning it in conversation, and each was worth
+more than a week of inspection — 20 dead jobs, a withdraw form that collected
+no reason, hashed skill labels where words belonged.
 
 ## 3. The remaining 45.2% of a real posting
 
@@ -181,8 +220,26 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - **No `POST /resumes/{id}/reparse` route** — a degraded résumé cannot be recovered without re-upload. The JD side has one; the résumé side does not.
 - `resume_parse_max_tries` has no upper sanity cap.
 - **FU-7 decision 1 — LLM provider failover chain.** Genuinely useful now: a second Ollama host would let an `aria-gb10` outage fail *over* rather than fail *closed*.
+- **A second "Generate" while a run is in progress is dropped with no acknowledgement** (measured 2026-09-17, e2e run). The worker discards it as `already_running` — find that return in the shortlist task in `core/src/worker/`. Recommended fix: remember that a re-run was requested and run it when the current one ends.
+- **A credential suffix after a name defeats the roster match** ("First Last, CSM" vs. Taleo's "Last, First" with no email) — `core/src/services/candidate_roster_service.py`, `_normalize_name`. Pinned as an expected failure in `core/tests/unit/test_stress_roster.py`.
+- **The entry-detail ("Why this rank?") page is unreachable by link** — `core/frontend/app.py`, `shortlist_entry_detail`. It renders when addressed directly; no card or export carries its address.
+- **No screen assigns a requisition to a hiring manager** — `core/src/api/routes/job_assignees.py` has the route; nothing in the frontend calls it. A hiring manager who signs in today sees an empty job list.
+- **A JD that parses to zero requirements has no in-UI recovery.** The warning says re-parse or replace the JD; the Re-parse button appears only after a failed parse, and the description is not editable. Today's only path is creating the job again from the right document.
+- **`stub_llm` reads `request.json()` with no model validation** (measured 2026-09-17, stress build). Fine for its purpose — a throwaway load-test double — but worth knowing if it is ever reused for anything that matters. Recorded only, not a defect in the product.
+- **Every export is anonymised, including on non-blind jobs** (design, not a bug): names become "Candidate A", email and phone are blank, regardless of the job's blind-review setting.
 
 **Privacy / access**
+- **TLS cutover (2026-09-15) creates three residuals** — see
+  [docs/deploy/sfuai-ca.md](deploy/sfuai-ca.md) for the full topology:
+  - Any SFU CAS user can authenticate; a first login by anyone other than the
+    default admin creates an unbounded `users` row (NetID only, role `NULL`).
+  - `:29500`/`:29800` stay published on `0.0.0.0` for `host.docker.internal` to
+    reach them, so the API's `/docs` is reachable on the LAN port. (As of
+    2026-09-15 the app itself also refuses to serve `/docs` at all when
+    `CAS_ENABLED=true`, independent of this residual.)
+  - `sessions.ip` records the nginx container's address, not the real client
+    IP (uvicorn deliberately not given `--proxy-headers`, to avoid trusting
+    `X-Forwarded-For` from a LAN peer that can reach `:29800` directly).
 - **🔴 GitHub Support PII purge — still open, ~15 minutes of someone's time.** Real candidate résumés remain fetchable by SHA on a public repo. Deleting the branch did **not** stop GitHub serving them (tested, not assumed). Both `humanaxiom/` and `sfu-aria/` are public. This is the oldest unactioned item in the file and the only one with a live external exposure.
 - The shortlist card's quick withdraw still collects no reason (`shortlist_cards.html:151-158`) — deliberate: a text input on every card is poor UX. Consequence: those withdrawals record `None`, so the audited reveal has nothing to offer for them. **Revisit if pilot users withdraw mostly from cards** — now checkable.
 - Reveals are not rate-limited. The audit trail *is* the control (option C records access rather than preventing it), but nothing alerts on the pattern.

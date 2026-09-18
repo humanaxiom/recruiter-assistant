@@ -45,9 +45,9 @@ jobs:
           cache: pip
           cache-dependency-path: core/requirements*.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: ruff check src tests frontend scripts
-      - run: black --check src tests frontend scripts
-      - run: mypy src frontend scripts --strict
+      - run: ruff check src tests frontend scripts stub_llm
+      - run: black --check src tests frontend scripts stub_llm
+      - run: mypy src frontend scripts stub_llm tests/e2e --strict
 
   # ─── Gates 4 & 6: Unit tests + Coverage ─────────────────────────────────
   unit:

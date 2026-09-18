@@ -6,73 +6,77 @@ record: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
-## 🟢 2026-09-15 — the zero-requirements ranking defect is fixed (`fix/zero-requirements-rank-guard`)
+## ▶ START HERE — the site is LIVE; this branch carries a guide, a findings doc, and an isolated stress stack
 
-**The user-reported defect of 2026-09-10** — *"Resume short listing was
-generated against the additional hiring manager input, and 0 against the
-JD?!!"* — a job whose JD parse yielded zero required AND zero nice-to-have
-skills ranked 50 real people with the manager prompt (weight 0.10) as 100% of
-the signal, disclosed nowhere. It is the mirror of ADR-017 decision 1 on the
-JD side, and ADR-017 is amended in place (no new ADR).
+**Resumed 2026-09-15**, superseding the 2026-09-09 pause: the zero-requirements
+guard shipped (PR #105, merged), and the site went live at
+**https://sfuai.ca:8000** with CAS on (PR #106, open). **On 2026-09-17 the user
+asked for three more things before sharing the product with the DTO**: a
+manager's guide, an end-to-end run of it, and a multi-user stress build. All
+three are on this branch, `feat/e2e-stress-build`.
 
-What shipped, three commits (red → green → refactor), `verify.sh all` green
-after each:
+**What's on this branch:**
+- [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,
+  derived from the deployed code, with "Be aware" boxes for gaps.
+- [docs/guides/e2e-findings-2026-09-17.md](docs/guides/e2e-findings-2026-09-17.md) —
+  the guide driven step by step against an **isolated** copy of the product
+  (`docker compose -p recruiter-stress`, 28xxx ports, CAS off, its own
+  Postgres/Neo4j/blob volumes, the real `gpt-oss:20b`). **The live site was
+  never touched** — CAS on means every write needs a real SFU login, which a
+  script cannot do.
+- `scripts/e2e.sh` (one user, whole guide, real model, isolated stack) and
+  `scripts/stress.sh` (N concurrent users, `STRESS_LLM=stub` by default,
+  `STRESS_LLM=real` requires explicit confirmation and is capped at 30
+  résumés/run).
+- A first-boot Neo4j bootstrap retry fix — on an empty graph, the API and
+  worker raced to create schema and the API exited; the pilot box never hit
+  this because its graph predates the race. Any fresh box for the DTO would
+  have.
 
-- **API refuses:** `shortlist_service.assert_job_has_requirements` runs
-  BEFORE `set_shortlist_ranking` in `POST /jobs/{id}/shortlist` → `409
-  resource.conflict`, so a refused job never pins `shortlist_state='ranking'`.
-  Counted over the JSONB with a `jsonb_typeof` guard, so a never-parsed JD, a
-  blob missing the keys and a JSON `null` all refuse rather than 500. A
-  nonexistent job keeps its pre-existing 202. Zero-AND-zero, not
-  zero-required: nice-to-have alone is still a signal. **The manager's
-  additional requirements alone are deliberately not enough** — ranking on
-  them alone was the complaint.
-- **Screens disclose:** Generate disabled with the reason; a banner over an
-  already-ranked shortlist for every role; the job page's parse status warns;
-  a 409 re-renders the cards fragment with the API's `message` and stops
-  polling. Signal is DERIVED from `description_parsed`, not a new column —
-  `failure_reason` is nulled by every successful parse and drives the poll
-  and the Re-parse button.
-- **Worker logs** `parse_job.zero_requirements` at WARNING the moment the
-  counts are known.
+**Results, this session:**
+- `smoke.sh` on the isolated stack, real model: **10 of 10 passed, 901s**.
+- `scripts/stress.sh USERS=3 RESUMES_PER_USER=3` (stub model): **PASS — 3
+  users × 16 steps, 48 samples, 0 errors, 0 timeouts**.
+- `scripts/e2e.sh` (one user, real model): **PASS — smoke 10 of 10 in 1046 s, then all 16 driver steps with 0 errors and 0 timeouts (JD parse 265 s, three résumés plus a cover letter 660 s, ranking 215 s); doctor reports only the CAS-off state, which is the isolated stack's design** (to be
+  filled in when that run completes/is re-run).
 
-**Driven by hand against the running stack (CAS off), 2026-09-15:**
+**What the DTO must do by hand** (not scriptable — real CAS only; see the
+findings doc's "What only you can check"):
+- Sign in with SFU CAS from **outside the LAN**; confirm a first-time
+  colleague lands on pending-access and can be granted a role from the admin
+  screen.
+- Make one real write (a declaration or a withdraw) on the live site and
+  confirm it does not 403 behind the proxy.
+- Know that a hiring manager's view is empty today (no assignment screen —
+  see below) until either that's built or an assignment is made via the API.
 
-- The pilot's own zero-requirements job (`57ab5151…`, 50 entries, 72 parsed
-  résumés): shortlist page 200 with the `jd-no-requirements` banner, the
-  button rendered `disabled title="This job description has no requirements
-  to rank against"`, zero `hx-trigger` polls, zero "Generating"; job page
-  200 with `jd-no-requirements-warning` and **no** Re-parse button.
-- Browser POST Generate with a page token → 200 fragment carrying the API's
-  message, no raw dict, no poll, no "Generate again". The API's own client
-  from inside the frontend container → `Conflict` with
-  `{'code': 'resource.conflict', 'message': 'job … has no required or
-  nice-to-have skills to rank against', 'job_id': …}`. Afterwards
-  `shortlist_state` and `shortlist_state_at` both still NULL, 50 entries
-  untouched.
-- The healthy draft built from `JD.pdf` (18 required): 19 pills, no warning.
-- **The parse-time path, live:** a job created from a title-bearing blurb
-  with no qualifications parsed to `req=0 nice=0`, `failure_reason` NULL, the
-  fragment rendered the warning, and the worker logged
-  `parse_job.zero_requirements job_id=69e1ae82…`. (A blurb with no title at
-  all fails on `title: string_too_short` instead — the pre-existing path.)
-  Both drive jobs deleted from Postgres and Neo4j afterwards.
-- `doctor.sh`: two findings — `deploy.auth_disabled` (the CAS-off decision,
-  intended) and **`neo4j.unprojected_jobs` for the zero-requirements job
-  itself**: no skills → no `REQUIRES` edges, and the remedy text ("re-parse,
-  check the outbox drainer") misdiagnoses it. Recorded in ROADMAP §5.
-- `smoke.sh`: 10 passed in 693s on the merged checkout (§4 has the two failed runs and why).
+**Next candidate fixes, in priority order** (from the findings doc, none done
+yet on this branch):
+1. A second "Generate" while a run is in progress is silently dropped
+   (`already_running`). Recommended fix: remember a re-run was requested and
+   run it when the current one ends.
+2. No screen assigns a requisition to a hiring manager — the API supports it,
+   the UI does not.
+3. The "Why this rank?" entry-detail page exists but nothing links to it.
+4. A credential suffix after a name ("First Last, CSM") defeats the roster
+   name match when the row has no email.
+5. A JD that parses to zero requirements has no in-UI recovery path (no
+   description editor, no on-demand re-parse for a clean draft).
 
-**Recorded, not fixed:** an auditor's shortlist page view now also writes a
-`read_job` audit row (the page fetches the job to decide the banner);
-`doctor.py`'s unprojected-jobs remedy text.
+**Standing rules that changed or newly apply:**
+- **The stack serves the working tree, not an image.** Never `git checkout`
+  while a stack (smoke/stress/e2e/hand-drive) is running against it — use a
+  separate worktree, exactly as this task did.
+- **Scripted `e2e.sh`/`stress.sh` never target the live site** — isolated
+  stack only, CAS off, own volumes/ports.
+- **Stress in real-LLM mode is capped at 30 résumés/run** and needs explicit
+  confirmation — it spends the shared GPU's time, which pilot users need.
 
-**Two branches, one order.** This fix branched off `main`, not off
-`feat/candidate-roster-csv` (still unpushed, still awaiting the user's Codex
-review). `docs/pilot-feedback.md` exists only on the roster branch; its
-status line and its START-HERE block were flipped there in a docs-only
-commit. When the roster branch is next synced with `main`, ADR-017 conflicts
-on two appended amendments — keep both, in date order.
+**The roster branch is unchanged and still unpushed.** `feat/candidate-roster-csv`
+is `main` + the proxy/TLS work; this e2e/stress branch is not merged into it yet. Still pending the
+user's own review before push — see §3 below for what it carries; the
+roster-specific "must not rediscover" points there are still true and are not
+repeated here.
 
 ---
 
@@ -95,10 +99,22 @@ this repository gold-plating itself.
 ### 2. Do this first — the pilot box is not this box
 
 Everything in `docs/ROADMAP.md` §"Where things stand" describes the *product*.
-**Recorded 2026-09-09: this box IS the pilot box.** The 28 jobs, the 35
-résumés, the DTO's own ranked job and the director demo all live on the stack
-at `:29500`/`:29800` on this machine, booted from this checkout's `.env` plus
-the untracked override below. It was rebuilt from the branch head on
+**Recorded 2026-09-09: this box IS the pilot box.** It runs at
+`:29500`/`:29800` on this machine, booted from this checkout's `.env` plus the
+untracked override below.
+
+> ⚠️ **The pilot data was WIPED on 2026-09-09 at the user's explicit request**
+> ("the pilot data can be wiped clean"), to load the DTO's bundle onto a clean
+> box. Removed: 29 jobs, 48 résumés, 32 shortlist entries, 88 outbox rows and
+> 52 blobs — including the DTO's own ranked job and the director-demo job that
+> earlier entries in this file describe as live. **Those are gone; do not go
+> looking for them.** `users` and `audit_log` were KEPT, which is a deliberate
+> asymmetry worth knowing: the audit log still references candidates whose data
+> no longer exists. The user was told and did not ask for it to be purged.
+>
+> What is on the box now: the **Business Analyst** requisition from the DTO's
+> bundle, with the manager's prompt attached, 75 résumés, and the 315-row
+> roster reconciled onto them. It was rebuilt from the branch head on
 2026-09-09 (three times that day, each after a gate), `doctor.sh` has run
 against it after every deploy, and the one finding it reports is the CAS-off
 decision. `FLASK_SECRET_KEY` is no longer committed anywhere; the quickstart
@@ -109,16 +125,115 @@ The local dev stack is still up on `:29500` UI · `:29800` API · `:29432` pg ·
 stale `CAS_SERVICE_BASE_URL=http://localhost:8000`; the correct values are in
 `.env.example` (`:29800` API, `:29500` frontend, `LLM_TIMEOUT_S=900`).
 
-**CAS is OFF on this box as of 2026-09-09**, at the user's request — *"this is
-still a dev/test box… we'll switch it on when users start playing around with
-it next week."* It is off via an untracked, gitignored
-`docker-compose.override.yml`, which also carries the `LLM_TIMEOUT_S` correction
-below. **Delete that file before anyone real touches the box**: with CAS off
-every visitor is an anonymous admin, including on the audit-log viewer.
-`doctor.sh` fails with `deploy.auth_disabled` for exactly as long as it is
-there, which is the intended nag — do not silence it.
+**CAS is ON as of 2026-09-15.** The box is now served at
+`https://sfuai.ca:8000` through a second, non-git compose project
+(`C:\repos\web`, container `sfuai-web`, nginx) that terminates TLS with a
+Let's Encrypt cert and reverse-proxies `/auth/cas/` to the API (`:29800`) and
+everything else to the frontend (`:29500`); `:8000` rather than `:443` because
+the router only forwards a public TCP port range to this box, and 443 isn't
+in it. The untracked `docker-compose.override.yml` that forced CAS off is
+retired (moved to the scratchpad). Full runbook — topology, exact nginx
+config, `.env` keys, cutover and revert steps, residuals — is
+[docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md).
 
-### 3. The sponsor picked the next feature — and it is none of the three cards
+**Same day, a debugger exposure was found and closed.** A forged `Host`
+header could reach the Werkzeug interactive debugger through the proxy. Fixed
+same-day with `--no-debugger` on the frontend (load-bearing) plus a
+default-deny `444` catch-all in nginx for any request whose Host/SNI isn't
+`sfuai.ca` (a second, independent layer — Host injection, not the debugger
+itself). `FLASK_SECRET_KEY` and the four `API_KEY_*` values were rotated the
+same day (2026-09-15) as a precaution; rotating `FLASK_SECRET_KEY` logs
+everyone out.
+
+**`smoke.sh` can no longer run on this box** — it requires CAS off and fails
+rather than skips when CAS is on. The obligation is now `doctor.sh` (run
+after every deploy; the `deploy.auth_disabled` finding should be gone) plus a
+by-hand drive **from off the LAN** (hairpin NAT blocks an on-LAN client from
+reaching the public IP): CAS login as a real principal, land on the jobs
+list, one real write that does not 403. That off-LAN drive has not yet been
+run and is owed before this state is trusted.
+
+### 3. IN FLIGHT — the candidate roster CSV (`feat/candidate-roster-csv`)
+
+**The DTO delivered a real Taleo bundle on 2026-09-09** and confirmed *"this is
+sample data, so BA is NOT the only job"* — so this is a general capability, not
+one requisition. 16 commits, gates green, **not pushed**. Full report:
+[docs/pilot-feedback.md](docs/pilot-feedback.md).
+
+**Delivered:** `parse_candidate_csv` + reconciliation (email-hash → normalised
+name, both refusing ambiguity rather than guessing), `resumes.internal_apsa`/
+`internal_cupe`, `set_internal_status`, `POST /jobs/{id}/candidate-roster`, a
++0.05 disclosed uplift for SFU-internal candidates, the card chip, the upload
+form, ADR-047 + amendments to ADR-009/ADR-017, and two splitter fixes.
+
+**Verified on the live box, not only in tests:** 75 résumés uploaded, and
+**every parsed résumé matched its roster row — 39 of 39 at last count, 100%.**
+One real candidate is both APSA and CUPE internal; one real candidate is
+`not_eligible` **and** CUPE-internal, which is the two mechanisms in tension on
+a real person — the band wins, the uplift cannot resurrect them, both facts
+disclosed. No fixture would have produced that case.
+
+**Four things a future session must not rediscover:**
+
+1. **The workflow is Upload → Parse → ROSTER → Rank.** `candidate_email_hash`
+   and `candidate_name` are NULL until the parse extracts them, and they are
+   the only two reconciliation keys. A roster uploaded before parsing finishes
+   matches **0 of 315** and says nothing about why. Recorded, not fixed.
+2. **Parsing runs ~29 résumés/hour** (batches of 4, ~8 min each, measured).
+   75 résumés ≈ 2.5 h; a full 315-candidate requisition ≈ **11 hours**.
+   **This is a HARDWARE bound and the arithmetic says so.** One parse is 2–3
+   SEQUENTIAL LLM calls (`resume_core_v1`, `resume_skills_v2`, and
+   `cover_letter_v1` when present), so `max_jobs=4` puts **up to 12 concurrent
+   requests on a single GPU** running a 20B model — which relocates the queue
+   into Ollama rather than raising throughput. Against the profile's ~35s
+   uncontended call, the floor for 75 résumés is ≈1.8 h and we observe ≈2.5 h:
+   **within ~1.4× of the floor.** Tuning buys ~30%, not 10×. A step change
+   needs more/faster GPUs, a smaller model, or fewer calls per résumé.
+   **The user's call, 2026-09-09: pause feature work until the datacenter
+   hardware is ready.** Do not spend sessions optimising the queue against
+   this ceiling.
+   **And the sharp edge of it: "Generate shortlist" QUEUES BEHIND every
+   parse.** arq is FIFO at `max_jobs=4`; with ~1,400 jobs queued the request
+   returns 200, sets `shortlist_state='ranking'`, and then sits for hours. It
+   reproduces the exact pilot complaint of 2026-09-09 ("Generate shortlist has
+   not been producing anything") from an unrelated cause, and the page still
+   says "several minutes". Surfacing the real queue depth is cheap and removes
+   the whole "is it broken?" class; a separate lane for interactive work is
+   the real fix. **Do not just raise `max_jobs`** — lesson 7 applies.
+3. **The CSV is the FULL export; the résumés are a subset.** ~240 unmatched CSV
+   rows are the NORMAL state, forever. The report currently enumerates them,
+   which buries the number that matters: **résumé-side** coverage. Recorded.
+4. **`About This Role.txt` arrived as Windows-1252, not UTF-8.** Uploaded raw it
+   pushes mojibake into the JD text and every screen rendering it. Convert with
+   `iconv -f WINDOWS-1252 -t UTF-8` before ingest.
+
+**Two gate failures worth remembering, because everything was green for both:**
+
+- The roster upload **503'd on first real use** — `pgp_sym_decrypt` with no
+  transaction, so no PII key. 6067 unit tests passed because they mock
+  `pii_service` wholesale, and `reconcile_candidate_roster` had **no
+  integration test at all**. A mock agrees with any transaction state you ask
+  it about.
+- A mutant flipping `if resolved_wa != "unknown":` to `if True:` **survived all
+  6067 unit tests** — a blank CSV cell would overwrite a recruiter's audited
+  screening decision. Both now pinned.
+
+**⚠️ And the one that was self-inflicted:** real candidate PII (a name, a phone
+number, an email) was **committed** to `docs/pilot-feedback.md` and three other
+files while documenting PII hygiene. Caught by the security gate before push.
+History rewritten; verified clean by extracting **all 925 name and email tokens
+from the real roster** and scanning the entire branch diff and every commit
+message against them. **That scan is the only method that worked** — three
+earlier passes using remembered patterns each missed something (a name split
+across a line break, lowercase token forms, a 4-character surname excluded by
+my own length filter). A standing warning now sits at the top of
+`pilot-feedback.md`.
+
+**Remaining, recorded not fixed:** the parse-ordering message; the report's
+CSV-side emphasis; an unbounded `_JOB_RESUMES_SQL` fetch; cover-letter-only
+applicants whose pages are written but excluded from `manifest.json`.
+
+#### What came before — the sponsor set, delivered as PR #104 (merged 2026-09-09)
 
 The DTO/CIO sent a requirements set on 2026-09-02 and answered all four open
 decisions the same day. Plan of record:
@@ -280,14 +395,11 @@ new branch; these are what remains of the first set.)
    reproduce at the real fan-out before raising it, and raise
    `LLM_TIMEOUT_S` with it.
 
-**Two config duties that outrank all four**, both created by a live-ish box and
-neither fixable from an agent session:
-
-- **`.env` still sets `LLM_TIMEOUT_S=120`.** The override masks it; deleting
-  that file re-breaks parsing and ranking. Set `.env` to 838+ properly.
-- **Delete `docker-compose.override.yml` before real users arrive** (stated as
-  "next week" on 2026-09-09). CAS is off through it — every visitor is an
-  anonymous admin, audit-log viewer included.
+**Two config duties that outranked all four — both discharged 2026-09-15.**
+`.env` now sets `LLM_TIMEOUT_S=900` directly (no longer masked by an
+override); `docker-compose.override.yml` is deleted and CAS is on. See
+[docs/deploy/sfuai-ca.md](docs/deploy/sfuai-ca.md) for the cutover that did
+this and §2 above for what it leaves owed (the off-LAN drive).
 
 **Owed and not yet written: two ADRs** from the work-authorization slice — the
 screening decision (it must record *why inference was rejected*) and an ADR-009
@@ -403,10 +515,12 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | `fix/zero-requirements-rank-guard` (this fix, see top) — plus **`feat/candidate-roster-csv`, 21 commits, unpushed, awaiting the user's Codex review**; its own HANDOFF.md is the fuller one for that work |
-| Gates, last local run | `verify.sh all` on the fix branch: 5963 unit @ 91.82%, 609 integration, ALL GATES GREEN; reviewer CHANGES REQUIRED → all applied; security PASS — **re-run, do not cite** |
-| `smoke.sh` | 2026-09-15, on the roster+fix merged checkout: **10 passed in 693s**. Two earlier runs failed for reasons outside this change: a `git checkout` mid-run swapped the served code (§8), then one of three résumés parsed degraded and was rightly not ranked (lesson 9 on the roster branch). Re-run confirmed, not assumed. |
-| PR | [#104](https://github.com/humanaxiom/recruiter-assistant/pull/104), MERGED at the user's request; the fix branch's PR is opened by the same session that wrote this line |
+| Branch in flight | **`feat/candidate-roster-csv`** is now `main` + [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy) + this session's `feat/e2e-stress-build` work (guide, findings, isolated stress stack) — **still not pushed, still awaiting the user's own review** (see START HERE). |
+| Live site | **https://sfuai.ca:8000, CAS on.** [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) (zero-requirements guard) MERGED 2026-09-15. [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy hardening) OPEN. |
+| Pilot box contents | Unchanged since 2026-09-15's cutover — see §2. The isolated stress stack (`-p recruiter-stress`, 28xxx ports) is a **separate**, throwaway copy built for this session's smoke/stress/e2e runs; it does not touch the pilot box's data. |
+| Gates, last local run | `verify.sh all` → 6246 unit @ 92.15% + 630 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |
+| Smoke / stress / e2e (this session, isolated stack) | `smoke.sh`: **10/10 passed, 901s**, real model. `stress.sh USERS=3 RESUMES_PER_USER=3` (stub): **PASS, 48 samples, 0 errors**. `e2e.sh` (one user, real model, whole guide): **PASS — smoke 10 of 10 in 1046 s, then all 16 driver steps with 0 errors and 0 timeouts (JD parse 265 s, three résumés plus a cover letter 660 s, ranking 215 s); doctor reports only the CAS-off state, which is the isolated stack's design**. |
+| ⚠️ Before pushing | The branch history was **rewritten four times** to purge committed candidate PII. A `backup-pre-redact-*` branch still holds the unredacted history — **delete it before any push**, and re-run the 925-token scan in §3 if you rewrite again. |
 | Lint paths | `src tests frontend scripts` in **both** the Makefile and `ci.yml`; a test pins them equal |
 | Verification | `verify.sh` code · `smoke.sh` screen · `doctor.sh` data · `model-check.sh` before a model swap |
 | Postgres | `psql -U app -d recruiter` — there is no `postgres` role |

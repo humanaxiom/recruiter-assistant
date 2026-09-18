@@ -414,6 +414,27 @@ Postgres tables + Neo4j vector indexes are created on API startup — no migrati
 
 `make gates-integration` runs the testcontainers suite (real Postgres + Neo4j) and needs a Docker socket. CI runs `make gates-all`.
 
+### End-to-end and stress
+
+`scripts/e2e.sh` brings up an **isolated** `recruiter-stress` compose project
+(28xxx ports, CAS off, its own volumes — never the developer's normal dev
+stack), waits for the API, runs `scripts/smoke.sh` against it, then a small
+functional-load pass through `python -m tests.e2e.stress` (extract a JD,
+create a job, upload résumés + a cover letter, upload a candidate roster,
+declare a work authorization, rank, withdraw/reinstate, export, download,
+audit), prints the report, and finishes with `scripts/doctor.sh`. Set
+`E2E_LLM=stub` to point the stack at the offline `llmstub` service
+(`docker-compose.stress.yml`, profile `stub`) instead of the real tailnet
+Ollama peer — no candidate data leaves the box in that mode.
+
+`scripts/stress.sh` runs just the load pass against an already-up stress
+stack, with `USERS`/`RESUMES_PER_USER` env knobs (`RESUMES_PER_USER` capped at
+30 — the CSRF one-shot-token budget per shortlist card). It defaults to the
+offline stub model; pointing it at the real GPU peer needs
+`STRESS_LLM=real STRESS_CONFIRM_REAL=1` and caps `USERS*RESUMES_PER_USER`
+at 30. See [docs/guides/managers-guide.md](docs/guides/managers-guide.md) for
+what the workflow looks like end to end.
+
 ---
 
 ## Repository layout

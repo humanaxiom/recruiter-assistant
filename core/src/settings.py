@@ -103,6 +103,21 @@ class Settings(BaseSettings):
     session_idle_refresh_hours: int = 1
     session_cookie_secure: bool = False
     session_cookie_samesite: str = "lax"
+    # fix/serve-behind-tls-proxy — the app is served at https://sfuai.ca
+    # behind an nginx TLS-terminating reverse proxy. Reading a forwarded
+    # header (X-Forwarded-Proto/Host/For) is trusting whoever sent it, so
+    # this defaults OFF: a fresh checkout, CI, and any deployment that has
+    # not explicitly opted in must never let a client-supplied header spoof
+    # our own notion of scheme/host (which `frontend.csrf.same_origin`
+    # reads via `request.host_url`). Only turn this on behind a proxy we
+    # control that SETS (not appends/forwards) X-Forwarded-Proto/Host on
+    # every request it passes through, so a client-sent value can never
+    # survive to reach the app. `proxy_hops` is the number of such proxies
+    # directly in front of this process (nginx alone = 1) — it is passed to
+    # werkzeug's ProxyFix so it trusts exactly that many hops of forwarded
+    # headers and no more.
+    trust_proxy_headers: bool = False
+    proxy_hops: int = Field(default=1, ge=1)
     # ADR-019 §10a — the ratified default-admin CAS allowlist value. A real
     # operational identity, deliberately committed (not PII), env-overridable
     # per deployment.
@@ -261,6 +276,25 @@ class Settings(BaseSettings):
     # 120s timeout converts every one of them into a ReadTimeout regardless of
     # this value. See docs/model-profiles/gpt-oss-20b.json.
     match_evidence_max_tokens: int = 8192
+
+    # Sponsor requirements PR2 slice 3 — the bounded, DISCLOSED SFU-internal-
+    # status uplift ("APSA/CUPE indicate SFU employee gets high marks",
+    # resolved as a bonus inside score_final, not a hard band above every
+    # external candidate). **This is a hiring-policy number, not an
+    # engineering one** — it was set by the user, not measured or tuned here,
+    # against a real spread: ten candidates on a real job scored 19-50 (~31
+    # points of competitive range), and +5 moves someone two to four places
+    # in that range. Do not let a future session "tune" this without HR —
+    # see MatchWeights' own manager_prompt/motivation precedent for why a
+    # hiring-policy decimal belongs on a settings field, ratifiable, and
+    # never a literal at a call site.
+    #
+    # Bounded ge=0/le=0.1: 0 is "feature present but switched off", and 0.1
+    # is a sanity ceiling (a bonus larger than manager_prompt's own weight
+    # would need its own sign-off, not a config typo). Deliberately NOT a
+    # MatchWeights field — see MatchingContext.internal_uplift_amount's own
+    # docstring for the defect that constraint prevents.
+    match_internal_uplift: float = Field(default=0.05, ge=0, le=0.1)
 
     # ── FU-7 (ADR-021 §3): honest résumé parse status ─────────────────────────
     # The arq JOB-layer retry ceiling `parse_resume`'s `LLMUnavailableError`

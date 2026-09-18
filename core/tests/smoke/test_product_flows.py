@@ -41,6 +41,8 @@ from typing import Any
 import httpx
 import pytest
 
+from tests.e2e.driver import form_for, hidden_value
+
 pytestmark = pytest.mark.smoke
 
 
@@ -184,14 +186,12 @@ def test_revealing_a_withheld_reason_returns_the_prose_and_is_audited(
 
 def _form_containing(html: str, needle: str) -> str:
     """The ``<form>...</form>`` whose markup contains ``needle``."""
-    idx = html.index(needle)
-    start = html.rindex("<form", 0, idx)
-    return html[start : html.index("</form>", idx) + 7]
+    form = form_for(html, needle)
+    assert form is not None, f"no form containing {needle!r}"
+    return form
 
 
 def _hidden(form_html: str, name: str) -> str:
-    match = re.search(rf'name="{name}"\s+value="([^"]*)"', form_html) or re.search(
-        rf'value="([^"]*)"\s+name="{name}"', form_html
-    )
-    assert match, f"no hidden input named {name}"
-    return match.group(1)
+    value = hidden_value(form_html, name)
+    assert value is not None, f"no hidden input named {name}"
+    return value

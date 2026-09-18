@@ -352,6 +352,8 @@ _STATEMENTS: tuple[str, ...] = (
         work_authorization   TEXT NOT NULL DEFAULT 'unknown'
                              CHECK (work_authorization IN
                                     ('eligible', 'not_eligible', 'unknown')),
+        internal_apsa        BOOLEAN NOT NULL DEFAULT FALSE,
+        internal_cupe        BOOLEAN NOT NULL DEFAULT FALSE,
         UNIQUE (job_id, sha256)
     )
     """,
@@ -404,6 +406,29 @@ _STATEMENTS: tuple[str, ...] = (
         ON resumes (job_id, work_authorization)
         WHERE work_authorization <> 'unknown'
     """,
+    # SPONSOR — SFU internal-employee status (APSA / CUPE bargaining units),
+    # sourced from the Taleo "All Candidates" roster's "APSA Internal" /
+    # "CUPE Internal" columns (parsed in
+    # ``bulk_ingest_service.parse_candidate_csv``).
+    #
+    # ``NOT NULL DEFAULT FALSE`` — NOT the ``work_authorization`` trap above.
+    # That trap is directional: a NULL coerced to falsy on *eligibility*
+    # produces an ADVERSE decision on a protected ground (banding a real
+    # candidate last because the tool guessed "not eligible" for a state
+    # nobody declared). This column carries no such asymmetry. FALSE on an
+    # unreconciled row is the correct value until a roster says otherwise —
+    # it withholds a scoring BONUS, not a screening verdict — and the
+    # eventual reconciliation write (``resume_service.set_internal_status``)
+    # is the only place that ever flips it to TRUE. A false negative here
+    # costs a candidate a bonus point; it never bands anyone out. Same
+    # already-migrated-volume convention as ``work_authorization`` above:
+    # ``CREATE TABLE IF NOT EXISTS`` is a no-op on the pilot box's existing
+    # volume, so the column also needs a separate idempotent ALTER to reach
+    # any live row.
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS internal_apsa "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS internal_cupe "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
     # How many times `worker.reconcile.reconcile_stalled_parses` has re-queued
     # this row. Nullable with NO default so every pre-existing row reads back as
     # NULL and is COALESCEd to 0 — a row stranded since July gets a full quota
