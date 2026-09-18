@@ -62,7 +62,11 @@ def test_entrypoint_targets_the_isolated_stress_compose_project(name: str) -> No
     if not path.is_file():
         pytest.fail(f"{path} is missing")
     text = path.read_text(encoding="utf-8")
-    assert "-p recruiter-stress" in text, (
+    assert "-p recruiter-stress" in text
+    # The comment banner alone must not satisfy this: the code must name the
+    # project and pass it on every compose call.
+    assert 'PROJECT="recruiter-stress"' in text
+    assert '-p "$PROJECT"' in text, (
         f"{path} must target the isolated `-p recruiter-stress` compose "
         "project, never the default one"
     )

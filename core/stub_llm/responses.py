@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from typing import Any
 
 # A vocabulary shared between the JD and résumé-skills stubs, so a stubbed
@@ -101,17 +102,37 @@ def _manager_prompt(user_prompt: str) -> dict[str, Any]:
 
 _CHUNK_RE = re.compile(
     r"--- chunk (?P<id>\S+) \(section: [^)]*\) ---\n"
-    r"(?P<text>.*?)(?:\n\n|\n--- end ---)",
+    r"(?P<text>.*?)(?:\n\n|\n--- end)",
     re.DOTALL,
 )
 _REQUIREMENT_RE = re.compile(r"^\d+\.\s+(.+)$", re.MULTILINE)
 
 
-def _shortlist_evidence(user_prompt: str) -> dict[str, Any]:
-    chunks = [
+def _all_chunks(user_prompt: str) -> list[tuple[str, str]]:
+    """Every ``--- chunk <id> (section: ...) ---`` block in the prompt, résumé
+    (``c_NNN``) and cover-letter (``cl_NNN``) alike, in document order."""
+    return [
         (m.group("id"), m.group("text").strip())
         for m in _CHUNK_RE.finditer(user_prompt)
     ]
+
+
+def _resume_chunks(user_prompt: str) -> list[tuple[str, str]]:
+    return [
+        (cid, text)
+        for cid, text in _all_chunks(user_prompt)
+        if not cid.startswith("cl_")
+    ]
+
+
+def _cover_letter_chunks(user_prompt: str) -> list[tuple[str, str]]:
+    return [
+        (cid, text) for cid, text in _all_chunks(user_prompt) if cid.startswith("cl_")
+    ]
+
+
+def _shortlist_evidence(user_prompt: str) -> dict[str, Any]:
+    chunks = _resume_chunks(user_prompt)
     requirements_section = user_prompt.split("Requirements:", 1)
     req_texts: list[str] = []
     if len(requirements_section) > 1:
@@ -158,6 +179,34 @@ def _shortlist_evidence(user_prompt: str) -> dict[str, Any]:
     }
 
 
+def _shortlist_evidence_v2(user_prompt: str) -> dict[str, Any]:
+    """v2 adds a COVER LETTER assessment (Feature 1) on top of v1's
+    requirement evidence. The orchestrator loads v2 whenever a candidate has
+    cover-letter chunks (``orchestrator.py``'s ``_stage3_per_candidate``), so
+    an unrouted v2 template 500s every stub-mode candidate that uploaded a
+    cover letter — the whole shortlist then times out fail-closed."""
+    base = _shortlist_evidence(user_prompt)
+    cover_chunks = _cover_letter_chunks(user_prompt)
+    if not cover_chunks:
+        return base
+    cl_id, cl_text = cover_chunks[0]
+    return {
+        **base,
+        "cover_letter_presence": True,
+        "cover_letter_evidence": [
+            {
+                "theme": "motivation",
+                "evidence": cl_text[:40],
+                "evidence_chunk_ids": [cl_id],
+                "confidence": 0.8,
+            }
+        ],
+        "overall_motivation": (
+            "Stub evaluation: cover letter indicates genuine motivation."
+        ),
+    }
+
+
 # The distinguishing first line of each real system template — read verbatim
 # from disk by the pinning test, spelled here as the literal it routes on.
 _JD_FIRST_LINE = (
@@ -178,14 +227,18 @@ _MANAGER_PROMPT_FIRST_LINE = (
 _EVIDENCE_FIRST_LINE = (
     "You evaluate a candidate against a list of job requirements. Return"
 )
+_EVIDENCE_V2_FIRST_LINE = (
+    "You evaluate a candidate against a list of job requirements AND assess their"
+)
 
-_ROUTES: dict[str, Any] = {
+_ROUTES: dict[str, Callable[[str], dict[str, Any]]] = {
     _JD_FIRST_LINE: _jd_extract,
     _RESUME_CORE_FIRST_LINE: _resume_core,
     _RESUME_SKILLS_FIRST_LINE: _resume_skills,
     _COVER_LETTER_FIRST_LINE: _cover_letter,
     _MANAGER_PROMPT_FIRST_LINE: _manager_prompt,
     _EVIDENCE_FIRST_LINE: _shortlist_evidence,
+    _EVIDENCE_V2_FIRST_LINE: _shortlist_evidence_v2,
 }
 
 
@@ -200,7 +253,7 @@ def respond(system_prompt: str, user_prompt: str) -> dict[str, Any]:
         raise ValueError(
             f"unrecognised/unknown system prompt (first line: {first_line!r})"
         )
-    return handler(user_prompt)  # type: ignore[no-any-return]
+    return handler(user_prompt)
 
 
 def embed(texts: list[str], *, dim: int = 768) -> list[list[float]]:

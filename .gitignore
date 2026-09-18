@@ -24,7 +24,12 @@ fixtures/
 docker-compose.override.yml
 compose.override.yml
 
-# Stress/e2e harness output and env — never committed.
+# Stress/e2e harness output and env — never committed. `.env.*` also catches
+# `sed -i.bak`-style backup files (a `.env.bak` carries the same secrets as
+# `.env` and is not gitignored by the plain `.env` rule above) and any
+# `.env.stress`-style variant — `.env.example` is the one intentional
+# exception, since it ships no real secret.
 /report/
 *.roster.csv
-.env.stress
+.env.*
+!.env.example

@@ -146,7 +146,7 @@ def _pick_resumes(user_index: int, k: int) -> list[Path]:
     has a matching ``*_cover_letter.pdf`` sibling."""
     resumes = sorted(FIXTURES.glob("resumes/*_resume.pdf"))
     covers = {
-        p.stem.rsplit("_resume", 1)[0]
+        p.stem.rsplit("_cover_letter", 1)[0]
         for p in FIXTURES.glob("resumes/*_cover_letter.pdf")
     }
     paired = [r for r in resumes if r.stem.rsplit("_resume", 1)[0] in covers]
@@ -195,6 +195,20 @@ async def _check_preconditions(client: httpx.AsyncClient) -> None:
 
 async def _run_user(user_index: int, recorder: Recorder) -> None:
     label = f"U{user_index}"
+
+    # Fixture bytes are read ONCE, up front, off the event loop
+    # (asyncio.to_thread) and OUTSIDE every `_timed` block below — reading a
+    # multi-MB PDF from disk is not part of what "jd_extract"/"resume_upload"
+    # latency is measuring, and doing it inline was skewing both.
+    jd = _pick_jd(user_index)
+    jd_bytes = await asyncio.to_thread(jd.read_bytes)
+
+    k = min(RESUMES_PER_USER, _MAX_RESUMES_PER_USER)
+    resumes = _pick_resumes(user_index, k)
+    cover = _cover_letter_for(resumes[0])
+    resume_bytes = [await asyncio.to_thread(r.read_bytes) for r in resumes]
+    cover_bytes = await asyncio.to_thread(cover.read_bytes) if cover else None
+
     async with httpx.AsyncClient(
         base_url=FRONTEND,
         timeout=120.0,
@@ -203,15 +217,13 @@ async def _run_user(user_index: int, recorder: Recorder) -> None:
     ) as client:
         token = await _timed(recorder, "page_token", _page_token(client))
 
-        jd = _pick_jd(user_index)
-
         async def _extract() -> str:
             resp = await client.post(
                 "/jobs/jd-extract",
                 files={
                     "file": (
                         jd.name,
-                        jd.read_bytes(),
+                        jd_bytes,
                         "application/vnd.openxmlformats-officedocument"
                         ".wordprocessingml.document",
                     )
@@ -266,22 +278,17 @@ async def _run_user(user_index: int, recorder: Recorder) -> None:
 
         await _timed(recorder, "job_open", _open())
 
-        k = min(RESUMES_PER_USER, _MAX_RESUMES_PER_USER)
-        resumes = _pick_resumes(user_index, k)
-        cover = _cover_letter_for(resumes[0])
         upload_token = await _page_token(client, f"/jobs/{job_id}")
 
         async def _upload() -> None:
             files = [
-                ("files", (r.name, r.read_bytes(), "application/pdf")) for r in resumes
+                ("files", (r.name, b, "application/pdf"))
+                for r, b in zip(resumes, resume_bytes, strict=True)
             ]
             data = {"consent_acknowledged": "true", "csrf_token": upload_token}
-            if cover is not None:
+            if cover is not None and cover_bytes is not None:
                 files.append(
-                    (
-                        "cover_letter_file",
-                        (cover.name, cover.read_bytes(), "application/pdf"),
-                    )
+                    ("cover_letter_file", (cover.name, cover_bytes, "application/pdf"))
                 )
             resp = await client.post(
                 f"/jobs/{job_id}/resumes",
@@ -307,12 +314,9 @@ async def _run_user(user_index: int, recorder: Recorder) -> None:
             _wait_async("résumés to parse", _resumes_parsed, RESUME_PARSE_TIMEOUT),
         )
 
-        candidate_names = [
-            m
-            for m in _extract_candidate_names(
-                (await client.get(f"/jobs/{job_id}/resumes-table")).text
-            )
-        ]
+        candidate_names = _extract_candidate_names(
+            (await client.get(f"/jobs/{job_id}/resumes-table")).text
+        )
 
         async def _roster() -> None:
             specs = [
@@ -336,8 +340,13 @@ async def _run_user(user_index: int, recorder: Recorder) -> None:
                 headers={CSRF_HEADER: roster_token},
             )
             if resp.status_code not in (200, 302):
+                # Status code + body LENGTH only — never the body. The
+                # roster CSV this posts carries real candidate names, and an
+                # error path that echoes response text risks echoing one
+                # back into a log a recruiter never asked to be in.
                 raise StepError(
-                    f"candidate-roster -> {resp.status_code}: {resp.text[:200]}"
+                    f"candidate-roster -> {resp.status_code} "
+                    f"(body {len(resp.content)} bytes)"
                 )
 
         await _timed(recorder, "candidate_roster", _roster())
@@ -365,9 +374,8 @@ async def _run_user(user_index: int, recorder: Recorder) -> None:
         ids = withdraw_ids(shortlist_html)
         if not ids:
             raise StepError("no ranked candidates on the shortlist")
-        assert not any(
-            len(cid) == 32 and "-" not in cid for cid in ids
-        ), "raw hex candidate id leaked into the shortlist chip"
+        if any(len(cid) == 32 and "-" not in cid for cid in ids):
+            raise StepError("raw hex candidate id leaked into the shortlist chip")
 
         async def _work_auth() -> None:
             sl_token = page_token(shortlist_html)
@@ -471,6 +479,22 @@ def _extract_candidate_names(resumes_table_html: str) -> list[str]:
     ]
 
 
+def _user_run_errors(results: list[Any]) -> dict[str, int]:
+    """How many virtual users raised outside any ``_timed`` step, keyed for
+    ``summarise()``'s ``errors`` dict.
+
+    Pure and pinned by a unit test (``tests/unit/test_stress_user_errors.py``)
+    precisely because the bug this closes is invisible at the network layer:
+    ``asyncio.gather(..., return_exceptions=True)`` on its own only PRINTS a
+    failed user, it does not fail the run — a user that dies before its
+    first ``_timed`` call (a missing page token, a bad fixture pick) left
+    ``summarise()`` seeing only the steps that DID complete, which reported a
+    clean PASS and exit 0 for a run that never finished at all.
+    """
+    n = sum(1 for r in results if isinstance(r, BaseException))
+    return {"user_run": n} if n else {}
+
+
 async def _main() -> int:
     if RESUMES_PER_USER > _MAX_RESUMES_PER_USER:
         print(
@@ -489,12 +513,16 @@ async def _main() -> int:
     tasks = [_run_user(i, recorder) for i in range(USERS)]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for i, result in enumerate(results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             print(f"U{i} failed: {result!r}", file=sys.stderr)
+
+    errors = dict(recorder.errors)
+    for key, count in _user_run_errors(results).items():
+        errors[key] = errors.get(key, 0) + count
 
     summary = summarise(
         dict(recorder.samples),
-        errors=dict(recorder.errors),
+        errors=errors,
         timeouts=dict(recorder.timeouts),
     )
     await asyncio.to_thread(REPORT_DIR.mkdir, parents=True, exist_ok=True)

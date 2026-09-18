@@ -30,15 +30,15 @@ branch-name:      ## Enforce branch naming (agent|feat|fix|chore)/<slug>
 	@echo "✅ branch name OK"
 
 gates: branch-name  ## Offline gate suite (ruff·black·mypy·unit·coverage·branch)
-	cd core && ruff check src tests frontend scripts
-	cd core && black --check src tests frontend scripts
+	cd core && ruff check src tests frontend scripts stub_llm
+	cd core && black --check src tests frontend scripts stub_llm
 	cd core && mypy src frontend scripts stub_llm tests/e2e --strict
 	cd core && pytest tests/unit \
 		--cov=src --cov=frontend --cov-fail-under=$${COVERAGE_THRESHOLD:-80} --timeout=120 -q
 	@echo "✅ OFFLINE GATES GREEN"
 
 gates-fast:       ## Pre-commit subset (no coverage, no integration)
-	cd core && ruff check src tests frontend scripts && black --check src tests frontend scripts
+	cd core && ruff check src tests frontend scripts stub_llm && black --check src tests frontend scripts stub_llm
 	cd core && mypy src frontend scripts stub_llm tests/e2e --strict
 	cd core && pytest tests/unit -q --timeout=120
 

@@ -11,8 +11,10 @@
 #
 # Generates a stress-only .env on first run (fresh secrets, 28xxx ports, CAS
 # off) if one is not already present. Refuses to start if any of its ports
-# are already bound — this must never collide with a developer's normal
-# `docker compose up` stack.
+# are already bound, AND refuses to start if the checkout's .env is not
+# actually the isolated 28xxx one (e.g. a pilot/dev .env reused by mistake) —
+# this must never collide with, or point at, a developer's or pilot's normal
+# stack.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +22,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # never the default one, so this can never reset a developer's dev stack.
 PROJECT="recruiter-stress"
 ENV_FILE="$REPO_ROOT/.env"
-COMPOSE=(docker compose -f "$REPO_ROOT/docker-compose.yml" -f "$REPO_ROOT/docker-compose.stress.yml" -p "$PROJECT")
 
 E2E_LLM="${E2E_LLM:-real}"
 PROFILE_ARGS=()
@@ -28,10 +29,27 @@ if [[ "$E2E_LLM" == "stub" ]]; then
   PROFILE_ARGS=(--profile stub)
 fi
 
+# Windows/Git Bash: `$REPO_ROOT` (from plain `pwd`) is an MSYS path
+# (`/tmp/...` when the checkout lives under the Windows TEMP dir, `/c/...`
+# elsewhere) that Docker Desktop — and `docker compose -f <path>` itself —
+# resolve wrongly: the runner container sees an empty/wrong directory and
+# `python -m tests.e2e.stress` fails with `No module named 'tests'`. Same fix
+# as scripts/verify.sh: disable MSYS path conversion and use the
+# Windows-native path (`pwd -W`) for EVERY path handed to `docker`/`docker
+# compose` — both `-f <compose file>` and `-v <mount source>` — never the
+# plain `pwd`/`$REPO_ROOT` one. `$REPO_ROOT` itself stays MSYS-native, since
+# bash's own file tests (`-f`, `cat`, `sed`, heredocs) resolve it correctly
+# through the MSYS runtime; only arguments to WINDOWS-NATIVE executables need
+# the `-W` form.
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
   export MSYS_NO_PATHCONV=1
   export MSYS2_ARG_CONV_EXCL='*'
+  WIN_ROOT="$(cd "$REPO_ROOT" && pwd -W 2>/dev/null || echo "$REPO_ROOT")"
+else
+  WIN_ROOT="$REPO_ROOT"
 fi
+
+COMPOSE=(docker compose -f "$WIN_ROOT/docker-compose.yml" -f "$WIN_ROOT/docker-compose.stress.yml" -p "$PROJECT")
 
 _port_free() {
   ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
@@ -86,23 +104,63 @@ TALEO_MAX_PAGES=20
 EOF
 fi
 
-if [[ "$E2E_LLM" == "stub" ]]; then
-  sed -i.bak 's#^LLM_BASE_URL=.*#LLM_BASE_URL=http://llmstub:8000/v1#' "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-fi
+_env_var() {
+  # Read KEY= from the checkout's .env, falling back to $2 if absent/unset.
+  local key="$1" default="$2"
+  if [[ -f "$ENV_FILE" ]]; then
+    local val
+    val="$(grep -E "^${key}=" "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+    if [[ -n "$val" ]]; then
+      printf '%s' "$val"
+      return
+    fi
+  fi
+  printf '%s' "$default"
+}
 
-for port in 28800 28500 28432 28379 28474 28687; do
+# HARD-FAIL unless every port this checkout's .env actually configures is in
+# the isolated 28xxx block. Never inferred/hardcoded — read back from
+# $ENV_FILE, because a pilot/dev .env reused by mistake here would otherwise
+# bring this stack up on the LIVE ports (security finding, 2026-09-17).
+for var in API_PORT FRONTEND_PORT POSTGRES_PORT REDIS_PORT NEO4J_HTTP_PORT NEO4J_BOLT_PORT; do
+  val="$(_env_var "$var" "")"
+  if [[ ! "$val" =~ ^28[0-9]{3}$ ]]; then
+    echo "🔴 e2e: $ENV_FILE's $var=$val is not in the isolated 28000-28999 block." >&2
+    echo "   Refusing to run — this must never be the pilot/dev .env. Delete" >&2
+    echo "   $ENV_FILE and re-run to generate a fresh isolated one." >&2
+    exit 1
+  fi
+done
+
+API_PORT="$(_env_var API_PORT 28800)"
+FRONTEND_PORT="$(_env_var FRONTEND_PORT 28500)"
+POSTGRES_PORT="$(_env_var POSTGRES_PORT 28432)"
+REDIS_PORT="$(_env_var REDIS_PORT 28379)"
+NEO4J_HTTP_PORT="$(_env_var NEO4J_HTTP_PORT 28474)"
+NEO4J_BOLT_PORT="$(_env_var NEO4J_BOLT_PORT 28687)"
+
+for port in "$API_PORT" "$FRONTEND_PORT" "$POSTGRES_PORT" "$REDIS_PORT" "$NEO4J_HTTP_PORT" "$NEO4J_BOLT_PORT" 28900; do
   if ! _port_free "$port"; then
     echo "🔴 e2e: port $port is already in use — stop whatever owns it first" >&2
     exit 1
   fi
 done
 
+# Stub mode overrides LLM_BASE_URL as PROCESS ENV on the compose invocation
+# only (shell env wins over .env for compose variable interpolation) — NEVER
+# by editing .env in place. Editing .env was the earlier defect here: run
+# against the pilot checkout, stub mode would point the LIVE stack at a
+# nonexistent llmstub host with no way back short of hand-editing the file.
 echo "▶ e2e: docker compose -p $PROJECT up -d --build (LLM mode: $E2E_LLM)"
-"${COMPOSE[@]}" "${PROFILE_ARGS[@]}" up -d --build
+if [[ "$E2E_LLM" == "stub" ]]; then
+  LLM_BASE_URL="http://llmstub:8000/v1" "${COMPOSE[@]}" "${PROFILE_ARGS[@]}" up -d --build
+else
+  "${COMPOSE[@]}" "${PROFILE_ARGS[@]}" up -d --build
+fi
 
 echo "▶ e2e: waiting for /health on the API port"
 deadline=$((SECONDS + 180))
-until curl -fsS "http://127.0.0.1:28800/health" >/dev/null 2>&1; do
+until curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; do
   if (( SECONDS > deadline )); then
     echo "🔴 e2e: API never became healthy" >&2
     exit 1
@@ -110,20 +168,42 @@ until curl -fsS "http://127.0.0.1:28800/health" >/dev/null 2>&1; do
   sleep 3
 done
 
+if [[ "$E2E_LLM" == "stub" ]]; then
+  echo "▶ e2e: waiting for llmstub /health"
+  deadline=$((SECONDS + 180))
+  until curl -fsS "http://127.0.0.1:28900/health" >/dev/null 2>&1; do
+    if (( SECONDS > deadline )); then
+      echo "🔴 e2e: llmstub never became healthy" >&2
+      exit 1
+    fi
+    sleep 3
+  done
+fi
+
+# Evidence, not a claim: print exactly what the api container itself sees.
+echo -n "▶ e2e: api container's LLM_BASE_URL = "
+"${COMPOSE[@]}" exec -T api sh -c 'echo $LLM_BASE_URL'
+
 echo "▶ e2e: running the smoke suite against the stress stack"
 FIXTURES_DIR="${FIXTURES_DIR:-$REPO_ROOT/fixtures}"
 FIXTURES_MOUNT=()
 if [[ ! -d "$REPO_ROOT/fixtures" ]]; then
-  FIXTURES_MOUNT=(-v "${FIXTURES_DIR}:/repo/fixtures")
+  if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    FIXTURES_MOUNT_SRC="$(cd "$FIXTURES_DIR" && pwd -W 2>/dev/null || echo "$FIXTURES_DIR")"
+  else
+    FIXTURES_MOUNT_SRC="$FIXTURES_DIR"
+  fi
+  FIXTURES_MOUNT=(-v "${FIXTURES_MOUNT_SRC}:/repo/fixtures")
 fi
 SMOKE_NETWORK="${SMOKE_NETWORK:-${PROJECT}_default}" \
 SMOKE_IMAGE="${SMOKE_IMAGE:-${PROJECT}-api}" \
   "$REPO_ROOT/scripts/smoke.sh"
 
 echo "▶ e2e: running a small functional-load pass (tests/e2e/stress.py)"
+status=0
 docker run --rm \
   --network "${PROJECT}_default" \
-  -v "$REPO_ROOT:/repo" \
+  -v "${WIN_ROOT}:/repo" \
   "${FIXTURES_MOUNT[@]}" \
   -w /repo/core \
   -e USERS=1 \
@@ -131,10 +211,15 @@ docker run --rm \
   -e FRONTEND=http://frontend:5000 \
   -e PYTHONPATH=/repo/core \
   "${PROJECT}-api" \
-  python -m tests.e2e.stress
+  python -m tests.e2e.stress || status=$?
 
 echo "▶ e2e: report"
 cat "$REPO_ROOT/report/report.md" 2>/dev/null || echo "(no report.md written)"
+
+if [[ "$status" -ne 0 ]]; then
+  echo "🔴 e2e: functional-load run FAILED (exit $status) — see report.md above" >&2
+  exit "$status"
+fi
 
 echo "▶ e2e: running doctor.sh against the stress stack"
 COMPOSE_PROJECT_NAME="$PROJECT" \

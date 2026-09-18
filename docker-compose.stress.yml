@@ -5,16 +5,26 @@
 # bind-mounts ./data into api and worker — that is the live blob store when
 # run from the pilot checkout — so both are replaced here with a named volume.
 #
-# STUB LLM MODE: set LLM_BASE_URL=http://llmstub:8000/v1 in .env (and bring
-# the stack up with `--profile stub`) to point every model call at the
-# offline `llmstub` service below instead of the real tailnet Ollama peer —
-# no résumé, JD or shortlist text ever crosses the network in this mode.
-# Keep LLM_MODEL_GENERATION=gpt-oss:20b (the default) even in stub mode, so
-# `scripts/doctor.sh`'s model-profile check still finds a matching profile —
-# the stub answers to whatever model name it is asked for.
+# Every host port is bound to 127.0.0.1 ONLY (never 0.0.0.0) — this stack
+# runs with CAS off, so a port reachable from outside the box would be an
+# unauthenticated path to candidate data. The compose NETWORK (not host
+# ports) is what the smoke/stress runners actually use to reach these
+# services, so this binding is invisible to them.
+#
+# STUB LLM MODE: run `LLM_BASE_URL=http://llmstub:8000/v1 docker compose ...
+# --profile stub up -d` (scripts/e2e.sh and scripts/stress.sh both do this)
+# to point every model call at the offline `llmstub` service below instead
+# of the real tailnet Ollama peer — no résumé, JD or shortlist text ever
+# crosses the network in this mode. NEVER done by editing .env in place: a
+# stub-mode run against the pilot checkout's .env would otherwise leave the
+# LIVE stack pointed at a nonexistent llmstub host with no way back short of
+# a manual edit. Keep LLM_MODEL_GENERATION=gpt-oss:20b (the default) even in
+# stub mode, so `scripts/doctor.sh`'s model-profile check still finds a
+# matching profile — the stub answers to whatever model name it is asked for.
 name: recruiter-stress
 services:
   api:
+    ports: !override ["127.0.0.1:${API_PORT:-28800}:8000"]
     volumes: !override
       - "./core:/app"
       - "stressdata:/data"
@@ -22,6 +32,16 @@ services:
     volumes: !override
       - "./core:/app"
       - "stressdata:/data"
+  frontend:
+    ports: !override ["127.0.0.1:${FRONTEND_PORT:-28500}:5000"]
+  postgres:
+    ports: !override ["127.0.0.1:${POSTGRES_PORT:-28432}:5432"]
+  redis:
+    ports: !override ["127.0.0.1:${REDIS_PORT:-28379}:6379"]
+  neo4j:
+    ports: !override
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-28474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-28687}:7687"
   llmstub:
     profiles: ["stub"]
     build:

@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from stub_llm.responses import embed, respond
 
 from src.pipeline.matching.stages import verify_evidence
 from src.schemas.jobs import JDExtracted, ManagerRequirements
 from src.schemas.matching import EvidenceObjectIngest
 from src.schemas.resumes import CoverLetterParsed, ResumeCore, ResumeSkillDetails
+from stub_llm.responses import embed, respond
 
 _TEMPLATES = Path(__file__).resolve().parents[2] / "src" / "prompts" / "templates"
 
@@ -43,6 +43,7 @@ RESUME_SKILLS_SYSTEM = _system("resume_skills_v2.system.j2")
 COVER_LETTER_SYSTEM = _system("cover_letter_v1.system.j2")
 MANAGER_PROMPT_SYSTEM = _system("manager_prompt_v1.system.j2")
 EVIDENCE_SYSTEM = _system("shortlist_evidence_v1.system.j2")
+EVIDENCE_V2_SYSTEM = _system("shortlist_evidence_v2.system.j2")
 
 _SYNTHETIC_NAME_RE = re.compile(r"^Candidate [0-9a-f]{4} Synthetic$")
 _SYNTHETIC_EMAIL_RE = re.compile(r"^[0-9a-f]{4}@example\.invalid$")
@@ -230,6 +231,111 @@ def test_shortlist_evidence_survives_verify_evidence_unscrubbed() -> None:
         assert req.status == "met"
         assert req.evidence_chunk_ids
         assert req.evidence != ""
+
+
+# ── shortlist_evidence_v2 (cover letter) ───────────────────────────────────
+#
+# The orchestrator loads v2, not v1, whenever a candidate has cover-letter
+# chunks (``orchestrator.py``'s ``_stage3_per_candidate``: ``has_cover =
+# bool(cl_chunks)``). An unrouted v2 template raises ``ValueError`` -> the
+# LLM call 500s -> the fail-closed orchestrator withholds the WHOLE
+# shortlist, not just this one candidate's cover-letter section — so every
+# stub-mode run against a job with a cover-letter upload times out. Pinned
+# here next to v1 so the two can never drift apart again.
+
+_COVER_CHUNKS: list[dict[str, str]] = [
+    {
+        "id": "cl_001",
+        "section": "cover_letter",
+        "text": (
+            "I have followed your team's platform work for two years and am "
+            "genuinely excited to bring my Kubernetes experience to it."
+        ),
+    },
+]
+
+
+def _evidence_v2_user_prompt() -> str:
+    lines = [
+        "Evaluate the candidate against these 1 requirements, then assess "
+        "their cover letter.",
+        "",
+        "Job title: Senior Platform Engineer",
+        "",
+        "Requirements:",
+        "1. 5+ years of Kubernetes experience",
+        "",
+        "Candidate resume chunks (cite by c_ id for requirements):",
+        "",
+    ]
+    for chunk in _CHUNKS:
+        lines.append(f"--- chunk {chunk['id']} (section: {chunk['section']}) ---")
+        lines.append(chunk["text"])
+        lines.append("")
+    lines.append("--- end resume ---")
+    lines.append("")
+    lines.append(
+        "Cover letter chunks (cite by cl_ id, for cover_letter_evidence ONLY):"
+    )
+    lines.append("")
+    for chunk in _COVER_CHUNKS:
+        lines.append(f"--- chunk {chunk['id']} (section: {chunk['section']}) ---")
+        lines.append(chunk["text"])
+        lines.append("")
+    lines.append("--- end cover letter ---")
+    lines.append("")
+    lines.append("Return the JSON.")
+    return "\n".join(lines)
+
+
+def test_shortlist_evidence_v2_response_validates_against_the_real_schema() -> None:
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_v2_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    assert len(evidence.requirements) >= 1
+
+
+def test_shortlist_evidence_v2_cites_real_resume_chunk_ids() -> None:
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_v2_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    real_ids = {c["id"] for c in _CHUNKS}
+    for req in evidence.requirements:
+        assert set(req.evidence_chunk_ids) <= real_ids
+        assert req.evidence_chunk_ids, "must cite at least one real résumé chunk"
+
+
+def test_shortlist_evidence_v2_reports_cover_letter_presence() -> None:
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_v2_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    assert evidence.cover_letter_presence is True
+    assert evidence.cover_letter_evidence
+
+
+def test_shortlist_evidence_v2_cover_letter_cites_only_cl_ids() -> None:
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_v2_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    real_cl_ids = {c["id"] for c in _COVER_CHUNKS}
+    for cl_ev in evidence.cover_letter_evidence:
+        assert cl_ev.evidence_chunk_ids, "must cite at least one real cl_ chunk"
+        assert set(cl_ev.evidence_chunk_ids) <= real_cl_ids
+
+
+def test_shortlist_evidence_v2_cover_letter_quotes_a_verbatim_prefix() -> None:
+    cl_by_id = {c["id"]: c["text"] for c in _COVER_CHUNKS}
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_v2_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    for cl_ev in evidence.cover_letter_evidence:
+        cited_text = cl_by_id[cl_ev.evidence_chunk_ids[0]]
+        assert cited_text.lower().startswith(cl_ev.evidence.lower()[:20])
+
+
+def test_shortlist_evidence_v2_without_cover_chunks_behaves_like_v1() -> None:
+    """A v2 system prompt with no cover-letter chunks in the user prompt
+    (shouldn't happen in practice — the orchestrator only loads v2 when
+    ``cl_chunks`` is non-empty — but the stub must not crash on it)."""
+    out = respond(EVIDENCE_V2_SYSTEM, _evidence_user_prompt())
+    evidence = EvidenceObjectIngest.model_validate(out)
+    assert len(evidence.requirements) >= 1
+    assert evidence.cover_letter_presence is False
 
 
 # ── unknown system prompt ────────────────────────────────────────────────
