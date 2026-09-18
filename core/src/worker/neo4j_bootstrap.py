@@ -32,18 +32,35 @@ Three things here are load-bearing and must not be "tidied":
 The vector dimension is read from ``settings.llm_embedding_dim`` — the single
 source of the 768-d contract. Change the embedding model and this moves with
 it; the two can never drift apart.
+
+**First-boot deadlock retry (real defect, 2026-09-17).** The API and the
+worker both call :func:`bootstrap_neo4j_schema` on startup; against a FRESH
+graph with no schema yet, one of them can lose a lock-ordering race on the
+very first constraint/index DDL and get back Neo4j's own
+``DeadlockDetected`` (``neo4j.exceptions.TransientError``), which used to
+propagate straight out of ``session.run`` and fail API startup. Each
+statement is now retried on ``TransientError`` up to 5 attempts with bounded
+backoff, and re-raised after the last attempt; any other ``Neo4jError``
+(e.g. a genuine syntax error) fails fast on the first attempt.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Final
 
 from neo4j import AsyncDriver
+from neo4j.exceptions import Neo4jError, TransientError
 
 from src.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+_MAX_ATTEMPTS: Final[int] = 5
+# Bounded, simple linear backoff (seconds) between retry attempts.
+_BACKOFF_S: Final[float] = 0.5
 
 # CONTRACT: one number, one place. nomic-embed-text → 768-d, cosine.
 _DIM: Final[int] = get_settings().llm_embedding_dim
@@ -109,9 +126,39 @@ _STATEMENTS: tuple[str, ...] = (
 )
 
 
-async def bootstrap_neo4j_schema(driver: AsyncDriver) -> None:
-    """Run all constraint + index DDL. Idempotent."""
+async def bootstrap_neo4j_schema(
+    driver: AsyncDriver,
+    *,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> None:
+    """Run all constraint + index DDL. Idempotent.
+
+    Each statement is retried up to ``_MAX_ATTEMPTS`` on
+    ``neo4j.exceptions.TransientError`` (a lock-ordering deadlock, most
+    commonly the api/worker first-boot race) with bounded backoff via
+    ``sleep`` (defaults to ``asyncio.sleep``), and re-raised after the last
+    attempt. Any other ``Neo4jError`` is a real bug (bad Cypher) and is never
+    retried.
+    """
+    _sleep = sleep if sleep is not None else asyncio.sleep
     async with driver.session() as session:
         for statement in _STATEMENTS:
-            await session.run(statement)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    await session.run(statement)
+                    break
+                except TransientError:
+                    if attempt >= _MAX_ATTEMPTS:
+                        raise
+                    logger.warning(
+                        "neo4j.bootstrap.retry attempt=%s/%s statement=%s",
+                        attempt,
+                        _MAX_ATTEMPTS,
+                        statement.split()[0:3],
+                    )
+                    await _sleep(_BACKOFF_S * attempt)
+                except Neo4jError:
+                    raise
     logger.info("neo4j.bootstrap.ok statements=%s dim=%s", len(_STATEMENTS), _DIM)

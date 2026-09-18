@@ -4,6 +4,14 @@
 # distinct 28xxx host ports, CAS off, its own named volumes. The base file
 # bind-mounts ./data into api and worker — that is the live blob store when
 # run from the pilot checkout — so both are replaced here with a named volume.
+#
+# STUB LLM MODE: set LLM_BASE_URL=http://llmstub:8000/v1 in .env (and bring
+# the stack up with `--profile stub`) to point every model call at the
+# offline `llmstub` service below instead of the real tailnet Ollama peer —
+# no résumé, JD or shortlist text ever crosses the network in this mode.
+# Keep LLM_MODEL_GENERATION=gpt-oss:20b (the default) even in stub mode, so
+# `scripts/doctor.sh`'s model-profile check still finds a matching profile —
+# the stub answers to whatever model name it is asked for.
 name: recruiter-stress
 services:
   api:
@@ -14,5 +22,14 @@ services:
     volumes: !override
       - "./core:/app"
       - "stressdata:/data"
+  llmstub:
+    profiles: ["stub"]
+    build:
+      context: ./core
+      dockerfile: Dockerfile
+    command: uvicorn stub_llm.app:app --host 0.0.0.0 --port 8000
+    volumes:
+      - "./core:/app"
+    ports: ["127.0.0.1:28900:8000"]
 volumes:
   stressdata:

@@ -23,3 +23,8 @@ fixtures/
 # machine's behaviour invisibly, and one of these turns authentication OFF.
 docker-compose.override.yml
 compose.override.yml
+
+# Stress/e2e harness output and env — never committed.
+/report/
+*.roster.csv
+.env.stress
