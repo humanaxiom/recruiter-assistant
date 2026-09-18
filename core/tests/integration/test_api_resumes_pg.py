@@ -38,6 +38,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import asyncpg
+import fitz  # type: ignore[import-untyped]
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -293,3 +294,166 @@ async def test_upload_to_a_real_job_is_unaffected_by_the_existence_check(
             "SELECT count(*) FROM resumes WHERE job_id = $1", job_id
         )
     assert count == 1
+
+
+# ── combined-Taleo-export detection + cover-shaped-orphan rejection ─────────
+#
+# Real Postgres/BlobStore proof that a refused combined export (or an orphan
+# whose ACTUAL content is cover-letter-shaped) never reaches the resumes
+# table or blob storage at all — a mocked connection can't distinguish "no
+# row was ever attempted" from "a row was attempted and rolled back".
+
+
+def _make_pdf_with_page_headers(headers: list[str]) -> bytes:
+    doc = fitz.open()
+    for i, header in enumerate(headers):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"Applicant {i}", fontsize=10)
+        page.insert_text((72, 90), header, fontsize=10)
+        page.insert_text((72, 108), "604-555-0100", fontsize=10)
+    buf = BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _make_combined_export_pdf(n_pages: int = 12, n_distinct_emails: int = 3) -> bytes:
+    emails = [f"applicant{i}@example.invalid" for i in range(n_distinct_emails)]
+    headers = [emails[i % n_distinct_emails] for i in range(n_pages)]
+    return _make_pdf_with_page_headers(headers)
+
+
+def _make_cover_letter_pdf() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page()
+    lines = [
+        "Dear Hiring Manager,",
+        "",
+        "I am writing to apply for the Software Engineer position.",
+        "",
+        "Sincerely,",
+        "Pat Example",
+    ]
+    for i, line in enumerate(lines):
+        page.insert_text((72, 72 + i * 14), line, fontsize=10)
+    buf = BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_combined_export_pdf_is_rejected_with_no_row_and_no_blob(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    job_id = await _insert_job(pg_pool)
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+    combined = _make_combined_export_pdf()
+
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{job_id}/resumes",
+            files=[("files", ("export.pdf", combined, "application/pdf"))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["outcome"] == "rejected"
+    assert "split it first" in body[0]["reason"]
+
+    async with pg_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT count(*) FROM resumes WHERE job_id = $1", job_id
+        )
+    assert count == 0
+    keys = await store.list_keys()
+    assert keys == []
+
+
+@pytest.mark.asyncio
+async def test_cover_shaped_orphan_rejected_paired_cover_still_stored(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    job_id = await _insert_job(pg_pool)
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+    cover_text_pdf = _make_cover_letter_pdf()
+
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{job_id}/resumes",
+            files=[
+                ("files", ("x_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("x_cover_letter.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("y_cover_letter.pdf", cover_text_pdf, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    rejected = [r for r in body if r["outcome"] == "rejected"]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert "must never be ranked as a résumé" in rejected[0]["reason"]
+
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT cover_letter_blob_key FROM resumes WHERE job_id = $1", job_id
+        )
+    assert len(rows) == 1
+    assert rows[0]["cover_letter_blob_key"] is not None
+
+
+@pytest.mark.asyncio
+async def test_zip_plus_manifest_field_creates_n_resumes_m_with_covers(
+    pg_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    job_id = await _insert_job(pg_pool)
+    store = BlobStore(str(tmp_path))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(pg_pool, store, arq=arq)
+    archive = _zip_bytes(
+        [
+            ("001_resume.pdf", _PDF_MAGIC + b"1"),
+            ("001_cover_letter.pdf", _PDF_MAGIC + b"1c"),
+            ("002_resume.pdf", _PDF_MAGIC + b"2"),
+        ]
+    )
+    manifest = json.dumps(
+        {
+            "applicants": [
+                {
+                    "resume_file": "001_resume.pdf",
+                    "cover_letter_file": "001_cover_letter.pdf",
+                    "cover_letter_flag": "Yes",
+                },
+                {"resume_file": "002_resume.pdf", "cover_letter_flag": "No"},
+            ]
+        }
+    ).encode("utf-8")
+
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{job_id}/resumes",
+            files=[
+                ("files", ("batch.zip", archive, "application/zip")),
+                ("pairing_manifest", ("manifest.json", manifest, "application/json")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    accepted = [r for r in resp.json() if r["outcome"] == "accepted"]
+    assert len(accepted) == 2
+
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT cover_letter_blob_key FROM resumes WHERE job_id = $1", job_id
+        )
+    assert len(rows) == 2
+    with_cover = [r for r in rows if r["cover_letter_blob_key"] is not None]
+    assert len(with_cover) == 1

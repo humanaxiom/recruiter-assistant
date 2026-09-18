@@ -74,6 +74,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
+import fitz  # type: ignore[import-untyped]
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -636,6 +637,115 @@ async def test_upload_resumes_zip_bomb_rejected() -> None:
         )
     assert resp.status_code in (400, 422)
     arq.enqueue_job.assert_not_awaited()
+
+
+# ── upload: combined-Taleo-export detection (refuse, don't mis-ingest) ─────
+#
+# A combined Taleo export PDF concatenates MANY applicants; uploaded as-is it
+# would be ingested as ONE résumé and every page (cover letters included)
+# parsed as that one applicant. ``looks_like_combined_export`` runs on every
+# expanded PDF part; a flagged file becomes a REJECTED row (not a 4xx that
+# kills the whole batch) so the rest of a mixed batch still proceeds.
+
+
+def _make_pdf_with_page_headers(headers: list[str]) -> bytes:
+    doc = fitz.open()
+    for i, header in enumerate(headers):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"Applicant {i}", fontsize=10)
+        page.insert_text((72, 90), header, fontsize=10)
+        page.insert_text((72, 108), "604-555-0100", fontsize=10)
+    buf = BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+def _make_combined_export_pdf(n_pages: int = 12, n_distinct_emails: int = 3) -> bytes:
+    emails = [f"applicant{i}@example.invalid" for i in range(n_distinct_emails)]
+    headers = [emails[i % n_distinct_emails] for i in range(n_pages)]
+    return _make_pdf_with_page_headers(headers)
+
+
+def _make_cover_letter_pdf() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page()
+    lines = [
+        "Dear Hiring Manager,",
+        "",
+        "I am writing to apply for the Software Engineer position.",
+        "",
+        "Sincerely,",
+        "Pat Example",
+    ]
+    for i, line in enumerate(lines):
+        page.insert_text((72, 72 + i * 14), line, fontsize=10)
+    buf = BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_combined_export_pdf_is_rejected_with_split_first() -> (
+    None
+):
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    combined = _make_combined_export_pdf()
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("export.pdf", combined, "application/pdf")),
+                ("files", ("a.pdf", _PDF_MAGIC, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    rejected = [r for r in body if r["outcome"] == "rejected"]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert "split it first" in rejected[0]["reason"]
+    assert arq.enqueue_job.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_resumes_cover_shaped_orphan_is_rejected_not_ranked() -> None:
+    """x_resume + x_cover_letter pair by convention (unaffected); the orphan
+    y_cover_letter.pdf carries REAL cover-letter-shaped text (no matching
+    résumé) → rejected with the "must never be ranked" reason, never ingested
+    as a résumé."""
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_blob_store()
+    app = _build_app(conn, arq=arq, store=store)
+    cover_text_pdf = _make_cover_letter_pdf()
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/jobs/{uuid4()}/resumes",
+            files=[
+                ("files", ("x_resume.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("x_cover_letter.pdf", _PDF_MAGIC, "application/pdf")),
+                ("files", ("y_cover_letter.pdf", cover_text_pdf, "application/pdf")),
+            ],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    accepted = [r for r in body if r["outcome"] == "accepted"]
+    rejected = [r for r in body if r["outcome"] == "rejected"]
+    assert len(accepted) == 1
+    assert accepted[0]["original_filename"] == "x_resume.pdf"
+    assert accepted[0]["cover_letter_filename"] == "x_cover_letter.pdf"
+    assert len(rejected) == 1
+    assert rejected[0]["original_filename"] == "y_cover_letter.pdf"
+    assert "must never be ranked as a résumé" in rejected[0]["reason"]
+    assert arq.enqueue_job.await_count == 1
 
 
 # ── upload: server-generated blob key, retained filename ────────────────
