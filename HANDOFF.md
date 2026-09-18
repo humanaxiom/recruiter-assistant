@@ -15,6 +15,23 @@ asked for three more things before sharing the product with the DTO**: a
 manager's guide, an end-to-end run of it, and a multi-user stress build. All
 three are on this branch, `feat/e2e-stress-build`.
 
+> 🔴 **IMPORTANT DTO REQUIREMENT (user, 2026-09-18) — next after the five
+> gap fixes land.** *"The Taleo PDF which contains résumés and potentially
+> cover letters for the same candidate are treated all as résumés by the
+> extraction module upon upload to a job."* Revisit and fix. What exists:
+> `core/scripts/split_taleo_pdf.py` (run via `scripts/split-taleo.{sh,ps1}`)
+> segments the combined export per applicant with a cover-letter detector and
+> an LLM manifest, emitting `NNN_name_resume.pdf` + `NNN_name_cover_letter.pdf`;
+> the upload pairs cover letters by that filename convention or by a manifest
+> (`bulk_ingest_service.pair_applicants`). The reported behaviour means one of:
+> the combined PDF is uploaded unsplit and parsed as one résumé; the split
+> output's cover letters lose the suffix or the pairing and are ingested as
+> résumés; or cover-letter-only applicants (a recorded gap: pages written but
+> excluded from `manifest.json`). Reproduce with the DTO's bundle on the
+> isolated stack, then fix so a combined Taleo PDF uploaded to a job yields
+> one résumé per applicant with its cover letter attached, never a cover
+> letter parsed as a résumé.
+
 **What's on this branch:**
 - [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,
   derived from the deployed code, with "Be aware" boxes for gaps.
@@ -512,7 +529,7 @@ one obvious implementation, and the reasoning is in its commit.
 | | |
 |---|---|
 | `main` | PR #104 squash-merged 2026-09-09 (see `git log -1 main`) — the whole sponsor set |
-| Branch in flight | **`feat/complete-build-gaps`** — `feat/candidate-roster-csv` (`main` + #106 TLS/proxy + the e2e/stress-build guide and findings) with three merged lanes closing all five candidate fixes: dropped-regenerate queueing, hiring-manager assignment screen, "Why this rank?" card link, roster credential-suffix match, and zero-requirements JD recovery (Re-parse + description editor). Gates: GATES_PLACEHOLDER. Still not pushed, still awaiting the user's own review (see START HERE). |
+| Branch in flight | **`feat/complete-build-gaps`** — `feat/candidate-roster-csv` (`main` + #106 TLS/proxy + the e2e/stress-build guide and findings) with three merged lanes closing all five candidate fixes: dropped-regenerate queueing, hiring-manager assignment screen, "Why this rank?" card link, roster credential-suffix match, and zero-requirements JD recovery (Re-parse + description editor). Gates: `make gates-all` on the merged branch: 6341 unit @ 92.08%, 643 integration, ALL GATES GREEN; all five fixes driven by hand on the isolated stack (see the findings doc). Still not pushed, still awaiting the user's own review (see START HERE). |
 | Live site | **https://sfuai.ca:8000, CAS on.** [#105](https://github.com/humanaxiom/recruiter-assistant/pull/105) (zero-requirements guard) MERGED 2026-09-15. [#106](https://github.com/humanaxiom/recruiter-assistant/pull/106) (TLS/proxy hardening) OPEN. |
 | Pilot box contents | Unchanged since 2026-09-15's cutover — see §2. The isolated stress stack (`-p recruiter-stress`, 28xxx ports) is a **separate**, throwaway copy built for this session's smoke/stress/e2e runs; it does not touch the pilot box's data. |
 | Gates, last local run | `verify.sh all` → 6246 unit @ 92.15% + 630 integration, ✅ ALL GATES GREEN — **re-run, do not cite** |

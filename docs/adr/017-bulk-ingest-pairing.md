@@ -160,18 +160,26 @@ as "First Last, CSM" (the candidate's own signature block) failed to match a
 Taleo row spelled "Last, First" with no email to fall back on, because the
 extra `csm` token broke the strict set-equality comparison above. The fix
 adds exactly one narrow rule, ahead of that comparison, with three guards
-that keep it a strict subset of "would have matched anyway" — it can only
-ever make two spellings of one name MORE likely to be judged equal, never
-introduce a match strict equality would have refused: (1) **tail-only** — the
-ORIGINAL string is split on its last comma, and only a token after that
-comma is ever a stripping candidate, so a credential *before* the last comma
-is left alone; (2) **closed vocabulary** — a tail token, or the tail's
-letters concatenated (so a punctuated "P.Eng." is still recognised as one
-credential), must exactly match a fixed, spelled-out list (CSM, PMP, CPA,
-CFA, MBA, PHD, PENG, CHRP, CPHR, CISSP, PMIACP, MSC, BSC, BSW, MSW, MD, RN,
-LLB, JD, CMA, CGA, SHRM, GPHR, ITIL, CCNA, MCSE) — CA/BA/MA are deliberately
-excluded because they are real surnames, so nothing is ever dropped merely
-for looking short; (3) **two-token floor** — a tail is stripped only if ≥2
+meant to make two spellings of one name MORE likely to be judged equal
+without introducing a false POSITIVE — a match between two genuinely
+different people. **It is not purely one-directional, though**: the strip
+can also break a match strict equality would have made, in the narrow case
+where a candidate's own given name or initials happen to equal a credential
+token ("Del Rosario, Md" is a real "Last, First" name, and stripping "md"
+from its tail would stop it matching a résumé spelled "Md Del Rosario").
+That is why the vocabulary excludes short tokens that double as common given
+names/initials (MD, JD, RN) rather than including every real credential
+abbreviation — the closed vocabulary is a trade-off against that failure
+mode, not a one-way ratchet: (1) **tail-only** — the ORIGINAL string is split
+on its last comma, and only a token after that comma is ever a stripping
+candidate, so a credential *before* the last comma is left alone; (2)
+**closed vocabulary** — a tail token, or the tail's letters concatenated (so
+a punctuated "P.Eng." is still recognised as one credential), must exactly
+match a fixed, spelled-out list (CSM, PMP, CPA, CFA, MBA, PHD, PENG, CHRP,
+CPHR, CISSP, PMIACP, MSC, BSC, BSW, MSW, LLB, CMA, CGA, SHRM, GPHR, ITIL,
+CCNA, MCSE) — CA/BA/MA/MD/JD/RN are deliberately excluded because they are
+real surnames/given-names/initials, so nothing is ever dropped merely for
+looking short; (3) **two-token floor** — a tail is stripped only if ≥2
 tokens survive overall, so "Solo, Pmp" keeps its credential rather than
 collapsing to the single bare token "solo". Ambiguity elsewhere in the
 matching pipeline still refuses exactly as before.

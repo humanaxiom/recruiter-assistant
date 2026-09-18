@@ -267,7 +267,9 @@
      says so plainly rather than leaving that silent. #}
   {% if is_writer %}
   <h3>Assigned hiring managers</h3>
-  {% if job_assignees %}
+  {% if job_assignees is none %}
+  <p class="warning">Assignments could not be loaded.</p>
+  {% elif job_assignees %}
   <ul class="assignee-list">
     {% for assignee in job_assignees %}
     <li>
@@ -287,7 +289,7 @@
         method="post" class="form-actions">
     <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
     <select name="user_id">
-      {% for hm in hiring_managers %}
+      {% for hm in hiring_managers or [] %}
       <option value="{{ hm.id }}">{{ hm.display_name or hm.cas_username }}
         ({{ hm.cas_username }})</option>
       {% endfor %}

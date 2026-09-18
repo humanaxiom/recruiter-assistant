@@ -93,10 +93,7 @@ _CREDENTIAL_VOCAB = frozenset(
         "bsc",
         "bsw",
         "msw",
-        "md",
-        "rn",
         "llb",
-        "jd",
         "cma",
         "cga",
         "shrm",
@@ -106,6 +103,16 @@ _CREDENTIAL_VOCAB = frozenset(
         "mcse",
     }
 )
+# **Deliberately EXCLUDED, 2026-09-17 review finding**: "md", "jd", and "rn"
+# are also real given names/initials that legitimately sit in a "Last,
+# First" tail — "Del Rosario, Md" (a Filipino given name) and "Bautista, Jd"
+# (initials) are real "Last, First" shapes, not "Last, <credential>" ones.
+# Including them let the tail-strip turn "Del Rosario, Md" into a token set
+# for "del rosario" alone, which then FAILED to match the résumé side's
+# "Md Del Rosario, Del Rosario, Md" — the opposite of what this rule exists
+# to do. Short, name-shaped tokens are excluded from the vocabulary for
+# exactly this reason; see ``_normalize_name``'s docstring for why the rule
+# is not purely one-directional.
 
 
 def _normalize_name(name: str) -> frozenset[str]:
@@ -135,9 +142,21 @@ def _normalize_name(name: str) -> frozenset[str]:
     spelled "Last, First" with no email on the row to fall back on — the
     exact-token-set comparison saw the extra ``csm`` token and refused a
     match a recruiter would consider obvious. The fix is deliberately
-    narrow, with three guards, so it can only ever make two names MORE
-    likely to be judged equal (never introduce a false match that strict
-    equality would have refused — ambiguity elsewhere still refuses):
+    narrow, with three guards, meant to make two names MORE likely to be
+    judged equal without introducing a false POSITIVE (the vocabulary is
+    closed to real professional credentials, so this never makes two
+    genuinely different people collide).
+
+    **This is not purely one-directional, though — a correction, 2026-09-17
+    review.** The strip CAN also break a match that strict equality would
+    have made, in the narrow case where a candidate's given name (or
+    initials) happens to equal a credential token — "Del Rosario, Md" is a
+    real "Last, First" name, not "Last, <credential>", and stripping "md"
+    from its tail would have stopped it matching a résumé spelled "Md Del
+    Rosario". That is exactly why the vocabulary below excludes short tokens
+    that are also common given names/initials ("md", "jd", "rn") rather than
+    including every real credential abbreviation — the closed vocabulary is
+    a trade-off, not a one-way ratchet. Three guards:
 
     1. **Tail-only.** The ORIGINAL string is split on its LAST comma; only
        tokens after that comma are ever candidates for stripping. A

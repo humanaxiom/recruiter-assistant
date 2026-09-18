@@ -182,11 +182,7 @@ async def shortlist_job(ctx: dict[str, Any], job_id_str: str) -> str:
     ITEM 1 (A DROPPED REGENERATE IS REMEMBERED): a thin wrapper around
     ``_shortlist_job_once`` — see the module docstring's own ITEM 1 section
     for the drain contract. ``arq.Retry`` raised by the once-function
-    propagates straight through, untouched.
-
-    The ``_shortlist_job_once`` call below is where ``ensure_projection_caught_up``
-    actually runs — this wrapper delegates to it rather than inlining the
-    projection guard a second time."""
+    propagates straight through, untouched."""
     job_id = UUID(job_id_str)
     status = await _shortlist_job_once(ctx, job_id_str)
     if status in {"persisted", "empty", "not_parsed", "awaiting_llm"}:

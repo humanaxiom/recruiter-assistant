@@ -225,7 +225,10 @@ API call or a CSV backfill. To populate the assignment form's picker, a
 recruiter session can now fetch the assignable `hiring_manager` roster
 through `GET /users?role=hiring_manager` — closing a gap `GET /users`
 otherwise left admin-only (the unfiltered listing stays admin-only; only the
-filtered read gains the recruiter allowance).
+filtered read gains the recruiter allowance, and even there a recruiter
+session may filter by `role=hiring_manager` ONLY — any other `role` value
+403s, so the allowance cannot be used to reconstruct the admin-only roster
+one filtered value at a time; an admin session's filter stays unrestricted).
 
 ## Consequences
 

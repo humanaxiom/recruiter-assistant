@@ -164,6 +164,32 @@ def test_list_users_is_called_scoped_to_hiring_manager_role(
     assert seen.get("role") == "hiring_manager"
 
 
+def test_a_failed_assignee_fetch_shows_a_could_not_load_message_not_the_empty_one(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding: a FAILED fetch must not render the "no hiring manager
+    is assigned" sentence — that is a positive claim that the requisition is
+    genuinely unassigned, which a failed read cannot support. Only a
+    genuinely EMPTY list (``[]``) earns that sentence."""
+    job_id = uuid4()
+    monkeypatch.setattr(api_client, "get_job", lambda jid, **kw: _job(jid))
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+
+    def failing_list_job_assignees(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+        raise api_client.BackendUnavailable("backend down")
+
+    monkeypatch.setattr(api_client, "list_job_assignees", failing_list_job_assignees)
+    monkeypatch.setattr(api_client, "list_users", lambda **kw: [])
+
+    html = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+
+    assert "Assignments could not be loaded." in html
+    assert (
+        "No hiring manager is assigned — this requisition is invisible to "
+        "hiring managers" not in html
+    )
+
+
 # ── hidden for a non-writer session ─────────────────────────────────────────
 
 
