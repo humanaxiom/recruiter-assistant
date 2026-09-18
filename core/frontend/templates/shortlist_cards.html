@@ -87,6 +87,14 @@
   {% if conflict_reason %}
   <p id="jd-no-requirements" class="warning">{{ conflict_reason }}</p>
   {% endif %}
+  {# ITEM 1 (A DROPPED REGENERATE IS REMEMBERED): a Regenerate posted while a
+     run was already in flight recorded the request instead of enqueueing a
+     duplicate — this hint says so, independently of every other banner on
+     this fragment (it can coexist with `ranking`/`awaiting_llm`, since the
+     recorded rerun is drained only once the CURRENT run finishes). #}
+  {% if _status is not none and _status.get('rerun_requested') %}
+  <p id="rerun-queued" class="hint">A run is in progress; your regenerate request will run when it finishes.</p>
+  {% endif %}
   {% if entries %}
   {# SPONSOR 2026-09-02 §O2 follow-on: "the declaration is a critical eval
      parameter", so a recruiter needs to see at a glance how many candidates
@@ -216,6 +224,10 @@
         <a href="{{ url_for('resume_detail', resume_id=entry.resume_id) }}"
            >{{ entry.display_label }}</a>
       </h3>
+      {# ITEM 3 ("WHY THIS RANK?" LINK): a plain GET to the existing entry
+         detail route -- no CSRF slot, a GET mints nothing and consumes
+         nothing. #}
+      <a class="link-sm" href="{{ url_for('shortlist_entry_detail', entry_id=entry.id) }}">Why this rank?</a>
       {% if is_writer and entry.blinded %}
       {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
          deliberate, logged act); it records who/what/when and opens the résumé

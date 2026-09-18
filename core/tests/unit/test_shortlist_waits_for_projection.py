@@ -125,11 +125,27 @@ async def test_the_eligible_count_excludes_withdrawn_resumes() -> None:
 
 def test_the_helper_is_wired_into_shortlist_job() -> None:
     """A guard that exists but is never called is the ROADMAP A7 shape, and
-    this repo has shipped that exact thing repeatedly."""
+    this repo has shipped that exact thing repeatedly.
+
+    **Test-honesty correction, 2026-09-17 review.** ``shortlist_job`` split
+    into a thin wrapper plus ``_shortlist_job_once`` (ITEM 1, the dropped-
+    regenerate drain) and the guard's real call site moved to the *once*
+    function — but this test kept string-matching ``shortlist_job``'s own
+    source, which a prior fix satisfied by naming the helper in the
+    wrapper's DOCSTRING rather than actually proving the call happens. That
+    is not an honest pin: a docstring mention and a real call are
+    indistinguishable to ``inspect.getsource`` + ``in``. Fixed two ways: (1)
+    inspect ``_shortlist_job_once``'s source, where the guard actually runs,
+    and (2) separately assert the wrapper still reaches it, by asserting
+    ``shortlist_job`` calls ``_shortlist_job_once`` — proving the wiring
+    end-to-end without either half trusting prose."""
     import inspect
 
-    src = inspect.getsource(matching_tasks.shortlist_job)
-    assert "ensure_projection_caught_up" in src
+    once_src = inspect.getsource(matching_tasks._shortlist_job_once)
+    assert "ensure_projection_caught_up" in once_src
+
+    wrapper_src = inspect.getsource(matching_tasks.shortlist_job)
+    assert "_shortlist_job_once" in wrapper_src
 
 
 # ── Live demo, 2026-09-09 21:42 — a degraded parse wedges ranking forever ───

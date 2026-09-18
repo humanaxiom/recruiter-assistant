@@ -460,3 +460,82 @@ async def test_post_assignee_403_when_no_session_cas_enabled(
     assert resp.status_code == 403
     assert await _assignee_row(pg_pool, job_id, target_user_id) is None
     assert await _audit_rows(pg_pool, job_id, "assign_job") == []
+
+
+# ── GET /jobs/{job_id}/assignees — Item 2, real Postgres round trip ───────
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_after_a_real_post_returns_the_assigned_user(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a real Postgres proves that a mocked-conn route test cannot: a
+    real ``POST`` really inserts the row, and the NEW
+    ``job_assignee_service.list_assignees`` JOIN against ``users`` really
+    reads it back — not just that the route called some function with
+    plausible arguments."""
+    settings = _settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    admin_username = _unique_username("admin")
+    monkeypatch.setattr(
+        auth_routes.cas_service,
+        "validate_ticket",
+        _mock_validate_ticket(admin_username),
+    )
+    app = _build_app(pg_pool)
+
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
+    job_id = await _insert_job(pg_pool)
+    target_user_id = await _insert_user(
+        pg_pool, cas_username=_unique_username("hm"), role="hiring_manager"
+    )
+
+    async with await _client(app) as client:
+        sid = await _login_and_get_sid(client, settings, admin_username)
+        post_resp = await client.post(
+            f"/jobs/{job_id}/assignees",
+            json={"user_id": str(target_user_id)},
+            cookies={settings.session_cookie_name: sid},
+        )
+        assert post_resp.status_code == 201
+
+        get_resp = await client.get(
+            f"/jobs/{job_id}/assignees",
+            cookies={settings.session_cookie_name: sid},
+        )
+
+    assert get_resp.status_code == 200
+    body = get_resp.json()
+    assert len(body) == 1
+    assert body[0]["id"] == str(target_user_id)
+    assert body[0]["role"] == "hiring_manager"
+
+
+@pytest.mark.asyncio
+async def test_get_assignees_on_a_job_with_no_assignments_is_an_empty_list(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    monkeypatch.setattr(auth_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    admin_username = _unique_username("admin")
+    monkeypatch.setattr(
+        auth_routes.cas_service,
+        "validate_ticket",
+        _mock_validate_ticket(admin_username),
+    )
+    app = _build_app(pg_pool)
+
+    await _insert_user(pg_pool, cas_username=admin_username, role="admin")
+    job_id = await _insert_job(pg_pool)
+
+    async with await _client(app) as client:
+        sid = await _login_and_get_sid(client, settings, admin_username)
+        resp = await client.get(
+            f"/jobs/{job_id}/assignees",
+            cookies={settings.session_cookie_name: sid},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == []

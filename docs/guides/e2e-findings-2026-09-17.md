@@ -49,12 +49,23 @@ cannot do. Nothing in this document names a candidate.
    Recommended fix: when a run is already in progress, remember that a
    re-run was requested and run it when the current one ends.
 
+   **Fixed 2026-09-17 on `feat/complete-build-gaps`** — a Generate posted
+   while a run is in progress is now remembered (`jobs.shortlist_rerun_requested`)
+   and the worker runs it once more when the current run reaches a terminal
+   state; the shortlist page tells the user a re-run is queued instead of
+   discarding the click.
+
 3. **A credential after the name defeats the roster match** (recorded,
    pinned as an expected failure in the tests). A résumé whose extracted name
    reads "First Last, CSM" does not match the Taleo row "Last, First" when the
    row has no email, because the credential becomes an extra name token. With
    an email present the match works. Ask candidates' rows to carry emails;
    names with PMP/CPA/CSM suffixes will otherwise be reported as unmatched.
+
+   **Fixed 2026-09-17 on `feat/complete-build-gaps`** — the name match now
+   strips a trailing credential suffix after the last comma, against a closed
+   vocabulary; CA/BA/MA are excluded so a genuine surname-as-initials is not
+   stripped.
 
 4. **The roster overwrites a recruiter's declaration.** Declaring "eligible"
    on a card and then importing a roster row that says "Study Permit" left the
@@ -65,9 +76,18 @@ cannot do. Nothing in this document names a candidate.
 5. **The "Why this rank?" page exists but nothing links to it.** It renders
    when addressed directly; no card or export carries its address.
 
+   **Fixed 2026-09-17 on `feat/complete-build-gaps`** — every shortlist card
+   now carries a "Why this rank?" link to the entry-detail page.
+
 6. **No screen assigns a requisition to a hiring manager.** The API supports
    it; the UI does not. A hiring manager who signs in today sees an empty job
    list.
+
+   **Fixed 2026-09-17 on `feat/complete-build-gaps`** — the job page now has
+   an "Assigned hiring managers" section for admins/recruiters: a list with
+   remove, a select of hiring managers to add, and, when nobody is assigned,
+   the line "No hiring manager is assigned — this requisition is invisible to
+   hiring managers."
 
 7. **Every export is anonymised**, including on non-blind jobs: names become
    "Candidate A", email and phone are blank.
@@ -76,6 +96,12 @@ cannot do. Nothing in this document names a candidate.
    warning says re-parse or replace the JD, but the Re-parse button appears
    only after a failed parse and the description cannot be edited. Create the
    job again from the right document.
+
+   **Fixed 2026-09-17 on `feat/complete-build-gaps`** — a draft JD that
+   parsed to zero requirements now shows a Re-parse button and a description
+   editor; editing the description clears the parse and re-parses
+   automatically. An open job still refuses the edit (409); the advice there
+   remains to create a new requisition.
 
 9. **Throughput is the hardware.** Parsing runs at about 29 résumés an hour
    on the shared GPU. The guide's arithmetic (a 315-candidate requisition ≈
@@ -94,8 +120,10 @@ text, no notifications, exports, retention stored but not enforced, the
 - Make one real write (a declaration or a withdraw) and confirm it does not
   fail with a 403. The unit tests pin the mechanism behind the proxy; a
   browser is the proof.
-- A hiring manager's view is empty until finding 6 is built or an assignment
-  is made through the API.
+- Finding 6 is fixed on `feat/complete-build-gaps` (the job page now assigns
+  hiring managers); confirm on the live site that assigning a real hiring
+  manager there actually populates their job list, signed in as that
+  principal.
 
 ## The stress build
 

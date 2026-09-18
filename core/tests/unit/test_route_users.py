@@ -383,4 +383,141 @@ async def test_get_users_calls_list_users_with_the_injected_connection(
     assert list_users.await_args.args[0] is conn
 
 
+# ── GET /users?role=... — Item 2: admin OR recruiter session, filtered ────
+#
+# Contract pinned here (task instruction): a NEW gate
+# ``_require_admin_or_recruiter_session`` is used ONLY when ``role`` is
+# supplied on the query string — the unfiltered ``GET /users`` stays
+# admin-session-only (``_require_admin_session``, pinned above). Backed by
+# ``user_service.list_users(conn, role=None)`` gaining a filter kwarg.
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_200s_for_a_recruiter_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hole this closes: the hiring-manager-assignment screen is built by
+    a recruiter session, which must be able to fetch the assignable
+    hiring_manager roster — the plain (admin-only) gate would 403 it."""
+    users = [_real_user(cas_username="dana", role="hiring_manager")]
+    list_users = _patch_list_users(monkeypatch, users)
+    app = _build_app(_mock_conn(), user=_real_user(role="recruiter"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "hiring_manager"})
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+    list_users.assert_awaited_once()
+    assert list_users.await_args.kwargs.get("role") == "hiring_manager"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "recruiter", "auditor"])
+async def test_get_users_filtered_by_role_admin_403s_for_a_recruiter_session(
+    role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hole this closes: a recruiter session could pass ANY ``role``
+    filter — including ``role=admin`` — and so reconstruct the admin-only
+    unfiltered roster one filtered call at a time. A recruiter session may
+    only ever request ``role=hiring_manager``; every other value 403s, even
+    though the same gate lets an admin session request any role."""
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=_real_user(role="recruiter"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": role})
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_200s_for_an_admin_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    users = [_real_user(cas_username="dana", role="hiring_manager")]
+    _patch_list_users(monkeypatch, users)
+    app = _build_app(_mock_conn(), user=_real_user(role="admin"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "hiring_manager"})
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_200s_for_an_admin_session_any_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admin session's filter stays unrestricted — only the recruiter
+    allowance is narrowed to ``hiring_manager``."""
+    users = [_real_user(cas_username="al", role="admin")]
+    list_users = _patch_list_users(monkeypatch, users)
+    app = _build_app(_mock_conn(), user=_real_user(role="admin"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "admin"})
+    assert resp.status_code == 200
+    assert list_users.await_args.kwargs.get("role") == "admin"
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_403s_for_a_hiring_manager_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=_real_user(role="hiring_manager"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "hiring_manager"})
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_403s_for_an_auditor_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=_real_user(role="auditor"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "hiring_manager"})
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_403s_when_no_session_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=None)
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "hiring_manager"})
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_users_unfiltered_still_403s_for_a_recruiter_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unfiltered listing (no ``role`` query param) stays admin-only — the
+    new recruiter allowance is scoped to the filtered read only."""
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=_real_user(role="recruiter"))
+    async with await _client(app) as client:
+        resp = await client.get("/users")
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_users_unfiltered_still_200s_for_an_admin_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    users = _seeded_users()
+    list_users = _patch_list_users(monkeypatch, users)
+    app = _build_app(_mock_conn(), user=_real_user(role="admin"))
+    async with await _client(app) as client:
+        resp = await client.get("/users")
+    assert resp.status_code == 200
+    assert len(resp.json()) == len(users)
+    # No ``role`` query param -> no filter forwarded.
+    assert list_users.await_args.kwargs.get("role") is None
+
+
 __all__: list[str] = []

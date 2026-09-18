@@ -155,6 +155,35 @@ itself.
 **No unit test would have produced this pair**, because a fixture author
 writes the same name on both sides of a match.
 
+**2026-09-17 addendum — a bounded credential-suffix strip.** A résumé parsed
+as "First Last, CSM" (the candidate's own signature block) failed to match a
+Taleo row spelled "Last, First" with no email to fall back on, because the
+extra `csm` token broke the strict set-equality comparison above. The fix
+adds exactly one narrow rule, ahead of that comparison, with three guards
+meant to make two spellings of one name MORE likely to be judged equal
+without introducing a false POSITIVE — a match between two genuinely
+different people. **It is not purely one-directional, though**: the strip
+can also break a match strict equality would have made, in the narrow case
+where a candidate's own given name or initials happen to equal a credential
+token ("Del Rosario, Md" is a real "Last, First" name, and stripping "md"
+from its tail would stop it matching a résumé spelled "Md Del Rosario").
+That is why the vocabulary excludes short tokens that double as common given
+names/initials (MD, JD, RN) rather than including every real credential
+abbreviation — the closed vocabulary is a trade-off against that failure
+mode, not a one-way ratchet: (1) **tail-only** — the ORIGINAL string is split
+on its last comma, and only a token after that comma is ever a stripping
+candidate, so a credential *before* the last comma is left alone; (2)
+**closed vocabulary** — a tail token, or the tail's letters concatenated (so
+a punctuated "P.Eng." is still recognised as one credential), must exactly
+match a fixed, spelled-out list (CSM, PMP, CPA, CFA, MBA, PHD, PENG, CHRP,
+CPHR, CISSP, PMIACP, MSC, BSC, BSW, MSW, LLB, CMA, CGA, SHRM, GPHR, ITIL,
+CCNA, MCSE) — CA/BA/MA/MD/JD/RN are deliberately excluded because they are
+real surnames/given-names/initials, so nothing is ever dropped merely for
+looking short; (3) **two-token floor** — a tail is stripped only if ≥2
+tokens survive overall, so "Solo, Pmp" keeps its credential rather than
+collapsing to the single bare token "solo". Ambiguity elsewhere in the
+matching pipeline still refuses exactly as before.
+
 **3. The comparison stays strict set equality** — deliberately, and at a known
 cost. A résumé carrying a middle name and a second surname (four tokens) does
 not match a two-token CSV cell. Relaxing to a subset test

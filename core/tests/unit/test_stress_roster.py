@@ -142,25 +142,19 @@ def test_build_roster_csv_returns_a_str() -> None:
     assert "Solo Candidate" in csv_text
 
 
-# ── TODAY's finding: a credential suffix defeats the exact name-token match ─
+# ── credential suffix no longer defeats the exact name-token match ─────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "recorded 2026-09-17: _normalize_name splits on non-letters, so a "
-        "trailing credential ('PMP', 'CSM', ...) becomes an EXTRA token that "
-        "survives into the frozenset and breaks the exact-set-equality name "
-        "match in candidate_roster_service (`tok == tokens`). Flips to xpass "
-        "the day someone teaches the matcher to ignore credential suffixes."
-    ),
-)
-def test_credential_suffix_defeats_name_match_recorded() -> None:
+def test_credential_suffix_no_longer_defeats_name_match() -> None:
+    """Flipped from the recorded 2026-09-17 xfail (Item 4): a trailing
+    credential ("PMP", "CSM", ...) confined to the TAIL segment (after the
+    last comma) must be dropped from the token set whenever it is in the
+    credential vocabulary and at least 2 tokens survive overall, so the two
+    spellings of one name normalise to the SAME token set despite the
+    credential suffix. This used to be
+    ``test_credential_suffix_defeats_name_match_recorded``, marked
+    ``xfail(strict=True)``; the marker is removed now that the assertion is
+    the intended, passing behaviour rather than a recorded gap."""
     csv_side = _normalize_name("PAT EXAMPLE, PMP")
     resume_side = _normalize_name("Example, Pat")
-    # Desired end state (what "fixing" this means): the two spellings of one
-    # name normalise to the SAME token set despite the credential suffix.
-    # Fails TODAY because "pmp" survives as an extra token -- that failure is
-    # exactly what xfail(strict=True) records; it flips to XPASS (a hard
-    # failure, forcing the marker's removal) the day someone fixes it.
     assert csv_side == resume_side
