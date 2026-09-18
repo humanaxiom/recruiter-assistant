@@ -155,6 +155,27 @@ itself.
 **No unit test would have produced this pair**, because a fixture author
 writes the same name on both sides of a match.
 
+**2026-09-17 addendum — a bounded credential-suffix strip.** A résumé parsed
+as "First Last, CSM" (the candidate's own signature block) failed to match a
+Taleo row spelled "Last, First" with no email to fall back on, because the
+extra `csm` token broke the strict set-equality comparison above. The fix
+adds exactly one narrow rule, ahead of that comparison, with three guards
+that keep it a strict subset of "would have matched anyway" — it can only
+ever make two spellings of one name MORE likely to be judged equal, never
+introduce a match strict equality would have refused: (1) **tail-only** — the
+ORIGINAL string is split on its last comma, and only a token after that
+comma is ever a stripping candidate, so a credential *before* the last comma
+is left alone; (2) **closed vocabulary** — a tail token, or the tail's
+letters concatenated (so a punctuated "P.Eng." is still recognised as one
+credential), must exactly match a fixed, spelled-out list (CSM, PMP, CPA,
+CFA, MBA, PHD, PENG, CHRP, CPHR, CISSP, PMIACP, MSC, BSC, BSW, MSW, MD, RN,
+LLB, JD, CMA, CGA, SHRM, GPHR, ITIL, CCNA, MCSE) — CA/BA/MA are deliberately
+excluded because they are real surnames, so nothing is ever dropped merely
+for looking short; (3) **two-token floor** — a tail is stripped only if ≥2
+tokens survive overall, so "Solo, Pmp" keeps its credential rather than
+collapsing to the single bare token "solo". Ambiguity elsewhere in the
+matching pipeline still refuses exactly as before.
+
 **3. The comparison stays strict set equality** — deliberately, and at a known
 cost. A résumé carrying a middle name and a second surname (four tokens) does
 not match a two-token CSV cell. Relaxing to a subset test
