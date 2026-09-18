@@ -26,9 +26,11 @@ like an abbreviation):
   is also how the existing accent-fold behaviour keeps working: it never
   depended on a comma).
 
-Vocabulary (deliberately excludes CA, BA, MA — those are real surnames):
+Vocabulary (deliberately excludes CA, BA, MA — those are real surnames — and,
+2026-09-17 review finding, MD, JD, RN — those are real given names/initials
+that sit in a "Last, First" tail, e.g. "Del Rosario, Md"):
 CSM, PMP, CPA, CFA, MBA, PHD, PENG, CHRP, CPHR, CISSP, PMIACP, MSC, BSC,
-BSW, MSW, MD, RN, LLB, JD, CMA, CGA, SHRM, GPHR, ITIL, CCNA, MCSE.
+BSW, MSW, LLB, CMA, CGA, SHRM, GPHR, ITIL, CCNA, MCSE.
 """
 
 from __future__ import annotations
@@ -87,6 +89,29 @@ def test_excluded_surname_ca_in_the_tail_is_never_stripped() -> None:
     like a stray abbreviation, but CA is deliberately excluded from the
     vocabulary — the rule must not generalise to "any short tail token"."""
     assert _normalize_name("Chen, Ca") == frozenset({"chen", "ca"})
+
+
+def test_excluded_given_name_md_is_never_stripped() -> None:
+    """ "Md" is a real given name (e.g. a Filipino given name) that sits in
+    a "Last, First" tail — it is deliberately EXCLUDED from the credential
+    vocabulary even though "MD" is a real credential abbreviation, because
+    stripping it would break "Del Rosario, Md" matching a résumé spelled
+    "Md Del Rosario"."""
+    assert _normalize_name("Del Rosario, Md") == frozenset({"del", "rosario", "md"})
+
+
+def test_excluded_initials_jd_is_never_stripped() -> None:
+    """ "Jd" is a plausible pair of initials in a "Last, First" tail, and is
+    deliberately excluded even though "JD" is a real credential
+    abbreviation (Juris Doctor)."""
+    assert _normalize_name("Bautista, Jd") == frozenset({"bautista", "jd"})
+
+
+def test_excluded_given_name_rn_is_never_stripped() -> None:
+    """ "Rn" is deliberately excluded even though "RN" is a real credential
+    abbreviation (Registered Nurse), because it can also read as initials in
+    a "Last, First" tail."""
+    assert _normalize_name("Chen, Rn") == frozenset({"chen", "rn"})
 
 
 def test_no_comma_leaves_the_name_entirely_untouched() -> None:

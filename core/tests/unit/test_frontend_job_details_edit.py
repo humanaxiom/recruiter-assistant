@@ -349,6 +349,17 @@ def test_the_description_route_sends_only_description_raw(
 def test_the_description_route_conflict_re_renders_with_the_reason(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Review finding, 2026-09-17: this test used to accept a bare 409 body
+    with no ``get_job``/``list_resumes`` mocks — which was, in fact, testing
+    the route's OLD (wrong) behaviour: a short, direct error body instead of
+    a re-rendered job page. That contradicted this file's own docstring on
+    ``edit_job_description``, which already claimed (incorrectly, until this
+    fix) that the 409 "re-renders the job-detail page with the reason,
+    exactly like ``reparse_job``'s own Conflict handling". Rewritten to mock
+    ``get_job``/``list_resumes`` like every other job-page test in this
+    module (and ``test_reparse_route_surfaces_a_conflict_rather_than_500ing``
+    in ``test_frontend_job_reparse.py``) and assert the actual re-render,
+    not weakened in what it proves — still a 409 carrying the reason."""
     job_id = uuid4()
 
     def fake(jid: UUID, payload: dict[str, Any], **kw: Any) -> dict[str, Any]:
@@ -359,11 +370,18 @@ def test_the_description_route_conflict_re_renders_with_the_reason(
         )
 
     monkeypatch.setattr(api_client, "patch_job", fake)
+    monkeypatch.setattr(
+        api_client, "get_job", lambda jid, **kw: _job(jid, status="open")
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
     resp = client.post(
         f"/jobs/{job_id}/description", data={"description_raw": "Rewritten. " * 5}
     )
     assert resp.status_code == 409
     assert "job is not a draft" in resp.get_data(as_text=True)
+    # A re-render of the full job-detail page, not a bare error body — the
+    # page chrome (e.g. the job title) is present alongside the reason.
+    assert _job(job_id, status="open")["title"] in resp.get_data(as_text=True)
 
 
 def test_the_description_route_404s_when_the_job_does_not_exist(

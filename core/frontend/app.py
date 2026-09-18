@@ -815,23 +815,32 @@ def _degraded_resume_count(resumes: list[dict[str, Any]]) -> int:
 
 def _fetch_job_assignees_and_hiring_managers(
     job_id: UUID,
-) -> tuple[list[Any], list[Any]]:
+) -> tuple[list[Any] | None, list[Any] | None]:
     """Item 2 — the assignment screen's two reads, fetched ONLY for a writer
     session (a non-writer's render would throw the data away, and the
     backend would 403 it anyway).
 
     TOLERANT of a backend failure on EITHER call: an assignment screen that
     cannot load is not worth failing the whole job-detail page over, so both
-    default to ``[]`` rather than propagating (mirrors
-    ``_fetch_jd_has_no_requirements``'s own tolerant-fetch discipline)."""
+    default to a value the template can render without crashing (mirrors
+    ``_fetch_jd_has_no_requirements``'s own tolerant-fetch discipline).
+
+    **Review finding, 2026-09-17.** A failed ``assignees`` fetch used to
+    default to ``[]`` — observationally IDENTICAL to a genuinely empty
+    list — so the template rendered "No hiring manager is assigned... this
+    requisition is invisible to hiring managers", a POSITIVE claim about the
+    data that a failed read cannot support. Failure now defaults to
+    ``None`` instead, which the template distinguishes from a real ``[]``
+    and renders as "Assignments could not be loaded." — never a false claim
+    about what the roster actually contains."""
     try:
-        assignees = api_client.list_job_assignees(job_id)
+        assignees: list[Any] | None = api_client.list_job_assignees(job_id)
     except (api_client.NotFound, api_client.BackendUnavailable, api_client.BadRequest):
-        assignees = []
+        assignees = None
     try:
-        hiring_managers = api_client.list_users(role="hiring_manager")
+        hiring_managers: list[Any] | None = api_client.list_users(role="hiring_manager")
     except (api_client.NotFound, api_client.BackendUnavailable, api_client.BadRequest):
-        hiring_managers = []
+        hiring_managers = None
     return assignees, hiring_managers
 
 
@@ -846,8 +855,8 @@ def _render_job_detail(
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
-    assignees: list[Any] = []
-    hiring_managers: list[Any] = []
+    assignees: list[Any] | None = []
+    hiring_managers: list[Any] | None = []
     if _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
     return (
@@ -1268,12 +1277,14 @@ def edit_job_description(job_id: UUID) -> Any:
     try:
         api_client.patch_job(job_id, {"description_raw": description_raw})
     except api_client.Conflict as exc:
-        # Deliberately NOT `_render_job_detail` (unlike `reparse_job`'s own
-        # Conflict handling): that would re-fetch the whole page (`get_job`
-        # + `list_resumes`) for a response whose only job is to surface the
-        # ONE reason this specific PATCH was refused. A short, direct 409
-        # body is enough here and costs no extra backend round trip.
-        return _format_error(exc.detail), 409
+        # Review finding, 2026-09-17: a bare 409 body used to be returned
+        # here, contradicting this docstring's own claim and leaving the
+        # user on a blank error page rather than the job they were editing.
+        # Mirrors `reparse_job`'s own Conflict handling exactly: re-render
+        # the whole job-detail page with the reason.
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=409
+        )
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:

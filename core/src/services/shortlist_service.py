@@ -205,6 +205,18 @@ _GET_SHORTLIST_STATE_SQL = (
 _REQUEST_SHORTLIST_RERUN_SQL = (
     "UPDATE jobs SET shortlist_rerun_requested = TRUE WHERE id = $1"
 )
+# ONE atomic statement replacing the former read-then-write TOCTOU (a
+# separate ``get_shortlist_state`` read followed by a conditional write could
+# race a concurrent worker's own terminal-state write between the two). The
+# check (``shortlist_state = 'ranking'``) and the set happen in the same
+# ``UPDATE``, so ``RETURNING true`` is non-NULL if and only if the row was
+# ACTUALLY 'ranking' at the moment of the write -- no window for the state to
+# change out from under the read. A nonexistent job matches zero rows and
+# reads back identically to "not ranking" (``fetchval`` -> ``None``).
+_REQUEST_SHORTLIST_RERUN_IF_RANKING_SQL = (
+    "UPDATE jobs SET shortlist_rerun_requested = TRUE "
+    "WHERE id = $1 AND shortlist_state = 'ranking' RETURNING true"
+)
 # ONE atomic statement: only a row that is ACTUALLY TRUE flips to FALSE and
 # returns a row at all (``RETURNING true``), so two genuinely concurrent
 # callers racing this UPDATE can never both observe ``True`` — Postgres's own
@@ -252,6 +264,28 @@ async def request_shortlist_rerun(conn: DbConn, job_id: UUID) -> None:
     and by the worker's own ``already_running`` early return (a concurrent
     duplicate that never even acquired the lock)."""
     await conn.execute(_REQUEST_SHORTLIST_RERUN_SQL, job_id)
+
+
+async def request_shortlist_rerun_if_ranking(conn: DbConn, job_id: UUID) -> bool:
+    """Atomically check-and-set: ``True`` if ``job_id`` was genuinely
+    ``'ranking'`` at the moment of the write (and the rerun flag is now set),
+    ``False`` otherwise (no state, ``'awaiting_llm'``, or a nonexistent job).
+    Called by the API route in place of a ``get_shortlist_state`` read
+    followed by a separate conditional write — see
+    ``_REQUEST_SHORTLIST_RERUN_IF_RANKING_SQL`` for why that shape was a
+    TOCTOU race and this one is not.
+
+    A job whose ``'ranking'`` state is STALE (older than
+    ``settings.shortlist_ranking_stale_after_s``, per ``get_shortlist_state``'s
+    own staleness read) still matches this ``UPDATE`` and still returns
+    ``True`` — the column itself carries no timestamp check, only
+    ``get_shortlist_state``'s READ applies one. This is deliberate, not
+    overlooked: a stale row means a worker died without clearing its own
+    state, and the flag it sets here is harmless — the very next terminal
+    drain (whichever job next clears this job's state) consumes it and
+    triggers one extra rerun, bounded to a single additional run, never a
+    silent loss of the request."""
+    return bool(await conn.fetchval(_REQUEST_SHORTLIST_RERUN_IF_RANKING_SQL, job_id))
 
 
 async def consume_shortlist_rerun(conn: DbConn, job_id: UUID) -> bool:

@@ -639,3 +639,51 @@ async def test_consume_shortlist_rerun_is_atomic_under_real_concurrency(
 
     flag = await _rerun_requested_flag(pg_pool, job_id)
     assert flag is False
+
+
+# ── request_shortlist_rerun_if_ranking — the TOCTOU-fix atomic seam ─────────
+#
+# ``src.services.shortlist_service.request_shortlist_rerun_if_ranking`` does
+# not exist yet — RED half of the TDD cycle. What a real Postgres proves that
+# a mocked-conn unit test cannot: the check-and-set really is ONE statement
+# against real row state, not two, for both a ``NULL`` state (never ranked at
+# all) and a genuinely ``'ranking'`` row.
+
+
+@pytest.mark.asyncio
+async def test_request_shortlist_rerun_if_ranking_returns_false_on_null_state(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.shortlist_service import request_shortlist_rerun_if_ranking
+
+    job_id = await _insert_job(pg_pool)
+
+    async with pg_pool.acquire() as conn:
+        result = await request_shortlist_rerun_if_ranking(conn, job_id)
+
+    assert result is False
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+    assert flag is False, (
+        "a job with no shortlist_state at all must not have the rerun flag "
+        "set by the atomic UPDATE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_shortlist_rerun_if_ranking_returns_true_on_ranking_state(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    from src.services.shortlist_service import request_shortlist_rerun_if_ranking
+
+    job_id = await _insert_job(pg_pool)
+    await _set_ranking(pg_pool, job_id)
+
+    async with pg_pool.acquire() as conn:
+        result = await request_shortlist_rerun_if_ranking(conn, job_id)
+
+    assert result is True
+    flag = await _rerun_requested_flag(pg_pool, job_id)
+    assert flag is True, (
+        "a genuinely 'ranking' row must have the rerun flag set by the same "
+        "atomic UPDATE that reported True"
+    )

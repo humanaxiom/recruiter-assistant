@@ -411,6 +411,24 @@ async def test_get_users_filtered_by_role_200s_for_a_recruiter_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "recruiter", "auditor"])
+async def test_get_users_filtered_by_role_admin_403s_for_a_recruiter_session(
+    role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hole this closes: a recruiter session could pass ANY ``role``
+    filter — including ``role=admin`` — and so reconstruct the admin-only
+    unfiltered roster one filtered call at a time. A recruiter session may
+    only ever request ``role=hiring_manager``; every other value 403s, even
+    though the same gate lets an admin session request any role."""
+    list_users = _patch_list_users(monkeypatch, _seeded_users())
+    app = _build_app(_mock_conn(), user=_real_user(role="recruiter"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": role})
+    assert resp.status_code == 403
+    list_users.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_get_users_filtered_by_role_200s_for_an_admin_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -420,6 +438,21 @@ async def test_get_users_filtered_by_role_200s_for_an_admin_session(
     async with await _client(app) as client:
         resp = await client.get("/users", params={"role": "hiring_manager"})
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_users_filtered_by_role_200s_for_an_admin_session_any_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admin session's filter stays unrestricted — only the recruiter
+    allowance is narrowed to ``hiring_manager``."""
+    users = [_real_user(cas_username="al", role="admin")]
+    list_users = _patch_list_users(monkeypatch, users)
+    app = _build_app(_mock_conn(), user=_real_user(role="admin"))
+    async with await _client(app) as client:
+        resp = await client.get("/users", params={"role": "admin"})
+    assert resp.status_code == 200
+    assert list_users.await_args.kwargs.get("role") == "admin"
 
 
 @pytest.mark.asyncio
