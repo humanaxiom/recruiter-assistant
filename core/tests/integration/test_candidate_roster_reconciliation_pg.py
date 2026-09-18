@@ -369,3 +369,37 @@ async def test_two_real_resumes_sharing_an_email_hash_are_refused_not_collapsed(
         )
     assert stored_a == "unknown", "resume A must not have been written"
     assert stored_b == "unknown", "resume B must not have been written"
+
+
+@pytest.mark.asyncio
+async def test_credential_suffix_matches_through_real_pii_decrypt(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Item 4 (2026-09-17), against real pgcrypto rather than a mocked
+    ``pii_service``: the stored name carries a trailing credential suffix
+    (", CSM"), the CSV row is "Last, First" with no email, and the two must
+    still resolve to the same résumé through a real decrypt."""
+    job_id = await _insert_job(pg_pool)
+    resume_id = await _insert_resume(
+        pg_pool, job_id, name="Pat Example, CSM", email=None
+    )
+
+    async with pg_pool.acquire() as conn:
+        report = await candidate_roster_service.reconcile_candidate_roster(
+            conn,
+            job_id,
+            [_row(2, name="Example, Pat", work_authorization="eligible")],
+            actor_kind="service",
+            actor_user_id=None,
+            actor_service=_ACTOR,
+        )
+
+    assert report.matched == 1, (
+        "a credential suffix on the stored résumé name must not defeat the "
+        "name match against a real decrypt"
+    )
+    async with pg_pool.acquire() as conn:
+        stored = await conn.fetchval(
+            "SELECT work_authorization FROM resumes WHERE id = $1", resume_id
+        )
+    assert stored == "eligible"
