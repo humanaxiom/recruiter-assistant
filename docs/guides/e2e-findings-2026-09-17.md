@@ -134,3 +134,24 @@ application tier can be loaded without spending GPU time the pilot users
 need; `STRESS_LLM=real` requires an explicit confirmation and is capped at
 30 résumés per run. Reports land in `report/` (gitignored) as Markdown and
 JSON with per-step percentiles and a verdict that fails rather than skips.
+
+## Addendum 2026-09-19 — the DTO's real Taleo bundle
+
+Driven on the isolated stack with the real bundle (four combined exports of
+43–53 pages, one 3-page PDF, the 316-row roster CSV; the PDFs are a subset
+of the roster). Nothing here names a candidate.
+
+| Step | Result |
+|---|---|
+| Upload a real export unsplit | Refused: "43 pages and 19 distinct applicant emails … split it first"; all four exports refuse the same way; the 3-page file is accepted as one résumé |
+| Split one export with the splitter (real model) | Intermittent: 20 applicants with one page assigned to nobody (twice), or 18 with two people merged into one file (once). Two new checks: a merged file fails the run; an orphan page with its neighbour's email is attached with a `REPAIRED:` line. Third run: 20 résumés + 4 cover letters, clean |
+| Upload the zip plus manifest | 18 accepted, 4 with a cover letter attached, 0 cover-letter rows |
+| Parse 19 résumés (real model, concurrency 4) | 15 parsed, 4 failed: 1 skills-pass empty content (known), 3 abandoned by the reconciler at median 715 s / max 1157 s per parse against a 900 s timeout — measured while the splitter was also using the GPU, so contended |
+| Import the real roster CSV | 14 of 15 parsed résumés matched (93%), 14 work-authorization facts; 301 roster rows unmatched, the normal whole-pool state |
+
+**Be aware:** the split is the step that needs a human eye until the
+in-app confirmation screen exists — the model can merge two applicants and
+only an email check catches it. A failed résumé cannot be re-parsed from the
+UI today; re-upload it. Parse time on real résumés is long enough that four
+at once can exceed the timeout when the GPU is shared; do not run the
+splitter and a parse batch at the same time.

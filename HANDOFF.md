@@ -55,8 +55,30 @@ three are on this branch, `feat/e2e-stress-build`.
 > first; the product now says so instead of silently ingesting. Known modes
 > of the detector: a single-applicant PDF carrying three distinct header
 > emails is refused (recoverable, the reason says why); a scanned export
-> with no header text is not detected. **Still owed: a drive with the DTO's
-> real export** — it is not on this box; ask for its path.
+> with no header text is not detected.
+>
+> **Driven with the DTO's real bundle on 2026-09-19** (`data/HR Hriing
+> Tool`, gitignored: four exports of 43–53 pages, one 3-page PDF, the
+> 316-row roster CSV). All four exports refused with the right counts (19
+> distinct-email pages each); the 3-page file accepted as one résumé. The
+> splitter's LLM segmentation was **intermittent on one export**: 20
+> applicants with one page assigned to nobody (twice) or 18 with two people
+> merged into one file (once) — page accounting caught the first, nothing
+> caught the second. Two more splitter invariants landed from that: a
+> résumé file carrying two applicants' emails fails the run, and an orphan
+> page whose email equals its neighbour's is attached with a `REPAIRED:`
+> line; the third run then produced 20 + 4 cover letters cleanly. Upload of
+> the zip + manifest: 18 accepted, 4 with cover letters, 0 cover-named rows.
+> Roster CSV on the parsed set: **14 of 15 matched**, 14 work-authorization
+> facts, 301 rows unmatched (the whole pool; normal). **4 of 19 real parses
+> failed**: 1 with the known skills-pass empty-content mode, 3 abandoned by
+> the stalled-parse reconciler — real parse latency was median 715 s, max
+> 1157 s against `LLM_TIMEOUT_S=900`, **while the splitter's own segmentation
+> was running on the same GPU**, so that number is contended and not a clean
+> measurement. `scripts/split-taleo.sh` also needed the MSYS path guard the
+> other scripts carry. Still not built: the in-app split with the sponsor's
+> confirmation screen; and there is no way to re-parse a failed résumé from
+> the UI (recorded).
 
 **What's on this branch:**
 - [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,
