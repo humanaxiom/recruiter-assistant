@@ -26,10 +26,19 @@ OUTDIR="$2"; shift 2
 [ -f "$INPUT" ] || { echo "no such file: $INPUT" >&2; exit 1; }
 mkdir -p "$OUTDIR"
 
-# Absolute paths — a bind mount cannot take a relative one.
-IN_DIR="$(cd "$(dirname "$INPUT")" && pwd)"
+# Absolute paths — a bind mount cannot take a relative one. On Git Bash the
+# mount sources must be Windows-native (`pwd -W`) and MSYS path conversion must
+# be off, or "/in/<file>" is rewritten to a Git-for-Windows path (2026-09-19).
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL="*"
+  _pwd() { pwd -W; }
+else
+  _pwd() { pwd; }
+fi
+IN_DIR="$(cd "$(dirname "$INPUT")" && _pwd)"
 IN_FILE="$(basename "$INPUT")"
-OUT_DIR="$(cd "$OUTDIR" && pwd)"
+OUT_DIR="$(cd "$OUTDIR" && _pwd)"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
