@@ -320,3 +320,150 @@ def test_report_merged_applicants_returns_count_and_prints(
 
 def test_report_merged_applicants_zero_for_empty_rows() -> None:
     assert _MOD.report_merged_applicants([]) == 0
+
+
+# ── repair_orphan_pages: an email-verified repair for a page the LLM manifest
+# left assigned to no applicant, run BEFORE page accounting. 2026-09-19
+# finding: the real 43-page export left page 30 orphaned in 2 of 3 LLM runs;
+# page 30 carries the SAME email as page 29 (the preceding applicant's last
+# résumé page) — it is that applicant's second page, mis-assigned.
+
+
+def _applicant(
+    name: str, resume_pages: list[int], cover_pages: list[int] | None = None
+) -> object:
+    return _MOD._Applicant(
+        candidate_name=name,
+        resume_pages=resume_pages,
+        cover_letter_pages=cover_pages or [],
+    )
+
+
+def test_repair_orphan_pages_attaches_to_preceding_applicant_same_email() -> None:
+    applicants = [
+        _applicant("Pat", [1, 2, 10]),
+        _applicant("Sam", [12, 13]),
+    ]
+
+    def page_emails(p: int) -> set[str]:
+        if p == 10:
+            return {"pat@example.com"}
+        if p == 11:
+            return {"pat@example.com"}
+        if p == 12:
+            return {"sam@example.com"}
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == [1, 2, 10, 11]
+    assert repaired[1].resume_pages == [12, 13]
+    assert report == [
+        "REPAIRED: page 11 attached to applicant 1 — same applicant email as page 10"
+    ]
+    # input is not mutated
+    assert applicants[0].resume_pages == [1, 2, 10]
+
+
+def test_repair_orphan_pages_attaches_to_following_when_preceding_differs() -> None:
+    applicants = [
+        _applicant("Pat", [10]),
+        _applicant("Sam", [12, 13]),
+    ]
+
+    def page_emails(p: int) -> set[str]:
+        if p == 10:
+            return {"pat@example.com"}
+        if p == 11:
+            return {"sam@example.com"}
+        if p == 12:
+            return {"sam@example.com"}
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == [10]
+    assert repaired[1].resume_pages == [11, 12, 13]
+    assert report == [
+        "REPAIRED: page 11 attached to applicant 2 — same applicant email as page 12"
+    ]
+
+
+def test_repair_orphan_pages_untouched_when_orphan_has_no_email() -> None:
+    applicants = [_applicant("Pat", [10]), _applicant("Sam", [12, 13])]
+
+    def page_emails(p: int) -> set[str]:
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == [10]
+    assert repaired[1].resume_pages == [12, 13]
+    assert report == []
+
+
+def test_repair_orphan_pages_untouched_when_email_matches_neither_neighbour() -> None:
+    applicants = [_applicant("Pat", [10]), _applicant("Sam", [12, 13])]
+
+    def page_emails(p: int) -> set[str]:
+        if p == 11:
+            return {"stranger@example.com"}
+        if p == 10:
+            return {"pat@example.com"}
+        if p == 12:
+            return {"sam@example.com"}
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == [10]
+    assert repaired[1].resume_pages == [12, 13]
+    assert report == []
+
+
+def test_repair_orphan_pages_untouched_when_orphan_is_a_cover_page() -> None:
+    # The real _orphan_page_emails() returns set() for a page whose text
+    # reads as a cover letter (_is_cover), even though the page DOES carry
+    # an email — cover pages are out of scope for this repair (see
+    # repair_orphan_pages's docstring), so from the pure function's point of
+    # view this is indistinguishable from "no email" (previous test).
+    applicants = [_applicant("Pat", [10]), _applicant("Sam", [12, 13])]
+
+    def page_emails(p: int) -> set[str]:
+        if p == 11:
+            return set()  # cover-shaped page 11 filtered upstream by _is_cover
+        if p == 10:
+            return {"pat@example.com"}
+        if p == 12:
+            return {"sam@example.com"}
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == [10]
+    assert repaired[1].resume_pages == [12, 13]
+    assert report == []
+
+
+def test_repair_orphan_pages_never_attaches_to_a_cover_only_neighbour() -> None:
+    # Preceding applicant has NO résumé pages (cover-letter only) — the
+    # orphan must never be folded into a cover-letter page set, even if the
+    # email matches the cover letter's own contact info.
+    applicants = [
+        _applicant("Pat", [], cover_pages=[10]),
+        _applicant("Sam", [12, 13]),
+    ]
+
+    def page_emails(p: int) -> set[str]:
+        if p == 11:
+            return {"pat@example.com"}
+        if p == 12:
+            return {"sam@example.com"}
+        return set()
+
+    repaired, report = _MOD.repair_orphan_pages(applicants, 13, page_emails)
+
+    assert repaired[0].resume_pages == []
+    assert repaired[0].cover_letter_pages == [10]
+    assert repaired[1].resume_pages == [12, 13]
+    assert report == []

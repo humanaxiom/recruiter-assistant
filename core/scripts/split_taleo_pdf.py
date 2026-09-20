@@ -579,6 +579,119 @@ def report_merged_applicants(rows: list[tuple[str, int]]) -> int:
     return len(rows)
 
 
+def repair_orphan_pages(
+    manifest_applicants: list[_Applicant],
+    page_count: int,
+    page_emails: Callable[[int], set[str]],
+) -> tuple[list[_Applicant], list[str]]:
+    """Repair pages the LLM manifest left assigned to no applicant, when a
+    single distinct email ties the page unambiguously to a NEIGHBOUR
+    applicant's résumé (2026-09-19 finding: page 30 of a real 43-page export
+    carried the SAME email as page 29, the last résumé page of the preceding
+    applicant, mis-assigned by the model).
+
+    For each page in ``1..page_count`` assigned to no applicant (neither
+    résumé nor cover-letter pages, across every applicant): look up its
+    distinct emails via ``page_emails``. If there is exactly one, and it
+    equals the email on the immediately PRECEDING applicant's last résumé
+    page, append the orphan page to that applicant's résumé pages. Failing
+    that, if it equals the email on the immediately FOLLOWING applicant's
+    first résumé page, prepend it there instead. Otherwise the page is left
+    untouched (still orphaned; the caller's existing page-accounting check
+    still fires on it).
+
+    Only résumé pages are ever grown — an applicant with no résumé pages
+    (cover-letter-only) is never a repair target, so a page is never folded
+    into a cover-letter page set.
+
+    Cover-letter pages are out of scope: ``page_emails`` is expected to
+    return an empty set for a page whose text reads as a cover letter (the
+    caller's real implementation checks ``_is_cover`` before extracting
+    emails), which this function then treats identically to "no email" —
+    it has no page text of its own to make that call.
+
+    Returns the repaired applicant list (a deep copy; the input is never
+    mutated) and the human-readable report lines to print, one per repair.
+    """
+    assigned: set[int] = set()
+    for a in manifest_applicants:
+        assigned.update(a.resume_pages)
+        assigned.update(a.cover_letter_pages)
+    orphans = sorted(p for p in range(1, page_count + 1) if p not in assigned)
+
+    repaired = [a.model_copy(deep=True) for a in manifest_applicants]
+    report: list[str] = []
+
+    def _bounds(a: _Applicant) -> tuple[int, int] | None:
+        pages = a.resume_pages + a.cover_letter_pages
+        return (min(pages), max(pages)) if pages else None
+
+    for p in orphans:
+        emails = page_emails(p)
+        if len(emails) != 1:
+            continue
+        (email,) = tuple(emails)
+
+        prev_idx: int | None = None
+        prev_max = -1
+        next_idx: int | None = None
+        next_min = page_count + 1
+        for idx, a in enumerate(repaired):
+            b = _bounds(a)
+            if b is None:
+                continue
+            if b[1] < p and b[1] > prev_max:
+                prev_max = b[1]
+                prev_idx = idx
+            if b[0] > p and b[0] < next_min:
+                next_min = b[0]
+                next_idx = idx
+
+        attached = False
+        if prev_idx is not None:
+            a = repaired[prev_idx]
+            if a.resume_pages:
+                last_resume_page = max(a.resume_pages)
+                if email in page_emails(last_resume_page):
+                    a.resume_pages = sorted([*a.resume_pages, p])
+                    report.append(
+                        f"REPAIRED: page {p} attached to applicant "
+                        f"{prev_idx + 1} — same applicant email as page "
+                        f"{last_resume_page}"
+                    )
+                    attached = True
+
+        if not attached and next_idx is not None:
+            a = repaired[next_idx]
+            if a.resume_pages:
+                first_resume_page = min(a.resume_pages)
+                if email in page_emails(first_resume_page):
+                    a.resume_pages = sorted([p, *a.resume_pages])
+                    report.append(
+                        f"REPAIRED: page {p} attached to applicant "
+                        f"{next_idx + 1} — same applicant email as page "
+                        f"{first_resume_page}"
+                    )
+
+    return repaired, report
+
+
+def _orphan_page_emails(texts: list[str]) -> Callable[[int], set[str]]:
+    """Build the ``page_emails`` callable ``repair_orphan_pages`` needs, from
+    the same PyMuPDF page texts the LLM digest was built from. A page whose
+    text reads as a cover letter (``_is_cover``) returns no emails — cover
+    pages are out of scope for the repair, per ``repair_orphan_pages``'s own
+    docstring — so it is never mistaken for a résumé-page match."""
+
+    def page_emails(p: int) -> set[str]:
+        text = texts[p - 1]
+        if _is_cover(text):
+            return set()
+        return {m.lower() for m in _EMAIL.findall(text[:_MERGED_HEAD])}
+
+    return page_emails
+
+
 def _run_llm_mode(
     doc: fitz.Document,
     texts: list[str],
@@ -597,6 +710,11 @@ def _run_llm_mode(
         print("       Retry, or fall back to --heuristic / --ranges.")
         return 1
     print(f"output: {out_dir}\n")
+    manifest.applicants, repair_report = repair_orphan_pages(
+        manifest.applicants, len(texts), _orphan_page_emails(texts)
+    )
+    for line in repair_report:
+        print(line)
     emitted = _emit_from_manifest(doc, texts, manifest, out_dir, min_text)
     resumes, covers = _zippable(emitted)
     _write_pairing_manifest(emitted, out_dir)

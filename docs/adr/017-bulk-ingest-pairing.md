@@ -341,3 +341,9 @@ applicant is surfaced rather than discovered later by counting.
 which page accounting cannot see because every page is still assigned, just to the wrong file; this is
 still a splitter-side heuristic on the operator's own re-run, not the in-app confirmation screen decision 2
 already deferred.
+
+**2026-09-19: an unassigned page is now repaired before accounting runs, when an email makes the fix
+unambiguous** — `repair_orphan_pages` folds an orphan page into the immediately preceding (or, failing
+that, following) applicant's résumé pages only when the orphan carries exactly one email matching that
+neighbour's adjoining résumé page, printing a loud `REPAIRED:` line per fix and leaving every other orphan
+for the existing `PAGE ACCOUNTING FAILURE` to catch.
