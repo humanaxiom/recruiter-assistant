@@ -59,6 +59,7 @@ import asyncio
 import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz  # type: ignore[import-untyped]
@@ -525,6 +526,59 @@ def report_cover_only(
     return len(cover_only)
 
 
+_MERGED_HEAD = 600
+
+
+def _pymupdf_page_texts(path: Path) -> list[str]:
+    """Default ``page_texts``: the first ~600 chars of each page's extracted
+    text, via the same PyMuPDF extraction the splitter already uses."""
+    doc = fitz.open(path)
+    try:
+        return [(page.get_text("text") or "")[:_MERGED_HEAD] for page in doc]
+    finally:
+        doc.close()
+
+
+def merged_applicant_files(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+    page_texts: Callable[[Path], list[str]] = _pymupdf_page_texts,
+) -> list[tuple[str, int]]:
+    """Scan each emitted applicant's *résumé* PDF (never its cover letter)
+    for distinct email addresses across its pages. A résumé carrying 2+
+    distinct, lowercased emails is a probable merged applicant — the LLM put
+    two people's documents in one file, which page accounting cannot see
+    because every page IS assigned, just to the wrong applicant. Returns
+    ``(candidate name or file stem, distinct email count)`` rows, one per
+    affected résumé, in emitted order."""
+    rows: list[tuple[str, int]] = []
+    for name, resume_path, _cover_path, _pages in emitted:
+        if resume_path is None:
+            continue
+        emails: set[str] = set()
+        for text in page_texts(resume_path):
+            for m in _EMAIL.findall(text):
+                emails.add(m.lower())
+        if len(emails) >= 2:
+            rows.append((name or resume_path.stem, len(emails)))
+    return rows
+
+
+def report_merged_applicants(rows: list[tuple[str, int]]) -> int:
+    """Print a loud block for each probable merged applicant. Returns the
+    count so the CLI can exit non-zero."""
+    if not rows:
+        return 0
+    print("\n" + "!" * 60)
+    for name, n_emails in rows:
+        print(
+            f"! PROBABLE MERGED APPLICANT — file {name} carries {n_emails} "
+            "distinct applicant emails; the segmentation put two people in "
+            "one résumé. Re-run the split or use --ranges to separate them."
+        )
+    print("!" * 60 + "\n")
+    return len(rows)
+
+
 def _run_llm_mode(
     doc: fitz.Document,
     texts: list[str],
@@ -562,7 +616,8 @@ def _run_llm_mode(
     missing, duplicated = page_accounting(len(texts), assigned)
     clean = report_page_accounting(missing, duplicated)
     cover_only_count = report_cover_only(emitted)
-    return 0 if clean and cover_only_count == 0 else 1
+    merged_count = report_merged_applicants(merged_applicant_files(emitted))
+    return 0 if clean and cover_only_count == 0 and merged_count == 0 else 1
 
 
 def _run_deterministic_mode(

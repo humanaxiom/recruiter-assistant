@@ -220,3 +220,103 @@ def test_zippable_keeps_a_resume_with_no_cover(tmp_path: Path) -> None:
     resumes, covers = _MOD._zippable(emitted)
     assert resumes == [resume_only]
     assert covers == []
+
+
+# ── merged_applicant_files: a résumé PDF carrying 2+ distinct applicant
+# emails means the LLM merged two people into one file — page accounting
+# can't see this because every page IS assigned, just to the wrong file.
+# 2026-09-19 finding: a 4-page résumé file carried two applicants' emails.
+
+
+def test_merged_applicant_files_reports_two_distinct_emails(tmp_path: Path) -> None:
+    resume = tmp_path / "001_pat_example_resume.pdf"
+    resume.write_bytes(b"%PDF-1.4")
+
+    def fake_page_texts(path: Path) -> list[str]:
+        assert path == resume
+        return ["contact pat@example.com", "contact sam@example.com"]
+
+    rows = _MOD.merged_applicant_files(
+        [("Pat Example", resume, None, [1, 2])], fake_page_texts
+    )
+    assert rows == [("Pat Example", 2)]
+
+
+def test_merged_applicant_files_not_reported_for_same_email_twice(
+    tmp_path: Path,
+) -> None:
+    resume = tmp_path / "001_pat_example_resume.pdf"
+    resume.write_bytes(b"%PDF-1.4")
+
+    def fake_page_texts(path: Path) -> list[str]:
+        return ["contact Pat@Example.com", "again pat@example.com"]
+
+    rows = _MOD.merged_applicant_files(
+        [("Pat Example", resume, None, [1, 2])], fake_page_texts
+    )
+    assert rows == []
+
+
+def test_merged_applicant_files_not_reported_when_no_emails(tmp_path: Path) -> None:
+    resume = tmp_path / "001_pat_example_resume.pdf"
+    resume.write_bytes(b"%PDF-1.4")
+
+    def fake_page_texts(path: Path) -> list[str]:
+        return ["no contact info here", "still nothing"]
+
+    rows = _MOD.merged_applicant_files(
+        [("Pat Example", resume, None, [1, 2])], fake_page_texts
+    )
+    assert rows == []
+
+
+def test_merged_applicant_files_only_scans_resume_files_not_cover_letters(
+    tmp_path: Path,
+) -> None:
+    resume = tmp_path / "001_pat_resume.pdf"
+    resume.write_bytes(b"%PDF-1.4")
+    cover = tmp_path / "001_pat_cover_letter.pdf"
+    cover.write_bytes(b"%PDF-1.4")
+
+    def fake_page_texts(path: Path) -> list[str]:
+        if path == cover:
+            return ["Dear recruiter@company.com, ...", "sincerely, another@company.com"]
+        return ["contact pat@example.com"]
+
+    rows = _MOD.merged_applicant_files(
+        [("Pat", resume, cover, [1, 2])], fake_page_texts
+    )
+    assert rows == []
+
+
+def test_merged_applicant_files_two_files_one_merged(tmp_path: Path) -> None:
+    resume_a = tmp_path / "001_pat_resume.pdf"
+    resume_a.write_bytes(b"%PDF-1.4")
+    resume_b = tmp_path / "002_sam_resume.pdf"
+    resume_b.write_bytes(b"%PDF-1.4")
+
+    def fake_page_texts(path: Path) -> list[str]:
+        if path == resume_a:
+            return ["pat@example.com", "different@example.com"]
+        return ["sam@example.com"]
+
+    rows = _MOD.merged_applicant_files(
+        [("Pat", resume_a, None, [1, 2]), ("Sam", resume_b, None, [3])],
+        fake_page_texts,
+    )
+    assert rows == [("Pat", 2)]
+
+
+def test_report_merged_applicants_returns_count_and_prints(
+    capsys: object,
+) -> None:
+    count = _MOD.report_merged_applicants([("001_pat_resume.pdf", 2)])
+    assert count == 1
+    out = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "PROBABLE MERGED APPLICANT" in out
+    assert "001_pat_resume.pdf" in out
+    assert "2 distinct applicant emails" in out
+
+
+def test_report_merged_applicants_zero_for_empty_rows() -> None:
+    assert _MOD.report_merged_applicants([]) == 0

@@ -335,3 +335,9 @@ separately in **Pairing manifest**. `report_cover_only` prints a loud block when
 applicant with cover-letter pages but no résumé pages at all (already excluded from `manifest.json` by
 `_write_pairing_manifest`'s existing filter) and the CLI now exits non-zero in that case, so a dropped
 applicant is surfaced rather than discovered later by counting.
+
+**2026-09-19: the splitter also fails on a probable merged applicant**, not just on unassigned pages —
+`merged_applicant_files` scans each emitted `*_resume.pdf` (never a cover letter) for 2+ distinct emails,
+which page accounting cannot see because every page is still assigned, just to the wrong file; this is
+still a splitter-side heuristic on the operator's own re-run, not the in-app confirmation screen decision 2
+already deferred.
