@@ -27,7 +27,7 @@ import pytest
 from frontend import api_client
 from frontend import app as frontend_app_module
 from frontend.app import _CSRF_HOOK_EXEMPT_ENDPOINTS, app
-from src.schemas.resumes import CandidateInfo, ResumeOut
+from src.schemas.resumes import CandidateInfo, ResumeOut, ResumeStatus
 from src.settings import Settings
 
 _NOW = dt.datetime(2026, 9, 19, 12, 0, tzinfo=dt.UTC)
@@ -43,7 +43,7 @@ def client(csrf_client: Any) -> Any:
 def _resume_ctx(
     resume_id: UUID | None = None,
     *,
-    status: str = "failed",
+    status: ResumeStatus = "failed",
     degraded: bool = False,
     withdrawn_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
@@ -67,7 +67,7 @@ def _resume_ctx(
         candidate=CandidateInfo(name=None, email=None, phone=None, location=None),
         candidate_email_hash=None,
         parsed=parsed,
-        status=status,  # type: ignore[arg-type]
+        status=status,
         uploaded_by="api",
         uploaded_at=_NOW,
         parsed_at=parsed_at,
