@@ -1665,7 +1665,12 @@ def resume_reparse(resume_id: UUID) -> Any:
     try:
         api_client.reparse_resume(resume_id)
     except api_client.Conflict as exc:
-        resume = api_client.get_resume(resume_id)
+        try:
+            resume = api_client.get_resume(resume_id)
+        except api_client.NotFound:
+            abort(404)
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
         return _render_resume_detail(
             resume_id,
             resume,
