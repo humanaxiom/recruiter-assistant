@@ -449,6 +449,17 @@ def get_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def reparse_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /resumes/{id}/reparse — re-queue a failed or degraded résumé
+    parse. Mirrors :func:`reparse_job`.
+
+    A backend 409 (the résumé is withdrawn, already in flight, or already
+    parsed cleanly) surfaces as ``Conflict`` so the route can say that
+    plainly rather than redirecting as though it had queued something."""
+    response = _request("POST", f"/resumes/{resume_id}/reparse", client=client)
+    return response.json()
+
+
 def reveal_resume(
     resume_id: UUID,
     *,
