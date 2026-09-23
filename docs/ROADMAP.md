@@ -221,7 +221,7 @@ Small, real, and none of them blocking. Fix one when you are already in the file
 - The Regenerate staleness bound is wall-clock, not job-time — a 2+ hour ranking reads stale after 1 hour (`shortlist_service.py:276-279`).
 - A second Regenerate during a run is silently dropped by the advisory lock with no user acknowledgement (`matching_tasks.py:80-87`).
 - ~~Job `306c573c` fails extraction on model output~~ — **resolved 2026-09-09**: it parsed first time under `jd_extract_v2` at the 8192 floor (`Co-operative Education Program Assistant`, department filled). The residual lesson stands: the token floor is per-*prompt*, not per-model.
-- **No `POST /resumes/{id}/reparse` route** — a degraded résumé cannot be recovered without re-upload. The JD side has one; the résumé side does not.
+- ~~No `POST /resumes/{id}/reparse` route~~ — **built 2026-09-23 on `feat/resume-reparse`**: a failed or degraded résumé has a Re-parse button on its page; the reconciler measures a stall from `GREATEST(uploaded_at, reparse_requested_at)`. Residual: the résumés TABLE has no per-row control, only the detail page.
 - `resume_parse_max_tries` has no upper sanity cap.
 - **FU-7 decision 1 — LLM provider failover chain.** Genuinely useful now: a second Ollama host would let an `aria-gb10` outage fail *over* rather than fail *closed*.
 - **`stub_llm` reads `request.json()` with no model validation** (measured 2026-09-17, stress build). Fine for its purpose — a throwaway load-test double — but worth knowing if it is ever reused for anything that matters. Recorded only, not a defect in the product.
