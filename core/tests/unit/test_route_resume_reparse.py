@@ -136,11 +136,18 @@ async def test_reparse_a_failed_resume_returns_202_queued(
 
 
 @pytest.mark.asyncio
-async def test_reparse_a_degraded_parsed_resume_returns_202(
+async def test_reparse_returns_202_whenever_the_service_says_reset_applied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Eligible = failed, OR parsed-but-degraded — the other half of the
-    incident (1 of 4 dead rows was degraded, not failed)."""
+    """The route itself cannot distinguish a failed row from a
+    parsed-but-degraded one — both are "eligible" per
+    ``resume_service.reset_for_reparse`` returning ``True``, and the route
+    just trusts that verdict and enqueues. The actual failed-vs-degraded
+    eligibility distinction (1 of 4 dead rows in the 2026-09-19 incident was
+    degraded, not failed) is pinned at the SERVICE layer, in
+    ``test_resume_reparse_service.py`` and the real-Postgres
+    ``test_resume_reparse_pg.py`` — this test only pins that the route does
+    not re-derive or second-guess that verdict."""
     resume_id = uuid4()
     reset = AsyncMock(return_value=True)
     monkeypatch.setattr(resumes_routes.resume_service, "reset_for_reparse", reset)
