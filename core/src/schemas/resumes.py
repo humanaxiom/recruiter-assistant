@@ -603,6 +603,22 @@ class ResumeStatusBreakdown(BaseModel):
     degraded: int = Field(ge=0)
 
 
+class ResumeReparseOut(BaseModel):
+    """POST /resumes/{id}/reparse — the retry was accepted onto the queue.
+
+    Mirrors ``schemas.jobs.JobReparseOut``. Deliberately NOT a ``ResumeOut``:
+    the row is unchanged apart from its cleared parse outcome, and returning
+    the full résumé would invite a caller to read ``parsed_at``/``parsed``
+    from it as if the retry had already run. 202 plus this two-field
+    acknowledgement says what actually happened — queued, not done.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    status: Literal["queued"]
+
+
 class ResumeDeleteOut(BaseModel):
     """DELETE /resumes/{id} — confirmation of a single-résumé cascade delete.
 

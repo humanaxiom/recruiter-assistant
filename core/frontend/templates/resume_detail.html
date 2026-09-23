@@ -15,6 +15,11 @@
 #}
 {% set parsed = resume.parsed %}
 {% block content %}
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
 <div class="card">
   <div class="card-header">
     <h1 style="margin:0">{{ resume.original_filename }}</h1>
@@ -27,10 +32,10 @@
   {#
     FU-7 §4 / ADR-030 — degraded-parse warning. Skills extraction fell back to
     the deterministic keyword scan, so this résumé ranks on incomplete skills;
-    it is EXCLUDED from shortlists until re-parsed (via re-upload today). NON-PII
-    — renders regardless of blind/reveal state, exactly like the withdrawal
-    block below. Only rendered when `parsed.degraded` so a clean parse carries
-    no "degraded" text at all.
+    it is EXCLUDED from shortlists until re-parsed (via the Re-parse résumé
+    button below). NON-PII — renders regardless of blind/reveal state, exactly
+    like the withdrawal block below. Only rendered when `parsed.degraded` so a
+    clean parse carries no "degraded" text at all.
   #}
   {% if parsed and parsed.degraded %}
   <div class="degraded-banner">
@@ -95,6 +100,30 @@
       {% if c_phone %}<dt>Phone</dt><dd>{{ c_phone }}</dd>{% endif %}
       {% if c_location %}<dt>Location</dt><dd>{{ c_location }}</dd>{% endif %}
     </dl>
+  </div>
+  {% endif %}
+
+  {#
+    The résumé side of `job_detail.html`'s JD recovery path (ROADMAP §5): a
+    failed or degraded parse used to have no recovery besides deleting the
+    file and starting over. Gated on `resume.status == 'failed'` OR a
+    degraded parse — never on a clean parse (which has nothing to recover)
+    and never on a withdrawn résumé (reinstate it first). The failure reason
+    is shown for a failed row because "it failed" is not actionable and "the
+    circuit breaker was open" is. Deliberately OUTSIDE the identity block
+    above for the same reason the withdrawal block below is: recovery is
+    orthogonal to blind/reveal posture.
+  #}
+  {% if is_writer and not resume.withdrawn_at
+        and (resume.status == 'failed' or (parsed and parsed.degraded)) %}
+  <div class="parse-failed">
+    {% if resume.status == 'failed' and resume.failure_reason %}
+    <p class="muted">Reason: {{ resume.failure_reason }}</p>
+    {% endif %}
+    <form action="{{ url_for('resume_reparse', resume_id=resume.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <button class="btn btn-secondary btn-sm" type="submit">Re-parse résumé</button>
+    </form>
   </div>
   {% endif %}
 
