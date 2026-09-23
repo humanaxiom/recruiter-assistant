@@ -192,6 +192,49 @@ def test_reparse_route_404s_when_the_backend_404s(
     assert resp.status_code == 404
 
 
+def test_reparse_route_conflict_then_404_on_the_refetch_is_a_404_not_a_500(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-fetch inside the ``Conflict`` handler must be guarded exactly
+    like ``_render_job_detail``'s own fetch: a résumé deleted between the
+    ``reparse`` 409 and this handler's re-``GET`` must 404, not 500."""
+    resume_id = uuid4()
+
+    def fake_reparse(rid: UUID, **_kw: Any) -> dict[str, str]:
+        raise api_client.Conflict(
+            "résumé parsed cleanly", status_code=409, detail="résumé parsed cleanly"
+        )
+
+    def fake_get_resume(rid: UUID, **_kw: Any) -> dict[str, Any]:
+        raise api_client.NotFound("no such resume")
+
+    monkeypatch.setattr(api_client, "reparse_resume", fake_reparse)
+    monkeypatch.setattr(api_client, "get_resume", fake_get_resume)
+    resp = client.post(f"/resumes/{resume_id}/reparse")
+    assert resp.status_code == 404
+
+
+def test_reparse_route_conflict_then_backend_unavailable_on_the_refetch(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guard, the other exception: a backend outage on the re-fetch must
+    surface the shared unavailable page, not a 500."""
+    resume_id = uuid4()
+
+    def fake_reparse(rid: UUID, **_kw: Any) -> dict[str, str]:
+        raise api_client.Conflict(
+            "résumé parsed cleanly", status_code=409, detail="résumé parsed cleanly"
+        )
+
+    def fake_get_resume(rid: UUID, **_kw: Any) -> dict[str, Any]:
+        raise api_client.BackendUnavailable("down")
+
+    monkeypatch.setattr(api_client, "reparse_resume", fake_reparse)
+    monkeypatch.setattr(api_client, "get_resume", fake_get_resume)
+    resp = client.post(f"/resumes/{resume_id}/reparse")
+    assert resp.status_code == 503
+
+
 def test_reparse_route_rejects_a_request_with_no_page_token() -> None:
     """The ORDINARY ``_csrf_gate`` hook, not a one-shot slot — a plain client
     with no page token must still 403."""
