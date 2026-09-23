@@ -44,6 +44,7 @@ from src.schemas.resumes import (  # noqa: F401
     CandidateInfo,
     ResumeOut,
     ResumeReparseOut,
+    ResumeStatus,
 )
 
 _NOW = dt.datetime(2026, 9, 19, 12, 0, tzinfo=dt.UTC)
@@ -54,7 +55,7 @@ _NON_WRITER_ROLES: tuple[Role, ...] = (Role.HIRING_MANAGER, Role.AUDITOR)
 def _resume_out(
     resume_id: UUID,
     *,
-    status: str = "failed",
+    status: ResumeStatus = "failed",
     withdrawn_at: dt.datetime | None = None,
 ) -> ResumeOut:
     return ResumeOut(
@@ -67,7 +68,7 @@ def _resume_out(
         candidate=CandidateInfo(name=None, email=None, phone=None, location=None),
         candidate_email_hash=None,
         parsed=None,
-        status=status,  # type: ignore[arg-type]
+        status=status,
         uploaded_by="api",
         uploaded_at=_NOW,
         parsed_at=_NOW if status == "parsed" else None,
