@@ -199,6 +199,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # is prefetchable, and a speculative fetch would both fabricate an
         # audit row and pull candidate PII into a cache.
         "/resumes/{resume_id}/document",
+        # The résumé side of "/jobs/{job_id}/reparse" above — re-queue a
+        # failed or degraded résumé parse (ROADMAP §5).
+        "/resumes/{resume_id}/reparse",
     }
 )
 
