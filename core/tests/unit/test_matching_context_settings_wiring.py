@@ -9,7 +9,8 @@ construction:
 1. ``matching_context_from_settings(settings, *, db, neo4j, llm, embedder) ->
    MatchingContext`` — a factory that must populate EVERY non-weight tunable
    (``family_weight`` / ``non_matchable_families`` / ``llm_concurrency`` /
-   ``evidence_max_tokens`` / ``model_gen`` / ``model_emb`` / ``git_sha``) from
+   ``evidence_max_tokens`` / ``model_gen`` / ``model_emb`` / ``git_sha`` /
+   ``internal_uplift_amount``) from
    the ``Settings`` instance it's handed, not ``MatchingContext``'s own
    dataclass-field defaults (which mirror ``orchestrator.py``'s module-level
    literals ``_FAMILY_MATCH_WEIGHT=0.5``, ``_NON_MATCHABLE_FAMILIES=("other",
@@ -28,6 +29,15 @@ construction:
 3. ``settings.git_sha`` must flow, end to end, through
    ``matching_context_from_settings`` -> ``MatchingContext.git_sha`` -> the
    REAL orchestrator's ``PipelineMeta.git_sha`` on a shortlist run.
+4. RED (review finding, 2026-09-09): ``settings.match_internal_uplift`` must
+   flow the SAME two ways -- into ``MatchingContext.internal_uplift_amount``
+   (asserted in the tunables test below, extended rather than left silent) and
+   end to end into the REAL orchestrator's
+   ``PipelineMeta.internal_uplift_amount`` on a shortlist run, mirroring the
+   ``git_sha`` proof in (3). Before this, a deployment setting
+   ``MATCH_INTERNAL_UPLIFT=0.02`` silently got ``0.05`` instead -- nothing
+   enforced ADR-009's "configurable" promise for this one field, and
+   ``grep -rn match_internal_uplift core/tests/`` returned nothing.
 """
 
 from __future__ import annotations
@@ -54,6 +64,9 @@ _ORCHESTRATOR_FAMILY_WEIGHT_LITERAL = 0.5
 _ORCHESTRATOR_NON_MATCHABLE_FAMILIES_LITERAL = ("other", "domain")
 _ORCHESTRATOR_LLM_CONCURRENCY_LITERAL = 4
 _ORCHESTRATOR_EVIDENCE_MAX_TOKENS_LITERAL = 2048
+# ``orchestrator._INTERNAL_UPLIFT`` / ``Settings.match_internal_uplift``'s own
+# default — chosen here for the same "must differ" reason as the four above.
+_ORCHESTRATOR_INTERNAL_UPLIFT_LITERAL = 0.05
 
 
 # ── 1. matching_context_from_settings populates every non-weight tunable ────
@@ -68,12 +81,14 @@ def test_matching_context_from_settings_populates_tunables() -> None:
         llm_model_generation="custom-gen-model-9000",
         llm_model_embedding="custom-emb-model-9000",
         git_sha="feedface1234",
+        match_internal_uplift=0.02,
     )
     assert settings.match_family_weight != _ORCHESTRATOR_FAMILY_WEIGHT_LITERAL
     assert settings.match_llm_concurrency != _ORCHESTRATOR_LLM_CONCURRENCY_LITERAL
     assert (
         settings.match_evidence_max_tokens != _ORCHESTRATOR_EVIDENCE_MAX_TOKENS_LITERAL
     )
+    assert settings.match_internal_uplift != _ORCHESTRATOR_INTERNAL_UPLIFT_LITERAL
 
     db = MagicMock(name="db")
     neo4j = MagicMock(name="neo4j")
@@ -100,6 +115,12 @@ def test_matching_context_from_settings_populates_tunables() -> None:
     assert ctx.model_gen == "custom-gen-model-9000"
     assert ctx.model_emb == "custom-emb-model-9000"
     assert ctx.git_sha == "feedface1234"
+    # RED (review finding): a deployment that configures MATCH_INTERNAL_UPLIFT
+    # must see that value on the context, not orchestrator's own module-level
+    # literal default -- the same "configurable" contract every other tunable
+    # in this test already proves.
+    assert ctx.internal_uplift_amount == pytest.approx(0.02)
+    assert ctx.internal_uplift_amount != _ORCHESTRATOR_INTERNAL_UPLIFT_LITERAL
 
 
 def test_matching_context_from_settings_default_settings_still_wires_through() -> None:
@@ -120,6 +141,7 @@ def test_matching_context_from_settings_default_settings_still_wires_through() -
     assert ctx.model_gen == settings.llm_model_generation
     assert ctx.model_emb == settings.llm_model_embedding
     assert ctx.git_sha == settings.git_sha
+    assert ctx.internal_uplift_amount == settings.match_internal_uplift
 
 
 def test_matching_context_from_settings_use_classified_families_true() -> None:
@@ -314,3 +336,47 @@ async def test_git_sha_from_settings_lands_in_shortlist_pipeline_meta() -> None:
 
     assert result.pipeline_meta is not None
     assert result.pipeline_meta.git_sha == sentinel
+
+
+@pytest.mark.asyncio
+async def test_internal_uplift_amount_lands_in_shortlist_pipeline_meta() -> None:
+    """RED (review finding, link 2 of 4: ``orchestrator.py:1097``,
+    ``_shortlist_meta(internal_uplift_amount=ctx.internal_uplift_amount)``).
+
+    Mirrors ``test_git_sha_from_settings_lands_in_shortlist_pipeline_meta``
+    exactly, substituting the internal-uplift tunable for git_sha: a NON
+    -default ``settings.match_internal_uplift`` must reach
+    ``PipelineMeta.internal_uplift_amount`` on a real ``generate_shortlist``
+    run. Delete the kwarg at the ``_shortlist_meta`` call site and
+    ``PipelineMeta`` falls back to its own default (0.0, per
+    ``test_a_legacy_pipeline_meta_blob_with_no_internal_uplift_key_still_
+    parses`` in ``test_internal_uplift_scoring.py``) — every shortlist page
+    would then render "SFU internal (APSA) +0" for a candidate who actually
+    received the configured bonus, and every one of the 6067+624 pre-existing
+    tests would stay green because none of them read this field end to end.
+    """
+    settings = Settings(match_internal_uplift=0.02)
+    assert settings.match_internal_uplift != _ORCHESTRATOR_INTERNAL_UPLIFT_LITERAL
+
+    db = MagicMock(name="db")
+    db.fetchrow = AsyncMock(
+        return_value=_Row(
+            {"title": "Senior Engineer", "min_years": None, "description_parsed": None}
+        )
+    )
+    neo4j = _neo4j_with_zero_stage1_candidates()
+
+    ctx = matching_context_from_settings(
+        settings, db=db, neo4j=neo4j, llm=MagicMock(), embedder=MagicMock()
+    )
+    assert ctx.internal_uplift_amount == pytest.approx(0.02)
+
+    job_id: UUID = uuid4()
+    result = await generate_shortlist(job_id, ctx)
+
+    assert result.pipeline_meta is not None
+    assert result.pipeline_meta.internal_uplift_amount == pytest.approx(0.02)
+    assert (
+        result.pipeline_meta.internal_uplift_amount
+        != _ORCHESTRATOR_INTERNAL_UPLIFT_LITERAL
+    )

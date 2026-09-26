@@ -263,6 +263,34 @@
       </span>
     </div>
 
+    {# Sponsor requirements PR2 slice 3 -- the SFU-internal-status uplift
+       chip. Read-only (a `<span>`, no form, mints no CSRF token). Rendered
+       even on a voided card (the uplift does not resurrect it -- the
+       `voided` gate above already decides rank/n/a independently of these
+       flags).
+
+       2026-09-09 review finding (minor 4): the amount shown must be what
+       THIS candidate actually received, never the run's nominal configured
+       amount. `score_breakdown.internal_uplift_applied` is the post-clamp
+       bonus actually applied and needs no reproducibility stamp -- it is on
+       the same row. `pipeline_meta.internal_uplift_amount` is kept only as
+       a fallback for a row whose `score_breakdown` predates this field (and
+       so reads back as the default 0.0, which is indistinguishable from
+       "genuinely received nothing" for a flagged-internal candidate): an
+       unreadable/absent `pipeline_meta` must never turn into a confident
+       "+0" for someone `score_breakdown` says received +5, so it is only
+       ever consulted when the real per-candidate value is unavailable. #}
+    {% set pm = entry.pipeline_meta or {} %}
+    {% set applied_uplift = (sb.get('internal_uplift_applied', 0) or 0) %}
+    {% set nominal_uplift = (pm.get('internal_uplift_amount', 0) or 0) %}
+    {% set uplift_amount = applied_uplift if applied_uplift > 0 else nominal_uplift %}
+    {% if entry.internal_apsa or entry.internal_cupe %}
+    <p class="chip-row">
+      <span class="chip chip-internal">SFU internal{% if entry.internal_apsa and entry.internal_cupe %} (APSA, CUPE){% elif entry.internal_apsa %} (APSA){% elif entry.internal_cupe %} (CUPE){% endif %}
+        +{{ (uplift_amount * 100)|round|int }}</span>
+    </p>
+    {% endif %}
+
     {% if voided %}
     {# The band must EXPLAIN itself. A candidate silently parked at the bottom
        with dashes where numbers were is an unexplained adverse outcome — the

@@ -43,6 +43,52 @@ something narrower than the real gate and let a defect through.
 
 Gates: ruff · black · mypy --strict · pytest unit · pytest integration (testcontainers) · coverage ≥ 80% · branch-name. **A single red gate = the work is not done. Iterate until all green — do not report success, do not open a PR, do not stop.**
 
+### The hand-over rule — a major feature is not done until it has been driven
+
+**Standing order, 2026-09-09, from the user.** Every **major feature update**
+ends with an **end-to-end smoke test against the running deployment**, and that
+run happens **before** the work is handed over for review — not after, and not
+"available on request".
+
+A major feature update is anything that adds a screen, a route, an ingest path,
+a persisted column, or a term that moves a ranking. A typo fix, a comment, a
+doc edit and a pure refactor with no behavioural delta are not.
+
+The minimum is `./scripts/smoke.sh` (browser→Flask→API over HTTP, asserting on
+rendered HTML) plus `./scripts/doctor.sh` (invariants against the data that is
+actually there). **Where the feature's own path is not covered by `smoke.sh`,
+drive that path by hand against the running stack and paste what came back.**
+
+**Which stack each one runs against — this distinction is load-bearing.**
+`smoke.sh` requires CAS **off** and FAILS rather than skips when it is on, so
+it runs against a **local dev stack with CAS off**, never against a pilot or
+production box. **This rule is never a licence to turn authentication off on a
+box that has real users** — that would collide head-on with the standing "CAS
+on by default" order, and with `doctor.sh`'s own `deploy.auth_disabled`
+finding, which exists to nag exactly that state. Against an authenticated
+deployment the obligation is `doctor.sh` plus the by-hand drive of the
+feature's path, signed in as a real principal. If a feature can only be
+exercised with authentication disabled, say so in the hand-over rather than
+disabling it.
+
+This exists because green gates have repeatedly *not* meant a working product
+here, and every instance cost a user rather than a test:
+
+- ~6,000 tests and not one crosses the browser→Flask→API seam; four of the last
+  nine defects to reach users lived exactly there.
+- `{{ job.updated_at.strftime(...) }}` 500'd the whole jobs list, because the
+  frontend is a BFF where every timestamp is a **string**. Unit tests
+  string-matched the template source and saw nothing.
+- ROADMAP A7 (20): a fix that was correct, gated green, and had **never applied
+  to a single row** thirteen days later.
+- The `2048`-token evidence budget passed two probes and produced nothing for
+  hours in front of a user.
+
+**A green suite is evidence about the code. It is not evidence about the
+product.** Report the smoke/doctor output verbatim in the hand-over, and if a
+run could not happen, say so plainly rather than implying it passed — "could
+not check" is never a clean bill of health.
+
 ### `./scripts/model-check.sh` — run this BEFORE swapping models
 
 Every token budget, timeout and concurrency number in this repo was measured

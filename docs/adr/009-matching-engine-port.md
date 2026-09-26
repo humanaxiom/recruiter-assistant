@@ -262,3 +262,90 @@ flowchart TB
 - **Default `match_reverse_evidence_k = 0`** (hris's pre-ADR-0023 synchronous-endpoint value) —
   rejected; there is no synchronous reverse-match endpoint in this repo to protect, so the rationale for
   `0` does not apply, and `10` (hris's own current worker-path default) is the correct inheritance.
+
+## Amendment 2026-09-09 — how a new term reaches `score_final` (branch `feat/candidate-roster-csv`)
+
+Two decisions, recorded together because they are the same question asked
+twice: **how do you add a new contributor to `score_final` without repeating
+the defect the first attempt shipped?** The first half of this was owed —
+`HANDOFF.md` §3 has listed "an ADR-009 amendment for the weight move" as
+unwritten since 2026-09-02.
+
+### The defect this amendment exists to prevent
+
+`manager_prompt` (sponsor §I4, 2026-09-02) was added as a top-level weight
+worth 0.10, taken off the cover letter's `motivation`. It was **declared in
+`MatchWeights`, accepted by its sums-to-1.0 validator, surfaced in the
+breakdown — and multiplied in by nothing.** Every `score_final` came out
+uniformly 10% low.
+
+Nothing caught it, and the reason is worth stating precisely: **uniform
+deflation reorders nobody**, and `ranking-evals` is an ORDERING gate. A
+scoring bug that moves every candidate by the same factor is invisible to
+every quality signal this repo has.
+
+Two things came out of that and both are load-bearing:
+
+1. `_combine_final` is now **the top-level blend in ONE place**, with an
+   explicit docstring contract: every weight `MatchWeights` declares is
+   multiplied in there.
+2. `tests/unit/test_top_blend_is_fully_applied.py` asserts a perfect candidate
+   scores **exactly 1.0**, which fails on any unapplied term. **Do not delete
+   it to "simplify".**
+
+### Decision — the SFU internal uplift is not a weight
+
+The sponsor's "APSA/CUPE indicate SFU employee gets high marks" is applied as
+a **bounded, disclosed uplift**: `final = min(1.0, blend + uplift)`, applied in
+`stage4_combine` and `run_match` **after** `_combine_final`, which stays
+byte-unchanged so its contract above remains true.
+
+It is deliberately **not** a `MatchWeights` field, for two independent reasons:
+
+- **`pipeline_meta.weights` is a historical reproducibility stamp, and its read
+  path validates it uncaught.** Adding a weight with a non-zero default makes
+  every stamp written before the change fail its sum validator — a 500 on every
+  shortlist page for every previously-ranked job. (`MatchWeights` does already
+  carry non-summed fields, so a validator violation was avoidable; the stamp
+  problem is not.)
+- **A weight is a share of a fixed budget; this is not.** An external candidate
+  would score 0.0 on such a term, which is a *penalty on 304 people* dressed as
+  a bonus for 11, and it would silently renormalise what every other dimension
+  is worth.
+
+The amount lives on `MatchingContext` — whose docstring already claims it
+sources *every* non-weight tunable from Settings — as
+`internal_uplift_amount`, from `settings.match_internal_uplift`. It is stamped
+on `PipelineMeta` as a **sibling of `weights`**, never nested inside it, so an
+old shortlist explains itself with the number it was actually ranked under.
+That sibling needs **no `mode="before"` shim**, unlike `manager_prompt`: the
+shim exists only because a missing key silently violates a *sum* validator, and
+`PipelineMeta` has none — a missing optional field simply takes its default.
+
+### Why a uplift and not a band
+
+A hard band above all externals was the live alternative and was rejected by
+the user: 7 of 315 roster rows carry the flag (6 APSA, 5 CUPE, 4 both), and a band would put all 7 on
+top **regardless of fit**. The uplift is disclosed on the card with its amount,
+so a review can explain the difference between two candidates rather than
+discovering an invisible sort key. It is also clamped, so a perfect candidate
+still scores exactly 1.0 — the existing perfect-candidate test was extended
+with the flag set rather than a new test written beside it, because it is the
+same invariant under pressure.
+
+**`match_internal_uplift = 0.05` is a hiring-policy number, not an engineering
+one.** It was set against a measured spread — ten candidates on a real
+requisition scoring 19–50, so roughly 31 points of competitive range, in which
++5 moves someone two to four places. It is configurable so HR can retune it per
+deployment. Do not tune it without HR.
+
+### Recorded, not fixed — a third combine site
+
+`rank_job_matches` ([orchestrator.py](../../core/src/pipeline/matching/orchestrator.py))
+is the reverse résumé→jobs ranker and has its **own inline two-term formula**.
+It does not call `_combine_final`, and it already omits both `manager_prompt`
+and `motivation`. That is a pre-existing gap, out of scope here and
+deliberately not "fixed" in a change about something else — but the uplift was
+**not** copied into it either, because being the second term to go missing in a
+path nobody checks is worse than being absent from it consistently. A test now
+pins that formula unchanged so a future copy-paste cannot quietly change it.

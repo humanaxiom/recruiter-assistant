@@ -775,6 +775,15 @@ _SET_WORK_AUTHORIZATION_SQL = (
     "WHERE id = $1 AND work_authorization IS DISTINCT FROM $2"
 )
 
+# Same idempotency guard, extended to the two independent internal-employee
+# booleans: a re-declaration of the identical (apsa, cupe) pair matches zero
+# rows and writes no audit entry.
+_SET_INTERNAL_STATUS_SQL = (
+    "UPDATE resumes SET internal_apsa = $2, internal_cupe = $3 "
+    "WHERE id = $1 AND (internal_apsa IS DISTINCT FROM $2 "
+    "OR internal_cupe IS DISTINCT FROM $3)"
+)
+
 # The last DELIVERED ``resume.parsed`` payload for this résumé — the exact
 # bytes reinstate REPLAYS (never re-embeds; ADR-026 decision 1).
 _LAST_PARSED_PAYLOAD_SQL = (
@@ -1085,6 +1094,64 @@ async def set_work_authorization(
             subject_type="resume",
             subject_id=resume_id,
             details=details,
+        )
+    return True
+
+
+async def set_internal_status(
+    conn: DbConn,
+    resume_id: UUID,
+    *,
+    internal_apsa: bool,
+    internal_cupe: bool,
+    actor_kind: str,
+    actor_user_id: UUID | None,
+    actor_service: str | None,
+) -> bool:
+    """Record whether the candidate is an existing SFU employee under the
+    APSA or CUPE bargaining unit.
+
+    Sponsor Requirements PR2 slice 2. Shaped exactly like
+    ``set_work_authorization`` because it is the same kind of act: an
+    audited, reversible, human (or roster-reconciliation) declaration about a
+    real person. This is the ONLY place ``internal_apsa``/``internal_cupe``
+    are ever written — ``candidate_roster_service.reconcile_candidate_roster``
+    calls it, never the columns directly.
+
+    * **Idempotent.** The guarded UPDATE applies to at most one row;
+      re-declaring the same ``(internal_apsa, internal_cupe)`` pair is a
+      quiet no-op success — no second audit row, no error.
+    * **Audited on every APPLIED change, including a correction back to
+      ``False, False``.** Undoing a previously-declared internal-employee
+      status is exactly as much a decision as making one.
+    * **No outbox event.** This column IS read at rank/list time, but only as
+      a plain Postgres column on the shortlist band — never via Neo4j's
+      projected skill graph — so there is nothing for an outbox event to
+      trigger re-projection of. Enqueuing here would be pure worker fan-out
+      and would misleadingly suggest this field feeds the graph.
+
+    Raises ``NotFoundError`` for a résumé id that does not exist at all.
+    Returns whether the declaration actually changed anything.
+    """
+    exists = await conn.fetchval(_RESUME_EXISTS_SQL, resume_id)
+    if exists is None:
+        raise NotFoundError(f"resume {resume_id} not found", resume_id=str(resume_id))
+
+    async with conn.transaction():
+        result = await conn.execute(
+            _SET_INTERNAL_STATUS_SQL, resume_id, internal_apsa, internal_cupe
+        )
+        if not result.endswith(" 1"):
+            return False
+        await audit_service.record_audit(
+            conn,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="set_internal_status",
+            subject_type="resume",
+            subject_id=resume_id,
+            details={"internal_apsa": internal_apsa, "internal_cupe": internal_cupe},
         )
     return True
 

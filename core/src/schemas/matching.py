@@ -428,6 +428,21 @@ class ScoreBreakdown(BaseModel):
     experience_bar_stated: bool | None = None
     education_bar_stated: bool | None = None
     education_readable: bool | None = None
+    # Sponsor requirements PR2 slice 3 -- the SFU-internal-status flags this
+    # candidate carried AT RANK TIME (read off ``resumes.internal_apsa``/
+    # ``internal_cupe``, the Taleo-roster reconciliation columns) and the
+    # uplift actually applied for them. Unlike ``work_authorization`` on
+    # ``ShortlistEntry`` (a live join, re-read every time the page loads),
+    # these are folded facts about a PAST run: a roster ingested after this
+    # row was ranked must not change what this row explains. Defaulted so
+    # every row persisted before this feature still validates.
+    internal_apsa: bool = False
+    internal_cupe: bool = False
+    # The bonus this candidate ACTUALLY received (post-clamp), never a
+    # literal recomputation from today's settings -- see
+    # ``PipelineMeta.internal_uplift_amount`` for why the amount itself is a
+    # sibling stamp rather than a MatchWeights field.
+    internal_uplift_applied: float = Field(default=0.0, ge=0, le=1)
 
 
 class RequirementEvidence(BaseModel):
@@ -605,6 +620,17 @@ class PipelineMeta(BaseModel):
     git_sha: str | None = None
     generated_at: dt.datetime
     timings_ms: dict[str, int] = Field(default_factory=dict)
+    # Sponsor requirements PR2 slice 3 -- the SFU-internal-status uplift
+    # amount THIS ROW was ranked under. A SIBLING of ``weights``, never
+    # nested inside it: ``weights`` (``MatchWeights``) is ``extra="forbid"``
+    # and its ``_sums_close_to_one`` validator is read back UNCAUGHT on
+    # every shortlist page, so a new weight with a non-zero default would
+    # 500 every legacy stamp the moment this field existed. Defaulted to 0.0
+    # so a legacy blob with no such key (every stamp written before this
+    # slice) still parses -- no ``mode="before"`` shim needed, unlike
+    # ``MatchWeights._legacy_stamp_has_no_manager_prompt``, because nothing
+    # here validates a sum over it.
+    internal_uplift_amount: float = 0.0
 
 
 class ShortlistEntry(BaseModel):
@@ -715,6 +741,17 @@ class ShortlistEntry(BaseModel):
     # candidate ends up displayed as "no work permit" beside an authoritative
     # 78%, which is a number this product cannot stand behind.
     metrics_invalidated: bool = False
+    # Sponsor requirements PR2 slice 3 -- the SFU-internal-status uplift
+    # chip. Unlike ``work_authorization`` above (a LIVE join, re-read on
+    # every request so a correction is visible immediately), these are
+    # RANK-TIME FOLDED FACTS: what the candidate's Taleo-roster status was
+    # WHEN this row was generated. A roster ingested after this shortlist
+    # already exists must not change what an old row explains -- it explains
+    # itself with ``pipeline_meta.internal_uplift_amount``, the same
+    # reproducibility-stamp rule ``weights`` already follows. Defaulted so
+    # every row persisted before this feature still validates.
+    internal_apsa: bool = False
+    internal_cupe: bool = False
 
     @model_validator(mode="after")
     def _derive_metrics_invalidated(self) -> ShortlistEntry:

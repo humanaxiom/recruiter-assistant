@@ -54,6 +54,8 @@ new field itself.
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from src.settings import Settings, validate_startup_auth_config
@@ -205,3 +207,49 @@ def test_all_cas_and_session_fields_coexist_with_disabled_role_key_auth() -> Non
     s = Settings()
     assert s.auth_enabled is False
     assert s.cas_enabled is False
+
+
+# ── `trust_proxy_headers` / `proxy_hops` (fix/serve-behind-tls-proxy) ────
+#
+# The app will be served at https://sfuai.ca behind an nginx TLS-terminating
+# reverse proxy. Flask's own `request.host_url` (and therefore
+# `frontend.csrf.same_origin`'s notion of "our origin") is wrong behind a
+# proxy unless the proxy's X-Forwarded-* headers are explicitly trusted via
+# werkzeug's ProxyFix — see `test_frontend_proxy_trust.py` for the
+# install-time behaviour this setting controls. Both fields default to the
+# SAFE (untrusted-proxy) state so a fresh checkout, CI, and any deployment
+# that has not explicitly opted in never trusts a spoofable header.
+
+
+def test_trust_proxy_headers_defaults_false() -> None:
+    assert Settings().trust_proxy_headers is False
+
+
+def test_proxy_hops_defaults_to_one() -> None:
+    assert Settings().proxy_hops == 1
+
+
+def test_env_override_trust_proxy_headers(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
+    assert Settings().trust_proxy_headers is True
+
+
+def test_env_override_proxy_hops(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("PROXY_HOPS", "2")
+    assert Settings().proxy_hops == 2
+
+
+def test_proxy_hops_is_a_positive_int() -> None:
+    assert isinstance(Settings().proxy_hops, int)
+    assert Settings().proxy_hops > 0
+
+
+def test_proxy_hops_zero_is_rejected() -> None:
+    """`proxy_hops=0` would tell ProxyFix to trust ZERO hops of forwarded
+    headers, which is indistinguishable from `trust_proxy_headers=False` but
+    silently — a deployer who typed `PROXY_HOPS=0` expecting "off" would get
+    a config that passes construction and does nothing, instead of a loud
+    rejection. `Field(..., ge=1)` (mirroring `shortlist_max_tries`'s bound)
+    makes that fail at construction instead."""
+    with pytest.raises(ValidationError):
+        Settings(proxy_hops=0)

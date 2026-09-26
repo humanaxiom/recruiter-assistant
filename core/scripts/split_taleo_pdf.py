@@ -65,7 +65,7 @@ import fitz  # type: ignore[import-untyped]
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.pipeline.llm import LLMClient
+from src.pipeline.llm import REASONING_JSON_MIN_TOKENS, LLMClient
 from src.settings import get_settings as get_pipeline_settings
 
 # Email or a 10+ digit phone run in the page header → a fresh applicant's
@@ -163,6 +163,66 @@ def parse_ranges(spec: str, page_count: int) -> list[list[tuple[int, int]]]:
     return applicants
 
 
+def page_accounting(
+    page_count: int, assigned: list[list[int]]
+) -> tuple[list[int], list[int]]:
+    """Reconcile 1-based pages actually written per applicant against
+    ``1..page_count``. Returns ``(missing, duplicated)``, both sorted
+    ascending: ``missing`` are pages written to no applicant at all;
+    ``duplicated`` are pages written more than once, whether to the same
+    applicant twice (e.g. résumé + cover letter) or to two different ones."""
+    counts: dict[int, int] = {}
+    for pages in assigned:
+        for p in pages:
+            counts[p] = counts.get(p, 0) + 1
+    missing = [p for p in range(1, page_count + 1) if p not in counts]
+    duplicated = sorted(p for p, n in counts.items() if n > 1)
+    return missing, duplicated
+
+
+def _format_pages(pages: list[int]) -> str:
+    """Compress a sorted list of 1-based page numbers into ranges, e.g.
+    ``[3, 7, 8, 9, 25] -> "3, 7-9, 25"``."""
+    if not pages:
+        return ""
+    parts: list[str] = []
+    start = prev = pages[0]
+    for p in pages[1:]:
+        if p == prev + 1:
+            prev = p
+            continue
+        parts.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = p
+    parts.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(parts)
+
+
+def report_page_accounting(missing: list[int], duplicated: list[int]) -> bool:
+    """Print a prominent finding for any missing/duplicated pages. Returns
+    True when accounting is clean (nothing to print)."""
+    if not missing and not duplicated:
+        return True
+    print("\n" + "!" * 60)
+    print("! PAGE ACCOUNTING FAILURE — output is incomplete or unsafe to use")
+    if missing:
+        print(
+            f"!   {len(missing)} page(s) assigned to NO applicant: "
+            f"{_format_pages(missing)}"
+        )
+    if duplicated:
+        print(
+            f"!   {len(duplicated)} page(s) assigned to MORE THAN ONE "
+            f"applicant: {_format_pages(duplicated)}"
+        )
+    print(
+        "!   The files already written are still on disk. Re-run the split "
+        "(LLM segmentation can be intermittent), or use --ranges to place "
+        "the affected pages manually."
+    )
+    print("!" * 60 + "\n")
+    return False
+
+
 def _write_applicant(
     doc: fitz.Document, parts: list[tuple[int, int]], out_path: Path
 ) -> int:
@@ -186,10 +246,11 @@ def _emit_applicants(
     applicants: list[list[tuple[int, int]]],
     out_dir: Path,
     min_text: int,
-) -> list[Path]:
+) -> list[tuple[Path, list[int]]]:
     """Write each applicant's PDF and print a one-line proposal row. Returns
-    the written paths (in applicant order)."""
-    written: list[Path] = []
+    the written path and the 1-based pages actually written, one row per
+    applicant (in applicant order)."""
+    written: list[tuple[Path, list[int]]] = []
     for i, parts in enumerate(applicants, start=1):
         seg_text = "".join("".join(texts[lo : hi + 1]) for lo, hi in parts)
         name = _guess_name(seg_text)
@@ -197,7 +258,8 @@ def _emit_applicants(
         stem = f"applicant_{i:02d}" + (f"_{_slug(name)}" if name else "")
         out_path = out_dir / f"{stem}.pdf"
         n_pages = _write_applicant(doc, parts, out_path)
-        written.append(out_path)
+        pages_written = [p + 1 for lo, hi in parts for p in range(lo, hi + 1)]
+        written.append((out_path, pages_written))
 
         label = ", ".join(
             f"{lo + 1}-{hi + 1}" if lo != hi else f"{lo + 1}" for lo, hi in parts
@@ -299,7 +361,7 @@ async def _llm_segment(texts: list[str], *, model: str) -> _TaleoManifest:
                 {"role": "user", "content": _SEG_USER + _page_digest(texts)},
             ],
             _TaleoManifest,
-            max_tokens=4096,
+            max_tokens=REASONING_JSON_MIN_TOKENS,
         )
     finally:
         await http.aclose()
@@ -334,12 +396,14 @@ def _emit_from_manifest(
     manifest: _TaleoManifest,
     out_dir: Path,
     min_text: int,
-) -> list[tuple[str, Path | None, Path | None]]:
+) -> list[tuple[str, Path | None, Path | None, list[int]]]:
     """Write a résumé PDF (+ optional cover-letter PDF) per applicant from the
-    LLM manifest. Returns one (candidate_name, resume_path, cover_path) row per
-    applicant (paths None when absent) — used to build the pairing manifest."""
+    LLM manifest. Returns one (candidate_name, resume_path, cover_path,
+    pages_written) row per applicant (paths None when absent, pages_written
+    the 1-based pages actually written after ``_valid_pages`` filtering) —
+    used to build the pairing manifest and the page accounting."""
     page_count = len(texts)
-    emitted: list[tuple[str, Path | None, Path | None]] = []
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]] = []
     for i, a in enumerate(manifest.applicants, start=1):
         r_pages = _valid_pages(a.resume_pages, page_count)
         c_pages = _valid_pages(a.cover_letter_pages, page_count)
@@ -360,7 +424,7 @@ def _emit_from_manifest(
         if c_pages:
             cover_path = out_dir / f"{base}_cover_letter.pdf"
             _write_pages(doc, c_pages, cover_path)
-        emitted.append((a.candidate_name, resume_path, cover_path))
+        emitted.append((a.candidate_name, resume_path, cover_path, r_pages + c_pages))
 
         r_lbl = ",".join(map(str, r_pages)) or "—"
         c_lbl = ",".join(map(str, c_pages)) or "—"
@@ -373,7 +437,7 @@ def _emit_from_manifest(
 
 
 def _write_pairing_manifest(
-    emitted: list[tuple[str, Path | None, Path | None]], out_dir: Path
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]], out_dir: Path
 ) -> Path:
     """Write a CodeX-shaped ``manifest.json`` pairing each résumé to its cover
     letter. The in-app paired uploader (Feature 2) consumes this directly, so
@@ -386,7 +450,7 @@ def _write_pairing_manifest(
             "cover_letter_file": cover_path.name if cover_path else None,
             "cover_letter_flag": "Yes" if cover_path else "No",
         }
-        for name, resume_path, cover_path in emitted
+        for name, resume_path, cover_path, _pages in emitted
         if resume_path is not None
     ]
     path = out_dir / "manifest.json"
@@ -413,8 +477,8 @@ def _run_llm_mode(
         return 1
     print(f"output: {out_dir}\n")
     emitted = _emit_from_manifest(doc, texts, manifest, out_dir, min_text)
-    resumes = [r for _, r, _ in emitted if r is not None]
-    covers = [c for _, _, c in emitted if c is not None]
+    resumes = [r for _, r, _, _ in emitted if r is not None]
+    covers = [c for _, _, c, _ in emitted if c is not None]
     manifest_path = _write_pairing_manifest(emitted, out_dir)
     if do_zip and resumes:
         zip_path = out_dir / "applicants.zip"
@@ -431,7 +495,10 @@ def _run_llm_mode(
         "the job's Resumes section: the cover letters pair to their applicant "
         "automatically via manifest.json (Feature 2).\n"
     )
-    return 0
+    assigned = [pages for _, _, _, pages in emitted]
+    missing, duplicated = page_accounting(len(texts), assigned)
+    clean = report_page_accounting(missing, duplicated)
+    return 0 if clean else 1
 
 
 def _run_deterministic_mode(
@@ -467,7 +534,7 @@ def _run_deterministic_mode(
     if do_zip:
         zip_path = out_dir / "applicants.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in written:
+            for p, _pages in written:
                 zf.write(p, arcname=p.name)
         print(f"\nzipped {len(written)} file(s) -> {zip_path}")
 
@@ -482,7 +549,9 @@ def _run_deterministic_mode(
         "\nNext: review the PDFs, then bulk-upload them (or applicants.zip) on the "
         "job's Resumes section. Each file is ingested as one candidate.\n"
     )
-    return 0
+    missing, duplicated = page_accounting(page_count, [pages for _, pages in written])
+    clean = report_page_accounting(missing, duplicated)
+    return 0 if clean else 1
 
 
 def main(argv: list[str] | None = None) -> int:

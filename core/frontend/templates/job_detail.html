@@ -315,6 +315,27 @@
   </form>
   {% endif %}
 
+  {% if is_writer %}
+  <h3>Import candidate roster (Taleo)</h3>
+  <form action="{{ url_for('upload_candidate_roster', job_id=job.id) }}"
+        method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <div class="form-group">
+      <label class="label" for="roster-file">Taleo "All Candidates" export
+        (CSV)</label>
+      <input class="input" id="roster-file" name="file" type="file"
+             accept=".csv,text/csv">
+      <p class="hint">Reconciles work-authorization and SFU-internal (APSA/
+        CUPE) status onto this job's résumés by name/email match. An
+        existing shortlist does not reflect this update until it is
+        regenerated.</p>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Import roster</button>
+    </div>
+  </form>
+  {% endif %}
+
   <h3>Résumé status</h3>
   {#
     ADR-026 decision 5/FU-8: lazy-loaded so the main job-detail render never

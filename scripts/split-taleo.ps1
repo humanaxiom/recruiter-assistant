@@ -23,7 +23,7 @@
 
 .PARAMETER Rest
   Passed straight through to the splitter: -Zip, --heuristic,
-  --ranges "1-2;3-5", --model <name>, --dry-run.
+  --ranges "1-2;3-5", --min-text <n>, --model <name>.
 
 .EXAMPLE
   scripts\split-taleo.ps1 C:\exports\req7124.pdf -Output C:\exports\7124-split --zip

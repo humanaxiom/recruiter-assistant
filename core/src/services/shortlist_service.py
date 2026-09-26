@@ -823,6 +823,14 @@ def _row_to_entry(row: Any) -> ShortlistEntry:
     raw["pipeline_meta"] = _parse_pipeline_meta(
         raw.get("pipeline_meta"), entry_id=raw.get("id")
     )
+    # Sponsor requirements PR2 slice 3 -- project the two rank-time folded
+    # facts off the breakdown just parsed above, rather than a second
+    # read-time subquery like `work_authorization`'s (see
+    # `ShortlistEntry.internal_apsa`'s own docstring for why). Not a NEW
+    # query: `raw["score_breakdown"]` is already a validated `ScoreBreakdown`
+    # at this point.
+    raw["internal_apsa"] = raw["score_breakdown"].internal_apsa
+    raw["internal_cupe"] = raw["score_breakdown"].internal_cupe
     # A non-blind job (default since 2026-09-09): identity is not masked, and
     # `display_label` already arrived on the row pre-resolved by
     # `_NAME_SUBQUERY`'s COALESCE -- real name, falling back to the résumé's
@@ -989,6 +997,10 @@ def _row_to_blind_entry(row: Any) -> ShortlistEntry:
     raw["pipeline_meta"] = _parse_pipeline_meta(
         raw.get("pipeline_meta"), entry_id=raw.get("id")
     )
+    # Sponsor requirements PR2 slice 3 -- see `_row_to_entry`'s identical
+    # projection above.
+    raw["internal_apsa"] = raw["score_breakdown"].internal_apsa
+    raw["internal_cupe"] = raw["score_breakdown"].internal_cupe
     # Redaction happens BEFORE the DTO is built (ADR-006 §4): no decrypted PII
     # ever reaches ShortlistEntry.
     raw["evidence"] = _redact_evidence(

@@ -112,6 +112,99 @@ regexes (over-length names short-circuit to a plain résumé; no real name is th
 behaviour. Gates green: reviewer APPROVE, security PASS, `./scripts/verify.sh all` = 3977 unit @ 92.64% +
 422 integration. Scoring/ranking code untouched (ranking-evals N/A).
 
+## Amendment 2026-09-09 — the candidate roster CSV, and reconciling it to résumés (branch `feat/candidate-roster-csv`)
+
+Sponsor requirement §S3/I1 (`SPONSOR_REQUIREMENTS_PLAN.md`) adds a second
+producer for this ADR's existing consumer: a Taleo **"All Candidates"** export
+carrying, per applicant, a work-authorization prescreen answer and APSA/CUPE
+internal-employee flags. This is not a new ingest path — it writes onto
+résumés that the pairing machinery above already created.
+
+### What the real export changed about the plan
+
+§S3 was written while the file's shape was unknown, and was **wrong in a way
+that mattered**: it instructed the implementer to *"match on attachment
+filename first (deterministic)"*. The sponsor's real 315-row export has **no
+attachment-filename column** — `Resume` is blank on every row — so that
+strategy could not be implemented at all. The plan has been corrected in
+place; this amendment records the strategy that replaced it.
+
+### Decision — match on email hash, then on a normalised name, and refuse rather than guess
+
+**1. Email hash first.** `pii.email_hash` against `resumes.candidate_email_hash`,
+scoped to the job. Pure, deterministic, needs no decryption. **Measured before
+being chosen**: of 21 résumés split out of one real combined PDF, **19 matched
+by exact email with zero false matches**; the two misses carried no email
+anywhere in their text.
+
+**2. Normalised-name fallback**, only for rows email did not resolve. The name
+is lower-cased, **NFKD-folded with combining marks dropped**, split on any
+non-letter character, and compared as an **order-invariant token set** — the
+CSV writes `"Last, First"` while a parsed résumé does not, so a set comparison
+is symmetric and privileges neither convention.
+
+The accent fold is not defensive coding; it came from the data. **The two
+sides of this comparison are encoded differently**: Taleo ASCII-folds its
+export (zero of 315 rows carry a non-ASCII byte) while the résumé side is
+parsed from the candidate's own PDF and keeps its diacritics. The delivered
+bundle contains exactly that pair: an ASCII-folded surname in the CSV against
+the same surname carrying an acute accent on the résumé. Unfolded,
+`[^A-Za-z]+` treats a character like `í` as a **separator** and shatters such
+a surname into two meaningless fragments, so one name shares no token with
+itself.
+**No unit test would have produced this pair**, because a fixture author
+writes the same name on both sides of a match.
+
+**3. The comparison stays strict set equality** — deliberately, and at a known
+cost. A résumé carrying a middle name and a second surname (four tokens) does
+not match a two-token CSV cell. Relaxing to a subset test
+would make the fallback markedly more useful, and would also let `Kim, Min`
+match the wrong `Min Ji Kim`. What gets written is a screening decision on a
+protected ground ([ADR-047](047-screening-facts-are-declared-never-inferred.md)),
+so an unmatched row — which is *surfaced* for a human — is the better failure
+than a confident wrong attribution.
+
+### "Nothing is silently dropped", extended to a case this ADR did not have
+
+The original invariant covered an absent file. Reconciliation adds three
+failure modes that are about **two real people**, and all three refuse:
+
+- **Ambiguous name match** — one CSV row matching ≥2 résumés (or one résumé
+  matching ≥2 rows) is reported, never resolved arbitrarily to either.
+- **Conflicting duplicates** — the real export contains one person twice with
+  *disagreeing* declarations. Rows are grouped by resolved résumé **before any
+  write**, and a disagreement writes nothing for that field. Never last-wins.
+  The grouping must precede the write because `set_work_authorization` is a
+  single-value guarded UPDATE with no concept of a conflict.
+- **Unmatched in both directions**, plus rows whose declaration string the
+  parser did not recognise.
+
+Reported the same way this ADR already reports bulk-ingest outcomes: **an
+in-response summary plus one audit event, and no new table.** The report and
+the audit `details` blob carry counts, line numbers and résumé ids only —
+never a decrypted name or email, which matters because the name fallback
+decrypts names in bulk and that is exactly where PII leaks into a response.
+
+### Schema shape — two booleans, not an enum
+
+`resumes.internal_apsa` and `internal_cupe`, each `BOOLEAN NOT NULL DEFAULT
+FALSE`, in **both** the `CREATE TABLE` block and a separate idempotent
+`ALTER ... ADD COLUMN IF NOT EXISTS`: `CREATE TABLE IF NOT EXISTS` is a no-op
+on an already-migrated volume, so a `CREATE TABLE`-only change reaches no live
+row. Two independent booleans rather than an enum because the source carries
+two independent columns that the format does not guarantee are mutually
+exclusive — the real export has a row flagged both — and an enum would invent
+a `both` state for no consumer.
+
+`DEFAULT FALSE` is safe here for a directional reason argued in full in
+[ADR-047](047-screening-facts-are-declared-never-inferred.md): a falsy default
+on a *bonus* is the absence of a bonus, not an adverse decision. The **parsed**
+row still distinguishes three cases (`bool | None`, `None` = the column was
+absent from that export) so that a roster which never mentions APSA cannot
+clear a flag a previous roster legitimately set — Taleo exports are snapshots
+that get re-uploaded as applicants trickle in.
+
+Gates: `./scripts/verify.sh all` green — 6028 unit @ 91.92% + 616 integration.
 ## Amendment 2026-09-15 — the mirror guard on the JD side
 
 Decision 1 above gated the **résumé** side of ranking in the UI only (Generate disabled until ≥1 parsed

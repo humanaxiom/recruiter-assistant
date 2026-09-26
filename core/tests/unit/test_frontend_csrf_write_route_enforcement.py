@@ -54,6 +54,11 @@ _HOOK_PROTECTED_ROUTES: tuple[tuple[str, str], ...] = (
     ("create_job", "/jobs"),
     ("bulk_create_jobs", "/jobs/bulk"),
     ("upload_resumes", "/jobs/{job}/resumes"),
+    # Sponsor requirements PR2 slice 3 -- a new write route the allow-list
+    # does NOT enumerate for free (it is explicit, not introspective over
+    # url_map), so it would otherwise go unprotected-by-test even though the
+    # opt-out `_csrf_gate` hook already covers it. Added deliberately.
+    ("upload_candidate_roster", "/jobs/{job}/candidate-roster"),
     ("transition_status", "/jobs/{job}/status"),
     ("blind_review", "/jobs/{job}/blind-review"),
     ("generate_shortlist", "/jobs/{job}/shortlist"),

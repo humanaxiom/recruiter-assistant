@@ -58,6 +58,7 @@ from src.pipeline.llm import (
     LLMUnavailableError,
 )
 from src.pipeline.matching.stages import (
+    _apply_internal_uplift,
     _combine_final,
     _CombineInput,
     _evidence_completeness,
@@ -130,6 +131,10 @@ _LLM_CONCURRENCY = 4
 # is now enforced by ``test_evidence_budget_is_measured.py`` rather than
 # asserted in this comment.
 _EVIDENCE_MAX_TOKENS = 8192
+# Sponsor requirements PR2 slice 3 — kept equal to ``Settings
+# .match_internal_uplift``'s own default; see that field's docstring for why
+# this is a hiring-policy number, not an engineering one.
+_INTERNAL_UPLIFT = 0.05
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,18 @@ class MatchingContext:
     # ``settings.git_sha`` (never ``os.environ`` directly — see settings.py's
     # docstring invariant) and threaded into PipelineMeta.git_sha.
     git_sha: str | None = None
+    # Sponsor requirements PR2 slice 3 — the SFU-internal-status uplift
+    # (+0.05 default; ``settings.match_internal_uplift``'s own docstring
+    # records this as a HIRING-POLICY number, not an engineering one).
+    #
+    # This is the TUNABLE, mirroring ``family_weight`` above: it rides on
+    # ``MatchingContext``, never on ``MatchWeights``. A ``MatchWeights`` field
+    # with a non-zero default would fail ``_sums_close_to_one`` on every
+    # ``pipeline_meta.weights`` stamp written before this slice — that stamp
+    # is read back UNCAUGHT on every shortlist page, so a legacy row would
+    # 500 the page rather than fail a test. See ``PipelineMeta
+    # .internal_uplift_amount`` for the sibling half of the same constraint.
+    internal_uplift_amount: float = _INTERNAL_UPLIFT
 
 
 def matching_context_from_settings(
@@ -174,8 +191,8 @@ def matching_context_from_settings(
 
     This is the SINGLE call site that populates ``family_weight`` /
     ``non_matchable_families`` / ``llm_concurrency`` / ``evidence_max_tokens`` /
-    ``use_classified_families`` / ``model_gen`` / ``model_emb`` / ``git_sha``
-    from settings rather than the
+    ``use_classified_families`` / ``model_gen`` / ``model_emb`` / ``git_sha`` /
+    ``internal_uplift_amount`` from settings rather than the
     dataclass-field defaults (which mirror ``orchestrator.py``'s module-level
     ``_FAMILY_MATCH_WEIGHT`` / ``_NON_MATCHABLE_FAMILIES`` / ``_LLM_CONCURRENCY``
     / ``_EVIDENCE_MAX_TOKENS`` literals). The worker tasks
@@ -197,6 +214,7 @@ def matching_context_from_settings(
         evidence_max_tokens=settings.match_evidence_max_tokens,
         use_classified_families=settings.match_use_classified_families,
         git_sha=settings.git_sha,
+        internal_uplift_amount=settings.match_internal_uplift,
     )
 
 
@@ -215,6 +233,14 @@ class Stage2Candidate:
     # SPONSOR §I4. Optional, and ``None`` must survive to the combine -- see
     # ``_CombineInput.manager_prompt``.
     manager_prompt: float | None = None
+    # Sponsor requirements PR2 slice 3 -- read straight off ``resumes.
+    # internal_apsa``/``internal_cupe`` (the Taleo-roster reconciliation
+    # columns) in ``_stage2_per_candidate``'s existing ``parsed`` fetch, and
+    # carried through to ``_CombineInput``/``RankInput`` unchanged. Default
+    # False so every pre-existing call site (the eval harness, any fixture
+    # that predates this slice) stays valid.
+    internal_apsa: bool = False
+    internal_cupe: bool = False
 
 
 @dataclass(frozen=True)
@@ -556,8 +582,15 @@ async def _stage2_per_candidate(
 ) -> Stage2Candidate:
     # Pull resume.parsed first — experience + education + seniority AND the
     # implied-experience seniority gate (ADR 0027) all read off it.
+    # Sponsor requirements PR2 slice 3 -- widened to also read the
+    # Taleo-roster-reconciled internal-status flags (``bacc341``), so the
+    # SFU-internal uplift can ride the SAME row fetch this function already
+    # makes rather than a second query. This one change reaches BOTH the
+    # forward (`generate_shortlist`) and reverse (`match_resume_to_jobs`)
+    # paths, since both call this function.
     parsed_row = await ctx.db.fetchrow(
-        "SELECT parsed FROM resumes WHERE id = $1", candidate.resume_id
+        "SELECT parsed, internal_apsa, internal_cupe FROM resumes WHERE id = $1",
+        candidate.resume_id,
     )
     parsed = parsed_row["parsed"] if parsed_row else None
     if isinstance(parsed, str):
@@ -676,6 +709,13 @@ async def _stage2_per_candidate(
         structured=breakdown.structured,
         breakdown=breakdown,
         manager_prompt=manager_prompt,
+        # ``.get()`` (Mapping-style, not ``[]``): existing unit fixtures mock
+        # ``ctx.db.fetchrow`` with a bare ``{"parsed": ...}`` dict that never
+        # anticipated this widened query, and a real ``asyncpg.Record``
+        # supports the same Mapping interface -- so this is safe against both
+        # without touching those pre-existing fixtures.
+        internal_apsa=bool(parsed_row.get("internal_apsa")) if parsed_row else False,
+        internal_cupe=bool(parsed_row.get("internal_cupe")) if parsed_row else False,
     )
 
 
@@ -985,10 +1025,16 @@ async def generate_shortlist(
             # this is how the weight came to be applied by nothing the first
             # time; ``test_manager_prompt_pipeline_wiring`` pins it.
             manager_prompt=c.manager_prompt,
+            # Sponsor requirements PR2 slice 3 -- carry the Taleo-roster
+            # internal-status flags read in stage 2 into the blend.
+            internal_apsa=c.internal_apsa,
+            internal_cupe=c.internal_cupe,
         )
         for c in candidates_s2
     ]
-    combined = stage4_combine(combine_in, weights)
+    combined = stage4_combine(
+        combine_in, weights, internal_uplift_amount=ctx.internal_uplift_amount
+    )
     timings["stage4_ms"] = _ms_since(t)
 
     # ROADMAP A4 (evidence cliff) — record WHICH candidates stage 3 actually
@@ -1046,6 +1092,9 @@ def _shortlist_meta(
         git_sha=ctx.git_sha,
         generated_at=started,
         timings_ms=timings,
+        # Sponsor requirements PR2 slice 3 -- a SIBLING of ``weights``, never
+        # nested inside it (see ``PipelineMeta.internal_uplift_amount``).
+        internal_uplift_amount=ctx.internal_uplift_amount,
     )
 
 
@@ -1249,6 +1298,11 @@ class RankInput:
     # SPONSOR 2026-09-02 §I4 -- see ``_CombineInput.manager_prompt``. ``None``
     # means the job carried no prompt and the term is renormalised away.
     manager_prompt: float | None = None
+    # Sponsor requirements PR2 slice 3 -- see ``_CombineInput.internal_apsa``/
+    # ``internal_cupe``. Default False so every pre-existing eval-harness
+    # fixture stays inert.
+    internal_apsa: bool = False
+    internal_cupe: bool = False
 
 
 @dataclass(frozen=True)
@@ -1263,7 +1317,10 @@ class RankedMatch:
 
 
 def run_match(
-    inputs: Sequence[RankInput], weights: MatchWeights = DEFAULT_WEIGHTS
+    inputs: Sequence[RankInput],
+    weights: MatchWeights = DEFAULT_WEIGHTS,
+    *,
+    internal_uplift_amount: float = _INTERNAL_UPLIFT,
 ) -> list[RankedMatch]:
     """Stage-4 combine + rank over already-scored candidates (the pipeline
     entrypoint the eval harness wires). Identical arithmetic to
@@ -1276,18 +1333,29 @@ def run_match(
         # SAME blend helper as ``stage4_combine`` -- not a second copy of the
         # arithmetic. The two formulas drifting is exactly how a weight goes
         # unapplied on one path only.
-        final = _combine_final(
+        base_final = _combine_final(
             structured=c.structured,
             evidence_completeness=completeness,
             motivation=motivation,
             manager_prompt=c.manager_prompt,
             weights=weights,
         )
+        # SAME uplift helper as ``stage4_combine`` -- applied AFTER the blend,
+        # never inside it (Sponsor requirements PR2 slice 3, constraint 2).
+        final, uplift_applied = _apply_internal_uplift(
+            base_final,
+            internal_apsa=c.internal_apsa,
+            internal_cupe=c.internal_cupe,
+            internal_uplift_amount=internal_uplift_amount,
+        )
         breakdown = c.breakdown.model_copy(
             update={
                 "motivation": motivation,
                 "manager_prompt": c.manager_prompt or 0.0,
                 "manager_prompt_measured": c.manager_prompt is not None,
+                "internal_apsa": c.internal_apsa,
+                "internal_cupe": c.internal_cupe,
+                "internal_uplift_applied": uplift_applied,
             }
         )
         scored.append(

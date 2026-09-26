@@ -80,6 +80,8 @@ def _entry(
     work_authorization: str = "unknown",
     metrics_invalidated: bool = False,
     display_label: str = "Candidate A",
+    internal_apsa: bool = False,
+    internal_cupe: bool = False,
 ) -> dict[str, Any]:
     return {
         "id": str(uuid4()),
@@ -99,6 +101,13 @@ def _entry(
         "display_label": display_label,
         "work_authorization": work_authorization,
         "metrics_invalidated": metrics_invalidated,
+        # Sponsor requirements PR2 slice 3 — the SFU-internal-status uplift.
+        # Added here (rather than a second fixture builder) precisely so this
+        # file's own ineligible-candidate regression test can reuse it: see
+        # ``test_an_internal_apsa_candidate_who_is_also_ineligible_still_
+        # renders_voided`` below.
+        "internal_apsa": internal_apsa,
+        "internal_cupe": internal_cupe,
     }
 
 
@@ -504,6 +513,46 @@ def test_the_undeclared_count_is_absent_when_there_are_no_entries(
 
     body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
     assert _COUNT_RE.search(body) is None
+
+
+# ------------------------------- the uplift cannot resurrect an ineligible card
+
+
+def test_an_internal_apsa_candidate_who_is_also_ineligible_still_renders_voided(
+    monkeypatch: Any, client: Any
+) -> None:
+    """Sponsor requirements PR2 slice 3 — the SFU-internal-status uplift must
+    NOT resurrect a candidate the work-authorization declaration has already
+    voided. A candidate who is BOTH ``internal_apsa=True`` (would otherwise
+    earn the +5 uplift) AND ``work_authorization="not_eligible"`` must render
+    EXACTLY like any other ineligible candidate: rank is ``—`` and every
+    sub-score tile is ``n/a`` — reusing this file's own ``_entry`` fixture
+    builder (not a new one) is what proves this is the same voided rendering
+    path, not a parallel one that happens to agree today.
+    """
+    job_id = uuid4()
+    resume_id = uuid4()
+    entries = [
+        _entry(
+            job_id,
+            resume_id,
+            work_authorization="not_eligible",
+            metrics_invalidated=True,
+            internal_apsa=True,
+        )
+    ]
+    monkeypatch.setattr(api_client, "list_shortlist", MagicMock(return_value=entries))
+
+    body = client.get(f"/jobs/{job_id}/shortlist").get_data(as_text=True)
+
+    assert '<span class="rank">—</span>' in body, (
+        "an ineligible+internal candidate must still show — for rank, not a "
+        "real rank number restored by the uplift"
+    )
+    assert "n/a" in body, (
+        "an ineligible+internal candidate must still show n/a for its "
+        "sub-scores — the uplift must not resurrect a voided card's metrics"
+    )
 
 
 # ------------------------------------------------------- the consequence hint

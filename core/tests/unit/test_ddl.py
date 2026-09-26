@@ -723,6 +723,110 @@ def test_resumes_withdrawal_alters_run_after_the_resumes_create_table() -> None:
     assert resumes_idx < withdrawal_reason_idx
 
 
+# ── resumes / SFU internal-employee status (Sponsor Requirements PR2 slice 2) ─
+#
+# ``internal_apsa`` / ``internal_cupe`` -- booleans recording whether the
+# candidate is an existing SFU employee under the APSA or CUPE bargaining
+# unit, sourced from the Taleo "All Candidates" roster's "APSA Internal" /
+# "CUPE Internal" columns (parsed in ``bulk_ingest_service.parse_candidate_csv``,
+# slice 1 -- already GREEN and merged).
+#
+# Same already-migrated-volume convention as ``work_authorization`` and
+# ``shortlist_top_percent`` above: BOTH the CREATE TABLE column (fresh
+# installs) AND a separate idempotent ALTER (existing dev/CI/pilot-box
+# volumes, where CREATE TABLE IF NOT EXISTS is a no-op) are required -- one
+# alone is insufficient in each direction. ``NOT NULL DEFAULT FALSE`` so the
+# ALTER back-fills every pre-existing resume to "not an internal candidate"
+# the instant it lands, rather than leaving live rows reading NULL -- the
+# identical FU-5-slice-1 reasoning ``work_authorization`` already carries.
+
+
+def test_resumes_internal_apsa_in_create_table() -> None:
+    """Fresh installs get the column straight from the CREATE TABLE."""
+    assert re.search(
+        r"internal_apsa\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+        _table_sql("resumes"),
+        re.IGNORECASE,
+    )
+
+
+def test_resumes_internal_cupe_in_create_table() -> None:
+    assert re.search(
+        r"internal_cupe\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+        _table_sql("resumes"),
+        re.IGNORECASE,
+    )
+
+
+def test_resumes_internal_apsa_has_an_idempotent_alter() -> None:
+    """Existing dev/CI/pilot-box volumes already have a `resumes` table --
+    CREATE TABLE IF NOT EXISTS is a no-op against them, so only a separate
+    idempotent ALTER lands the column there."""
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"internal_apsa\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one idempotent ALTER for internal_apsa"
+
+
+def test_resumes_internal_cupe_has_an_idempotent_alter() -> None:
+    alters = [
+        _squash(s)
+        for s in _STATEMENTS
+        if re.search(
+            r"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"internal_cupe\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+            _squash(s),
+            re.IGNORECASE,
+        )
+    ]
+    assert len(alters) == 1, "expected exactly one idempotent ALTER for internal_cupe"
+
+
+def test_resumes_internal_status_columns_present_in_create_table_and_alter() -> None:
+    """The asymmetry the whole slice hinges on: ``CREATE TABLE IF NOT EXISTS``
+    is a no-op on the pilot box's existing volume (a CREATE-TABLE-only change
+    would reach no live row there), and an ALTER-only change would leave a
+    FRESH database inconsistent with the CREATE TABLE's own declared shape.
+    Both columns need BOTH forms, not just one or the other."""
+    create_sql = _table_sql("resumes")
+    all_sql = _all_sql()
+    for column in ("internal_apsa", "internal_cupe"):
+        assert re.search(
+            rf"{column}\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+            create_sql,
+            re.IGNORECASE,
+        ), f"{column} missing from the CREATE TABLE resumes block"
+        assert re.search(
+            rf"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            rf"{column}\s+BOOLEAN\s+NOT\s+NULL\s+DEFAULT\s+FALSE",
+            all_sql,
+            re.IGNORECASE,
+        ), f"{column} missing its idempotent ALTER"
+
+
+def test_resumes_internal_status_alters_run_after_the_resumes_create_table() -> None:
+    resumes_idx = _statement_index("resumes")
+    for column in ("internal_apsa", "internal_cupe"):
+        alter_idx = next(
+            i
+            for i, s in enumerate(_STATEMENTS)
+            if re.search(
+                rf"ALTER\s+TABLE\s+resumes\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+                rf"{column}",
+                _squash(s),
+                re.IGNORECASE,
+            )
+        )
+        assert resumes_idx < alter_idx, f"{column}'s ALTER must run after CREATE TABLE"
+
+
 def test_resume_status_enum_has_no_withdrawn_value() -> None:
     """Decision 1 — withdrawal is a dedicated column pair, NOT a fifth
     ``resume_status`` enum value. A ``'withdrawn'`` literal added to the enum

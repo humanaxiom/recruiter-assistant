@@ -32,12 +32,13 @@ from flask import (
     url_for,
 )
 from pydantic import ValidationError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
-from src.settings import get_settings, validate_startup_session_secret
+from src.settings import Settings, get_settings, validate_startup_session_secret
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,68 @@ def _entry_header(raw: dict[str, Any]) -> _EntryHeader:
 # limits have a chance to run.
 MAX_UPLOAD_BYTES = 210 * 1024 * 1024  # 20 files * 10 MB + headroom
 
+
+def _install_proxy_fix(flask_app: Flask, settings: Settings) -> None:
+    """fix/serve-behind-tls-proxy — the app is served at https://sfuai.ca
+    behind an nginx TLS-terminating reverse proxy, so the raw WSGI request
+    Flask sees is always ``http://`` on the proxy's internal hop and the
+    upstream's own hostname, not the browser's. ``frontend.csrf.same_origin``
+    compares the browser's ``Origin``/``Referer`` against ``request.host_url``
+    (~csrf.py line 304), so left alone every real POST behind the proxy would
+    403 as a same-origin mismatch.
+
+    ``ProxyFix`` fixes that by rewriting the WSGI environ from
+    ``X-Forwarded-Proto``/``X-Forwarded-Host`` — but only do that when we KNOW
+    the value in those headers was SET (not appended/forwarded) by a proxy we
+    control, never a value a client could inject directly. That is exactly
+    what ``settings.trust_proxy_headers`` (default OFF) gates: off, this is a
+    no-op and ``wsgi_app`` is untouched; on, it is wrapped with
+    ``x_for=x_proto=x_host=settings.proxy_hops`` (nginx alone = 1 hop) and
+    ``x_prefix=0`` (we do not run behind a URL sub-path).
+
+    ``x_port`` is deliberately left at ``0`` (never ``hops``): nginx sends
+    ``X-Forwarded-Port: 443`` (its own TLS listener), while the browser's
+    real, bookmarked URL is ``https://sfuai.ca:8000`` — trusting that header
+    would rewrite ``request.host_url`` to ``sfuai.ca:443`` and 403 every real
+    POST as a same-origin mismatch.
+    """
+    if not settings.trust_proxy_headers:
+        return
+    hops = settings.proxy_hops
+    flask_app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+        flask_app.wsgi_app,
+        x_for=hops,
+        x_proto=hops,
+        x_host=hops,
+        x_prefix=0,
+    )
+
+
+def _configure_session_cookie(flask_app: Flask, settings: Settings) -> None:
+    """Flask's OWN signed-session cookie (``flask.session`` — used by the CAS
+    login flow's ``next``/flash state, distinct from the ``ra_session`` API
+    cookie `auth.py` already sets with ``secure=settings.session_cookie_secure``)
+    must follow the same setting, or it would leak the session cookie over
+    plain HTTP even when the API cookie correctly requires TLS.
+
+    Browsers treat ``localhost`` as a trustworthy origin (the "potentially
+    trustworthy origin" carve-out in the Secure-cookie spec), so
+    ``SESSION_COOKIE_SECURE=True`` still lets a cookie be set and read over
+    plain ``http://localhost`` in local dev. It does NOT extend to a bare LAN
+    IP — that is a normal insecure origin, and a Secure cookie set there is
+    silently dropped by the browser. Only
+    ``localhost``/loopback and real TLS origins (``https://sfuai.ca``) work.
+    """
+    flask_app.config["SESSION_COOKIE_SECURE"] = bool(settings.session_cookie_secure)
+    # security audit 2026-09-15 (L2) — SAMESITE was never wired through at
+    # all, so Flask's own session cookie kept Werkzeug's default regardless
+    # of `settings.session_cookie_samesite`. Flask expects the werkzeug-cased
+    # value ("Lax"/"Strict"/"None"), not the lowercase settings value.
+    flask_app.config["SESSION_COOKIE_SAMESITE"] = (
+        settings.session_cookie_samesite.capitalize()
+    )
+
+
 _settings = get_settings()
 app = Flask(__name__)
 # ROADMAP open item 1 — refuse to serve a real deployment with a forgeable
@@ -120,6 +183,8 @@ app = Flask(__name__)
 validate_startup_session_secret(_settings)
 app.secret_key = _settings.flask_secret_key
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+_install_proxy_fix(app, _settings)
+_configure_session_cookie(app, _settings)
 API = _settings.api_base_url
 
 
@@ -864,6 +929,69 @@ def _summarise_upload(results: Any) -> list[str]:
         for warning in r.get("warnings") or []:
             messages.append(warning)
     return messages
+
+
+def _summarise_roster_report(report: Any) -> list[str]:
+    """Build the post-import flash summary for a Taleo candidate-roster
+    upload (Sponsor requirements PR2 slice 3). The stale-shortlist sentence
+    is UNCONDITIONAL — always present, never gated on whether anything
+    actually changed — since the uplift is applied at RANK time and this
+    reconciliation is not: an existing shortlist genuinely cannot reflect an
+    import that happened after it was generated, and detecting whether it
+    matters is out of scope (a plain, always-correct sentence is the
+    requirement, not stale-shortlist detection)."""
+    report = report if isinstance(report, dict) else {}
+    matched = report.get("matched", 0)
+    wa_changed = report.get("work_authorization_changed", 0)
+    apsa_changed = report.get("internal_apsa_changed", 0)
+    cupe_changed = report.get("internal_cupe_changed", 0)
+    unmatched = len(report.get("unmatched_csv_rows") or [])
+    messages = [
+        f"{matched} matched ({wa_changed} work-authorization change(s), "
+        f"{apsa_changed} APSA change(s), {cupe_changed} CUPE change(s))"
+    ]
+    if unmatched:
+        messages.append(f"{unmatched} roster row(s) could not be matched to a résumé.")
+    messages.append(
+        "Any existing shortlist for this job does not reflect this import "
+        "until it is regenerated."
+    )
+    return messages
+
+
+@app.post("/jobs/<uuid:job_id>/candidate-roster")
+def upload_candidate_roster(job_id: UUID) -> Any:
+    """Sponsor requirements PR2 slice 3 — upload a Taleo "All Candidates"
+    export to reconcile work-authorization + SFU-internal (APSA/CUPE) status
+    onto this job's résumés. Guarded by the ORDINARY ``_csrf_gate`` page
+    token (the opt-out hook), exactly like ``upload_resumes`` — no new
+    one-shot slot."""
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return _render_job_detail(
+            job_id,
+            error="Select a candidate-roster CSV file to upload.",
+            status_code=400,
+        )
+    content = upload.read()
+    try:
+        report = api_client.upload_candidate_roster(
+            job_id,
+            upload.filename,
+            content,
+            upload.content_type or "text/csv",
+        )
+    except api_client.BadRequest as exc:
+        return _render_job_detail(
+            job_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    for message in _summarise_roster_report(report):
+        flash(message)
+    return redirect(url_for("job_detail", job_id=job_id))
 
 
 @app.get("/jobs/<uuid:job_id>/resumes-table")

@@ -10,7 +10,7 @@
 #   scripts/split-taleo.sh ./taleo_export.pdf --output ./split [--zip] [...]
 #
 # Everything after the output directory is passed through to the splitter
-# (--zip, --heuristic, --ranges "1-2;3-5", --model, --dry-run).
+# (--zip, --heuristic, --ranges "1-2;3-5", --min-text, --model).
 #
 # The export is real candidate PII. Keep both paths outside the repo, or under
 # the gitignored fixtures/ — nothing this writes should ever be committed.

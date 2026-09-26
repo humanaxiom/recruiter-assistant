@@ -671,3 +671,141 @@ async def test_shortlist_state_check_constraint_keeps_its_original_name(
         assert rows[0]["conname"] == "jobs_shortlist_state_check"
     finally:
         await connection.close()
+
+
+# -- resumes / SFU internal-employee status (Sponsor Requirements PR2 slice 2) -
+#
+# Same class of proof as the withdrawal-lifecycle and blind_review-reversal
+# tests above, and directly the FU-5-slice-1 defect class CLAUDE.md names: a
+# NOT NULL column with no *working* default passes every unit test (a string
+# match against the DDL source) and fails the first real INSERT, or leaves an
+# already-migrated volume's pre-existing rows unreadable. The unit-level
+# string-match lives in tests/unit/test_ddl.py; this proves the two columns
+# actually land, actually default, and actually back-fill against a REAL
+# already-migrated volume, not merely a fresh CREATE TABLE.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ["internal_apsa", "internal_cupe"])
+async def test_internal_status_column_is_boolean_not_null_default_false(
+    conn: asyncpg.Connection, column: str
+) -> None:
+    row = await conn.fetchrow(
+        """
+        SELECT data_type, is_nullable, column_default
+          FROM information_schema.columns
+         WHERE table_name = 'resumes' AND column_name = $1
+        """,
+        column,
+    )
+    assert row is not None, f"resumes.{column} column does not exist"
+    assert row["data_type"] == "boolean"
+    assert row["is_nullable"] == "NO"
+    assert row["column_default"] is not None
+    assert "false" in row["column_default"].lower()
+
+
+@pytest.mark.asyncio
+async def test_a_freshly_inserted_resume_reads_back_false_for_both_internal_flags(
+    conn: asyncpg.Connection,
+) -> None:
+    """An INSERT that omits both columns entirely -- exactly how every résumé
+    on the pilot box was written before this slice existed -- must read back
+    FALSE, never NULL."""
+    job_id = await _insert_job(conn)
+    resume_id = await _insert_resume(conn, job_id)
+    row = await conn.fetchrow(
+        "SELECT internal_apsa, internal_cupe FROM resumes WHERE id = $1", resume_id
+    )
+    assert row is not None
+    assert row["internal_apsa"] is False
+    assert row["internal_cupe"] is False
+
+
+@pytest.mark.asyncio
+async def test_internal_status_columns_backfill_false_on_a_pre_slice2_volume(
+    pg_dsn: str,
+) -> None:
+    """The upgrade path, not just the fresh-install path.
+
+    Simulates "a volume that already has a pre-slice-2 `resumes` table" by
+    running `init_schema` once (creating the table with whatever shape the
+    CURRENT code declares), then DROPPING the two new columns outright and
+    inserting a row while they are absent -- standing in for the ~200 résumés
+    already on the pilot box, written before this slice's ALTER ever ran.
+    Re-running `init_schema` (the next boot) must re-add both columns via the
+    idempotent `ADD COLUMN IF NOT EXISTS ... DEFAULT FALSE` ALTER, and the
+    PRE-EXISTING row must read back FALSE for both -- never NULL, and never
+    an error -- exactly the FU-5-slice-1 lesson CLAUDE.md records.
+
+    Then `init_schema` is applied a THIRD time and must be a true no-op: no
+    error, and the already-backfilled row's values are unchanged.
+    """
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await connection.execute(
+            "ALTER TABLE resumes DROP COLUMN IF EXISTS internal_apsa"
+        )
+        await connection.execute(
+            "ALTER TABLE resumes DROP COLUMN IF EXISTS internal_cupe"
+        )
+
+        job_id = await _insert_job(connection)
+        resume_id = await _insert_resume(connection, job_id)
+
+        # The next boot, carrying the ALTERs that (re-)add the columns.
+        await init_schema(connection)
+
+        row = await connection.fetchrow(
+            "SELECT internal_apsa, internal_cupe FROM resumes WHERE id = $1",
+            resume_id,
+        )
+        assert row is not None, "the pre-existing row must survive the ALTER"
+        assert row["internal_apsa"] is False, "must back-fill FALSE, not NULL"
+        assert row["internal_cupe"] is False, "must back-fill FALSE, not NULL"
+
+        # A third boot must be a genuine no-op.
+        await init_schema(connection)
+
+        row_again = await connection.fetchrow(
+            "SELECT internal_apsa, internal_cupe FROM resumes WHERE id = $1",
+            resume_id,
+        )
+        assert row_again is not None
+        assert row_again["internal_apsa"] is False
+        assert row_again["internal_cupe"] is False
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_internal_status_columns_survive_init_schema_run_twice(
+    pg_dsn: str,
+) -> None:
+    """Mirrors `test_withdrawal_columns_survive_init_schema_run_twice`: the
+    columns land, and stay landed with the same type/nullability/default,
+    across two boots against the SAME already-migrated volume (the ordinary
+    case -- no manual DROP -- as opposed to the pre-slice-2 simulation
+    above)."""
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await init_schema(connection)
+        await init_schema(connection)
+
+        for column in ("internal_apsa", "internal_cupe"):
+            row = await connection.fetchrow(
+                """
+                SELECT data_type, is_nullable, column_default
+                  FROM information_schema.columns
+                 WHERE table_name = 'resumes' AND column_name = $1
+                """,
+                column,
+            )
+            assert row is not None
+            assert row["data_type"] == "boolean"
+            assert row["is_nullable"] == "NO"
+            assert row["column_default"] is not None
+            assert "false" in row["column_default"].lower()
+    finally:
+        await connection.close()
