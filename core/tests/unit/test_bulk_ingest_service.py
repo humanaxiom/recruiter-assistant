@@ -35,6 +35,7 @@ import pytest
 
 from src.errors import AppError
 from src.services.bulk_ingest_service import (
+    _COULD_NOT_READ_REASON,
     _DEMOTED_COVER_NOTE,
     ApplicantFiles,
     JobManifestRow,
@@ -42,6 +43,7 @@ from src.services.bulk_ingest_service import (
     PairingResult,
     _classify,
     basename_lower,
+    is_cover_named,
     pair_applicants,
     parse_csv_manifest,
     parse_pairing_manifest,
@@ -570,6 +572,153 @@ def test_files_not_named_in_manifest_fall_back_to_convention() -> None:
     # bob was not in the manifest → paired by the filename convention.
     assert by_resume["bob_resume.pdf"].cover_letter is not None
     assert by_resume["bob_resume.pdf"].cover_letter[0] == "bob_cover_letter.pdf"
+
+
+# ── pair_applicants(..., is_cover_content=...) / PairingResult.unattached ──
+#
+# A cover-NAMED file with no matching résumé is demoted to a standalone
+# résumé today (see ``_DEMOTED_COVER_NOTE`` above). ``is_cover_content`` is an
+# ADDITIVE, OPTIONAL callable the caller (the upload route) can supply to
+# check the file's ACTUAL extracted text, not just its filename: when it
+# returns True for an orphaned cover-named file, that file is NEVER ingested
+# as a résumé — it goes to ``PairingResult.unattached`` instead (filename,
+# static reason), and is absent from every ``ApplicantFiles.resume``.
+# ``is_cover_content=None`` (the default) is BYTE-IDENTICAL to today.
+
+_UNATTACHED_COVER_REASON = (
+    "a cover letter with no matching résumé — not ingested, since a cover "
+    "letter must never be ranked as a résumé"
+)
+
+
+def test_unattached_orphan_cover_when_is_cover_content_true() -> None:
+    result = pair_applicants(
+        [_f("stray_cover_letter.pdf")], is_cover_content=lambda f: True
+    )
+    assert result.pairs == []
+    assert result.unattached == [("stray_cover_letter.pdf", _UNATTACHED_COVER_REASON)]
+    # Never silently ingested as a résumé under any pair.
+    assert not any(p.resume[0] == "stray_cover_letter.pdf" for p in result.pairs)
+
+
+def test_unattached_reason_is_static_english_never_filename_derived() -> None:
+    result = pair_applicants(
+        [_f("Zzyzxqrst_Wibblesworth_cover.pdf")], is_cover_content=lambda f: True
+    )
+    assert len(result.unattached) == 1
+    _, reason = result.unattached[0]
+    assert reason == _UNATTACHED_COVER_REASON
+    assert "zzyzxqrst" not in reason.lower()
+    assert "wibblesworth" not in reason.lower()
+
+
+def test_orphan_cover_with_is_cover_content_false_is_still_demoted_regression() -> None:
+    """Regression guard: when the callable says "not actually cover-shaped",
+    today's demote-with-note behaviour is unchanged."""
+    result = pair_applicants(
+        [_f("stray_cover_letter.pdf")], is_cover_content=lambda f: False
+    )
+    assert result.unattached == []
+    assert len(result.pairs) == 1
+    pair = result.pairs[0]
+    assert pair.resume[0] == "stray_cover_letter.pdf"
+    assert pair.note == _DEMOTED_COVER_NOTE
+
+
+def test_is_cover_content_none_is_identical_to_omitting_it() -> None:
+    files = [_f("stray_cover_letter.pdf"), _f("jane_resume.pdf")]
+    with_none = pair_applicants(files, is_cover_content=None)
+    without = pair_applicants(files)
+    assert with_none.unattached == without.unattached == []
+    assert [(p.resume[0], p.note) for p in with_none.pairs] == [
+        (p.resume[0], p.note) for p in without.pairs
+    ]
+
+
+def test_is_cover_content_true_never_called_on_a_paired_resume() -> None:
+    """The callable is only consulted on files actually reaching the
+    demotion branch (an orphan cover-named file) — a résumé that pairs
+    cleanly with its own cover letter must never be routed to unattached."""
+    calls: list[str] = []
+
+    def _spy(f: tuple[str, bytes]) -> bool:
+        calls.append(f[0])
+        return True
+
+    result = pair_applicants(
+        [_f("jane_resume.pdf"), _f("jane_cover_letter.pdf")], is_cover_content=_spy
+    )
+    assert len(result.pairs) == 1
+    assert result.pairs[0].cover_letter is not None
+    assert result.unattached == []
+    assert calls == []  # jane's cover paired; the demotion branch never ran
+
+
+def test_manifest_leftover_cover_not_named_goes_unattached_when_cover_shaped() -> None:
+    """A manifest names the résumé but not a leftover cover file; with
+    ``is_cover_content`` True that leftover goes to ``unattached``, not a
+    demoted résumé."""
+    files = [_f("jane_resume.pdf"), _f("leftover_cover_letter.pdf")]
+    manifest = parse_pairing_manifest(
+        _manifest_bytes(
+            {
+                "applicants": [
+                    {"resume_file": "jane_resume.pdf", "cover_letter_flag": "No"}
+                ]
+            }
+        )
+    )
+    result = pair_applicants(files, manifest=manifest, is_cover_content=lambda f: True)
+    assert len(result.pairs) == 1
+    assert result.pairs[0].resume[0] == "jane_resume.pdf"
+    assert result.unattached == [
+        ("leftover_cover_letter.pdf", _UNATTACHED_COVER_REASON)
+    ]
+
+
+def test_pairing_result_unattached_defaults_to_empty_list() -> None:
+    assert PairingResult().unattached == []
+
+
+# ── is_cover_content tri-state (security audit F3, 2026-09-18) ─────────────
+#
+# ``None`` means "could not even read the file" — distinct from ``False``
+# ("read fine, not a cover letter"). Must NOT fall back to demote/ingest.
+
+
+def test_is_cover_content_none_goes_unattached_with_could_not_read_reason() -> None:
+    result = pair_applicants(
+        [_f("stray_cover_letter.pdf")], is_cover_content=lambda f: None
+    )
+    assert result.pairs == []
+    assert result.unattached == [("stray_cover_letter.pdf", _COULD_NOT_READ_REASON)]
+    assert not any(p.resume[0] == "stray_cover_letter.pdf" for p in result.pairs)
+
+
+def test_is_cover_content_none_is_never_silently_ingested_as_resume() -> None:
+    """Regression guard against the F3 fail-open bug: an unreadable orphan
+    cover-named file must never appear as an ``ApplicantFiles.resume``."""
+    result = pair_applicants(
+        [_f("jane_cover_letter.pdf")], is_cover_content=lambda f: None
+    )
+    assert len(result.pairs) == 0
+    assert len(result.unattached) == 1
+
+
+def test_could_not_read_reason_is_distinct_from_unattached_cover_reason() -> None:
+    assert _COULD_NOT_READ_REASON != _UNATTACHED_COVER_REASON
+
+
+# ── is_cover_named (reviewer finding — narrow public surface for F2) ───────
+
+
+def test_is_cover_named_true_for_cover_suffix() -> None:
+    assert is_cover_named("jane_cover_letter.pdf") is True
+
+
+def test_is_cover_named_false_for_plain_resume() -> None:
+    assert is_cover_named("jane_resume.pdf") is False
+    assert is_cover_named("jane.pdf") is False
 
 
 # ── title_from_filename (FU-3 Slice 4 — bulk JD) ─────────────────────────

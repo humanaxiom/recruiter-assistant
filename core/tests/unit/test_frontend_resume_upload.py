@@ -447,6 +447,51 @@ def test_upload_route_surfaces_pairing_warnings(monkeypatch: Any, client: Any) -
     assert warning in resp.get_data(as_text=True)
 
 
+def test_upload_route_renders_rejected_combined_export_guidance(
+    monkeypatch: Any, client: Any
+) -> None:
+    """A combined-Taleo-export refusal (Feature: combined-PDF detection)
+    surfaces its "split it first" guidance in the results summary, the same
+    way any other rejected row does."""
+    job_id = uuid4()
+    reason = (
+        "this PDF has 12 pages and 3 distinct applicant emails in its page "
+        "headers — it looks like a combined Taleo export, not one résumé; "
+        "split it first with scripts/split-taleo.sh and upload the "
+        "per-applicant files"
+    )
+    monkeypatch.setattr(
+        api_client,
+        "upload_resumes",
+        MagicMock(
+            return_value=[
+                {
+                    "original_filename": "export.pdf",
+                    "outcome": "rejected",
+                    "reason": reason,
+                    "cover_letter_filename": None,
+                    "warnings": [],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=_job(job_id)))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+    resp = client.post(
+        f"/jobs/{job_id}/resumes",
+        data={
+            "consent_acknowledged": "true",
+            "files": (BytesIO(b"pdf"), "export.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "split it first" in body
+    assert "1 rejected" in body
+
+
 def test_upload_route_forwards_cover_letter_text(monkeypatch: Any, client: Any) -> None:
     job_id = uuid4()
     spy = MagicMock(return_value=[])

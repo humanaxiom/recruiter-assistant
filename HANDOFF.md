@@ -31,6 +31,54 @@ three are on this branch, `feat/e2e-stress-build`.
 > isolated stack, then fix so a combined Taleo PDF uploaded to a job yields
 > one résumé per applicant with its cover letter attached, never a cover
 > letter parsed as a résumé.
+>
+> **Status 2026-09-18, `feat/taleo-combined-pdf`: the defect is closed; the
+> in-app split is the follow-on.** Four causes were found and three fixed:
+> (1) upload classification was filename-suffix only, so an unsplit export
+> became ONE résumé row and every applicant's pages, cover letters included,
+> parsed as one candidate — now refused as a rejected row ("looks like a
+> combined Taleo export … split it first with scripts/split-taleo.sh") by a
+> page-count + distinct-header-email rule that never raises; (2) the splitter
+> zipped `manifest.json`, which the upload's allowlist refuses, so its own
+> instruction could not succeed — the zip now carries PDFs only and the
+> printed instruction names the two form fields; (3) a cover-letter-only
+> applicant was promoted to a résumé by design — a cover-named orphan whose
+> text reads as a cover letter is now disclosed as unattached, never
+> ingested (ADR-017 amended). Driven by hand on the isolated stack with a
+> combined PDF built from fixture pairs: refused with the guidance, count
+> unchanged; a pair plus an orphan → one accepted with its cover letter, one
+> rejected, one parse enqueued. **Not done, deliberately:** the sponsor's
+> in-app split (SPONSOR_REQUIREMENTS_PLAN §2.0, with its mandatory
+> confirmation screen) — the segmentation prompt has no measured budget in
+> `docs/model-profiles/`, and a mis-split attributes one person's experience
+> to another. Until it exists the operator runs `scripts/split-taleo.sh`
+> first; the product now says so instead of silently ingesting. Known modes
+> of the detector: a single-applicant PDF carrying three distinct header
+> emails is refused (recoverable, the reason says why); a scanned export
+> with no header text is not detected.
+>
+> **Driven with the DTO's real bundle on 2026-09-19** (`data/HR Hriing
+> Tool`, gitignored: four exports of 43–53 pages, one 3-page PDF, the
+> 316-row roster CSV). All four exports refused with the right counts (19
+> distinct-email pages each); the 3-page file accepted as one résumé. The
+> splitter's LLM segmentation was **intermittent on one export**: 20
+> applicants with one page assigned to nobody (twice) or 18 with two people
+> merged into one file (once) — page accounting caught the first, nothing
+> caught the second. Two more splitter invariants landed from that: a
+> résumé file carrying two applicants' emails fails the run, and an orphan
+> page whose email equals its neighbour's is attached with a `REPAIRED:`
+> line; the third run then produced 20 + 4 cover letters cleanly. Upload of
+> the zip + manifest: 18 accepted, 4 with cover letters, 0 cover-named rows.
+> Roster CSV on the parsed set: **14 of 15 matched**, 14 work-authorization
+> facts, 301 rows unmatched (the whole pool; normal). **4 of 19 real parses
+> failed**: 1 with the known skills-pass empty-content mode, 3 abandoned by
+> the stalled-parse reconciler — real parse latency was median 715 s, max
+> 1157 s against `LLM_TIMEOUT_S=900`, **while the splitter's own segmentation
+> was running on the same GPU**, so that number is contended and not a clean
+> measurement. `scripts/split-taleo.sh` also needed the MSYS path guard the
+> other scripts carry. Still not built: the in-app split with the sponsor's
+> confirmation screen; and there is no way to re-parse a failed résumé from
+> the UI (recorded).
 
 **What's on this branch:**
 - [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,

@@ -59,6 +59,7 @@ import asyncio
 import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz  # type: ignore[import-untyped]
@@ -458,6 +459,239 @@ def _write_pairing_manifest(
     return path
 
 
+def _zip_outputs(out_dir: Path, resumes: list[Path], covers: list[Path]) -> Path:
+    """Zip the given résumé + cover-letter PDFs into ``applicants.zip`` —
+    PDFs ONLY, never ``manifest.json``, even though it lives in the SAME
+    ``out_dir`` (``_write_pairing_manifest`` writes it there). The in-app
+    paired uploader accepts ``pairing_manifest`` as its OWN multipart field;
+    a ``manifest.json`` zipped alongside the résumés trips the zip
+    allowlist (json isn't an accepted résumé extension) and rejects the
+    WHOLE upload."""
+    zip_path = out_dir / "applicants.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in [*resumes, *covers]:
+            zf.write(p, arcname=p.name)
+    return zip_path
+
+
+def _zippable(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+) -> tuple[list[Path], list[Path]]:
+    """Résumé/cover paths to include in ``applicants.zip``.
+
+    A cover-only row (LLM manifest emitted cover-letter pages but no résumé
+    pages for that applicant) is EXCLUDED entirely — there is no résumé for
+    the cover letter to pair with. This mirrors two promises that must stay
+    true together: ``_write_pairing_manifest``'s own ``resume_path is not
+    None`` filter (cover-only applicants never appear in ``manifest.json``),
+    and ``report_cover_only``'s printed claim that such applicants "are
+    EXCLUDED from manifest.json and applicants.zip" — before this helper
+    existed, the zip's ``covers`` list was built from every row with a cover
+    path regardless of whether that row also had a résumé, so a cover-only
+    applicant's cover letter WAS zipped despite the printed promise
+    (security audit finding, 2026-09-18)."""
+    resumes = [r for _, r, _, _ in emitted if r is not None]
+    covers = [c for _, r, c, _ in emitted if r is not None and c is not None]
+    return resumes, covers
+
+
+def report_cover_only(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+) -> int:
+    """Print a loud block listing applicants whose LLM-manifest row carried
+    cover-letter pages but NO résumé pages at all, and return the count.
+
+    Such a row has no résumé to ingest — already excluded from
+    ``manifest.json`` by ``_write_pairing_manifest``'s ``resume_path is not
+    None`` filter — so silently excluding it there is not enough; the
+    operator must be told an applicant was dropped rather than discovering it
+    only by counting. The CLI exits non-zero when this is > 0.
+    """
+    cover_only = [
+        (name, cover_path)
+        for name, resume_path, cover_path, _pages in emitted
+        if resume_path is None and cover_path is not None
+    ]
+    if not cover_only:
+        return 0
+    print("\n" + "!" * 60)
+    print(f"! {len(cover_only)} APPLICANT(S) HAVE A COVER LETTER BUT NO RÉSUMÉ")
+    for name, cover_path in cover_only:
+        print(f"!   {name or '?'}: {cover_path}")
+    print(
+        "!   These are EXCLUDED from manifest.json and applicants.zip. Fix "
+        "the split (--ranges), or ask the applicant to resubmit a résumé."
+    )
+    print("!" * 60 + "\n")
+    return len(cover_only)
+
+
+_MERGED_HEAD = 600
+
+
+def _pymupdf_page_texts(path: Path) -> list[str]:
+    """Default ``page_texts``: the first ~600 chars of each page's extracted
+    text, via the same PyMuPDF extraction the splitter already uses."""
+    doc = fitz.open(path)
+    try:
+        return [(page.get_text("text") or "")[:_MERGED_HEAD] for page in doc]
+    finally:
+        doc.close()
+
+
+def merged_applicant_files(
+    emitted: list[tuple[str, Path | None, Path | None, list[int]]],
+    page_texts: Callable[[Path], list[str]] = _pymupdf_page_texts,
+) -> list[tuple[str, int]]:
+    """Scan each emitted applicant's *résumé* PDF (never its cover letter)
+    for distinct email addresses across its pages. A résumé carrying 2+
+    distinct, lowercased emails is a probable merged applicant — the LLM put
+    two people's documents in one file, which page accounting cannot see
+    because every page IS assigned, just to the wrong applicant. Returns
+    ``(candidate name or file stem, distinct email count)`` rows, one per
+    affected résumé, in emitted order."""
+    rows: list[tuple[str, int]] = []
+    for name, resume_path, _cover_path, _pages in emitted:
+        if resume_path is None:
+            continue
+        emails: set[str] = set()
+        for text in page_texts(resume_path):
+            for m in _EMAIL.findall(text):
+                emails.add(m.lower())
+        if len(emails) >= 2:
+            rows.append((name or resume_path.stem, len(emails)))
+    return rows
+
+
+def report_merged_applicants(rows: list[tuple[str, int]]) -> int:
+    """Print a loud block for each probable merged applicant. Returns the
+    count so the CLI can exit non-zero."""
+    if not rows:
+        return 0
+    print("\n" + "!" * 60)
+    for name, n_emails in rows:
+        print(
+            f"! PROBABLE MERGED APPLICANT — file {name} carries {n_emails} "
+            "distinct applicant emails; the segmentation put two people in "
+            "one résumé. Re-run the split or use --ranges to separate them."
+        )
+    print("!" * 60 + "\n")
+    return len(rows)
+
+
+def repair_orphan_pages(
+    manifest_applicants: list[_Applicant],
+    page_count: int,
+    page_emails: Callable[[int], set[str]],
+) -> tuple[list[_Applicant], list[str]]:
+    """Repair pages the LLM manifest left assigned to no applicant, when a
+    single distinct email ties the page unambiguously to a NEIGHBOUR
+    applicant's résumé (2026-09-19 finding: page 30 of a real 43-page export
+    carried the SAME email as page 29, the last résumé page of the preceding
+    applicant, mis-assigned by the model).
+
+    For each page in ``1..page_count`` assigned to no applicant (neither
+    résumé nor cover-letter pages, across every applicant): look up its
+    distinct emails via ``page_emails``. If there is exactly one, and it
+    equals the email on the immediately PRECEDING applicant's last résumé
+    page, append the orphan page to that applicant's résumé pages. Failing
+    that, if it equals the email on the immediately FOLLOWING applicant's
+    first résumé page, prepend it there instead. Otherwise the page is left
+    untouched (still orphaned; the caller's existing page-accounting check
+    still fires on it).
+
+    Only résumé pages are ever grown — an applicant with no résumé pages
+    (cover-letter-only) is never a repair target, so a page is never folded
+    into a cover-letter page set.
+
+    Cover-letter pages are out of scope: ``page_emails`` is expected to
+    return an empty set for a page whose text reads as a cover letter (the
+    caller's real implementation checks ``_is_cover`` before extracting
+    emails), which this function then treats identically to "no email" —
+    it has no page text of its own to make that call.
+
+    Returns the repaired applicant list (a deep copy; the input is never
+    mutated) and the human-readable report lines to print, one per repair.
+    """
+    assigned: set[int] = set()
+    for a in manifest_applicants:
+        assigned.update(a.resume_pages)
+        assigned.update(a.cover_letter_pages)
+    orphans = sorted(p for p in range(1, page_count + 1) if p not in assigned)
+
+    repaired = [a.model_copy(deep=True) for a in manifest_applicants]
+    report: list[str] = []
+
+    def _bounds(a: _Applicant) -> tuple[int, int] | None:
+        pages = a.resume_pages + a.cover_letter_pages
+        return (min(pages), max(pages)) if pages else None
+
+    for p in orphans:
+        emails = page_emails(p)
+        if len(emails) != 1:
+            continue
+        (email,) = tuple(emails)
+
+        prev_idx: int | None = None
+        prev_max = -1
+        next_idx: int | None = None
+        next_min = page_count + 1
+        for idx, a in enumerate(repaired):
+            b = _bounds(a)
+            if b is None:
+                continue
+            if b[1] < p and b[1] > prev_max:
+                prev_max = b[1]
+                prev_idx = idx
+            if b[0] > p and b[0] < next_min:
+                next_min = b[0]
+                next_idx = idx
+
+        attached = False
+        if prev_idx is not None:
+            a = repaired[prev_idx]
+            if a.resume_pages:
+                last_resume_page = max(a.resume_pages)
+                if email in page_emails(last_resume_page):
+                    a.resume_pages = sorted([*a.resume_pages, p])
+                    report.append(
+                        f"REPAIRED: page {p} attached to applicant "
+                        f"{prev_idx + 1} — same applicant email as page "
+                        f"{last_resume_page}"
+                    )
+                    attached = True
+
+        if not attached and next_idx is not None:
+            a = repaired[next_idx]
+            if a.resume_pages:
+                first_resume_page = min(a.resume_pages)
+                if email in page_emails(first_resume_page):
+                    a.resume_pages = sorted([p, *a.resume_pages])
+                    report.append(
+                        f"REPAIRED: page {p} attached to applicant "
+                        f"{next_idx + 1} — same applicant email as page "
+                        f"{first_resume_page}"
+                    )
+
+    return repaired, report
+
+
+def _orphan_page_emails(texts: list[str]) -> Callable[[int], set[str]]:
+    """Build the ``page_emails`` callable ``repair_orphan_pages`` needs, from
+    the same PyMuPDF page texts the LLM digest was built from. A page whose
+    text reads as a cover letter (``_is_cover``) returns no emails — cover
+    pages are out of scope for the repair, per ``repair_orphan_pages``'s own
+    docstring — so it is never mistaken for a résumé-page match."""
+
+    def page_emails(p: int) -> set[str]:
+        text = texts[p - 1]
+        if _is_cover(text):
+            return set()
+        return {m.lower() for m in _EMAIL.findall(text[:_MERGED_HEAD])}
+
+    return page_emails
+
+
 def _run_llm_mode(
     doc: fitz.Document,
     texts: list[str],
@@ -476,29 +710,32 @@ def _run_llm_mode(
         print("       Retry, or fall back to --heuristic / --ranges.")
         return 1
     print(f"output: {out_dir}\n")
+    manifest.applicants, repair_report = repair_orphan_pages(
+        manifest.applicants, len(texts), _orphan_page_emails(texts)
+    )
+    for line in repair_report:
+        print(line)
     emitted = _emit_from_manifest(doc, texts, manifest, out_dir, min_text)
-    resumes = [r for _, r, _, _ in emitted if r is not None]
-    covers = [c for _, _, c, _ in emitted if c is not None]
-    manifest_path = _write_pairing_manifest(emitted, out_dir)
+    resumes, covers = _zippable(emitted)
+    _write_pairing_manifest(emitted, out_dir)
     if do_zip and resumes:
-        zip_path = out_dir / "applicants.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in [*resumes, *covers, manifest_path]:
-                zf.write(p, arcname=p.name)
+        zip_path = _zip_outputs(out_dir, resumes, covers)
         print(
             f"\nzipped {len(resumes)} résumé(s) + {len(covers)} "
-            f"cover letter(s) + manifest -> {zip_path}"
+            f"cover letter(s) -> {zip_path}"
         )
     print(
         f"\n{len(resumes)} résumé(s) + {len(covers)} cover letter(s). Review "
-        "them, then bulk-upload applicants.zip (or the whole output dir) on "
-        "the job's Resumes section: the cover letters pair to their applicant "
-        "automatically via manifest.json (Feature 2).\n"
+        "them, then upload applicants.zip in Résumé file(s) AND manifest.json "
+        "in Pairing manifest on the job's Resumes section: the cover letters "
+        "pair to their applicant automatically (Feature 2).\n"
     )
     assigned = [pages for _, _, _, pages in emitted]
     missing, duplicated = page_accounting(len(texts), assigned)
     clean = report_page_accounting(missing, duplicated)
-    return 0 if clean else 1
+    cover_only_count = report_cover_only(emitted)
+    merged_count = report_merged_applicants(merged_applicant_files(emitted))
+    return 0 if clean and cover_only_count == 0 and merged_count == 0 else 1
 
 
 def _run_deterministic_mode(

@@ -269,3 +269,81 @@ so "the JD had a non-trivial description" holds by construction independent of t
 known, so an operator can find these jobs without waiting for a recruiter to hit Generate.
 
 Same shape as decision 1 and as ADR-040/041: refuse and disclose, never silently degrade.
+
+## Amendment 2026-09-18 — refuse an unsplit combined export; disclose an orphan cover letter, never promote it
+
+Decision 2 above says an orphan cover-named file with no matching résumé is "ingested as a résumé anyway,
+with a warning" — and a combined Taleo export (one PDF concatenating many applicants, cover letters
+included) had no detection at all: uploaded as-is it became ONE résumé row with every page, cover letters
+included, parsed as that one applicant. Both are corrected here, in the same direction as decision 4's
+work-authorization guard and the zero-requirements guard above: refuse and disclose, never silently
+mis-ingest.
+
+**Combined-export detection** (`src/services/combined_export.py::looks_like_combined_export`) runs on every
+expanded PDF part in the upload route, off the event loop (PyMuPDF is sync), bounded to the first
+`min(page_count, 300)` pages (mirrors `pipeline/parsing/extract.py`'s `_MAX_PDF_PAGES` — security audit F1,
+2026-09-18: an attacker-crafted page count must not turn a cheap pre-parse heuristic into unbounded work),
+and reads only a top-band clip rect per page, not the full page text. It is a cheap, pre-parse heuristic —
+page count > 6, and either ≥3 DIFFERENT PAGES each contributing a not-yet-seen e-mail in the first 400
+chars of their top band, or ≥2 such pages AND ≥8 pages total — never a full parse. Counting is per-page
+(each page's FIRST e-mail match only), not per-e-mail-address-anywhere-in-the-document (reviewer finding,
+2026-09-18: the original per-e-mail count refused a genuine single applicant whose references page listed
+several referees' e-mails on one page — see `combined_export`'s module docstring). A flagged file becomes
+a **rejected** row (not a 4xx that kills the whole batch), naming the page/applicant counts and pointing at
+`scripts/split-taleo.sh`, and never a filename (the function doesn't take one). Two failure modes are the
+deliberate cost of a heuristic this cheap, and are recorded rather than "fixed" into a slower check:
+
+- **False positive**: a single, genuinely long applicant whose résumé repeats the SAME e-mail as the first
+  match on every page is safe (each page only counts the first NOT-YET-SEEN e-mail) — but a résumé whose
+  page order legitimately introduces 3+ different e-mail addresses as each page's FIRST match (e.g. contact
+  info reordered oddly by a PDF export) could still trip the >6-page floor combined with the per-page
+  count. This has not been observed in the pilot's real exports.
+- **False negative**: a scanned/image-only combined export has no extractable text in its page headers at
+  all, so the email count is always zero and this never flags it. The heuristic is deliberately
+  conservative (never raises, never blocks a legitimate upload it can't confidently classify) at the cost
+  of missing this case; the downstream parse still surfaces a scanned batch as one badly-parsed résumé,
+  which is at least visible on the résumé list, unlike a silent multi-applicant merge.
+- **False negative**: a small export (≤7 pages, 2 applicants) is never flagged — the page-count floor and
+  the ≥3-distinct-page / ≥2-distinct-page-and-≥8-page thresholds both require more signal than that. Such
+  a file is ingested as one résumé and mis-parsed exactly as a combined export always was before this
+  detector existed; it's just small enough that a recruiter is far more likely to notice on the résumé
+  list before it's ranked.
+
+**Orphan cover letters are disclosed, never promoted.** `pair_applicants` grew an additive, optional
+`is_cover_content` callable (`PairingResult.unattached`, default empty — every existing caller is
+byte-identical). The upload route extracts text ONLY for the leftover cover-NAMED files that have no
+matching résumé (a to_thread pass, since extraction is sync/CPU-bound — security audit F2, 2026-09-18:
+extracting every cover-named file up front, including ones that pair cleanly with their own résumé, was
+wasted work on a hostile-input trust boundary) and applies `combined_export.is_cover_letter_text` (the
+same salutation/sign-off patterns the splitter's own `_is_cover` uses) to whichever ones reach the
+demotion branch — i.e. only genuine orphans, never a résumé that already paired with its own cover letter.
+When the text reads as a cover letter, the file goes to `unattached` (filename, static reason) and becomes
+a rejected row — it is **never** ingested as a résumé and so can never be ranked as one. When the callable
+says "not actually cover-shaped" (`False`), today's demote-with-note behaviour (decision 2) is unchanged —
+this is a strictly-narrower refusal, not a new promotion path. A THIRD state (`None` — security audit F3,
+2026-09-18) covers a file the callable **could not even read** (encrypted, corrupt, oversized): this also
+goes to `unattached`, with its own distinct static reason, rather than falling back to the demote/ingest
+path — the earlier two-state boolean treated "unreadable" exactly like "not a cover letter" and ingested
+it, which fails OPEN on a hostile or corrupt orphan cover-named upload.
+
+**The splitter's zip carries PDFs only.** `core/scripts/split_taleo_pdf.py`'s LLM-mode `--zip` previously
+zipped the résumé/cover PDFs AND `manifest.json` together into `applicants.zip` — which, uploaded as a
+single `.zip` `files` part, trips the upload route's zip allowlist (`.json` isn't an accepted résumé
+extension) and rejects the WHOLE batch. `_zip_outputs` now zips PDFs only; the operator uploads
+`applicants.zip` in **Résumé file(s)** and `manifest.json` (written to the same output directory, unzipped)
+separately in **Pairing manifest**. `report_cover_only` prints a loud block when the LLM manifest emits an
+applicant with cover-letter pages but no résumé pages at all (already excluded from `manifest.json` by
+`_write_pairing_manifest`'s existing filter) and the CLI now exits non-zero in that case, so a dropped
+applicant is surfaced rather than discovered later by counting.
+
+**2026-09-19: the splitter also fails on a probable merged applicant**, not just on unassigned pages —
+`merged_applicant_files` scans each emitted `*_resume.pdf` (never a cover letter) for 2+ distinct emails,
+which page accounting cannot see because every page is still assigned, just to the wrong file; this is
+still a splitter-side heuristic on the operator's own re-run, not the in-app confirmation screen decision 2
+already deferred.
+
+**2026-09-19: an unassigned page is now repaired before accounting runs, when an email makes the fix
+unambiguous** — `repair_orphan_pages` folds an orphan page into the immediately preceding (or, failing
+that, following) applicant's résumé pages only when the orphan carries exactly one email matching that
+neighbour's adjoining résumé page, printing a loud `REPAIRED:` line per fix and leaving every other orphan
+for the existing `PAGE ACCOUNTING FAILURE` to catch.
