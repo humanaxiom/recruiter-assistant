@@ -62,6 +62,7 @@ from testcontainers.postgres import PostgresContainer
 from src.api import deps
 from src.api.deps import get_arq
 from src.api.routes import auth as auth_routes
+from src.api.routes import job_assignees as job_assignees_routes
 from src.api.routes import jobs as jobs_routes
 from src.errors import AppError
 from src.models.ddl import init_schema
@@ -114,6 +115,7 @@ def _build_app(pool: asyncpg.Pool) -> FastAPI:
     app = FastAPI()
     app.include_router(auth_routes.router)
     app.include_router(jobs_routes.router)
+    app.include_router(job_assignees_routes.router)
 
     async def _get_db_override() -> AsyncIterator[Any]:
         async with pool.acquire() as conn:
@@ -562,3 +564,68 @@ async def test_my_jobs_admin_who_is_assigned_sees_exactly_that_one_job(
     returned_ids = {item["id"] for item in resp.json()}
     assert returned_ids == {str(own_job)}
     assert str(other_job) not in returned_ids
+
+
+# ── Item 2 — assign via the route, list as that HM session, remove, gone ──
+
+
+@pytest.mark.asyncio
+async def test_assign_via_route_then_hm_session_sees_it_then_remove_and_it_is_gone(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end, through the REAL routes (never a direct SQL seed for the
+    assignment itself): an admin session assigns a hiring_manager to a job
+    via ``POST /jobs/{job_id}/assignees``; that SAME hiring_manager, logged in
+    as themselves, sees the job through ``GET /jobs`` (ADR-020 §3/§4); the
+    admin session then removes the assignment via ``DELETE
+    /jobs/{job_id}/assignees/{user_id}``; the hiring_manager's own ``GET
+    /jobs`` no longer lists it."""
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    app = _build_app(pg_pool)
+
+    job_id = await _insert_job(pg_pool, title="Requisition For Assignment")
+
+    async with await _client(app) as client:
+        admin_id, admin_sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="admin"
+        )
+        hm_id, hm_sid = await _login_as_seeded_user(
+            pg_pool, client, settings, monkeypatch, role="hiring_manager"
+        )
+
+        # Before assignment: the hiring_manager sees nothing.
+        before_resp = await client.get(
+            "/jobs", cookies={settings.session_cookie_name: hm_sid}
+        )
+        assert before_resp.status_code == 200
+        assert before_resp.json() == []
+
+        # Assign via the REAL route, acting as the admin session.
+        assign_resp = await client.post(
+            f"/jobs/{job_id}/assignees",
+            json={"user_id": str(hm_id)},
+            cookies={settings.session_cookie_name: admin_sid},
+        )
+        assert assign_resp.status_code == 201
+
+        # Now the hiring_manager's own GET /jobs lists it.
+        after_assign_resp = await client.get(
+            "/jobs", cookies={settings.session_cookie_name: hm_sid}
+        )
+        assert after_assign_resp.status_code == 200
+        assert {j["id"] for j in after_assign_resp.json()} == {str(job_id)}
+
+        # Remove via the REAL route, again as the admin session.
+        remove_resp = await client.delete(
+            f"/jobs/{job_id}/assignees/{hm_id}",
+            cookies={settings.session_cookie_name: admin_sid},
+        )
+        assert remove_resp.status_code == 204
+
+        # The hiring_manager's GET /jobs no longer lists it.
+        after_remove_resp = await client.get(
+            "/jobs", cookies={settings.session_cookie_name: hm_sid}
+        )
+    assert after_remove_resp.status_code == 200
+    assert after_remove_resp.json() == []

@@ -27,7 +27,7 @@ from typing import Annotated
 from uuid import UUID
 
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import actor_fields_from_user, get_arq, resolve_user
 from src.errors import ConflictError, NotFoundError
@@ -59,12 +59,52 @@ async def _require_admin_session(
     return user
 
 
+async def _require_admin_or_recruiter_session(
+    user: Annotated[User | None, Depends(resolve_user)],
+    role: str | None,
+) -> User:
+    """403 unless ``user`` is a real, ACTIVE session with ``role`` in
+    ``{"admin", "recruiter"}`` (Item 2) — used ONLY for the FILTERED read
+    (``GET /users?role=...``), never the unfiltered listing.
+
+    A recruiter session builds the hiring-manager-assignment screen and must
+    be able to fetch the assignable ``hiring_manager`` roster; the plain
+    ``_require_admin_session`` gate would 403 it. The unfiltered ``GET
+    /users`` stays admin-only — this gate is deliberately not used there.
+
+    **Narrowed by a review finding, 2026-09-17.** A recruiter session may
+    request ONLY ``role="hiring_manager"`` — any OTHER ``role`` value 403s,
+    even though it is syntactically the same query param the recruiter is
+    otherwise allowed to use. Without this, a recruiter session could pass
+    ``role=admin``/``role=recruiter``/``role=auditor`` one at a time and
+    reconstruct the admin-only unfiltered roster a page at a time, entirely
+    through a route meant to expose only the assignable hiring_manager list.
+    An admin session's filter stays completely unrestricted — this check is
+    skipped for ``user.role == "admin"``."""
+    if user is None or user.role not in ("admin", "recruiter") or not user.active:
+        raise HTTPException(
+            status_code=403,
+            detail="admin or recruiter session required for this route",
+        )
+    if user.role == "recruiter" and role != "hiring_manager":
+        raise HTTPException(
+            status_code=403,
+            detail="a recruiter session may only filter by role=hiring_manager",
+        )
+    return user
+
+
 @router.get("/users")
 async def list_users(
     db: Db,
-    _admin: Annotated[User, Depends(_require_admin_session)],
+    user: Annotated[User | None, Depends(resolve_user)],
+    role: str | None = Query(default=None),
 ) -> list[User]:
-    return await user_service.list_users(db)
+    if role is not None:
+        await _require_admin_or_recruiter_session(user, role)
+    else:
+        await _require_admin_session(user)
+    return await user_service.list_users(db, role=role)
 
 
 @router.post("/admin/jobs/sync", status_code=202)

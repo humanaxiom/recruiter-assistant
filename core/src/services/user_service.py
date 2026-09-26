@@ -118,16 +118,27 @@ SELECT id, cas_username, display_name, email, role, active, created_at,
 FROM users ORDER BY created_at
 """
 
+_LIST_USERS_BY_ROLE_SQL = """
+SELECT id, cas_username, display_name, email, role, active, created_at,
+       last_seen_at
+FROM users WHERE role = $1 ORDER BY created_at
+"""
 
-async def list_users(conn: DbConn) -> list[User]:
+
+async def list_users(conn: DbConn, role: str | None = None) -> list[User]:
     """Return every ``users`` row, ordered by ``created_at`` (user-admin-roles
     slice 5) — the ``GET /users`` admin-listing backend.
 
-    A plain pass-through: one ``SELECT`` (no N+1), no re-sorting/filtering of
-    whatever ``conn.fetch`` hands back, mapping each row straight into a
+    When ``role`` is given, adds a ``WHERE role = $1`` predicate (Item 2) —
+    the hiring-manager-assignment screen's directory-lookup backend. A plain
+    pass-through otherwise: one ``SELECT`` (no N+1), no re-sorting/filtering
+    of whatever ``conn.fetch`` hands back, mapping each row straight into a
     :class:`~src.schemas.auth.User` (``role`` may be ``None``).
     """
-    rows = await conn.fetch(_LIST_USERS_SQL)
+    if role is not None:
+        rows = await conn.fetch(_LIST_USERS_BY_ROLE_SQL, role)
+    else:
+        rows = await conn.fetch(_LIST_USERS_SQL)
     return [User(**dict(row)) for row in rows]
 
 

@@ -324,6 +324,14 @@ _STATEMENTS: tuple[str, ...] = (
     END
     $$
     """,
+    # ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — a Regenerate posted while a
+    # run is already in flight sets this instead of enqueueing a second worker
+    # run behind a FIFO queue; drained atomically by
+    # ``shortlist_service.consume_shortlist_rerun`` on every terminal worker
+    # path. ``NOT NULL DEFAULT FALSE`` so a pre-existing row (every job seeded
+    # before this migration existed) reads back FALSE, not NULL.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shortlist_rerun_requested "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
     # ── resumes ──────────────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS resumes (

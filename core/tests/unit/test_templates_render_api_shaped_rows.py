@@ -164,6 +164,48 @@ def test_the_job_detail_page_renders_a_real_api_body(
     assert resp.status_code == 200, resp.get_data(as_text=True)[:400]
 
 
+def test_the_job_detail_page_renders_real_assignee_and_hiring_manager_rows(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 (ADR-020 §2) — the "Assigned hiring managers" section reads
+    ``api_client.list_job_assignees``/``list_users`` results, and those are
+    real ``User`` rows over the wire (a ``created_at``/``last_seen_at``
+    STRING, never a ``datetime``) — the exact class of defect this file
+    exists to catch, applied to the new feature."""
+    import datetime as _dt
+
+    from src.schemas.auth import User
+
+    ts = _dt.datetime(2026, 9, 17, tzinfo=_dt.UTC)
+
+    def _assignee_user(**over: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "id": uuid4(),
+            "cas_username": "dana",
+            "display_name": "Dana Lee",
+            "email": "dana@example.org",
+            "role": "hiring_manager",
+            "active": True,
+            "created_at": ts,
+            "last_seen_at": ts,
+        }
+        base.update(over)
+        return User(**base).model_dump(mode="json")
+
+    monkeypatch.setattr(api_client, "get_job", lambda jid, **kw: _detail())
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+    monkeypatch.setattr(
+        api_client, "list_job_assignees", lambda jid, **kw: [_assignee_user()]
+    )
+    monkeypatch.setattr(
+        api_client,
+        "list_users",
+        lambda **kw: [_assignee_user(cas_username="priya", role="hiring_manager")],
+    )
+    resp = client.get(f"/jobs/{uuid4()}")
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:400]
+
+
 def test_the_job_detail_page_renders_a_bare_job(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

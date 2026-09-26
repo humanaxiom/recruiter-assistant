@@ -517,3 +517,79 @@ def test_post_generate_conflict_body_contains_the_reason(
         "the banner must render the human 'message', never the raw dict repr "
         "of the AppError envelope"
     )
+
+
+# ── job detail page: Re-parse button on a zero-requirements DRAFT job ──────
+#
+# Item 5 (zero-requirements JD recovery). The existing Re-parse button
+# (``job_detail.html`` ~212) renders only on ``job.failure_reason`` — a JD
+# that parsed CLEANLY but yielded zero required/nice-to-have skills has no
+# failure reason at all, so a recruiter had no recovery path once
+# ``description_raw`` itself is fixed. The button must ALSO render for that
+# shape: a writer, a DRAFT job, a completed parse (``parsed_at`` set), and
+# both skill lists empty.
+
+
+def test_reparse_button_renders_for_a_zero_requirements_draft_parsed_job(
+    monkeypatch: pytest.MonkeyPatch, client: Any
+) -> None:
+    job_id = uuid4()
+    job = _job(
+        status="draft",
+        parsed_at=_TS.isoformat(),
+        description_parsed=_jd(required_skills=[], nice_to_have_skills=[]),
+        failure_reason=None,
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=job))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+
+    resp = _get_detail(client, job_id)
+    body = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert f"/jobs/{job_id}/reparse" in body
+
+
+def test_reparse_button_absent_for_the_same_zero_requirements_shape_when_open(
+    monkeypatch: pytest.MonkeyPatch, client: Any
+) -> None:
+    """The recovery path is draft-only — ``update_job`` 409s a
+    ``description_raw`` PATCH on any other status, so offering the button on
+    an open job would dead-end the click."""
+    job_id = uuid4()
+    job = _job(
+        status="open",
+        parsed_at=_TS.isoformat(),
+        description_parsed=_jd(required_skills=[], nice_to_have_skills=[]),
+        failure_reason=None,
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=job))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+
+    resp = _get_detail(client, job_id)
+    body = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert f"/jobs/{job_id}/reparse" not in body
+
+
+def test_reparse_button_absent_while_a_parse_is_still_in_flight(
+    monkeypatch: pytest.MonkeyPatch, client: Any
+) -> None:
+    """No completed parse yet (``parsed_at`` unset, no failure) — clicking
+    Re-parse would queue a second run of work already underway."""
+    job_id = uuid4()
+    job = _job(
+        status="draft",
+        parsed_at=None,
+        description_parsed=None,
+        failure_reason=None,
+    )
+    monkeypatch.setattr(api_client, "get_job", MagicMock(return_value=job))
+    monkeypatch.setattr(api_client, "list_resumes", MagicMock(return_value=[]))
+
+    resp = _get_detail(client, job_id)
+    body = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert f"/jobs/{job_id}/reparse" not in body

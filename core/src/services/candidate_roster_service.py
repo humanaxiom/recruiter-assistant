@@ -69,11 +69,56 @@ _JOB_RESUMES_SQL = """
 # normalisation) — digits, punctuation, and whitespace are all separators.
 # ASCII-only BY DESIGN, because the two sides are folded to ASCII first.
 _NON_LETTER_RE = re.compile(r"[^A-Za-z]+")
+_LETTERS_RE = re.compile(r"[A-Za-z]+")
+
+# Closed credential vocabulary (Item 4, 2026-09-17 finding — see docstring
+# below). CA/BA/MA are DELIBERATELY EXCLUDED: they are real surnames ("Ma,
+# Wei"; "Ba, Kofi"), and a two-letter token being "short" or "abbreviation-
+# shaped" is never, by itself, grounds to drop it. Only membership in this
+# closed, spelled-out list counts.
+_CREDENTIAL_VOCAB = frozenset(
+    {
+        "csm",
+        "pmp",
+        "cpa",
+        "cfa",
+        "mba",
+        "phd",
+        "peng",
+        "chrp",
+        "cphr",
+        "cissp",
+        "pmiacp",
+        "msc",
+        "bsc",
+        "bsw",
+        "msw",
+        "llb",
+        "cma",
+        "cga",
+        "shrm",
+        "gphr",
+        "itil",
+        "ccna",
+        "mcse",
+    }
+)
+# **Deliberately EXCLUDED, 2026-09-17 review finding**: "md", "jd", and "rn"
+# are also real given names/initials that legitimately sit in a "Last,
+# First" tail — "Del Rosario, Md" (a Filipino given name) and "Bautista, Jd"
+# (initials) are real "Last, First" shapes, not "Last, <credential>" ones.
+# Including them let the tail-strip turn "Del Rosario, Md" into a token set
+# for "del rosario" alone, which then FAILED to match the résumé side's
+# "Md Del Rosario, Del Rosario, Md" — the opposite of what this rule exists
+# to do. Short, name-shaped tokens are excluded from the vocabulary for
+# exactly this reason; see ``_normalize_name``'s docstring for why the rule
+# is not purely one-directional.
 
 
 def _normalize_name(name: str) -> frozenset[str]:
     """Lower-case, accent-fold, and split a name into an order-invariant token
-    set.
+    set — with a bounded rule (added 2026-09-17, Item 4) for stripping a
+    trailing professional-credential suffix from the TAIL only.
 
     The accent fold is load-bearing and comes from the real data, not from
     caution. **The two sides of this comparison are encoded differently.**
@@ -89,13 +134,69 @@ def _normalize_name(name: str) -> frozenset[str]:
     produce a common token — a mismatch caused entirely by which side of the
     integration the name arrived from, which is not a fact about the
     candidate. NFKD then dropping combining marks maps both onto ``ruiz``.
+    The fold runs FIRST, unconditionally, before the credential rule below
+    ever looks at the string.
 
-    This only ever makes two names MORE likely to be judged equal, so it
-    cannot introduce a false match that strict equality would have refused.
+    **2026-09-17 finding**: a résumé parsed as "First Last, CSM" (the
+    candidate's own signature block) failed to match a Taleo roster row
+    spelled "Last, First" with no email on the row to fall back on — the
+    exact-token-set comparison saw the extra ``csm`` token and refused a
+    match a recruiter would consider obvious. The fix is deliberately
+    narrow, with three guards, meant to make two names MORE likely to be
+    judged equal without introducing a false POSITIVE (the vocabulary is
+    closed to real professional credentials, so this never makes two
+    genuinely different people collide).
+
+    **This is not purely one-directional, though — a correction, 2026-09-17
+    review.** The strip CAN also break a match that strict equality would
+    have made, in the narrow case where a candidate's given name (or
+    initials) happens to equal a credential token — "Del Rosario, Md" is a
+    real "Last, First" name, not "Last, <credential>", and stripping "md"
+    from its tail would have stopped it matching a résumé spelled "Md Del
+    Rosario". That is exactly why the vocabulary below excludes short tokens
+    that are also common given names/initials ("md", "jd", "rn") rather than
+    including every real credential abbreviation — the closed vocabulary is
+    a trade-off, not a one-way ratchet. Three guards:
+
+    1. **Tail-only.** The ORIGINAL string is split on its LAST comma; only
+       tokens after that comma are ever candidates for stripping. A
+       credential positioned before the last comma (e.g. "PMP, Pat Example")
+       is left alone — the rule looks only at the tail, so "PMP" there reads
+       as a token in the name, not a suffix.
+    2. **Closed vocabulary, checked two ways.** A tail token — or the tail's
+       letters concatenated together, so a punctuated credential like
+       "P.Eng." (which the non-letter split shatters into "p" and "eng")
+       is still recognised as one credential ("peng") — must be an exact
+       member of ``_CREDENTIAL_VOCAB`` to be dropped. Nothing is stripped
+       merely for being short.
+    3. **Two-token floor.** A tail is dropped only if doing so leaves >= 2
+       tokens in the name overall. "Solo, Pmp" keeps "pmp" rather than
+       collapsing to the single bare token "solo".
+
+    With no comma anywhere, the tail rule never engages at all — the name
+    is returned exactly as the pre-existing accent-fold behaviour already
+    handled it, unchanged.
     """
     folded = unicodedata.normalize("NFKD", name.lower())
-    stripped = "".join(c for c in folded if not unicodedata.combining(c))
-    return frozenset(t for t in _NON_LETTER_RE.split(stripped) if t)
+    working = "".join(c for c in folded if not unicodedata.combining(c))
+
+    while "," in working:
+        idx = working.rindex(",")
+        head, tail = working[:idx], working[idx + 1 :]
+        tail_tokens = _LETTERS_RE.findall(tail)
+        if not tail_tokens:
+            break
+        concatenated = "".join(tail_tokens)
+        is_credential = (
+            len(tail_tokens) == 1 and tail_tokens[0] in _CREDENTIAL_VOCAB
+        ) or concatenated in _CREDENTIAL_VOCAB
+        if not is_credential:
+            break
+        if len(_LETTERS_RE.findall(head)) < 2:
+            break
+        working = head
+
+    return frozenset(_NON_LETTER_RE.split(working)) - {""}
 
 
 class AmbiguousNameMatch(BaseModel):

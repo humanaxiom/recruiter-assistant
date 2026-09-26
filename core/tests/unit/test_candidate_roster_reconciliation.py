@@ -1226,3 +1226,92 @@ async def test_decrypt_runs_only_for_resumes_still_unresolved_after_email_matchi
         "decrypted -- step 2 never needs its name"
     )
     assert report.matched == 2
+
+
+# ── Item 4 (2026-09-17): a credential suffix must not defeat the name match ─
+
+
+@pytest.mark.asyncio
+async def test_credential_suffix_on_the_resume_side_still_matches_the_csv_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full-reconciliation pin, not just a ``_normalize_name`` unit check:
+    a CSV row "Example, Pat" with NO email must still resolve, by name, to a
+    résumé whose decrypted name carries a trailing credential ("Pat Example,
+    CSM"), instead of the credential token silently defeating the exact-set
+    match."""
+    resume_id = uuid4()
+    name_cipher = b"cipher-pat-example-csm"
+    resume = _resume_row(resume_id=resume_id, email=None, name_ciphertext=name_cipher)
+    conn = _mock_conn([resume])
+    set_wa, _ = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(monkeypatch, {name_cipher: "Pat Example, CSM"})
+
+    row = _row(2, name="Example, Pat", work_authorization="eligible")
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    assert report.matched == 1
+    assert resume_id in _resume_ids_written_by(set_wa)
+    assert report.unmatched_csv_rows == []
+    assert report.ambiguous_name_matches == []
+
+
+@pytest.mark.asyncio
+async def test_credential_stripping_does_not_collapse_two_distinct_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control for the test above: two DIFFERENT résumés — one whose stored
+    name carries the credential suffix ("Pat Example, CSM") and one that is
+    the bare name ("Pat Example") — must both normalise to the SAME token
+    set and therefore be reported as ambiguous against a single matching CSV
+    row, never silently resolved to just one of them."""
+    resume_with_credential = uuid4()
+    resume_bare = uuid4()
+    cipher_credential = b"cipher-pat-example-csm-control"
+    cipher_bare = b"cipher-pat-example-bare-control"
+    resumes = [
+        _resume_row(
+            resume_id=resume_with_credential,
+            email=None,
+            name_ciphertext=cipher_credential,
+        ),
+        _resume_row(
+            resume_id=resume_bare,
+            email=None,
+            name_ciphertext=cipher_bare,
+        ),
+    ]
+    conn = _mock_conn(resumes)
+    set_wa, set_internal = _patch_writes(monkeypatch)
+    _patch_audit(monkeypatch)
+    _patch_decrypt(
+        monkeypatch,
+        {cipher_credential: "Pat Example, CSM", cipher_bare: "Pat Example"},
+    )
+
+    row = _row(2, name="Example, Pat", work_authorization="eligible")
+    report = await _reconcile(
+        conn,
+        uuid4(),
+        [row],
+        actor_kind="user",
+        actor_user_id=None,
+        actor_service=None,
+    )
+
+    written = set(_resume_ids_written_by(set_wa)) | set(
+        _resume_ids_written_by(set_internal)
+    )
+    assert resume_with_credential not in written
+    assert resume_bare not in written
+    matches = [m for m in report.ambiguous_name_matches if 2 in m.csv_line_nos]
+    assert len(matches) == 1
+    assert set(matches[0].resume_ids) == {resume_with_credential, resume_bare}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from src.schemas.auth import User
 from src.services import DbConn
 
 _ASSIGN_SQL = """
@@ -58,3 +59,20 @@ async def list_assigned_job_ids(conn: DbConn, user_id: UUID) -> list[UUID]:
     """Return every job id ``user_id`` is assigned to, most-recent first."""
     rows = await conn.fetch(_LIST_ASSIGNED_JOB_IDS_SQL, user_id)
     return [row["job_id"] for row in rows]
+
+
+_LIST_ASSIGNEES_SQL = """
+SELECT u.id, u.cas_username, u.display_name, u.email, u.role, u.active,
+       u.created_at, u.last_seen_at
+FROM job_assignees ja
+JOIN users u ON u.id = ja.user_id
+WHERE ja.job_id = $1
+ORDER BY ja.assigned_at DESC
+"""
+
+
+async def list_assignees(conn: DbConn, job_id: UUID) -> list[User]:
+    """Return the ``users`` rows assigned to ``job_id``, most-recently
+    assigned first (Item 2, the assignment screen's ``GET`` backend)."""
+    rows = await conn.fetch(_LIST_ASSIGNEES_SQL, job_id)
+    return [User(**dict(row)) for row in rows]

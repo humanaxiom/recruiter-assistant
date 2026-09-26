@@ -70,6 +70,26 @@ def _require_real_assigner(user: User | None) -> User:
     return user
 
 
+@router.get(
+    "/jobs/{job_id}/assignees",
+    dependencies=[
+        Depends(require_role(*_ASSIGNERS)),
+        Depends(require_session_role(*_ASSIGNERS)),
+    ],
+)
+async def list_assignees(job_id: UUID, db: Db) -> list[User]:
+    """The hiring managers currently assigned to ``job_id`` (Item 2, the
+    assignment screen's ``GET`` backend).
+
+    Gated by the SAME ``_ASSIGNERS`` (admin/recruiter) role pair as
+    ``POST``/``DELETE`` above, but deliberately NOT
+    ``_require_real_assigner`` — a read is not an attributable write, so the
+    CAS-disabled dev-admin sentinel (which 403s the write routes) is allowed
+    to GET here.
+    """
+    return await job_assignee_service.list_assignees(db, job_id)
+
+
 @router.post(
     "/jobs/{job_id}/assignees",
     status_code=status.HTTP_201_CREATED,

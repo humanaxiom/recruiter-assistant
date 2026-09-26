@@ -223,3 +223,19 @@ flowchart TD
 ## Cross-references
 
 ADR-029 (the fail-closed `awaiting_llm` flag this state twin is paired with); ADR-020 §3 (row-scoping that the state route inherits); ADR-010 §1 (the advisory lock the state works alongside); test file `test_shortlist_ranking_state_pg.py` (six integration tests against real Postgres proving the state's behavior); DDL lines 135-149 (the constraint widening); `routes/shortlist.py` line 57-64 (the route); `matching_tasks.py` lines 73-170 (the worker); `shortlist_service.py` lines 173-284 (the state functions); `shortlist_cards.html` lines 14-91 (the frontend rendering).
+
+## Amendment 2026-09-17 — a dropped Regenerate is remembered, not discarded
+
+A second Regenerate posted while a run is genuinely `'ranking'` no longer gets
+silently absorbed by the same "don't enqueue a duplicate" short-circuit this
+ADR already documents — it is recorded on a new `jobs.shortlist_rerun_requested`
+boolean (`request_shortlist_rerun`), and the API route answers
+`queued_after_current` instead of pretending nothing happened. The flag is
+drained by exactly one atomic `UPDATE ... WHERE shortlist_rerun_requested
+RETURNING true` (`consume_shortlist_rerun`) on every TERMINAL worker path —
+`persisted`, `empty`, `not_parsed`, `awaiting_llm` — never on `already_running`
+or a below-ceiling `arq.Retry`, since neither of those is actually done running
+yet. A drained `True` re-arms `'ranking'` and enqueues exactly one follow-up
+`shortlist_job`, so a burst of clicks during one run collapses to exactly one
+extra run afterward rather than a FIFO queue of duplicates, and the atomic
+consume means two concurrent drains can never both re-enqueue.

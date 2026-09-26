@@ -62,8 +62,27 @@ async def generate_shortlist(
 
     ``fix/zero-requirements-rank-guard`` — the zero-requirements refusal runs
     FIRST, before any ranking-state write, so a refused job never flips to
-    ``'ranking'`` and never enqueues."""
+    ``'ranking'`` and never enqueues.
+
+    ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — AFTER the requirements
+    guard, ATOMICALLY check-and-set via
+    ``shortlist_service.request_shortlist_rerun_if_ranking``: ONE ``UPDATE
+    ... WHERE shortlist_state = 'ranking' RETURNING true`` statement, not a
+    separate read (``get_shortlist_state``) followed by a conditional write —
+    that older shape was a TOCTOU race (a concurrent worker could flip the
+    state between the read and the write). ``True`` means a run was
+    genuinely in flight at the moment of the write: a second worker run
+    would just duplicate work already happening, so this does NOT enqueue —
+    it answers ``queued_after_current`` so the caller knows the request was
+    heard rather than silently ignored. ``False`` covers every other case,
+    including a nonexistent job (the ``UPDATE`` simply matches zero rows,
+    diagnosing a missing job is the worker's job, not this guard's, matching
+    the pre-existing "a nonexistent job still 202s" contract) and
+    ``'awaiting_llm'``/no state at all (no run genuinely in flight) — all of
+    which enqueue exactly as before."""
     await shortlist_service.assert_job_has_requirements(db, job_id)
+    if await shortlist_service.request_shortlist_rerun_if_ranking(db, job_id):
+        return {"job_id": str(job_id), "status": "queued_after_current"}
     await shortlist_service.set_shortlist_ranking(db, job_id)
     await arq.enqueue_job("shortlist_job", str(job_id))
     return {"job_id": str(job_id), "status": "enqueued"}
@@ -181,7 +200,17 @@ async def shortlist_status(
     if state is None:
         return ShortlistStatusResponse(job_id=job_id)
     return ShortlistStatusResponse(
-        job_id=job_id, state=state.state, reason=state.reason, at=state.at
+        job_id=job_id,
+        state=state.state,
+        reason=state.reason,
+        at=state.at,
+        # ITEM 1: ``getattr`` with a default, not a bare attribute read — a
+        # handful of pre-existing tests in this file mock ``get_shortlist_state``
+        # with a stand-in ``_State`` object that predates this field and
+        # carries no ``rerun_requested`` attribute at all; a bare read would
+        # 500 those. ``ShortlistStateOut`` itself always carries the field
+        # (with its own ``False`` default), so real callers are unaffected.
+        rerun_requested=getattr(state, "rerun_requested", False),
     )
 
 

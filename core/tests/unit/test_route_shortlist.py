@@ -87,6 +87,15 @@ three tests below supplies a real hiring_manager session override for the
 ``Role.HIRING_MANAGER`` parametrize case ONLY — the other three roles are
 unaffected by row-scoping (ADR-020 §4) and keep relying on the ambient
 dev-anonymous-admin ``resolve_user`` default, exactly as before.
+
+**ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) — appended below.**
+``src.services.shortlist_service.request_shortlist_rerun`` does not exist
+yet, and the route does not read the job's current ``shortlist_state``
+before deciding whether to enqueue at all — every new test in the dedicated
+section near the bottom of this file fails either at ``monkeypatch.setattr``
+(``AttributeError``: no such service attribute) or on its final assertions
+(the route enqueues unconditionally today). See that section's own header
+comment for the full contract.
 """
 
 from __future__ import annotations
@@ -107,7 +116,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.api.deps import Role, get_arq, resolve_role, resolve_user
 from src.api.routes import shortlist as shortlist_routes
-from src.errors import AppError, NotFoundError
+from src.errors import AppError, ConflictError, NotFoundError
 from src.models.pool import get_db
 from src.schemas.auth import User
 from src.schemas.matching import EvidenceObject, ScoreBreakdown, ShortlistEntry
@@ -1088,3 +1097,185 @@ async def test_export_shortlist_dev_anonymous_admin_writes_no_read_log(
 
     assert resp.status_code == 200
     audit.assert_not_awaited()
+
+
+# ── ITEM 1 (A DROPPED REGENERATE IS REMEMBERED) ─────────────────────────────
+#
+# **Seam changed by the TOCTOU review finding.** The route no longer reads
+# ``shortlist_service.get_shortlist_state`` and then separately decides
+# whether to enqueue — that was a read-then-write race (a concurrent worker
+# could flip the state between the read and the write). It now calls ONE
+# atomic statement, ``shortlist_service.request_shortlist_rerun_if_ranking``,
+# which both checks AND sets ``shortlist_rerun_requested`` in a single
+# ``UPDATE ... WHERE shortlist_state = 'ranking' RETURNING true``. The tests
+# below were rewritten to mock THIS seam instead of ``get_shortlist_state`` —
+# they mocked the read-then-write shape before the fix closed it, so keeping
+# them pointed at ``get_shortlist_state`` would now be testing a seam the
+# route no longer calls on this path. Every assertion they made about
+# observable behaviour (202 + ``queued_after_current`` + no enqueue when a
+# run is in flight; 202 + ``enqueued`` + a real enqueue otherwise, including
+# for a nonexistent job) is preserved unchanged.
+#
+# Contract: ``request_shortlist_rerun_if_ranking`` runs AFTER
+# ``assert_job_has_requirements`` (a refused job must never reach this
+# branch) and BEFORE the route decides whether to enqueue:
+#
+# * returns ``True`` (a run was genuinely in flight and the flag is now set)
+#   -> do NOT enqueue a second worker run; return 202 with
+#   ``{"job_id": ..., "status": "queued_after_current"}``.
+# * returns ``False`` (no run in flight, INCLUDING a nonexistent job — the
+#   ``UPDATE`` simply matches zero rows) -> enqueue exactly as today: 202
+#   with ``{"job_id": ..., "status": "enqueued"}``.
+
+
+@pytest.mark.asyncio
+async def test_post_while_ranking_returns_queued_after_current_and_does_not_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = uuid4()
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+
+    rerun_if_ranking = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "request_shortlist_rerun_if_ranking",
+        rerun_if_ranking,
+    )
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"job_id": str(job_id), "status": "queued_after_current"}
+    arq.enqueue_job.assert_not_awaited()
+    rerun_if_ranking.assert_awaited_once()
+    assert job_id in list(rerun_if_ranking.await_args.args) + list(
+        rerun_if_ranking.await_args.kwargs.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_with_no_state_still_enqueues_as_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overwhelmingly common case (no run in flight) must be BYTE
+    IDENTICAL to the pre-existing behaviour: 202 + ``status: "enqueued"`` +
+    a real enqueue."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+
+    rerun_if_ranking = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "request_shortlist_rerun_if_ranking",
+        rerun_if_ranking,
+    )
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"job_id": str(job_id), "status": "enqueued"}
+    arq.enqueue_job.assert_awaited_once_with("shortlist_job", str(job_id))
+
+
+@pytest.mark.asyncio
+async def test_post_against_a_nonexistent_job_still_202s_and_enqueues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-existing "a nonexistent job still 202s" contract (the route
+    never fetches the job row itself, only ranks it) must survive the atomic
+    seam: the ``UPDATE`` simply matches zero rows for a nonexistent job, so
+    ``request_shortlist_rerun_if_ranking`` returns ``False`` and the route
+    falls through to the ordinary enqueue path, never a 404 or a
+    ``queued_after_current``."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+
+    rerun_if_ranking = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "request_shortlist_rerun_if_ranking",
+        rerun_if_ranking,
+    )
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"job_id": str(job_id), "status": "enqueued"}
+    arq.enqueue_job.assert_awaited_once_with("shortlist_job", str(job_id))
+
+
+@pytest.mark.asyncio
+async def test_post_while_awaiting_llm_still_enqueues_as_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-closed ``awaiting_llm`` state is NOT a run-in-flight state —
+    a user clicking Regenerate against it is the ordinary "try again" path,
+    not a dropped-regenerate scenario, and must still enqueue a fresh run.
+    ``request_shortlist_rerun_if_ranking``'s ``WHERE shortlist_state =
+    'ranking'`` predicate naturally excludes it, returning ``False``."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+
+    rerun_if_ranking = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "request_shortlist_rerun_if_ranking",
+        rerun_if_ranking,
+    )
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"job_id": str(job_id), "status": "enqueued"}
+    arq.enqueue_job.assert_awaited_once_with("shortlist_job", str(job_id))
+
+
+@pytest.mark.asyncio
+async def test_post_while_ranking_reads_state_after_the_requirements_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering pin: the existing zero-requirements refusal
+    (``assert_job_has_requirements``) must still run FIRST — a job that
+    would be refused must never reach the atomic rerun-request branch at
+    all, exactly like it never reaches the old enqueue branch today."""
+    job_id = uuid4()
+    conn = _mock_conn()
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(conn, arq=arq)
+
+    assert_requirements = AsyncMock(
+        side_effect=ConflictError(
+            f"job {job_id} has no required or nice-to-have skills to rank against",
+            job_id=str(job_id),
+        )
+    )
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "assert_job_has_requirements",
+        assert_requirements,
+    )
+    rerun_if_ranking = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        shortlist_routes.shortlist_service,
+        "request_shortlist_rerun_if_ranking",
+        rerun_if_ranking,
+    )
+
+    async with await _client(app) as client:
+        resp = await client.post(f"/jobs/{job_id}/shortlist")
+
+    assert resp.status_code == 409
+    rerun_if_ranking.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
