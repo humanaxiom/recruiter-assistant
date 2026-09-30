@@ -49,6 +49,7 @@ from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import (
     ResumeListItem,
     ResumeOut,
+    ResumeReparseOut,
     ResumeStatusBreakdown,
     ResumeUploadResult,
     WithdrawRequest,
@@ -747,6 +748,51 @@ async def get_match_results(resume_id: UUID, db: Db) -> JobMatchResultOut:
     there is no blind-review boundary to enforce here (unlike ``GET
     /resumes/{id}`` itself)."""
     return await shortlist_service.get_reverse_match_result(db, resume_id)
+
+
+@router.post(
+    "/resumes/{resume_id}/reparse",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
+)
+async def reparse_resume(
+    resume_id: UUID, db: Db, arq: Annotated[ArqRedis, Depends(get_arq)]
+) -> ResumeReparseOut:
+    """Re-enqueue ``parse_resume`` for a failed or degraded résumé — the
+    résumé side of ``jobs.reparse_job``.
+
+    **Why this exists.** On the DTO's real bundle (2026-09-19) 4 of 19 résumé
+    parses failed: 1 degraded (the skills-pass empty-content fallback) and 3
+    abandoned by the stalled-parse reconciler. The only recovery was
+    re-upload. ROADMAP §5 recorded the gap: "No ``POST /resumes/{id}/reparse``
+    route — a degraded résumé cannot be recovered without re-upload."
+
+    **Eligibility lives in ``resume_service.reset_for_reparse``, not here** —
+    ``failed``, or ``parsed``-but-degraded; never withdrawn, never a clean
+    parse, never already in flight (``uploaded``/``parsing`` — the reconciler
+    owns stalls). The reset happens BEFORE the enqueue, deliberately: the
+    reverse order races a fast worker into wiping its own fresh failure (the
+    same race ``job_service.clear_parse_failure`` guards against).
+
+    On ineligibility we re-fetch the résumé (its own ``NotFoundError`` 404s,
+    exactly as ``get_resume`` does) purely to pick a plain, state-specific 409
+    reason — the reset itself never distinguishes WHY it declined.
+    """
+    ok = await resume_service.reset_for_reparse(db, resume_id)
+    if not ok:
+        resume = await resume_service.get_one(db, resume_id)
+        if resume.withdrawn_at is not None:
+            reason = "résumé is withdrawn — reinstate it first"
+        elif resume.status in ("uploaded", "parsing"):
+            reason = "a parse is already queued or running"
+        else:
+            reason = "résumé parsed cleanly; there is nothing to recover"
+        raise HTTPException(status_code=409, detail=reason)
+    await arq.enqueue_job("parse_resume", str(resume_id))
+    return ResumeReparseOut(id=resume_id, status="queued")
 
 
 __all__ = ["router"]

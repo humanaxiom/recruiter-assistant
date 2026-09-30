@@ -309,6 +309,28 @@ async def test_resume_service_record_parse_failure_sets_status_failed() -> None:
     assert "corrupt pdf" in args
 
 
+@pytest.mark.asyncio
+async def test_resume_service_record_parse_failure_truncates_a_long_reason() -> None:
+    """The résumé side must cap ``reason`` the same way the job side does
+    (``job_service._MAX_REASON_CHARS``) — ``failure_reason`` is now rendered
+    on the résumé page, unbounded input must not reach the UPDATE."""
+    conn = _mock_conn("UPDATE 1")
+    reason = "x" * 10_000
+    await resume_service.record_parse_failure(conn, uuid4(), reason)
+    _query, *args = conn.execute.await_args.args
+    stored = args[-1]
+    assert stored == "x" * resume_service._MAX_REASON_CHARS
+    assert len(stored) == resume_service._MAX_REASON_CHARS
+
+
+@pytest.mark.asyncio
+async def test_resume_service_record_parse_failure_leaves_reason_unchanged() -> None:
+    conn = _mock_conn("UPDATE 1")
+    await resume_service.record_parse_failure(conn, uuid4(), "corrupt pdf")
+    _query, *args = conn.execute.await_args.args
+    assert args[-1] == "corrupt pdf"
+
+
 # ── resume_service.encrypt_pii_via_session — ordering is the whole point ────
 
 

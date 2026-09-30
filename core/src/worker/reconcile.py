@@ -67,8 +67,9 @@ SELECT id, status, uploaded_at, COALESCE(reconcile_attempts, 0) AS attempts
 FROM resumes
 WHERE status IN ('uploaded', 'parsing')
   AND withdrawn_at IS NULL
-  AND uploaded_at < now() - interval '{_STALLED_AFTER}'
-ORDER BY uploaded_at ASC
+  AND GREATEST(uploaded_at, COALESCE(reparse_requested_at, uploaded_at))
+      < now() - interval '{_STALLED_AFTER}'
+ORDER BY GREATEST(uploaded_at, COALESCE(reparse_requested_at, uploaded_at)) ASC
 LIMIT {_BATCH}
 """
 

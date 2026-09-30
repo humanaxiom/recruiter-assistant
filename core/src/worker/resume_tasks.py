@@ -918,8 +918,8 @@ async def parse_resume(  # noqa: PLR0911 — each error path gets a distinct ret
                 # pool on incomplete skills: the projection-triggering
                 # `resume.parsed` enqueue is SKIPPED, so there is no Neo4j node,
                 # no stage-1 recall, no ranking — consistent with the ADR-029
-                # fail-closed stance. A later successful re-parse (re-upload
-                # today) projects normally.
+                # fail-closed stance. A later successful re-parse (via the
+                # Re-parse control, or a re-upload) projects normally.
                 if cleaned_parsed.degraded:
                     log.info(
                         "parse_resume.degraded_skip_projection resume_id=%s",
