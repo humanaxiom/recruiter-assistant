@@ -185,6 +185,15 @@ Values only, no secrets:
 
 `PROXY_HOPS` stays at its default of `1` (one proxy hop: nginx).
 
+**Localhost on the box keeps working alongside sfuai.ca.** `sfuai.ca` does
+not resolve back to the box from inside the LAN, so the operator uses
+`http://localhost:29500` there. `compose.cas.yml` sets
+`CAS_LOCAL_SERVICE_BASE_URL` / `CAS_LOCAL_FRONTEND_BASE_URL` to the localhost
+ports, and the app uses them only for a request whose own `Host` is loopback.
+Outside traffic always gets the two `sfuai.ca` values above. Never put a
+localhost value in `CAS_SERVICE_BASE_URL`: that is what broke every outside
+login between 2026-10-08 and 10-14.
+
 ## Cutover steps
 
 1. Edit `.env` in this repo with the six keys above.
