@@ -44,6 +44,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from src.errors import AppError
 from src.models.pool import Db
 from src.services import cas_service, session_service, user_service
+from src.services.cas_origin import is_loopback_host
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,12 @@ def _service_base(settings: Settings, request: Request) -> str:
     otherwise. Login and validate both derive it the same way so the
     service URL CAS issued and the one presented at validation match (CAS
     requires byte-equality).
+
+    A request whose own ``Host`` is loopback uses
+    ``cas_local_service_base_url`` when that is set (fix/cas-local-origin).
     """
+    if settings.cas_local_service_base_url and _is_local(request):
+        return settings.cas_local_service_base_url.rstrip("/")
     if settings.cas_service_from_request:
         fwd_host = request.headers.get("x-forwarded-host")
         if fwd_host:
@@ -110,7 +116,20 @@ def _safe_next(next_value: str) -> str:
     return next_value
 
 
-def _landing_url(settings: Settings, safe_next: str) -> str:
+def _is_local(request: Request) -> bool:
+    return is_loopback_host(request.headers.get("host", ""))
+
+
+def _frontend_base(settings: Settings, request: Request) -> str:
+    """The UI origin this browser is on — the local one for a loopback
+    request when configured, else the static ``cas_frontend_base_url``
+    (empty = same-origin)."""
+    if settings.cas_local_frontend_base_url and _is_local(request):
+        return settings.cas_local_frontend_base_url.rstrip("/")
+    return settings.cas_frontend_base_url.rstrip("/")
+
+
+def _landing_url(settings: Settings, request: Request, safe_next: str) -> str:
     """Resolve a "landing" redirect target — a page the browser actually ends
     up on, as opposed to a hop back to the CAS server or a restart of the
     login dance (see the "frontend landing redirect" note in this module's
@@ -120,9 +139,10 @@ def _landing_url(settings: Settings, safe_next: str) -> str:
     called — this function only ever prefixes a base URL onto it, it never
     re-validates it.
     """
-    if not settings.cas_frontend_base_url:
+    base = _frontend_base(settings, request)
+    if not base:
         return safe_next
-    return f"{settings.cas_frontend_base_url.rstrip('/')}{safe_next}"
+    return f"{base}{safe_next}"
 
 
 def _set_session_cookie(
@@ -145,7 +165,9 @@ async def cas_login(request: Request, next: str = "/") -> RedirectResponse:
     safe_next = _safe_next(next)
     if not settings.cas_enabled:
         logger.info("cas.login.dev_mode")
-        return RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
+        return RedirectResponse(
+            url=_landing_url(settings, request, safe_next), status_code=302
+        )
 
     cas_base = settings.cas_server_url.rstrip("/")
     service_url = _service_url(settings, request, safe_next)
@@ -164,7 +186,9 @@ async def cas_validate(
     settings = get_settings()
     safe_next = _safe_next(next)
     if not settings.cas_enabled:
-        return RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
+        return RedirectResponse(
+            url=_landing_url(settings, request, safe_next), status_code=302
+        )
 
     if not ticket:
         # CAS round-trip lost the ticket somehow — restart the dance.
@@ -197,7 +221,9 @@ async def cas_validate(
         ip=(request.client.host if request.client else None),
     )
 
-    response = RedirectResponse(url=_landing_url(settings, safe_next), status_code=302)
+    response = RedirectResponse(
+        url=_landing_url(settings, request, safe_next), status_code=302
+    )
     _set_session_cookie(response, settings, session.id)
     logger.info("cas.validate.ok user_id=%s", user.id)
     return response
@@ -211,15 +237,15 @@ async def cas_logout(request: Request, db: Db) -> RedirectResponse:
         await session_service.revoke_session(db, sid)
 
     if not settings.cas_enabled:
-        response = RedirectResponse(url=_landing_url(settings, "/"), status_code=302)
+        response = RedirectResponse(
+            url=_landing_url(settings, request, "/"), status_code=302
+        )
         response.delete_cookie(settings.session_cookie_name, path="/")
         return response
 
     cas_base = settings.cas_server_url.rstrip("/")
-    logout_service = (
-        settings.cas_frontend_base_url.rstrip("/")
-        if settings.cas_frontend_base_url
-        else _service_base(settings, request)
+    logout_service = _frontend_base(settings, request) or _service_base(
+        settings, request
     )
     logout_url = f"{cas_base}/logout?" + urlencode({"service": logout_service})
     response = RedirectResponse(url=logout_url, status_code=302)
