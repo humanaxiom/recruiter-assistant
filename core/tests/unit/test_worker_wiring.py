@@ -136,6 +136,8 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
     replaces, which a change that dropped Phase 3's two tasks would still
     fail.
     """
+    from src.worker.export_tasks import build_resume_export  # RED: not yet there
+
     assert WorkerSettings.functions == [
         parse_job,
         parse_resume,
@@ -156,6 +158,9 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         extract_manager_prompt,
         # In-app Taleo split: enqueued by name from the split-upload route.
         segment_taleo_export,
+        # Résumé export (as-is + anonymized ZIP) as a background job: enqueued by
+        # name from POST /jobs/{id}/resumes/exports.
+        build_resume_export,
     ]
 
 
