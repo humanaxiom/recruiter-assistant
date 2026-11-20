@@ -11,7 +11,7 @@
    by walking up the DOM to here — including requests fired from partials
    swapped in later, which is why this lives on <body> and not on each control.
    Plain <form> posts carry the same token as a hidden field instead. #}
-<body hx-headers='{"X-CSRF-Token": "{{ csrf_page_token }}"}'>
+<body {% block body_attrs %}hx-headers='{"X-CSRF-Token": "{{ csrf_page_token }}"}'{% endblock %}>
   <header class="nav">
     <div class="container nav-inner">
       <a class="nav-logo" href="{{ url_for('index') }}">recruiter-assistant</a>

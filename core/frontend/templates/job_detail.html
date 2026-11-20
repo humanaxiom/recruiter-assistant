@@ -396,6 +396,30 @@
   {% endif %}
 
   {% if is_writer %}
+  <h3>Split a combined Taleo export</h3>
+  <form action="{{ url_for('split_upload', job_id=job.id) }}" method="post"
+        enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <div class="form-group">
+      <label class="label" for="split-files">Combined Taleo export(s) — PDF</label>
+      <input class="input" id="split-files" name="files" type="file" multiple
+             accept=".pdf,application/pdf">
+      <p class="hint">One PDF holding many applicants. You review how it was
+        divided before anything is imported.</p>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="split_consent_acknowledged"
+             name="consent_acknowledged" value="true" required>
+      <label class="label" for="split_consent_acknowledged" style="margin:0">
+        I confirm the candidates consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Split export</button>
+    </div>
+  </form>
+  {% endif %}
+
+  {% if is_writer %}
   <h3>Import candidate roster (Taleo)</h3>
   <form action="{{ url_for('upload_candidate_roster', job_id=job.id) }}"
         method="post" enctype="multipart/form-data">

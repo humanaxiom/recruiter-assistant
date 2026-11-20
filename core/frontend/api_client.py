@@ -712,3 +712,75 @@ __all__ = [
     "set_user_role",
     "get_cas_user",
 ]
+
+
+def split_upload(
+    job_id: UUID,
+    files: list[tuple[str, bytes, str]],
+    *,
+    consent_acknowledged: bool,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/{id}/resumes/split-upload (multipart) -- queue the in-app
+    split of one or more combined Taleo exports. ``files`` is a list of
+    ``(filename, content, content_type)`` tuples sent as repeated ``files``
+    parts; consent is the ``"true"``/``"false"`` form field. Returns
+    ``{"splits": [...], "split_ids": [...]}``."""
+    multipart = [
+        ("files", (filename, content, ctype)) for filename, content, ctype in files
+    ]
+    response = _request(
+        "POST",
+        f"/jobs/{job_id}/resumes/split-upload",
+        data={"consent_acknowledged": "true" if consent_acknowledged else "false"},
+        files=multipart,
+        client=client,
+    )
+    return response.json()
+
+
+def get_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /resume-splits/{id} -- the review view (status, proposal, diagnostics)."""
+    return _request("GET", f"/resume-splits/{split_id}", client=client).json()
+
+
+def correct_resume_split(
+    split_id: UUID,
+    *,
+    proposal_version: int,
+    applicants: list[dict[str, Any]],
+    ignored_pages: list[int],
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /resume-splits/{id}/correct -- replace the proposal. A stale
+    ``proposal_version`` surfaces as :class:`Conflict`."""
+    response = _request(
+        "POST",
+        f"/resume-splits/{split_id}/correct",
+        json={
+            "proposal_version": proposal_version,
+            "applicants": applicants,
+            "ignored_pages": ignored_pages,
+        },
+        client=client,
+    )
+    return response.json()
+
+
+def accept_resume_split(
+    split_id: UUID, *, proposal_version: int, client: httpx.Client | None = None
+) -> Any:
+    """POST /resume-splits/{id}/accept -- slice, ingest and return the
+    ``ResumeUploadResult[]`` rows."""
+    response = _request(
+        "POST",
+        f"/resume-splits/{split_id}/accept",
+        json={"proposal_version": proposal_version},
+        client=client,
+    )
+    return response.json()
+
+
+def discard_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /resume-splits/{id}/discard."""
+    return _request("POST", f"/resume-splits/{split_id}/discard", client=client).json()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -1041,6 +1042,350 @@ def upload_candidate_roster(job_id: UUID) -> Any:
     for message in _summarise_roster_report(report):
         flash(message)
     return redirect(url_for("job_detail", job_id=job_id))
+
+
+_PAGE_ITEM = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
+_MAX_LIST_PAGES = 10000
+
+
+def _parse_page_list(raw: str) -> list[int]:
+    """Parse ``"1-2, 5"`` into ``[1, 2, 5]`` (order kept, repeats kept so the
+    API's duplicate finding still sees them). Empty text is an empty list;
+    anything outside the grammar, a zero page or a backwards range raises
+    ``ValueError``."""
+    text = raw.strip()
+    if not text:
+        return []
+    pages: list[int] = []
+    for part in text.split(","):
+        match = _PAGE_ITEM.fullmatch(part.strip())
+        if match is None:
+            raise ValueError(f"{part.strip()!r} is not a page or a page range")
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) is not None else first
+        if first < 1 or last < first:
+            raise ValueError(f"{part.strip()!r} is not a valid page range")
+        if last - first + len(pages) >= _MAX_LIST_PAGES:
+            raise ValueError("the page list is too long")
+        pages.extend(range(first, last + 1))
+    return pages
+
+
+def _format_page_list(pages: list[int]) -> str:
+    """Inverse of :func:`_parse_page_list`: runs of consecutive ascending pages
+    collapse to ``a-b``; everything else is kept in order."""
+    out: list[str] = []
+    i = 0
+    while i < len(pages):
+        j = i
+        while j + 1 < len(pages) and pages[j + 1] == pages[j] + 1:
+            j += 1
+        out.append(str(pages[i]) if j == i else f"{pages[i]}-{pages[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def _join_numbers(values: list[int]) -> str:
+    return ", ".join(str(v) for v in values)
+
+
+_SPLIT_FAILURE_TEXT = {
+    "unreadable_pdf": "the PDF could not be read",
+}
+
+
+def _split_findings(
+    diagnostics: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Plain-words ``(informational, blocking)`` diagnostics. Applicant numbers
+    are the same 1-based labels the review rows carry."""
+
+    def nums(key: str) -> list[int]:
+        raw = diagnostics.get(key) or []
+        return [int(v) for v in raw if isinstance(v, int)]
+
+    blocking: list[str] = []
+    missing, duplicated = nums("missing"), nums("duplicated")
+    if missing:
+        blocking.append(
+            f"Page(s) {_join_numbers(missing)} are missing: not assigned to "
+            "any applicant or to the ignored pages."
+        )
+    if duplicated:
+        blocking.append(f"Page(s) {_join_numbers(duplicated)} appear more than once.")
+    for n in nums("merged"):
+        blocking.append(
+            f"Applicant {n} looks like it contains more than one person's pages."
+        )
+    for n in nums("misfiled_cover"):
+        blocking.append(
+            f"Applicant {n} has a cover letter filed as a résumé page, or a "
+            "résumé page filed as a cover letter."
+        )
+    info: list[str] = []
+    for n in nums("cover_only"):
+        info.append(f"Applicant {n} will not be imported: only cover-letter pages.")
+    for n in nums("low_text"):
+        info.append(f"Applicant {n} will not be imported: too little readable text.")
+    return info, blocking
+
+
+def _render_split_review(
+    split_id: UUID,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+) -> Any:
+    try:
+        view = api_client.get_resume_split(split_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(403 if exc.status_code == 403 else 400)
+    blind = bool(view.get("blind_review"))
+    proposal = view.get("proposal") or {}
+    rows: list[dict[str, Any]] = []
+    for n, a in enumerate(proposal.get("applicants") or [], start=1):
+        rows.append(
+            {
+                "n": n,
+                "label": f"Applicant {n}",
+                # Blind review: a name is never rendered, whatever the API sent.
+                "name": "" if blind else (a.get("candidate_name") or ""),
+                "resume": _format_page_list(list(a.get("resume_pages") or [])),
+                "cover": _format_page_list(list(a.get("cover_letter_pages") or [])),
+            }
+        )
+    for n in (len(rows) + 1, len(rows) + 2):
+        rows.append(
+            {
+                "n": n,
+                "label": f"Applicant {n} (new)",
+                "name": "",
+                "resume": "",
+                "cover": "",
+            }
+        )
+    info, blocking = _split_findings(view.get("diagnostics") or {})
+    reason = str(view.get("failure_reason") or "")
+    return (
+        render_template(
+            "split_review.html",
+            split=view,
+            rows=rows,
+            ignored=_format_page_list(list(proposal.get("ignored_pages") or [])),
+            findings=info,
+            blocking_findings=blocking,
+            source_filename="" if blind else (view.get("source_filename") or ""),
+            failure_text=_SPLIT_FAILURE_TEXT.get(
+                reason, "the export could not be segmented"
+            ),
+            error=error,
+        ),
+        status_code,
+    )
+
+
+@app.post("/jobs/<uuid:job_id>/resumes/split-upload")
+def split_upload(job_id: UUID) -> Any:
+    """Queue the in-app split of combined Taleo export(s). Consent is checked
+    here BEFORE any backend call, as ``upload_resumes`` does. Guarded by the
+    ordinary ``_csrf_gate`` page token -- no exemption, no one-shot slot."""
+    consent = (request.form.get("consent_acknowledged") or "").strip().lower() == "true"
+    if not consent:
+        return _render_job_detail(
+            job_id,
+            error="You must confirm the candidates' consent to this processing.",
+            status_code=400,
+        )
+    files: list[tuple[str, bytes, str]] = [
+        (
+            upload.filename or "export.pdf",
+            upload.read(),
+            upload.content_type or "application/pdf",
+        )
+        for upload in request.files.getlist("files")
+        if upload.filename
+    ]
+    if not files:
+        return _render_job_detail(
+            job_id,
+            error="Select at least one combined Taleo export (PDF).",
+            status_code=400,
+        )
+    try:
+        result = api_client.split_upload(job_id, files, consent_acknowledged=True)
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+        return redirect(url_for("job_detail", job_id=job_id))
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    ids: list[UUID] = []
+    raw_ids = result.get("split_ids") if isinstance(result, dict) else None
+    for raw in raw_ids or []:
+        try:
+            ids.append(UUID(str(raw)))
+        except ValueError:
+            continue
+    if not ids:
+        flash("The export was not queued; please try again.")
+        return redirect(url_for("job_detail", job_id=job_id))
+    if len(ids) > 1:
+        flash(
+            f"{len(ids)} exports queued. Review this one first; the others are "
+            "at: "
+            + ", ".join(url_for("split_review", split_id=other) for other in ids[1:])
+        )
+    return redirect(url_for("split_review", split_id=ids[0]))
+
+
+@app.get("/resume-splits/<uuid:split_id>")
+def split_review(split_id: UUID) -> Any:
+    return _render_split_review(split_id)
+
+
+def _split_posted_version() -> int | None:
+    try:
+        return int(request.form.get("proposal_version", ""))
+    except ValueError:
+        return None
+
+
+@app.post("/resume-splits/<uuid:split_id>/correct")
+def split_correct(split_id: UUID) -> Any:
+    version = _split_posted_version()
+    if version is None:
+        return _render_split_review(
+            split_id,
+            error="The proposal version is missing or not a number; reload the page.",
+            status_code=400,
+        )
+    numbers = sorted(
+        {
+            int(m.group(1))
+            for key in request.form
+            if (m := re.fullmatch(r"(?:resume|cover)_pages_(\d+)", key))
+        }
+    )
+    applicants: list[dict[str, Any]] = []
+    try:
+        for n in numbers:
+            resume = _parse_page_list(request.form.get(f"resume_pages_{n}", ""))
+            cover = _parse_page_list(request.form.get(f"cover_pages_{n}", ""))
+            if resume or cover:
+                applicants.append(
+                    {
+                        "candidate_name": "",
+                        "resume_pages": resume,
+                        "cover_letter_pages": cover,
+                    }
+                )
+        ignored = _parse_page_list(request.form.get("ignored_pages", ""))
+    except ValueError as exc:
+        return _render_split_review(
+            split_id,
+            error=f"Check the page lists: {exc}. Use pages like 1-2,5.",
+            status_code=400,
+        )
+    try:
+        api_client.correct_resume_split(
+            split_id,
+            proposal_version=version,
+            applicants=applicants,
+            ignored_pages=ignored,
+        )
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id,
+            error=(
+                "Someone else changed this split (or it can no longer be "
+                f"edited): {_format_error(exc.detail)}. The page below shows "
+                "the current version; re-apply your edits if needed."
+            ),
+            status_code=409,
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("split_review", split_id=split_id))
+
+
+def _summarise_split_accept(results: Any) -> str:
+    """Counts only -- never a filename or name, so a blind-review job cannot
+    leak one through the flash."""
+    rows = results if isinstance(results, list) else []
+    counts = {"accepted": 0, "duplicate": 0, "rejected": 0}
+    for r in rows:
+        if isinstance(r, dict) and r.get("outcome") in counts:
+            counts[str(r["outcome"])] += 1
+    message = f"{counts['accepted']} accepted"
+    if counts["duplicate"]:
+        message += f", {counts['duplicate']} duplicate"
+    message += f", {counts['rejected']} rejected"
+    return message + " from the split export."
+
+
+def _redirect_to_split_job(split_id: UUID) -> Any:
+    try:
+        job_id = UUID(str(api_client.get_resume_split(split_id).get("job_id")))
+    except (api_client.BackendError, ValueError):
+        return redirect(url_for("index"))
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/resume-splits/<uuid:split_id>/accept")
+def split_accept(split_id: UUID) -> Any:
+    version = _split_posted_version()
+    if version is None:
+        return _render_split_review(
+            split_id,
+            error="The proposal version is missing or not a number; reload the page.",
+            status_code=400,
+        )
+    try:
+        results = api_client.accept_resume_split(split_id, proposal_version=version)
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    flash(_summarise_split_accept(results))
+    return _redirect_to_split_job(split_id)
+
+
+@app.post("/resume-splits/<uuid:split_id>/discard")
+def split_discard(split_id: UUID) -> Any:
+    try:
+        api_client.discard_resume_split(split_id)
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _redirect_to_split_job(split_id)
 
 
 @app.get("/jobs/<uuid:job_id>/resumes-table")
