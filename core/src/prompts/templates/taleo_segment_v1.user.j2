@@ -1,0 +1,6 @@
+Segment this export. Return JSON of the form:
+{"applicants":[{"candidate_name":"Full Name","resume_pages":[1,2],"cover_letter_pages":[3]}, ...]}
+Pages are 1-based. Every page must appear exactly once across all applicants. Omit cover_letter_pages (or use []) when an applicant has no cover letter.
+
+PER-PAGE DIGEST:
+{{ digest }}
