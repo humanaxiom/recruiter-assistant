@@ -524,7 +524,9 @@ async def test_cron_expires_sweeps_and_requeues_stale_rows() -> None:
         out = await split_tasks.expire_split_requests(ctx)
     m.expire.assert_awaited_once()
     m.sweep_orphan_blobs.assert_awaited_once()
-    assert m.requeue_stale.await_args.kwargs["minutes"] == 30
+    # Derived from the LLM retry budget, no longer a fixed 30: with default
+    # settings (2 retries, 120 s timeout) that is (2+1)*120/60 + 5 = 11 min.
+    assert m.requeue_stale.await_args.kwargs["minutes"] == pytest.approx(11.0)
     assert isinstance(out, str)
     arq = ctx["arq"]
     assert arq.enqueue_job.await_count == 2

@@ -96,6 +96,9 @@ def _store() -> MagicMock:
     store.put = AsyncMock(return_value=None)
     store.delete = AsyncMock(return_value=None)
     store.list_keys = AsyncMock(return_value=[])
+    # Every blob is an hour old, i.e. past the orphan-sweep grace period;
+    # grace-period tests override this.
+    store.age_seconds = AsyncMock(return_value=3600.0)
     return store
 
 

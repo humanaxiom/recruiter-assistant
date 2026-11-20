@@ -705,6 +705,9 @@ async def test_sweep_deletes_only_unreferenced_blobs_under_the_split_prefix(
     live = f"split_sources/{split_id}.pdf"
     await store.put("split_sources/orphan.pdf", b"x")
     await store.put("resumes/keepme.pdf", b"y")
+    # Past the grace period, so the sweep treats it as a real orphan.
+    for key in (live, "split_sources/orphan.pdf", "resumes/keepme.pdf"):
+        _backdate(store, key, seconds=3600)
     async with pool.acquire() as conn:
         n = await srs.sweep_orphan_blobs(conn, store)
     assert n == 1
@@ -720,6 +723,7 @@ async def test_sweep_frees_the_blob_of_a_row_that_is_already_terminal(
     # A discard that crashed between UPDATE and unlink leaves an orphan blob.
     split_id = await _create(pool, store, await _job(pool))
     key = f"split_sources/{split_id}.pdf"
+    _backdate(store, key, seconds=3600)  # past the sweep's grace period
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE resume_split_requests SET status = 'discarded', "
