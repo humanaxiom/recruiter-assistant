@@ -133,6 +133,12 @@ class Settings(BaseSettings):
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC
+    # In-app Taleo split (plan decisions 4 and 5): unaccepted proposals expire
+    # after this many hours; per-file / per-page / per-request upload caps.
+    split_proposal_ttl_h: int = 72
+    split_max_file_mib: int = 40
+    split_max_pages: int = 300
+    split_max_files: int = 5
     # Reversed 2026-09-09 (sponsor decision) to match JobCreate/DDL — has no
     # reader in src/ (nothing wires it up); kept only as a pinned setting.
     blind_review_default: bool = False

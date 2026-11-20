@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import textwrap
 from io import BytesIO
 from pathlib import Path
 from types import ModuleType
@@ -107,10 +108,14 @@ def _cover_text(email: str, marker: str = "") -> str:
 
 
 def _make_pdf(pages: list[str]) -> bytes:
+    # Wrap long lines: insert_text never wraps, so a 327-char _PAD line ran off
+    # the 612pt page and get_text clipped it to ~100 chars, which made healthy
+    # applicants look LOW TEXT.
     doc = fitz.open()
     for text in pages:
         page = doc.new_page()
-        for i, line in enumerate(text.splitlines()):
+        lines = [w for ln in text.splitlines() for w in (textwrap.wrap(ln, 80) or [""])]
+        for i, line in enumerate(lines):
             page.insert_text((72, 72 + i * 14), line, fontsize=9)
     buf = BytesIO()
     doc.save(buf)

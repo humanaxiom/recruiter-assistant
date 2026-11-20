@@ -40,14 +40,14 @@ async def ingest_files(
     cover_letter_text: str | None = None,
     cover_letter_file: tuple[str, bytes] | None = None,
     extract: Callable[..., Any] | None = None,
+    max_files: int = _MAX_UPLOAD_FILES,
 ) -> list[ResumeUploadResult]:
     # ``extract`` lets the route inject ITS ``extract_text`` binding so the
     # pre-extraction route tests (which patch ``routes.resumes.extract_text``)
     # keep exercising the real path; default is this module's own binding.
-    if len(files) > _MAX_UPLOAD_FILES:
+    if len(files) > max_files:
         raise FileRejectedError(
-            f"upload has {len(files)} files; the per-request cap is "
-            f"{_MAX_UPLOAD_FILES}",
+            f"upload has {len(files)} files; the per-request cap is {max_files}",
             count=len(files),
         )
 

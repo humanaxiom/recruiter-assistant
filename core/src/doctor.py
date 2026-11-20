@@ -222,6 +222,44 @@ async def _check_postgres(pg: Any, settings: Any) -> list[Finding]:
     return found
 
 
+#: Retention decision (in-app Taleo split): the combined PDF blob is deleted and
+#: the encrypted proposal NULLed the moment a request turns terminal. A terminal
+#: row still holding either is a retention promise that nothing enforced.
+#: Rows, not a count: the existing doctor fakes feed ``fetchval`` from a fixed
+#: list, so this check must read through ``conn.fetch``.
+_SPLIT_TERMINAL_HOLDING_SQL = """
+SELECT id FROM resume_split_requests
+WHERE status IN ('accepted', 'discarded', 'failed')
+  AND (source_blob_key IS NOT NULL OR proposal IS NOT NULL)
+"""
+
+
+async def _check_split_requests(pg: Any) -> list[Finding]:
+    async with pg.acquire() as conn:
+        rows = await conn.fetch(_SPLIT_TERMINAL_HOLDING_SQL)
+    if not rows:
+        return []
+    n = len(rows)
+    return [
+        Finding(
+            check="pg.split_terminal_rows_retain_data",
+            severity="fail",
+            count=n,
+            detail=(
+                f"{n} finished split requests still hold a combined-export blob "
+                "key or an encrypted proposal"
+            ),
+            remedy=(
+                "Terminal split requests must release their blob and proposal. "
+                "Find the code path that reached accepted/discarded/failed "
+                "without split_request_service releasing them; the hourly "
+                "expire_split_requests sweep frees orphan blobs but does not "
+                "NULL these columns."
+            ),
+        )
+    ]
+
+
 # ── Neo4j checks ─────────────────────────────────────────────────────────
 
 _UNLABELLED_EDGES = """
@@ -386,6 +424,7 @@ async def run_checks(
     profiles = profile_dir if profile_dir is not None else _DEFAULT_PROFILE_DIR
     checks: list[tuple[str, Any]] = [
         ("pg", lambda: _check_postgres(pg, settings)),
+        ("pg.split", lambda: _check_split_requests(pg)),
         ("neo4j", lambda: _check_neo4j(neo4j)),
         ("model", lambda: _check_model_profile(settings, profiles)),
     ]

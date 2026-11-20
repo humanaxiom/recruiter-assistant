@@ -455,6 +455,49 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS resumes_withdrawn_idx ON resumes (job_id)
         WHERE withdrawn_at IS NOT NULL
     """,
+    # ── resume_split_requests (in-app Taleo combined-export split) ───────────
+    # One row per uploaded combined export awaiting segmentation / review.
+    # ``consent_acknowledged`` is NOT NULL with NO default on purpose: the one
+    # writer (split_request_service.create) always supplies it, and a row that
+    # cannot say whether consent was given must not exist. Every column that a
+    # later state machine step sets is nullable or defaulted so the first real
+    # INSERT (queued) succeeds. ``proposal`` is pgp_sym_encrypt ciphertext
+    # (page assignments + manager-corrected names are PII-adjacent).
+    # ``source_blob_key`` and ``proposal`` are NULLed on every terminal state.
+    """
+    CREATE TABLE IF NOT EXISTS resume_split_requests (
+        id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        job_id               UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        status               TEXT NOT NULL DEFAULT 'queued'
+                             CHECK (status IN ('queued', 'segmenting', 'proposed',
+                                               'accepted', 'discarded', 'failed')),
+        source_blob_key      TEXT,
+        source_sha256        TEXT NOT NULL,
+        source_filename      TEXT NOT NULL,
+        page_count           INTEGER,
+        proposal             BYTEA,
+        proposal_version     INTEGER NOT NULL DEFAULT 0,
+        diagnostics          JSONB,
+        method               TEXT CHECK (method IN ('llm', 'heuristic')),
+        fallback_reason      TEXT,
+        failure_reason       TEXT,
+        consent_acknowledged BOOLEAN NOT NULL,
+        created_by           TEXT,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        accepted_by          TEXT,
+        accepted_at          TIMESTAMPTZ,
+        ingest_result        JSONB
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_split_requests_job_idx
+        ON resume_split_requests (job_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_split_requests_status_idx
+        ON resume_split_requests (status, updated_at)
+    """,
     # ── shortlist_entries ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS shortlist_entries (

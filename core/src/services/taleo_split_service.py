@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import fitz  # type: ignore[import-untyped]
 
@@ -310,16 +310,23 @@ def _pages_to_pdf(doc: fitz.Document, pages: list[int]) -> bytes:
         out.close()
 
 
-def build_slices(pdf: bytes, proposal: SplitProposal) -> list[ApplicantSlice]:
+def build_slices(
+    pdf: bytes, proposal: SplitProposal, exclude: Collection[int] = ()
+) -> list[ApplicantSlice]:
     """Emit one résumé PDF (+ optional cover PDF) per applicant with a résumé.
 
     Cover-only applicants are skipped (excluded, never ingested) but keep their
-    place in the numbering. Filenames are name-free: ``applicant-NNN_*``."""
+    place in the numbering. ``exclude`` is a set of 1-based applicant indexes
+    (accept passes cover_only | low_text) skipped the same way.
+
+    Filenames are name-free: ``applicant-NNN_*``."""
     doc = fitz.open(stream=pdf, filetype="pdf")
     try:
         page_count = int(doc.page_count)
         slices: list[ApplicantSlice] = []
         for idx, a in enumerate(proposal.applicants, start=1):
+            if idx in exclude:
+                continue
             r_pages = valid_pages(a.resume_pages, page_count)
             if not r_pages:
                 continue
@@ -358,6 +365,20 @@ async def llm_segment(llm: LLMClient, page_texts: list[str]) -> SplitProposal:
     """Ask the local LLM to segment the export. Failures propagate: the caller
     (worker) owns the fall back to :func:`heuristic_proposal`."""
     rendered = load_prompt("taleo_segment_v1", digest=page_digest(page_texts))
-    return await llm.chat_json(
+    proposal = await llm.chat_json(
         rendered.messages, SplitProposal, max_tokens=TALEO_SEGMENT_MAX_TOKENS
+    )
+    # The model proposes page assignments ONLY. ``ignored_pages`` is a
+    # manager-only escape hatch (a model could otherwise silently drop an
+    # applicant), and guessed names are never persisted or shown.
+    return SplitProposal(
+        applicants=[
+            ProposalApplicant(
+                candidate_name="",
+                resume_pages=list(a.resume_pages),
+                cover_letter_pages=list(a.cover_letter_pages),
+            )
+            for a in proposal.applicants
+        ],
+        ignored_pages=[],
     )

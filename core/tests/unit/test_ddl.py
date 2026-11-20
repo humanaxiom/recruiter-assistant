@@ -71,6 +71,9 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "audit_log",
         "sessions",
         "job_assignees",
+        # In-app split of a combined Taleo export: the staged proposal between
+        # segmentation and the manager's accept (ADR-017 amendment).
+        "resume_split_requests",
     }
 )
 
