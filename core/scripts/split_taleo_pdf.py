@@ -64,35 +64,33 @@ from pathlib import Path
 
 import fitz  # type: ignore[import-untyped]
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
 
-from src.pipeline.llm import REASONING_JSON_MIN_TOKENS, LLMClient
+from src.pipeline.llm import LLMClient
+from src.schemas.taleo_split import ProposalApplicant, SplitProposal
+from src.services.taleo_split_service import (
+    EMAIL_RE,
+    has_contact,
+    is_cover,
+    llm_segment,
+    orphan_page_emails,
+    page_accounting,
+    page_digest,
+    repair_orphan_pages,
+    valid_pages,
+)
 from src.settings import get_settings as get_pipeline_settings
 
-# Email or a 10+ digit phone run in the page header → a fresh applicant's
-# résumé usually opens with one. Cover letters carry contact info too, hence
-# the salutation veto below.
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PHONE = re.compile(r"(?:\+?\d[\s().-]?){10,}")
-_HEADER_CHARS = 400
-
-# Clean cover-letter signal in the validated sample (fired on every cover
-# page, zero on résumé pages). Used to veto a cover page from starting a new
-# applicant when it sits inside someone's packet.
-_COVER = re.compile(
-    r"\b(dear\b|to whom it may concern|i am writing|hiring manager|"
-    r"sincerely|kind regards|best regards|yours (?:truly|sincerely))",
-    re.IGNORECASE,
-)
-
-
-def _has_contact(text: str) -> bool:
-    head = text[:_HEADER_CHARS]
-    return bool(_EMAIL.search(head) or _PHONE.search(head))
-
-
-def _is_cover(text: str) -> bool:
-    return bool(_COVER.search(text))
+# The pure splitter logic lives in src/services/taleo_split_service.py; these
+# names are the service's own objects, re-exported so the CLI (and its tests)
+# keep one implementation.
+_EMAIL = EMAIL_RE
+_MERGED_HEAD = 600
+_has_contact = has_contact
+_is_cover = is_cover
+_valid_pages = valid_pages
+_page_digest = page_digest
+_Applicant = ProposalApplicant
+_orphan_page_emails = orphan_page_emails
 
 
 def _guess_name(text: str) -> str | None:
@@ -162,23 +160,6 @@ def parse_ranges(spec: str, page_count: int) -> list[list[tuple[int, int]]]:
     if not applicants:
         raise ValueError("no applicants parsed from --ranges")
     return applicants
-
-
-def page_accounting(
-    page_count: int, assigned: list[list[int]]
-) -> tuple[list[int], list[int]]:
-    """Reconcile 1-based pages actually written per applicant against
-    ``1..page_count``. Returns ``(missing, duplicated)``, both sorted
-    ascending: ``missing`` are pages written to no applicant at all;
-    ``duplicated`` are pages written more than once, whether to the same
-    applicant twice (e.g. résumé + cover letter) or to two different ones."""
-    counts: dict[int, int] = {}
-    for pages in assigned:
-        for p in pages:
-            counts[p] = counts.get(p, 0) + 1
-    missing = [p for p in range(1, page_count + 1) if p not in counts]
-    duplicated = sorted(p for p, n in counts.items() if n > 1)
-    return missing, duplicated
 
 
 def _format_pages(pages: list[int]) -> str:
@@ -278,67 +259,7 @@ def _emit_applicants(
     return written
 
 
-# ---------------- LLM segmentation (default) ----------------
-
-
-class _Applicant(BaseModel):
-    """One applicant in the LLM-emitted manifest. Pages are 1-based."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    candidate_name: str = ""
-    resume_pages: list[int] = Field(default_factory=list)
-    cover_letter_pages: list[int] = Field(default_factory=list)
-
-
-class _TaleoManifest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    applicants: list[_Applicant] = Field(default_factory=list)
-
-
-_DIGEST_HEAD = 500
-
-_SEG_SYSTEM = (
-    "You are a precise document-segmentation tool. You receive a page-by-page "
-    "digest of ONE PDF that concatenates MANY job applicants' documents, in "
-    "order. Each applicant has exactly one résumé (one or more consecutive "
-    "pages) and OPTIONALLY one cover letter (one or more pages, usually "
-    "adjacent to that applicant's résumé). Section headings INSIDE a résumé "
-    "(e.g. 'Professional Summary', 'Core Competencies', 'Work Experience', "
-    "'Registration') are NOT new applicants — do not split on them. A new "
-    "applicant typically begins with a fresh contact block (a different "
-    "person's name + email/phone), flagged CONTACT. Cover-letter pages are "
-    "flagged COVER. Assign EVERY page (1..N) to exactly one applicant and "
-    "classify it as résumé or cover letter. Return STRICT JSON only — no prose."
-)
-
-_SEG_USER = (
-    "Segment this export. Return JSON of the form:\n"
-    '{"applicants":[{"candidate_name":"Full Name",'
-    '"resume_pages":[1,2],"cover_letter_pages":[3]}, ...]}\n'
-    "Pages are 1-based. Every page must appear exactly once across all "
-    "applicants. Omit cover_letter_pages (or use []) when an applicant has no "
-    "cover letter.\n\nPER-PAGE DIGEST:\n"
-)
-
-
-def _page_digest(texts: list[str]) -> str:
-    """Compact per-page summary for the LLM: page no + flags + first chars."""
-    lines: list[str] = []
-    for i, t in enumerate(texts, start=1):
-        head = " ".join(t.split())[:_DIGEST_HEAD]
-        flags = []
-        if _has_contact(t):
-            flags.append("CONTACT")
-        if _is_cover(t):
-            flags.append("COVER")
-        tag = f" [{'/'.join(flags)}]" if flags else ""
-        lines.append(f"[page {i}]{tag}: {head}")
-    return "\n".join(lines)
-
-
-async def _llm_segment(texts: list[str], *, model: str) -> _TaleoManifest:
+async def _llm_segment(texts: list[str], *, model: str) -> SplitProposal:
     """Ask the local LLM to segment the export into a per-applicant manifest.
     Uses the configured host (no cloud egress); the model is overridable."""
     pipe = get_pipeline_settings()
@@ -356,27 +277,9 @@ async def _llm_segment(texts: list[str], *, model: str) -> _TaleoManifest:
         http_client=http,
     )
     try:
-        return await llm.chat_json(
-            [
-                {"role": "system", "content": _SEG_SYSTEM},
-                {"role": "user", "content": _SEG_USER + _page_digest(texts)},
-            ],
-            _TaleoManifest,
-            max_tokens=REASONING_JSON_MIN_TOKENS,
-        )
+        return await llm_segment(llm, texts)
     finally:
         await http.aclose()
-
-
-def _valid_pages(pages: list[int], page_count: int) -> list[int]:
-    """Keep in-range pages, preserve order, drop duplicates."""
-    seen: set[int] = set()
-    out: list[int] = []
-    for p in pages:
-        if 1 <= p <= page_count and p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
 
 
 def _write_pages(doc: fitz.Document, pages: list[int], out_path: Path) -> int:
@@ -394,7 +297,7 @@ def _write_pages(doc: fitz.Document, pages: list[int], out_path: Path) -> int:
 def _emit_from_manifest(
     doc: fitz.Document,
     texts: list[str],
-    manifest: _TaleoManifest,
+    manifest: SplitProposal,
     out_dir: Path,
     min_text: int,
 ) -> list[tuple[str, Path | None, Path | None, list[int]]]:
@@ -526,9 +429,6 @@ def report_cover_only(
     return len(cover_only)
 
 
-_MERGED_HEAD = 600
-
-
 def _pymupdf_page_texts(path: Path) -> list[str]:
     """Default ``page_texts``: the first ~600 chars of each page's extracted
     text, via the same PyMuPDF extraction the splitter already uses."""
@@ -577,119 +477,6 @@ def report_merged_applicants(rows: list[tuple[str, int]]) -> int:
         )
     print("!" * 60 + "\n")
     return len(rows)
-
-
-def repair_orphan_pages(
-    manifest_applicants: list[_Applicant],
-    page_count: int,
-    page_emails: Callable[[int], set[str]],
-) -> tuple[list[_Applicant], list[str]]:
-    """Repair pages the LLM manifest left assigned to no applicant, when a
-    single distinct email ties the page unambiguously to a NEIGHBOUR
-    applicant's résumé (2026-09-19 finding: page 30 of a real 43-page export
-    carried the SAME email as page 29, the last résumé page of the preceding
-    applicant, mis-assigned by the model).
-
-    For each page in ``1..page_count`` assigned to no applicant (neither
-    résumé nor cover-letter pages, across every applicant): look up its
-    distinct emails via ``page_emails``. If there is exactly one, and it
-    equals the email on the immediately PRECEDING applicant's last résumé
-    page, append the orphan page to that applicant's résumé pages. Failing
-    that, if it equals the email on the immediately FOLLOWING applicant's
-    first résumé page, prepend it there instead. Otherwise the page is left
-    untouched (still orphaned; the caller's existing page-accounting check
-    still fires on it).
-
-    Only résumé pages are ever grown — an applicant with no résumé pages
-    (cover-letter-only) is never a repair target, so a page is never folded
-    into a cover-letter page set.
-
-    Cover-letter pages are out of scope: ``page_emails`` is expected to
-    return an empty set for a page whose text reads as a cover letter (the
-    caller's real implementation checks ``_is_cover`` before extracting
-    emails), which this function then treats identically to "no email" —
-    it has no page text of its own to make that call.
-
-    Returns the repaired applicant list (a deep copy; the input is never
-    mutated) and the human-readable report lines to print, one per repair.
-    """
-    assigned: set[int] = set()
-    for a in manifest_applicants:
-        assigned.update(a.resume_pages)
-        assigned.update(a.cover_letter_pages)
-    orphans = sorted(p for p in range(1, page_count + 1) if p not in assigned)
-
-    repaired = [a.model_copy(deep=True) for a in manifest_applicants]
-    report: list[str] = []
-
-    def _bounds(a: _Applicant) -> tuple[int, int] | None:
-        pages = a.resume_pages + a.cover_letter_pages
-        return (min(pages), max(pages)) if pages else None
-
-    for p in orphans:
-        emails = page_emails(p)
-        if len(emails) != 1:
-            continue
-        (email,) = tuple(emails)
-
-        prev_idx: int | None = None
-        prev_max = -1
-        next_idx: int | None = None
-        next_min = page_count + 1
-        for idx, a in enumerate(repaired):
-            b = _bounds(a)
-            if b is None:
-                continue
-            if b[1] < p and b[1] > prev_max:
-                prev_max = b[1]
-                prev_idx = idx
-            if b[0] > p and b[0] < next_min:
-                next_min = b[0]
-                next_idx = idx
-
-        attached = False
-        if prev_idx is not None:
-            a = repaired[prev_idx]
-            if a.resume_pages:
-                last_resume_page = max(a.resume_pages)
-                if email in page_emails(last_resume_page):
-                    a.resume_pages = sorted([*a.resume_pages, p])
-                    report.append(
-                        f"REPAIRED: page {p} attached to applicant "
-                        f"{prev_idx + 1} — same applicant email as page "
-                        f"{last_resume_page}"
-                    )
-                    attached = True
-
-        if not attached and next_idx is not None:
-            a = repaired[next_idx]
-            if a.resume_pages:
-                first_resume_page = min(a.resume_pages)
-                if email in page_emails(first_resume_page):
-                    a.resume_pages = sorted([p, *a.resume_pages])
-                    report.append(
-                        f"REPAIRED: page {p} attached to applicant "
-                        f"{next_idx + 1} — same applicant email as page "
-                        f"{first_resume_page}"
-                    )
-
-    return repaired, report
-
-
-def _orphan_page_emails(texts: list[str]) -> Callable[[int], set[str]]:
-    """Build the ``page_emails`` callable ``repair_orphan_pages`` needs, from
-    the same PyMuPDF page texts the LLM digest was built from. A page whose
-    text reads as a cover letter (``_is_cover``) returns no emails — cover
-    pages are out of scope for the repair, per ``repair_orphan_pages``'s own
-    docstring — so it is never mistaken for a résumé-page match."""
-
-    def page_emails(p: int) -> set[str]:
-        text = texts[p - 1]
-        if _is_cover(text):
-            return set()
-        return {m.lower() for m in _EMAIL.findall(text[:_MERGED_HEAD])}
-
-    return page_emails
 
 
 def _run_llm_mode(
