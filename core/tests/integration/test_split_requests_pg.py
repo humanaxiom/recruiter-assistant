@@ -768,3 +768,158 @@ async def test_doctor_sql_ignores_live_rows_holding_data(
     await _to_proposed(pool, store, await _job(pool))
     async with pool.acquire() as conn:
         assert await conn.fetch(doctor._SPLIT_TERMINAL_HOLDING_SQL) == []
+
+
+# -- C+D review fixes (RED) ---------------------------------------------------
+
+
+# item 6: source_filename is nullable, truncated on the way in, and NULLed on
+# every terminal state (a filename can carry a candidate's name).
+
+
+@pytest.mark.asyncio
+async def test_source_filename_column_is_nullable(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as conn:
+        nullable = await conn.fetchval(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'resume_split_requests' "
+            "AND column_name = 'source_filename'"
+        )
+    assert nullable == "YES"
+
+
+@pytest.mark.asyncio
+async def test_create_stores_a_400_char_filename_truncated_to_255(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    async with pool.acquire() as conn:
+        split_id = await srs.create(
+            conn,
+            store,
+            job_id=job_id,
+            filename="y" * 400 + ".pdf",
+            data=PDF,
+            consent_acknowledged=True,
+            created_by=None,
+        )
+    assert (await _row(pool, split_id))["source_filename"] == "y" * 255
+
+
+async def _terminate(pool: asyncpg.Pool, store: BlobStore, how: str) -> uuid.UUID:
+    job_id = await _job(pool)
+    if how == "accepted":
+        split_id = await _to_proposed(pool, store, job_id)
+        async with pool.acquire() as conn:
+            assert await srs.mark_accepted(
+                conn, store, split_id, accepted_by="rec", ingest_result=[]
+            )
+    elif how == "discarded":
+        split_id = await _to_proposed(pool, store, job_id)
+        async with pool.acquire() as conn:
+            assert await srs.discard(conn, store, split_id)
+    elif how == "failed":
+        split_id = await _create(pool, store, job_id)
+        async with pool.acquire() as conn:
+            await srs.claim(conn, split_id)
+            assert await srs.fail(conn, store, split_id, "unreadable_pdf")
+    else:  # expired
+        split_id = await _to_proposed(pool, store, job_id)
+        await _age(pool, split_id, hours=500)
+        async with pool.acquire() as conn:
+            assert await srs.expire(conn, store, ttl_hours=1) == 1
+    return split_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["accepted", "discarded", "failed", "expired"])
+async def test_every_terminal_state_nulls_the_source_filename(
+    pool: asyncpg.Pool, store: BlobStore, how: str
+) -> None:
+    live = await _to_proposed(pool, store, await _job(pool))
+    assert (await _row(pool, live))["source_filename"] == "export.pdf"
+    split_id = await _terminate(pool, store, how)
+    row = await _row(pool, split_id)
+    assert row["status"] == ("discarded" if how == "expired" else how)
+    assert row["source_filename"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_live_row_keeps_its_source_filename(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    split_id = await _to_proposed(pool, store, await _job(pool))
+    assert (await _row(pool, split_id))["source_filename"] == "export.pdf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["accepted", "discarded", "failed"])
+async def test_doctor_sql_flags_a_terminal_row_that_kept_its_source_filename(
+    pool: asyncpg.Pool, store: BlobStore, status: str
+) -> None:
+    split_id = await _create(pool, store, await _job(pool))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE resume_split_requests SET status = $2, "
+            "source_blob_key = NULL, proposal = NULL WHERE id = $1",
+            split_id,
+            status,
+        )
+        rows = await conn.fetch(doctor._SPLIT_TERMINAL_HOLDING_SQL)
+    assert [r["id"] for r in rows] == [split_id]
+
+
+@pytest.mark.asyncio
+async def test_doctor_sql_is_clean_once_the_source_filename_is_nulled(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    split_id = await _terminate(pool, store, "discarded")
+    async with pool.acquire() as conn:
+        assert await conn.fetch(doctor._SPLIT_TERMINAL_HOLDING_SQL) == []
+    assert (await _row(pool, split_id))["source_filename"] is None
+
+
+# item 7: the stale threshold is a float number of minutes (derived from the
+# LLM settings), so sub-minute precision must reach the SQL.
+
+
+@pytest.mark.asyncio
+async def test_requeue_stale_honours_a_fractional_minute_threshold(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    younger = await _create(pool, store, job_id, b"%PDF-1.4 y")
+    older = await _create(pool, store, job_id, b"%PDF-1.4 o")
+    await _age(pool, younger, hours=600 / 3600)  # 10.0 min idle
+    await _age(pool, older, hours=660 / 3600)  # 11.0 min idle
+    async with pool.acquire() as conn:
+        ids = await srs.requeue_stale(conn, minutes=10.5)
+    assert ids == [older]
+
+
+# item 8: an unreferenced blob inside the grace period is a create in flight.
+
+
+def _backdate(store: BlobStore, key: str, *, seconds: float) -> None:
+    import os
+    import time
+
+    then = time.time() - seconds
+    os.utime(store._resolve(key), (then, then))
+
+
+@pytest.mark.asyncio
+async def test_sweep_spares_a_fresh_orphan_and_deletes_an_hour_old_one(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    await store.put("split_sources/fresh.pdf", b"x")
+    await store.put("split_sources/recent.pdf", b"x")
+    await store.put("split_sources/stale.pdf", b"y")
+    _backdate(store, "split_sources/recent.pdf", seconds=300)
+    _backdate(store, "split_sources/stale.pdf", seconds=3600)
+    async with pool.acquire() as conn:
+        n = await srs.sweep_orphan_blobs(conn, store)
+    assert n == 1
+    assert await store.exists("split_sources/fresh.pdf")
+    assert await store.exists("split_sources/recent.pdf")
+    assert not await store.exists("split_sources/stale.pdf")

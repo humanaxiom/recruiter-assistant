@@ -864,3 +864,117 @@ async def _all_split_ids(pool: asyncpg.Pool) -> list[UUID]:
             "SELECT id FROM resume_split_requests ORDER BY created_at"
         )
     return [r["id"] for r in rows]
+
+
+# ── C+D review fixes (RED) ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_blob_survives_when_the_accept_transaction_does_not_commit(
+    pool: asyncpg.Pool, store: BlobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 5: the combined PDF is deleted only AFTER the commit. A failure
+    after ``mark_accepted`` inside the transaction must roll the row back to
+    'proposed' AND leave the blob on disk, or the manager has lost the source
+    of a proposal that still says it can be accepted."""
+    job_id = await _job(pool)
+    pdf, proposal = _four_page_export()
+    split_id = await _seed_proposed(pool, store, job_id, pdf, proposal)
+    row0 = await _row(pool, split_id)
+    blob_key = row0["source_blob_key"]
+    real = srs.mark_accepted
+
+    async def _then_fail(*args: Any, **kwargs: Any) -> bool:
+        await real(*args, **kwargs)  # the UPDATE ran inside the transaction
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(srs, "mark_accepted", _then_fail)
+    arq = _arq()
+    app = _build_app(pool, store, arq)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            f"/resume-splits/{split_id}/accept",
+            json={"proposal_version": int(row0["proposal_version"])},
+        )
+
+    assert resp.status_code >= 500
+    row = await _row(pool, split_id)
+    assert row["status"] == "proposed"
+    assert row["proposal"] is not None
+    assert row["source_blob_key"] == blob_key
+    assert await store.exists(blob_key)
+    assert await _resume_rows(pool, job_id) == []
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_successful_accept_still_deletes_the_blob_after_commit(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    pdf, proposal = _four_page_export()
+    split_id = await _seed_proposed(pool, store, job_id, pdf, proposal)
+    blob_key = (await _row(pool, split_id))["source_blob_key"]
+    app = _build_app(pool, store, _arq())
+    resp = await _accept(app, split_id, await _version(pool, split_id))
+    assert resp.status_code == 200
+    assert (await _row(pool, split_id))["status"] == "accepted"
+    assert not await store.exists(blob_key)
+
+
+@pytest.mark.asyncio
+async def test_misfiled_cover_accept_is_409_with_blob_and_proposal_intact(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    """Item 1 against a real database and a real stored PDF."""
+    job_id = await _job(pool)
+    pdf = _make_pdf(
+        [
+            _resume(_EMAILS[0], "A"),
+            _resume(_EMAILS[1], "B"),  # B's contact page ...
+            _more("B"),
+        ]
+    )
+    proposal = SplitProposal(
+        applicants=[
+            ProposalApplicant(resume_pages=[1], cover_letter_pages=[2]),  # ... in A
+            ProposalApplicant(resume_pages=[3]),
+        ]
+    )
+    split_id = await _seed_proposed(pool, store, job_id, pdf, proposal)
+    blob_key = (await _row(pool, split_id))["source_blob_key"]
+    arq = _arq()
+    app = _build_app(pool, store, arq)
+
+    resp = await _accept(app, split_id, await _version(pool, split_id))
+
+    assert resp.status_code == 409
+    row = await _row(pool, split_id)
+    assert row["status"] == "proposed"
+    assert row["proposal"] is not None
+    assert await store.exists(blob_key)
+    assert await _resume_rows(pool, job_id) == []
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_source_blob_is_409_and_the_row_is_untouched(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    """Item 4 against a real row whose blob has vanished."""
+    job_id = await _job(pool)
+    pdf, proposal = _four_page_export()
+    split_id = await _seed_proposed(pool, store, job_id, pdf, proposal)
+    blob_key = (await _row(pool, split_id))["source_blob_key"]
+    await store.delete(blob_key)
+    v0 = await _version(pool, split_id)
+    app = _build_app(pool, store, _arq())
+
+    resp = await _accept(app, split_id, v0)
+
+    assert resp.status_code == 409
+    assert "source export unavailable" in resp.text.lower()
+    row = await _row(pool, split_id)
+    assert row["status"] == "proposed"
+    assert int(row["proposal_version"]) == v0

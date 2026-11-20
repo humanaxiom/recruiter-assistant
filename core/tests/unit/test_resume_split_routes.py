@@ -633,3 +633,447 @@ async def test_writer_session_passes_the_gate_on_upload(
             _upload_url(), files=[_pdf_part()], data={"consent_acknowledged": "true"}
         )
     assert resp.status_code == 202
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# C+D review fixes (RED). Each block below pins one numbered finding.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_SECRET = "SECRET-leak-xyz-Wibblesworth"
+
+
+@pytest.fixture
+def env_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
+    """Lets a test set SPLIT_* env vars; settings cache cleared both sides."""
+    get_settings.cache_clear()
+    try:
+        yield monkeypatch
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
+def _patch_correction(mp: pytest.MonkeyPatch, version: int = 2) -> AsyncMock:
+    spy = AsyncMock(return_value=version)
+    mp.setattr("src.services.split_request_service.store_correction", spy)
+    return spy
+
+
+def _two_applicant_proposal() -> SplitProposal:
+    return SplitProposal(
+        applicants=[
+            ProposalApplicant(resume_pages=[1]),
+            ProposalApplicant(resume_pages=[2]),
+        ]
+    )
+
+
+def _call_body(kind: str) -> tuple[str, dict[str, Any]]:
+    """URL suffix + JSON body for a CLEAN two-applicant, two-page export."""
+    if kind == "correct":
+        return "correct", {
+            "proposal_version": 1,
+            "applicants": [{"resume_pages": [1]}, {"resume_pages": [2]}],
+            "ignored_pages": [],
+        }
+    return "accept", {"proposal_version": 1}
+
+
+async def _post_kind(app: FastAPI, kind: str) -> Any:
+    suffix, body = _call_body(kind)
+    async with await _client(app) as client:
+        return await client.post(f"/resume-splits/{uuid4()}/{suffix}", json=body)
+
+
+def _arrange_clean(spies: _Spies, mp: pytest.MonkeyPatch) -> AsyncMock:
+    spies.load_proposal.return_value = _two_applicant_proposal()
+    return _patch_correction(mp)
+
+
+# ── 1. cover-page hijack: accept is blocked ──────────────────────────────────
+
+
+def _a_resume() -> str:
+    return f"Applicant A\na@example.test\n604-555-0100\n{_PAD}"
+
+
+def _b_resume(tag: str) -> str:
+    return f"Applicant B {tag}\nb@example.test\n604-555-0101\n{_PAD}"
+
+
+def _genuine_cover() -> str:
+    return (
+        "a@example.test\nDear Hiring Manager,\nI am writing to apply.\n"
+        f"{_PAD}\nSincerely,\nA"
+    )
+
+
+@pytest.mark.asyncio
+async def test_accept_blocks_a_foreign_resume_page_filed_as_a_cover_letter(
+    spies: _Spies,
+) -> None:
+    spies.load_proposal.return_value = SplitProposal(
+        applicants=[
+            ProposalApplicant(resume_pages=[1], cover_letter_pages=[2]),
+            ProposalApplicant(resume_pages=[3]),
+        ]
+    )
+    store = _mock_store(_pdf([_a_resume(), _b_resume("p1"), _b_resume("p2")]))
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(_mock_conn(_split_row()), arq=arq, store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/resume-splits/{uuid4()}/accept", json={"proposal_version": 1}
+        )
+    assert resp.status_code == 409
+    spies.ingest.assert_not_awaited()
+    spies.mark_accepted.assert_not_awaited()
+    store.delete.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_accept_allows_a_genuine_cover_letter_that_carries_an_email(
+    spies: _Spies,
+) -> None:
+    spies.load_proposal.return_value = SplitProposal(
+        applicants=[
+            ProposalApplicant(resume_pages=[1], cover_letter_pages=[2]),
+            ProposalApplicant(resume_pages=[3]),
+        ]
+    )
+    store = _mock_store(_pdf([_a_resume(), _genuine_cover(), _b_resume("p1")]))
+    app = _build_app(_mock_conn(_split_row()), store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/resume-splits/{uuid4()}/accept", json={"proposal_version": 1}
+        )
+    assert resp.status_code == 200
+    spies.ingest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_correct_reports_misfiled_cover_in_the_diagnostics(
+    spies: _Spies, env_settings: pytest.MonkeyPatch
+) -> None:
+    store_correction = _patch_correction(env_settings)
+    store = _mock_store(_pdf([_a_resume(), _b_resume("p1"), _b_resume("p2")]))
+    app = _build_app(_mock_conn(_split_row()), store=store)
+    async with await _client(app) as client:
+        resp = await client.post(
+            f"/resume-splits/{uuid4()}/correct",
+            json={
+                "proposal_version": 1,
+                "applicants": [
+                    {"resume_pages": [1], "cover_letter_pages": [2]},
+                    {"resume_pages": [3]},
+                ],
+                "ignored_pages": [],
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["diagnostics"]["misfiled_cover"] == [2]
+    stored = store_correction.await_args.kwargs["diagnostics"]
+    assert stored.misfiled_cover == [2]
+
+
+# ── 2. hostile PDF bounds: extract BEFORE the lock, bounded in size + time ───
+
+
+def _ordered_app(
+    mp: pytest.MonkeyPatch, events: list[str]
+) -> tuple[FastAPI, MagicMock]:
+    from src.services import taleo_split_service
+
+    real_extract = taleo_split_service.extract_page_texts
+
+    def _extract(pdf: bytes) -> list[str]:
+        events.append("extract")
+        return real_extract(pdf)
+
+    mp.setattr(taleo_split_service, "extract_page_texts", _extract)
+    row = _split_row()
+    conn = _mock_conn(row)
+
+    async def _fetchrow(sql: str, *_a: Any) -> _Row:
+        events.append("lock" if "FOR UPDATE" in sql else "select")
+        return row
+
+    conn.fetchrow = AsyncMock(side_effect=_fetchrow)
+
+    async def _get(_key: str) -> bytes:
+        events.append("blob_get")
+        return _export(2)
+
+    store = _mock_store()
+    store.get = AsyncMock(side_effect=_get)
+    return _build_app(conn, store=store), store
+
+
+@pytest.mark.parametrize("kind", ["correct", "accept"])
+@pytest.mark.asyncio
+async def test_blob_read_and_text_extraction_happen_before_the_row_lock(
+    spies: _Spies, env_settings: pytest.MonkeyPatch, kind: str
+) -> None:
+    _arrange_clean(spies, env_settings)
+    events: list[str] = []
+    app, _store = _ordered_app(env_settings, events)
+    resp = await _post_kind(app, kind)
+    assert resp.status_code == 200, resp.text
+    assert "lock" in events and "extract" in events and "blob_get" in events
+    assert events.index("blob_get") < events.index("extract") < events.index("lock")
+
+
+def test_extraction_bound_settings_have_the_planned_defaults() -> None:
+    from src.settings import Settings
+
+    s = Settings()
+    assert s.split_max_text_chars == 2_000_000
+    assert s.split_extract_timeout_s == 120
+
+
+@pytest.mark.parametrize("kind", ["correct", "accept"])
+@pytest.mark.asyncio
+async def test_extracted_text_over_the_char_cap_is_422_and_ingests_nothing(
+    spies: _Spies, env_settings: pytest.MonkeyPatch, kind: str
+) -> None:
+    env_settings.setenv("SPLIT_MAX_TEXT_CHARS", "100")
+    get_settings.cache_clear()
+    correction = _arrange_clean(spies, env_settings)
+    store = _mock_store(_export(2))  # ~700 chars of text > 100
+    app = _build_app(_mock_conn(_split_row()), store=store)
+    resp = await _post_kind(app, kind)
+    assert resp.status_code == 422
+    assert "applicant0@example.test" not in resp.text
+    assert "Experience in recruiting" not in resp.text
+    spies.ingest.assert_not_awaited()
+    spies.mark_accepted.assert_not_awaited()
+    correction.assert_not_awaited()
+    store.delete.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kind", ["correct", "accept"])
+@pytest.mark.asyncio
+async def test_extracted_text_under_the_char_cap_is_not_rejected(
+    spies: _Spies, env_settings: pytest.MonkeyPatch, kind: str
+) -> None:
+    env_settings.setenv("SPLIT_MAX_TEXT_CHARS", "100000")
+    get_settings.cache_clear()
+    _arrange_clean(spies, env_settings)
+    app = _build_app(_mock_conn(_split_row()), store=_mock_store(_export(2)))
+    resp = await _post_kind(app, kind)
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("kind", ["correct", "accept"])
+@pytest.mark.asyncio
+async def test_a_slow_extraction_times_out_as_422_instead_of_hanging(
+    spies: _Spies, env_settings: pytest.MonkeyPatch, kind: str
+) -> None:
+    import time
+
+    from src.services import taleo_split_service
+
+    env_settings.setenv("SPLIT_EXTRACT_TIMEOUT_S", "0.3")
+    get_settings.cache_clear()
+    correction = _arrange_clean(spies, env_settings)
+
+    def _slow(_pdf: bytes) -> list[str]:
+        time.sleep(1.5)
+        return ["x", "y"]
+
+    env_settings.setattr(taleo_split_service, "extract_page_texts", _slow)
+    app = _build_app(_mock_conn(_split_row()), store=_mock_store(_export(2)))
+    started = time.monotonic()
+    resp = await _post_kind(app, kind)
+    assert time.monotonic() - started < 1.2
+    assert resp.status_code == 422
+    spies.ingest.assert_not_awaited()
+    spies.mark_accepted.assert_not_awaited()
+    correction.assert_not_awaited()
+
+
+# ── 3. _CorrectBody lists are bounded by split_max_pages ─────────────────────
+
+
+@pytest.fixture
+def three_page_cap(env_settings: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    env_settings.setenv("SPLIT_MAX_PAGES", "3")
+    get_settings.cache_clear()
+    return env_settings
+
+
+def _correct_body(**over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "proposal_version": 1,
+        "applicants": [{"resume_pages": [1]}],
+        "ignored_pages": [],
+    }
+    body.update(over)
+    return body
+
+
+_TOO_LONG: list[tuple[str, dict[str, Any]]] = [
+    (
+        "applicants",
+        _correct_body(applicants=[{"resume_pages": [1]} for _ in range(4)]),
+    ),
+    ("resume_pages", _correct_body(applicants=[{"resume_pages": [1, 1, 1, 1]}])),
+    (
+        "cover_letter_pages",
+        _correct_body(
+            applicants=[{"resume_pages": [1], "cover_letter_pages": [2, 2, 2, 2]}]
+        ),
+    ),
+    ("ignored_pages", _correct_body(ignored_pages=[3, 3, 3, 3])),
+]
+
+_AT_CAP: list[tuple[str, dict[str, Any]]] = [
+    (
+        "applicants",
+        _correct_body(applicants=[{"resume_pages": [i]} for i in (1, 2, 3)]),
+    ),
+    ("resume_pages", _correct_body(applicants=[{"resume_pages": [1, 2, 3]}])),
+    (
+        "cover_letter_pages",
+        _correct_body(
+            applicants=[{"resume_pages": [1], "cover_letter_pages": [2, 3, 3]}]
+        ),
+    ),
+    ("ignored_pages", _correct_body(ignored_pages=[3, 3, 3])),
+]
+
+
+@pytest.mark.parametrize(("field", "body"), _TOO_LONG, ids=[f for f, _ in _TOO_LONG])
+@pytest.mark.asyncio
+async def test_correct_rejects_a_list_longer_than_the_page_cap(
+    spies: _Spies, three_page_cap: pytest.MonkeyPatch, field: str, body: dict[str, Any]
+) -> None:
+    correction = _patch_correction(three_page_cap)
+    app = _build_app(_mock_conn(_split_row()), store=_mock_store(_export(3)))
+    async with await _client(app) as client:
+        resp = await client.post(f"/resume-splits/{uuid4()}/correct", json=body)
+    assert resp.status_code == 422, field
+    correction.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("field", "body"), _AT_CAP, ids=[f for f, _ in _AT_CAP])
+@pytest.mark.asyncio
+async def test_correct_accepts_a_list_exactly_at_the_page_cap(
+    spies: _Spies, three_page_cap: pytest.MonkeyPatch, field: str, body: dict[str, Any]
+) -> None:
+    correction = _patch_correction(three_page_cap)
+    app = _build_app(_mock_conn(_split_row()), store=_mock_store(_export(3)))
+    async with await _client(app) as client:
+        resp = await client.post(f"/resume-splits/{uuid4()}/correct", json=body)
+    assert resp.status_code == 200, (field, resp.text)
+    correction.assert_awaited_once()
+
+
+# ── 4. unreadable source -> fixed 409, class-name-only logging ───────────────
+
+
+class _PdfBoomError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("case", ["blob_missing", "parse_error"])
+@pytest.mark.parametrize("kind", ["correct", "accept"])
+@pytest.mark.asyncio
+async def test_unavailable_source_is_a_fixed_409_not_a_500(
+    spies: _Spies,
+    env_settings: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+    case: str,
+) -> None:
+    import logging
+
+    from src.services import taleo_split_service
+    from src.storage.blob_store import BlobNotFound
+
+    caplog.set_level(logging.DEBUG)
+    correction = _arrange_clean(spies, env_settings)
+    store = _mock_store()
+    if case == "blob_missing":
+        store.get = AsyncMock(side_effect=BlobNotFound(f"split_sources/{_SECRET}"))
+    else:
+
+        def _boom(_pdf: bytes) -> list[str]:
+            raise _PdfBoomError(f"bad xref near {_SECRET}")
+
+        env_settings.setattr(taleo_split_service, "extract_page_texts", _boom)
+    app = _build_app(_mock_conn(_split_row()), store=store)
+    resp = await _post_kind(app, kind)
+    assert resp.status_code == 409
+    assert "source export unavailable" in resp.text.lower()
+    assert _SECRET not in resp.text
+    spies.ingest.assert_not_awaited()
+    spies.mark_accepted.assert_not_awaited()
+    correction.assert_not_awaited()
+    haystack = caplog.text + " ".join(
+        str(v) for r in caplog.records for v in r.__dict__.values()
+    )
+    assert _SECRET not in haystack
+    assert ("BlobNotFound" if case == "blob_missing" else "_PdfBoomError") in haystack
+
+
+# ── 9. multi-file upload: enqueue each id right after its own row ────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_enqueues_each_file_right_after_its_own_row_is_created(
+    spies: _Spies,
+) -> None:
+    ids = [uuid4(), uuid4()]
+    order: list[str] = []
+    created: list[UUID] = []
+
+    async def _create(*_a: Any, **_k: Any) -> UUID:
+        sid = ids[len(created)]
+        created.append(sid)
+        order.append(f"create{len(created)}")
+        return sid
+
+    async def _enqueue(_fn: str, sid: str, *_a: Any, **_k: Any) -> None:
+        order.append(f"enqueue{ids.index(UUID(sid)) + 1}")
+
+    spies.create.side_effect = _create
+    arq = MagicMock(enqueue_job=AsyncMock(side_effect=_enqueue))
+    app = _build_app(_mock_conn(_split_row()), arq=arq)
+    async with await _client(app) as client:
+        resp = await client.post(
+            _upload_url(),
+            files=[_pdf_part("a.pdf", _export(2)), _pdf_part("b.pdf", _export(3))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code == 202
+    assert order == ["create1", "enqueue1", "create2", "enqueue2"]
+
+
+@pytest.mark.asyncio
+async def test_upload_failure_on_file_two_leaves_file_one_enqueued_and_errors(
+    spies: _Spies,
+) -> None:
+    from src.errors import ConflictError
+
+    first = uuid4()
+    calls = {"n": 0}
+
+    async def _create(*_a: Any, **_k: Any) -> UUID:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ConflictError("second create failed")
+        return first
+
+    spies.create.side_effect = _create
+    arq = MagicMock(enqueue_job=AsyncMock())
+    app = _build_app(_mock_conn(_split_row()), arq=arq)
+    async with await _client(app) as client:
+        resp = await client.post(
+            _upload_url(),
+            files=[_pdf_part("a.pdf", _export(2)), _pdf_part("b.pdf", _export(3))],
+            data={"consent_acknowledged": "true"},
+        )
+    assert resp.status_code >= 400
+    arq.enqueue_job.assert_awaited_once_with("segment_taleo_export", str(first))

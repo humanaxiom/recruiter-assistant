@@ -720,3 +720,65 @@ def test_build_slices_exclude_of_unknown_index_is_ignored_m3() -> None:
     proposal = SplitProposal(applicants=[_app([1]), _app([2])])
     slices = svc.build_slices(_marker_pdf(), proposal, exclude={99})
     assert [s.index for s in slices] == [1, 2]
+
+
+# ── misfiled_cover (cover-page hijack) ───────────────────────────────────────
+# A page listed in applicant A's cover_letter_pages that does NOT read as a
+# cover letter AND carries contact details is another applicant's résumé page:
+# cover pages are exempt from the merged check, so without this finding a
+# crafted/mistaken proposal would hand B's contact page to A's cover file.
+
+
+def _hijack_texts() -> list[str]:
+    return [
+        _resume_text("a@example.com", "A1"),
+        _resume_text("b@example.com", "B1"),  # B's contact page
+        _resume_text("b@example.com", "B2"),
+    ]
+
+
+def test_validate_flags_a_non_cover_contact_page_filed_as_a_cover_letter() -> None:
+    proposal = SplitProposal(applicants=[_app([1], [2]), _app([3])])
+    diag = svc.validate_proposal(proposal, _hijack_texts())
+    assert diag.misfiled_cover == [2]
+
+
+def test_validate_misfiled_cover_is_blocking() -> None:
+    proposal = SplitProposal(applicants=[_app([1], [2]), _app([3])])
+    diag = svc.validate_proposal(proposal, _hijack_texts())
+    assert diag.missing == [] and diag.duplicated == [] and diag.merged == []
+    assert diag.blocking is True
+
+
+def test_validate_genuine_cover_letter_with_an_email_is_not_misfiled() -> None:
+    texts = [_resume_text("a@example.com", "A1"), _cover_text("a@example.com", "A")]
+    diag = svc.validate_proposal(SplitProposal(applicants=[_app([1], [2])]), texts)
+    assert diag.misfiled_cover == []
+    assert diag.blocking is False
+
+
+def test_validate_cover_continuation_page_without_contact_is_not_misfiled() -> None:
+    texts = [
+        _resume_text("a@example.com", "A1"),
+        _cover_text("a@example.com", "A"),
+        f"and so I remain keen on the role.\n{_PAD}",
+    ]
+    diag = svc.validate_proposal(SplitProposal(applicants=[_app([1], [2, 3])]), texts)
+    assert diag.misfiled_cover == []
+
+
+def test_validate_misfiled_cover_reports_every_offending_page_sorted() -> None:
+    texts = [
+        _resume_text("a@example.com", "A1"),
+        _resume_text("b@example.com", "B1"),
+        _resume_text("c@example.com", "C1"),
+    ]
+    proposal = SplitProposal(applicants=[_app([1], [3, 2])])
+    assert svc.validate_proposal(proposal, texts).misfiled_cover == [2, 3]
+
+
+def test_validate_misfiled_cover_default_is_empty_on_a_clean_proposal() -> None:
+    diag = svc.validate_proposal(
+        SplitProposal(applicants=[_app([1, 2], [3]), _app([4])]), _clean_texts()
+    )
+    assert diag.misfiled_cover == []

@@ -595,3 +595,93 @@ async def test_expire_defaults_its_ttl_to_the_split_proposal_setting() -> None:
     assert n == 0
     flat = [a for c in _calls(conn) for a in c.args]
     assert any(a in (5, 5.0) or "5" in str(a) for a in flat)
+
+
+# -- item 6: source_filename is stored truncated to 255 chars -----------------
+
+
+def _insert_args(conn: MagicMock) -> tuple[Any, ...]:
+    assert conn.execute.await_count == 1
+    return tuple(conn.execute.await_args.args)
+
+
+@pytest.mark.asyncio
+async def test_create_truncates_an_overlong_filename_to_255_chars() -> None:
+    conn, store = _conn(), _store()
+    await _create(conn, store, filename="x" * 400 + ".pdf")
+    args = _insert_args(conn)
+    assert "x" * 255 in args
+    assert not any(isinstance(a, str) and len(a) > 255 for a in args)
+
+
+@pytest.mark.parametrize("length", [1, 100, 255])
+@pytest.mark.asyncio
+async def test_create_keeps_a_filename_of_255_chars_or_fewer_verbatim(
+    length: int,
+) -> None:
+    conn, store = _conn(), _store()
+    name = "n" * length
+    await _create(conn, store, filename=name)
+    assert name in _insert_args(conn)
+
+
+# -- item 8: orphan sweep never touches a blob inside the grace period --------
+#
+# A real filesystem BlobStore is used so the test does not depend on how the
+# store reports age: ``create`` writes the blob BEFORE inserting the row, so a
+# fresh unreferenced blob is a create in flight, not an orphan.
+
+
+def _age_blob(store: Any, key: str, *, seconds: float) -> None:
+    import os
+    import time
+
+    path = store._resolve(key)
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_delete_an_unreferenced_blob_younger_than_grace(
+    tmp_path: Any,
+) -> None:
+    from src.storage.blob_store import BlobStore
+
+    store = BlobStore(tmp_path)
+    await store.put("split_sources/inflight.pdf", b"x")
+    conn = _conn()
+    n = await srs.sweep_orphan_blobs(conn, store)
+    assert n == 0
+    assert await store.exists("split_sources/inflight.pdf")
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_a_five_minute_old_orphan_but_deletes_an_hour_old_one(
+    tmp_path: Any,
+) -> None:
+    from src.storage.blob_store import BlobStore
+
+    store = BlobStore(tmp_path)
+    await store.put("split_sources/recent.pdf", b"x")
+    await store.put("split_sources/stale.pdf", b"y")
+    _age_blob(store, "split_sources/recent.pdf", seconds=300)
+    _age_blob(store, "split_sources/stale.pdf", seconds=3600)
+    n = await srs.sweep_orphan_blobs(_conn(), store)
+    assert n == 1
+    assert await store.exists("split_sources/recent.pdf")
+    assert not await store.exists("split_sources/stale.pdf")
+
+
+@pytest.mark.asyncio
+async def test_sweep_still_keeps_an_old_blob_a_row_references(
+    tmp_path: Any,
+) -> None:
+    from src.storage.blob_store import BlobStore
+
+    store = BlobStore(tmp_path)
+    await store.put("split_sources/live.pdf", b"x")
+    _age_blob(store, "split_sources/live.pdf", seconds=86400)
+    conn = _conn()
+    conn.fetch = AsyncMock(return_value=[{"source_blob_key": "split_sources/live.pdf"}])
+    assert await srs.sweep_orphan_blobs(conn, store) == 0
+    assert await store.exists("split_sources/live.pdf")

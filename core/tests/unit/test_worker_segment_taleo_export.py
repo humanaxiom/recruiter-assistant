@@ -565,3 +565,31 @@ async def test_cron_expiry_ttl_comes_from_settings_not_a_literal() -> None:
         await split_tasks.expire_split_requests(ctx)
     # no explicit ttl => the service applies settings.split_proposal_ttl_h
     assert m.expire.await_args.kwargs.get("ttl_hours") is None
+
+
+# -- item 7: the stale threshold derives from the LLM settings ----------------
+#
+# A segmenting row is only stalled once it has outlived the model's own worst
+# case: ``llm_max_retries + 1`` attempts (LLMClient's HTTP-layer retry budget,
+# ``Settings.llm_max_retries`` -- the retry count the worker's LLMClient really
+# uses) of ``llm_timeout_s`` each, plus 300 s of slack. The cron hands that to
+# ``requeue_stale(minutes=...)`` (a float number of minutes).
+
+
+@pytest.mark.parametrize(
+    ("retries", "timeout_s", "expected_s"),
+    [(2, 120.0, 660.0), (1, 100.0, 500.0), (4, 60.0, 600.0), (0, 30.0, 330.0)],
+)
+@pytest.mark.asyncio
+async def test_cron_stale_threshold_is_derived_from_llm_settings(
+    retries: int, timeout_s: float, expected_s: float
+) -> None:
+    ctx, _c, _b = _ctx(pdf=b"")
+    settings = Settings(llm_max_retries=retries, llm_timeout_s=timeout_s)
+    with (
+        _svc(None) as m,
+        patch.object(split_tasks, "get_settings", return_value=settings),
+    ):
+        await split_tasks.expire_split_requests(ctx)
+    minutes = m.requeue_stale.await_args.kwargs["minutes"]
+    assert minutes == pytest.approx(expected_s / 60)
