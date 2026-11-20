@@ -331,6 +331,27 @@ async def split_upload(
     }
 
 
+@router.get("/jobs/{job_id}/resume-splits", dependencies=_GATES)
+async def list_job_splits(job_id: UUID, db: Db) -> list[dict[str, Any]]:
+    """Splits of a job still awaiting action, newest first. Read-only; carries
+    no names or proposal contents, and no filename on a blind-review job."""
+    job = await db.fetchrow("SELECT blind_review FROM jobs WHERE id = $1", job_id)
+    if job is None:
+        raise NotFoundError(f"job {job_id} not found", job_id=str(job_id))
+    blind = bool(job["blind_review"])
+    return [
+        {
+            "id": str(r["id"]),
+            "status": r["status"],
+            "created_at": r["created_at"],
+            "page_count": r["page_count"],
+            "method": r["method"],
+            "source_filename": None if blind else r["source_filename"],
+        }
+        for r in await split_request_service.list_pending(db, job_id)
+    ]
+
+
 @router.get("/resume-splits/{split_id}", dependencies=_GATES)
 async def get_split(split_id: UUID, db: Db) -> dict[str, Any]:
     row = await db.fetchrow(_SELECT_SQL, split_id)

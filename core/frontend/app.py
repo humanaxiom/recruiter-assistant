@@ -860,6 +860,21 @@ def _render_job_detail(
     hiring_managers: list[Any] | None = []
     if _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
+    pending_splits: list[dict[str, Any]] = []
+    if _is_writer_session():
+        try:
+            listed = api_client.list_resume_splits(job_id)
+        except (
+            api_client.BackendUnavailable,
+            api_client.BadRequest,
+            api_client.NotFound,
+        ):
+            listed = []  # the listing is a convenience; never break the job page
+        blind = bool(job.get("blind_review"))
+        pending_splits = [
+            {**s, "source_filename": None if blind else s.get("source_filename")}
+            for s in listed
+        ]
     return (
         render_template(
             "job_detail.html",
@@ -872,6 +887,7 @@ def _render_job_detail(
             error=error,
             job_assignees=assignees,
             hiring_managers=hiring_managers,
+            pending_splits=pending_splits,
         ),
         status_code,
     )
@@ -1045,7 +1061,6 @@ def upload_candidate_roster(job_id: UUID) -> Any:
 
 
 _PAGE_ITEM = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
-_MAX_LIST_PAGES = 10000
 
 
 def _parse_page_list(raw: str) -> list[int]:
@@ -1056,6 +1071,7 @@ def _parse_page_list(raw: str) -> list[int]:
     text = raw.strip()
     if not text:
         return []
+    cap = get_settings().split_max_pages
     pages: list[int] = []
     for part in text.split(","):
         match = _PAGE_ITEM.fullmatch(part.strip())
@@ -1065,7 +1081,7 @@ def _parse_page_list(raw: str) -> list[int]:
         last = int(match.group(2)) if match.group(2) is not None else first
         if first < 1 or last < first:
             raise ValueError(f"{part.strip()!r} is not a valid page range")
-        if last - first + len(pages) >= _MAX_LIST_PAGES:
+        if last - first + len(pages) >= cap:
             raise ValueError("the page list is too long")
         pages.extend(range(first, last + 1))
     return pages
@@ -1130,12 +1146,23 @@ def _split_findings(
     return info, blocking
 
 
+def _submitted_row_numbers(form: Any) -> set[int]:
+    return {
+        int(m.group(1))
+        for key in form
+        if (m := re.fullmatch(r"(?:resume|cover)_pages_(\d+)", key))
+    }
+
+
 def _render_split_review(
     split_id: UUID,
     *,
     error: str | None = None,
     status_code: int = 200,
+    submitted: Any = None,
 ) -> Any:
+    """``submitted`` (a form mapping) re-renders the recruiter's own text after
+    a rejected save instead of the stored version."""
     try:
         view = api_client.get_resume_split(split_id)
     except api_client.NotFound:
@@ -1168,6 +1195,23 @@ def _render_split_review(
                 "cover": "",
             }
         )
+    ignored_text = _format_page_list(list(proposal.get("ignored_pages") or []))
+    if submitted is not None:
+        stored = len(proposal.get("applicants") or [])
+        numbers = sorted(_submitted_row_numbers(submitted))
+        rows = [
+            {
+                "n": n,
+                "label": f"Applicant {n}" if n <= stored else f"Applicant {n} (new)",
+                "name": (
+                    "" if blind else str(submitted.get(f"candidate_name_{n}", ""))[:200]
+                ),
+                "resume": str(submitted.get(f"resume_pages_{n}", "")),
+                "cover": str(submitted.get(f"cover_pages_{n}", "")),
+            }
+            for n in numbers
+        ]
+        ignored_text = str(submitted.get("ignored_pages", ""))
     info, blocking = _split_findings(view.get("diagnostics") or {})
     reason = str(view.get("failure_reason") or "")
     return (
@@ -1175,7 +1219,7 @@ def _render_split_review(
             "split_review.html",
             split=view,
             rows=rows,
-            ignored=_format_page_list(list(proposal.get("ignored_pages") or [])),
+            ignored=ignored_text,
             findings=info,
             blocking_findings=blocking,
             source_filename="" if blind else (view.get("source_filename") or ""),
@@ -1264,13 +1308,13 @@ def split_correct(split_id: UUID) -> Any:
             error="The proposal version is missing or not a number; reload the page.",
             status_code=400,
         )
-    numbers = sorted(
-        {
-            int(m.group(1))
-            for key in request.form
-            if (m := re.fullmatch(r"(?:resume|cover)_pages_(\d+)", key))
-        }
-    )
+    numbers = sorted(_submitted_row_numbers(request.form))
+    if len(numbers) > get_settings().split_max_pages:
+        return _render_split_review(
+            split_id,
+            error="Too many applicant rows were submitted.",
+            status_code=400,
+        )
     applicants: list[dict[str, Any]] = []
     try:
         for n in numbers:
@@ -1279,7 +1323,11 @@ def split_correct(split_id: UUID) -> Any:
             if resume or cover:
                 applicants.append(
                     {
-                        "candidate_name": "",
+                        # The API blanks it on a blind job; it only echoes
+                        # the name the page showed (hidden field per row).
+                        "candidate_name": request.form.get(f"candidate_name_{n}", "")[
+                            :200
+                        ],
                         "resume_pages": resume,
                         "cover_letter_pages": cover,
                     }
@@ -1290,6 +1338,7 @@ def split_correct(split_id: UUID) -> Any:
             split_id,
             error=f"Check the page lists: {exc}. Use pages like 1-2,5.",
             status_code=400,
+            submitted=request.form,
         )
     try:
         api_client.correct_resume_split(
@@ -1310,7 +1359,10 @@ def split_correct(split_id: UUID) -> Any:
         )
     except api_client.BadRequest as exc:
         return _render_split_review(
-            split_id, error=_format_error(exc.detail), status_code=400
+            split_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            submitted=request.form,
         )
     except api_client.NotFound:
         abort(404)

@@ -417,6 +417,20 @@
       <button class="btn btn-secondary" type="submit">Split export</button>
     </div>
   </form>
+  {% if pending_splits %}
+  <h4>Pending splits</h4>
+  <ul>
+    {% for s in pending_splits %}
+    <li>
+      <a href="{{ url_for('split_review', split_id=s.id) }}">Review split</a>
+      · {{ s.status }}
+      {% if s.page_count %} · {{ s.page_count }} page(s){% endif %}
+      {% if s.created_at %} · {{ s.created_at }}{% endif %}
+      {% if s.source_filename %} · {{ s.source_filename }}{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   {% endif %}
 
   {% if is_writer %}

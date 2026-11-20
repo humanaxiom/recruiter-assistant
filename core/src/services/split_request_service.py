@@ -418,3 +418,17 @@ async def sweep_orphan_blobs(conn: DbConn, blob_store: BlobStore) -> int:
     for key in orphans:
         await blob_store.delete(key)
     return len(orphans)
+
+
+async def list_pending(conn: DbConn, job_id: UUID) -> list[dict[str, Any]]:
+    """A job's splits still awaiting action (queued, segmenting, proposed,
+    failed), newest first. Metadata only: never the proposal or any name."""
+    rows = await conn.fetch(
+        "SELECT id, status, created_at, page_count, method, source_filename "
+        "FROM resume_split_requests "
+        "WHERE job_id = $1 AND status IN "
+        "('queued', 'segmenting', 'proposed', 'failed') "
+        "ORDER BY created_at DESC, id",
+        job_id,
+    )
+    return [dict(r) for r in rows]

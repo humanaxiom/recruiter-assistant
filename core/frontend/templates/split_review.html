@@ -71,7 +71,9 @@
       <tbody>
         {% for row in rows %}
         <tr>
-          <td>{{ row.label }}{% if row.name %} ({{ row.name }}){% endif %}</td>
+          <td>{{ row.label }}{% if row.name %} ({{ row.name }}){% endif %}
+            {% if row.name %}<input type="hidden" name="candidate_name_{{ row.n }}"
+                                    value="{{ row.name }}">{% endif %}</td>
           <td><input class="input" type="text" name="resume_pages_{{ row.n }}"
                      value="{{ row.resume }}"
                      aria-label="{{ row.label }} résumé pages"></td>

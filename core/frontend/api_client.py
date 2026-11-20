@@ -739,6 +739,12 @@ def split_upload(
     return response.json()
 
 
+def list_resume_splits(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /jobs/{id}/resume-splits -- the job's pending (non-terminal) splits,
+    newest first. Metadata only; never names or proposal contents."""
+    return _request("GET", f"/jobs/{job_id}/resume-splits", client=client).json()
+
+
 def get_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
     """GET /resume-splits/{id} -- the review view (status, proposal, diagnostics)."""
     return _request("GET", f"/resume-splits/{split_id}", client=client).json()
