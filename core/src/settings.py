@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     # passthroughs) are prefixed with this base — see
     # `src.api.routes.auth._landing_url`.
     cas_frontend_base_url: str = ""
+    # fix/cas-local-origin — the same stack reached at localhost on the box
+    # itself, where the public name does not resolve back to it. Used only
+    # for a request whose own Host is loopback (`src.services.cas_origin`);
+    # both empty (default) = one origin, behaviour unchanged.
+    cas_local_service_base_url: str = ""
+    cas_local_frontend_base_url: str = ""
 
     # ── Privacy ──────────────────────────────────────────────────────────────
     pii_key: str = ""  # env-supplied pgcrypto key for the app.pii_key GUC

@@ -37,6 +37,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
+from src.services.cas_origin import is_loopback_host
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import Settings, get_settings, validate_startup_session_secret
 
@@ -193,6 +194,15 @@ API = _settings.api_base_url
 _CAS_GATE_EXEMPT_PATHS = frozenset({"/health"})
 
 
+def _cas_api_base(settings: Settings) -> str:
+    """The browser-reachable API origin for THIS page's origin
+    (fix/cas-local-origin): the localhost one when the page was served on a
+    loopback host and it is configured, else the static public one."""
+    if settings.cas_local_service_base_url and is_loopback_host(request.host):
+        return settings.cas_local_service_base_url.rstrip("/")
+    return settings.cas_service_base_url.rstrip("/")
+
+
 @app.before_request
 def _cas_auth_gate() -> Any:
     """FU-5 slice 11 (ADR-019 §10/§3/§10b) — gate unauthenticated browser
@@ -224,9 +234,8 @@ def _cas_auth_gate() -> Any:
         if status.get("role") is None:
             return render_template("pending_access.html"), 200
         return None
-    login_url = (
-        f"{settings.cas_service_base_url.rstrip('/')}/auth/cas/login?"
-        + urlencode({"next": request.path})
+    login_url = f"{_cas_api_base(settings)}/auth/cas/login?" + urlencode(
+        {"next": request.path}
     )
     return redirect(login_url)
 
@@ -377,7 +386,7 @@ def inject_current_user() -> dict[str, Any]:
     UX control only.
     """
     settings = get_settings()
-    base = settings.cas_service_base_url.rstrip("/")
+    base = _cas_api_base(settings)
     current_user = getattr(g, "cas_user", None)
     is_writer = _is_writer_session()
     return {
