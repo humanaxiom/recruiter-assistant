@@ -39,6 +39,7 @@ from src.worker.main import WorkerSettings, startup
 from src.worker.manager_prompt_task import extract_manager_prompt
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.resume_tasks import parse_resume
+from src.worker.split_tasks import segment_taleo_export
 from src.worker.taleo_sync_task import sync_taleo_jobs
 from src.worker.tasks import parse_job
 
@@ -153,6 +154,8 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         # ``status = 'draft'``, so on an open requisition -- the case editing a
         # note exists for -- it would have done nothing and reported success.
         extract_manager_prompt,
+        # In-app Taleo split: enqueued by name from the split-upload route.
+        segment_taleo_export,
     ]
 
 
