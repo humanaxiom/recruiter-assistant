@@ -265,6 +265,49 @@ async def store_proposal(
     return won is not None
 
 
+_CORRECT_SQL = """
+UPDATE resume_split_requests
+SET proposal = $3, proposal_version = proposal_version + 1,
+    diagnostics = $4::jsonb, updated_at = now()
+WHERE id = $1 AND status = 'proposed' AND proposal_version = $2
+RETURNING proposal_version
+"""
+
+
+async def store_correction(
+    conn: DbConn,
+    split_id: UUID,
+    proposal: SplitProposal,
+    *,
+    expected_version: int,
+    diagnostics: ProposalDiagnostics,
+    blind_review: bool,
+) -> int | None:
+    """CAS proposed -> proposed at ``expected_version``: replace the encrypted
+    proposal, bump the version and return it (``None`` when another writer won)."""
+    to_store = proposal
+    if blind_review:
+        to_store = proposal.model_copy(
+            update={
+                "applicants": [
+                    a.model_copy(update={"candidate_name": ""})
+                    for a in proposal.applicants
+                ]
+            }
+        )
+    async with conn.transaction():
+        await pii.set_pii_key(conn)
+        cipher = await pii.encrypt(conn, to_store.model_dump_json())
+        version = await conn.fetchval(
+            _CORRECT_SQL,
+            split_id,
+            expected_version,
+            cipher,
+            json.dumps(diagnostics.model_dump()),
+        )
+    return None if version is None else int(version)
+
+
 async def load_proposal(conn: DbConn, split_id: UUID) -> SplitProposal | None:
     """Decrypt and parse the stored proposal; ``None`` if there is none."""
     async with conn.transaction():
