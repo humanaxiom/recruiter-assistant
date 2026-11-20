@@ -513,3 +513,52 @@ async def test_route_unparsed_consent_string_is_passed_as_false() -> None:
                 data={"consent_acknowledged": "nope"},
             )
     assert spy.await_args.kwargs["consent_acknowledged"] is False
+
+
+# -- Slice C1 review fix M2: ``max_files`` keyword ---------------------------
+# The service-side count cap (_MAX_ZIP_ENTRIES = 50) would reject a valid
+# in-app split accept of >25 applicants-with-covers. ``max_files`` is a
+# keyword-only parameter whose DEFAULT is the current cap (50), so the route's
+# behaviour is unchanged; the accept path passes its own bound.
+
+
+def _distinct_files(n: int) -> list[tuple[str, bytes]]:
+    return [(f"r{i}.pdf", _PDF_MAGIC + str(i).encode()) for i in range(n)]
+
+
+def test_ingest_files_max_files_default_is_the_current_cap_m2() -> None:
+    import inspect
+
+    param = inspect.signature(resume_ingest_service.ingest_files).parameters[
+        "max_files"
+    ]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default == 50
+
+
+@pytest.mark.asyncio
+async def test_ingest_files_over_default_cap_still_rejected_m2() -> None:
+    conn, store = _mock_conn(), _mock_blob_store()
+    with pytest.raises(FileRejectedError):
+        await _ingest(conn, store, _distinct_files(60))
+
+
+@pytest.mark.asyncio
+async def test_ingest_files_raised_max_files_accepts_sixty_slices_m2() -> None:
+    conn, store = _mock_conn(), _mock_blob_store()
+    results = await _ingest(conn, store, _distinct_files(60), max_files=120)
+    assert len(_accepted(results)) == 60
+
+
+@pytest.mark.asyncio
+async def test_ingest_files_max_files_can_also_lower_the_cap_m2() -> None:
+    conn, store = _mock_conn(), _mock_blob_store()
+    with pytest.raises(FileRejectedError):
+        await _ingest(conn, store, _distinct_files(11), max_files=10)
+
+
+@pytest.mark.asyncio
+async def test_ingest_files_at_exactly_max_files_is_accepted_m2() -> None:
+    conn, store = _mock_conn(), _mock_blob_store()
+    results = await _ingest(conn, store, _distinct_files(10), max_files=10)
+    assert len(_accepted(results)) == 10

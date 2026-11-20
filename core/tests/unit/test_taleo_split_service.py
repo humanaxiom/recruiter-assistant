@@ -619,3 +619,99 @@ def test_script_still_exposes_cli_only_names() -> None:
     script = _script_module()
     for name in ("main", "parse_ranges", "merged_applicant_files", "_zip_outputs"):
         assert callable(getattr(script, name)), name
+
+
+# ── Slice C1 review fixes (M1, M3) ───────────────────────────────────────────
+# M1: llm_segment must strip model-supplied ``ignored_pages`` (manager-only,
+# decision 2) and every ``candidate_name`` (guessed names never persisted,
+# decision 6) before returning.
+# M3: build_slices takes ``exclude: Collection[int]`` (1-based applicant
+# indexes) that are skipped while numbering is preserved (decision 1: accept
+# passes cover_only | low_text).
+
+
+@pytest.mark.asyncio
+async def test_llm_segment_clears_model_supplied_ignored_pages_m1() -> None:
+    llm = _FakeLLM(
+        result=SplitProposal(
+            applicants=[_app([1, 2], [3]), _app([4])], ignored_pages=[2]
+        )
+    )
+    out = await svc.llm_segment(llm, _clean_texts())  # type: ignore[arg-type]
+    assert out.ignored_pages == []
+
+
+@pytest.mark.asyncio
+async def test_llm_segment_clears_every_candidate_name_m1() -> None:
+    llm = _FakeLLM(
+        result=SplitProposal(
+            applicants=[_app([1, 2], [3], name="Pat Example"), _app([4], name="Lee")]
+        )
+    )
+    out = await svc.llm_segment(llm, _clean_texts())  # type: ignore[arg-type]
+    assert [a.candidate_name for a in out.applicants] == ["", ""]
+
+
+@pytest.mark.asyncio
+async def test_llm_segment_keeps_the_page_assignments_when_stripping_m1() -> None:
+    llm = _FakeLLM(
+        result=SplitProposal(
+            applicants=[_app([1, 2], [3], name="Pat"), _app([4])], ignored_pages=[9]
+        )
+    )
+    out = await svc.llm_segment(llm, _clean_texts())  # type: ignore[arg-type]
+    assert [a.resume_pages for a in out.applicants] == [[1, 2], [4]]
+    assert [a.cover_letter_pages for a in out.applicants] == [[3], []]
+
+
+@pytest.mark.asyncio
+async def test_llm_segment_strip_means_a_dropped_applicant_cannot_hide_m1() -> None:
+    # A model that "ignores" page 4 to hide an applicant: after the strip the
+    # page is MISSING again, so validate_proposal blocks accept.
+    texts = _clean_texts()
+    llm = _FakeLLM(
+        result=SplitProposal(applicants=[_app([1, 2], [3])], ignored_pages=[4])
+    )
+    out = await svc.llm_segment(llm, texts)  # type: ignore[arg-type]
+    assert svc.validate_proposal(out, texts).missing == [4]
+
+
+def test_build_slices_exclude_skips_the_index_but_keeps_numbering_m3() -> None:
+    proposal = SplitProposal(applicants=[_app([1]), _app([2, 3]), _app([4, 5])])
+    slices = svc.build_slices(_marker_pdf(), proposal, exclude={2})
+    assert [s.index for s in slices] == [1, 3]
+    assert slices[1].resume_filename == "applicant-003_resume.pdf"
+    emitted = "".join("".join(_pdf_texts(s.resume_pdf)) for s in slices)
+    assert "MARKER-2" not in emitted and "MARKER-3" not in emitted
+
+
+def test_build_slices_exclude_default_is_unchanged_m3() -> None:
+    proposal = SplitProposal(applicants=[_app([1]), _app([2, 3])])
+    pdf = _marker_pdf()
+    assert [s.index for s in svc.build_slices(pdf, proposal)] == [1, 2]
+    assert [s.index for s in svc.build_slices(pdf, proposal, exclude=())] == [1, 2]
+
+
+@pytest.mark.parametrize("kind", [set, frozenset, list, tuple])
+def test_build_slices_exclude_accepts_any_collection_m3(kind: type) -> None:
+    proposal = SplitProposal(applicants=[_app([1]), _app([2]), _app([3])])
+    slices = svc.build_slices(_marker_pdf(), proposal, exclude=kind([1, 3]))
+    assert [s.index for s in slices] == [2]
+
+
+def test_build_slices_exclude_covers_low_text_union_cover_only_m3() -> None:
+    texts = [_resume_text("a@example.com"), "x", _resume_text("c@example.com")]
+    proposal = SplitProposal(
+        applicants=[_app([1]), _app([2]), _app([3]), _app([], [4])]
+    )
+    pdf = _make_pdf([*texts, "cover only page"])
+    diag = svc.validate_proposal(proposal, _pdf_texts(pdf))
+    skip = set(diag.cover_only) | set(diag.low_text)
+    assert skip == {2, 4}
+    assert [s.index for s in svc.build_slices(pdf, proposal, exclude=skip)] == [1, 3]
+
+
+def test_build_slices_exclude_of_unknown_index_is_ignored_m3() -> None:
+    proposal = SplitProposal(applicants=[_app([1]), _app([2])])
+    slices = svc.build_slices(_marker_pdf(), proposal, exclude={99})
+    assert [s.index for s in slices] == [1, 2]
