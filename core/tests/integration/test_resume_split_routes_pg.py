@@ -978,3 +978,143 @@ async def test_unreadable_source_blob_is_409_and_the_row_is_untouched(
     row = await _row(pool, split_id)
     assert row["status"] == "proposed"
     assert int(row["proposal_version"]) == v0
+
+
+# ── slice E5 (RED): GET /jobs/{job_id}/resume-splits ─────────────────────────
+
+
+async def _seed_listing(
+    pool: asyncpg.Pool, store: BlobStore, job_id: UUID
+) -> dict[str, UUID]:
+    """One row per status; created_at is staggered so 'newest first' is
+    testable. Every row's filename is ``f-<status>.pdf``."""
+    pdf, proposal = _four_page_export()
+    ids: dict[str, UUID] = {}
+    for status in ("accepted", "queued", "failed", "discarded", "segmenting"):
+        async with pool.acquire() as conn:
+            ids[status] = await srs.create(
+                conn,
+                store,
+                job_id=job_id,
+                filename="export.pdf",
+                data=pdf + status.encode(),
+                consent_acknowledged=True,
+                created_by="rec",
+            )
+    ids["proposed"] = await _seed_proposed(pool, store, job_id, pdf, proposal)
+    ages = {
+        "accepted": 60,
+        "discarded": 50,
+        "failed": 40,
+        "queued": 30,
+        "segmenting": 20,
+        "proposed": 10,
+    }
+    async with pool.acquire() as conn:
+        for status, split_id in ids.items():
+            await conn.execute(
+                "UPDATE resume_split_requests SET status = $2, "
+                "source_filename = $3, "
+                "created_at = now() - make_interval(mins => $4) WHERE id = $1",
+                split_id,
+                status,
+                f"f-{status}.pdf",
+                ages[status],
+            )
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_listing_returns_only_non_terminal_splits_newest_first(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    ids = await _seed_listing(pool, store, job_id)
+    other_job = await _job(pool)
+    await _seed_listing(pool, store, other_job)  # another job's rows never leak
+    app = _build_app(pool, store, _arq())
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/resume-splits")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert isinstance(items, list)
+    assert [i["id"] for i in items] == [
+        str(ids["proposed"]),
+        str(ids["segmenting"]),
+        str(ids["queued"]),
+        str(ids["failed"]),
+    ]
+    assert [i["status"] for i in items] == [
+        "proposed",
+        "segmenting",
+        "queued",
+        "failed",
+    ]
+    for item in items:
+        assert isinstance(item["created_at"], str)
+        assert "page_count" in item and "method" in item
+    assert items[0]["method"] == "heuristic"
+    assert items[0]["page_count"] == 4
+    assert [i["source_filename"] for i in items] == [
+        "f-proposed.pdf",
+        "f-segmenting.pdf",
+        "f-queued.pdf",
+        "f-failed.pdf",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_listing_never_carries_names_or_proposal_contents(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    await _seed_listing(pool, store, job_id)
+    app = _build_app(pool, store, _arq())
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/resume-splits")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 4
+    for name in _NAMES:
+        assert name not in resp.text
+    for item in resp.json():
+        assert "proposal" not in item
+        assert "candidate_name" not in item
+        assert "applicants" not in item
+
+
+@pytest.mark.asyncio
+async def test_listing_on_a_blind_job_has_no_filename(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool, blind=True)
+    await _seed_listing(pool, store, job_id)
+    app = _build_app(pool, store, _arq())
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/resume-splits")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 4
+    assert "f-" not in resp.text and ".pdf" not in resp.text
+    for item in items:
+        assert item.get("source_filename") is None
+
+
+@pytest.mark.asyncio
+async def test_listing_with_no_splits_is_an_empty_list(
+    pool: asyncpg.Pool, store: BlobStore
+) -> None:
+    job_id = await _job(pool)
+    app = _build_app(pool, store, _arq())
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{job_id}/resume-splits")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_listing_unknown_job_is_404(pool: asyncpg.Pool, store: BlobStore) -> None:
+    app = _build_app(pool, store, _arq())
+    async with await _client(app) as client:
+        resp = await client.get(f"/jobs/{uuid4()}/resume-splits")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "resource.not_found"  # not a missing route

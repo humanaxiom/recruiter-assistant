@@ -139,6 +139,7 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # In-app split of a combined Taleo export (ADR-017 amendment): upload,
         # review, correct, accept, discard. Same writer role gate as above.
         "/jobs/{job_id}/resumes/split-upload",
+        "/jobs/{job_id}/resume-splits",
         "/resume-splits/{split_id}",
         "/resume-splits/{split_id}/correct",
         "/resume-splits/{split_id}/accept",

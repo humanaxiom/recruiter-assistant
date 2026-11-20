@@ -1077,3 +1077,76 @@ async def test_upload_failure_on_file_two_leaves_file_one_enqueued_and_errors(
         )
     assert resp.status_code >= 400
     arq.enqueue_job.assert_awaited_once_with("segment_taleo_export", str(first))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Slice E5 (RED): GET /jobs/{job_id}/resume-splits -- the pending-split listing.
+# The row/SQL behaviour is pinned against real Postgres in
+# tests/integration/test_resume_split_routes_pg.py; these pin the gates.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _list_url(job_id: UUID | None = None) -> str:
+    return f"/jobs/{job_id or uuid4()}/resume-splits"
+
+
+@pytest.mark.parametrize("session_role", ["hiring_manager", "auditor"])
+@pytest.mark.asyncio
+async def test_listing_non_writer_session_is_403(
+    spies: _Spies, session_role: str
+) -> None:
+    conn = _mock_conn(_split_row())
+    app = _build_app(conn, key_role=Role.RECRUITER)
+    app.dependency_overrides[resolve_user] = lambda: _session_user(role=session_role)
+    async with await _client(app) as client:
+        resp = await client.get(_list_url())
+    assert resp.status_code == 403
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("key_role", [Role.HIRING_MANAGER, Role.AUDITOR])
+@pytest.mark.asyncio
+async def test_listing_non_writer_api_key_is_403(spies: _Spies, key_role: Role) -> None:
+    conn = _mock_conn(_split_row())
+    app = _build_app(conn, key_role=key_role)
+    async with await _client(app) as client:
+        resp = await client.get(_list_url())
+    assert resp.status_code == 403
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("session_role", ["admin", "recruiter"])
+@pytest.mark.asyncio
+async def test_listing_writer_session_gets_a_json_list(
+    spies: _Spies, session_role: str
+) -> None:
+    app = _build_app(_mock_conn(_split_row()), key_role=Role.RECRUITER)
+    app.dependency_overrides[resolve_user] = lambda: _session_user(role=session_role)
+    async with await _client(app) as client:
+        resp = await client.get(_list_url())
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_listing_unknown_job_is_404(spies: _Spies) -> None:
+    app = _build_app(_mock_conn(None))
+    async with await _client(app) as client:
+        resp = await client.get(_list_url())
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "resource.not_found"  # not a missing route
+
+
+@pytest.mark.asyncio
+async def test_listing_is_read_only_and_audits_nothing(spies: _Spies) -> None:
+    arq = MagicMock(enqueue_job=AsyncMock())
+    store = _mock_store()
+    app = _build_app(_mock_conn(_split_row()), arq=arq, store=store)
+    async with await _client(app) as client:
+        resp = await client.get(_list_url())
+    assert resp.status_code == 200
+    for spy in spies.writes():
+        spy.assert_not_awaited()
+    store.put.assert_not_called()
+    store.delete.assert_not_called()
+    arq.enqueue_job.assert_not_awaited()

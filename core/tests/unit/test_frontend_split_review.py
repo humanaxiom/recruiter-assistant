@@ -1229,3 +1229,409 @@ def test_backend_403_for_a_non_writer_is_handled_not_a_500(
 
     for resp in responses:
         assert resp.status_code < 500
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Slice E5 (RED): pending-split listing + review-screen fixes
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _pending(
+    status: str = "proposed", filename: str | None = "export.pdf"
+) -> dict[str, Any]:
+    return {
+        "id": str(uuid4()),
+        "status": status,
+        "created_at": _STAMP,
+        "page_count": 8,
+        "method": "llm",
+        "source_filename": filename,
+    }
+
+
+def _job_page(
+    monkeypatch: Any,
+    client: Any,
+    listing: Any,
+    *,
+    blind: bool = False,
+) -> tuple[int, str]:
+    job_id = uuid4()
+    monkeypatch.setattr(
+        api_client, "get_job", lambda jid, **kw: _job(job_id, blind=blind)
+    )
+    monkeypatch.setattr(api_client, "list_resumes", lambda jid, **kw: [])
+    if isinstance(listing, Exception):
+
+        def _boom(*a: Any, **k: Any) -> Any:
+            raise listing
+
+        monkeypatch.setattr(api_client, "list_resume_splits", _boom, raising=False)
+    else:
+        monkeypatch.setattr(
+            api_client,
+            "list_resume_splits",
+            MagicMock(return_value=listing),
+            raising=False,
+        )
+    resp = client.get(f"/jobs/{job_id}")
+    return resp.status_code, resp.get_data(as_text=True)
+
+
+def test_job_page_lists_pending_splits_with_review_links_and_status(
+    monkeypatch: Any, plain_client: Any
+) -> None:
+    items = [_pending("proposed"), _pending("queued"), _pending("failed")]
+
+    code, body = _job_page(monkeypatch, plain_client, items)
+
+    assert code == 200
+    assert "Pending splits" in body
+    for item in items:
+        assert f"/resume-splits/{item['id']}" in body
+        assert item["status"] in body.lower()
+
+
+def test_job_page_has_no_pending_section_when_there_are_none(
+    monkeypatch: Any, plain_client: Any
+) -> None:
+    code, body = _job_page(monkeypatch, plain_client, [])
+
+    assert code == 200
+    assert "Pending splits" not in body
+    assert "Split a combined Taleo export" in body
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        api_client.BackendUnavailable("down"),
+        api_client.BadRequest("x", status_code=403, detail={"detail": "no"}),
+        api_client.NotFound("gone"),
+    ],
+    ids=["503", "403", "404"],
+)
+def test_job_page_survives_a_failing_pending_listing(
+    monkeypatch: Any, plain_client: Any, failure: Exception
+) -> None:
+    code, body = _job_page(monkeypatch, plain_client, failure)
+
+    assert code == 200
+    assert "Split a combined Taleo export" in body
+    assert "Pending splits" not in body
+
+
+def test_job_page_pending_list_shows_no_filename_on_a_blind_job(
+    monkeypatch: Any, plain_client: Any
+) -> None:
+    items = [_pending("proposed", filename="Jane Roe export.pdf")]
+
+    code, body = _job_page(monkeypatch, plain_client, items, blind=True)
+
+    assert code == 200
+    assert "Pending splits" in body
+    assert f"/resume-splits/{items[0]['id']}" in body
+    assert "Jane" not in body and "Roe" not in body
+
+
+def test_job_page_pending_list_shows_the_filename_on_a_normal_job(
+    monkeypatch: Any, plain_client: Any
+) -> None:
+    items = [_pending("proposed", filename="march-export.pdf")]
+
+    _, body = _job_page(monkeypatch, plain_client, items)
+
+    assert "march-export.pdf" in body
+
+
+def test_job_page_pending_list_is_hidden_from_non_writers(
+    monkeypatch: Any, plain_client: Any
+) -> None:
+    settings = Settings(cas_enabled=True)
+    monkeypatch.setattr(frontend_app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        api_client,
+        "get_cas_user",
+        MagicMock(
+            return_value={
+                "authenticated": True,
+                "username": "jordan",
+                "cas_enabled": True,
+                "role": "hiring_manager",
+            }
+        ),
+    )
+
+    code, body = _job_page(monkeypatch, plain_client, [_pending()])
+
+    assert code == 200
+    assert "Pending splits" not in body
+    assert "/resume-splits/" not in body
+
+
+# ---- correct: the recruiter's edits survive a rejected save ---------------
+
+_EDITED = {
+    "resume_pages_1": "abc",
+    "cover_pages_1": "3",
+    "resume_pages_2": "9",
+    "cover_pages_2": "",
+    "resume_pages_3": "",
+    "cover_pages_3": "",
+    "resume_pages_4": "",
+    "cover_pages_4": "",
+    "resume_pages_5": "10-11",
+    "cover_pages_5": "",
+    "ignored_pages": "2",
+}
+
+
+def _rendered_values(body: str) -> dict[str, str]:
+    form = _form_for(body, "/correct") or {"inputs": []}
+    return {n: i.get("value", "") for n, i in _inputs(form).items()}
+
+
+def test_correct_400_parse_error_rerenders_the_submitted_values(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+    monkeypatch.setattr(api_client, "correct_resume_split", MagicMock())
+    _install(monkeypatch, _view(split_id))
+
+    resp = client.post(
+        f"/resume-splits/{split_id}/correct", data=_correct_form(**_EDITED)
+    )
+
+    assert resp.status_code == 400
+    values = _rendered_values(resp.get_data(as_text=True))
+    for key, submitted in _EDITED.items():
+        assert values[key] == submitted, key
+
+
+def test_correct_api_422_rerenders_the_submitted_values(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+
+    def _bad(*a: Any, **k: Any) -> Any:
+        raise api_client.BadRequest(
+            "x", status_code=422, detail={"detail": "pages must be within 1..8"}
+        )
+
+    monkeypatch.setattr(api_client, "correct_resume_split", _bad)
+    _install(monkeypatch, _view(split_id))
+    edited = dict(_EDITED, resume_pages_1="99")
+
+    resp = client.post(
+        f"/resume-splits/{split_id}/correct", data=_correct_form(**edited)
+    )
+
+    body = resp.get_data(as_text=True)
+    assert resp.status_code in (400, 422)
+    assert "pages must be within 1..8" in body
+    values = _rendered_values(body)
+    for key, submitted in edited.items():
+        assert values[key] == submitted, key
+
+
+def test_correct_409_still_shows_the_current_stored_version_not_the_edits(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+
+    def _stale(*a: Any, **k: Any) -> Any:
+        raise api_client.Conflict("x", status_code=409, detail={"message": "stale"})
+
+    monkeypatch.setattr(api_client, "correct_resume_split", _stale)
+    _install(monkeypatch, _view(split_id, version=7))
+    edited = dict(_EDITED, resume_pages_1="77")
+
+    resp = client.post(
+        f"/resume-splits/{split_id}/correct", data=_correct_form(**edited)
+    )
+
+    assert resp.status_code == 409
+    values = _rendered_values(resp.get_data(as_text=True))
+    assert values["proposal_version"] == "7"
+    assert values["resume_pages_1"] == "1-2"
+    assert values["resume_pages_3"] == "6-8"
+    assert values["ignored_pages"] == ""
+
+
+def test_a_plain_get_still_renders_the_stored_values(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+    _install(monkeypatch, _view(split_id))
+
+    _, body = _get(client, split_id)
+
+    values = _rendered_values(body)
+    assert values["resume_pages_1"] == "1-2"
+    assert values["cover_pages_1"] == "3"
+
+
+# ---- BFF bounds -----------------------------------------------------------
+
+
+def _bounds_setup(monkeypatch: Any, split_id: UUID) -> MagicMock:
+    spy = MagicMock(return_value=_view(split_id))
+    monkeypatch.setattr(api_client, "correct_resume_split", spy)
+    _install(monkeypatch, _view(split_id))
+    return spy
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["resume_pages_1", "cover_pages_1", "ignored_pages"],
+)
+@pytest.mark.parametrize("value", ["1-301", ",".join(["1"] * 301)])
+def test_a_page_list_over_the_split_cap_is_400_before_any_api_call(
+    monkeypatch: Any, client: Any, field: str, value: str
+) -> None:
+    split_id = uuid4()
+    spy = _bounds_setup(monkeypatch, split_id)
+    data = _correct_form(resume_pages_1="1", cover_pages_1="")
+    data[field] = value
+
+    resp = client.post(f"/resume-splits/{split_id}/correct", data=data)
+
+    assert resp.status_code == 400
+    spy.assert_not_called()
+
+
+def test_a_page_list_of_exactly_the_cap_is_accepted(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+    spy = _bounds_setup(monkeypatch, split_id)
+
+    resp = client.post(
+        f"/resume-splits/{split_id}/correct",
+        data=_correct_form(resume_pages_1="1-300", cover_pages_1=""),
+    )
+
+    assert resp.status_code == 302
+    spy.assert_called_once()
+
+
+def test_more_applicant_rows_than_the_cap_is_400_before_any_api_call(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+    spy = _bounds_setup(monkeypatch, split_id)
+    rows = {f"resume_pages_{n}": "1" for n in range(1, 302)}
+
+    resp = client.post(f"/resume-splits/{split_id}/correct", data=_correct_form(**rows))
+
+    assert resp.status_code == 400
+    spy.assert_not_called()
+
+
+def test_exactly_the_cap_of_applicant_rows_is_accepted(
+    monkeypatch: Any, client: Any
+) -> None:
+    split_id = uuid4()
+    spy = _bounds_setup(monkeypatch, split_id)
+    rows = {f"resume_pages_{n}": "1" for n in range(1, 301)}
+
+    resp = client.post(f"/resume-splits/{split_id}/correct", data=_correct_form(**rows))
+
+    assert resp.status_code == 302
+    assert len(spy.call_args.kwargs["applicants"]) == 300
+
+
+# ---- names survive a save on a non-blind job ------------------------------
+
+
+def _round_trip_payload(
+    monkeypatch: Any,
+    client: Any,
+    view: dict[str, Any],
+    *,
+    edit: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """GET the review page, post back exactly what its correct form carries
+    (plus ``edit``), and return the ``applicants`` the API call received."""
+    split_id = UUID(view["id"])
+    _install(monkeypatch, view)
+    spy = MagicMock(return_value=view)
+    monkeypatch.setattr(api_client, "correct_resume_split", spy)
+    _, body = _get(client, split_id)
+    form = _form_for(body, "/correct")
+    assert form is not None
+    data = {
+        name: inp.get("value", "")
+        for name, inp in _inputs(form).items()
+        if inp.get("type") != "submit"
+    }
+    data.update(edit or {})
+    resp = client.post(f"/resume-splits/{split_id}/correct", data=data)
+    assert resp.status_code == 302
+    applicants: list[dict[str, Any]] = spy.call_args.kwargs["applicants"]
+    return applicants
+
+
+def test_saving_a_correction_keeps_each_applicants_name_on_a_normal_job(
+    monkeypatch: Any, client: Any
+) -> None:
+    view = _view(
+        uuid4(),
+        applicants=[
+            _applicant([1, 2], [3], name="Jane Roe"),
+            _applicant([4, 5], name="Omar Haddad"),
+            _applicant([6, 7, 8]),
+        ],
+    )
+
+    sent = _round_trip_payload(monkeypatch, client, view)
+
+    assert [a["candidate_name"] for a in sent] == ["Jane Roe", "Omar Haddad", ""]
+    assert [a["resume_pages"] for a in sent] == [[1, 2], [4, 5], [6, 7, 8]]
+
+
+def test_a_name_stays_with_its_row_when_the_pages_are_edited(
+    monkeypatch: Any, client: Any
+) -> None:
+    view = _view(
+        uuid4(),
+        applicants=[
+            _applicant([1, 2], name="Jane Roe"),
+            _applicant([3, 4], name="Omar Haddad"),
+        ],
+    )
+
+    sent = _round_trip_payload(
+        monkeypatch, client, view, edit={"resume_pages_2": "3-5"}
+    )
+
+    assert [(a["candidate_name"], a["resume_pages"]) for a in sent] == [
+        ("Jane Roe", [1, 2]),
+        ("Omar Haddad", [3, 4, 5]),
+    ]
+
+
+def test_a_new_spare_row_gets_an_empty_name(monkeypatch: Any, client: Any) -> None:
+    view = _view(uuid4(), applicants=[_applicant([1, 2], name="Jane Roe")])
+
+    sent = _round_trip_payload(
+        monkeypatch, client, view, edit={"resume_pages_2": "3-4"}
+    )
+
+    assert [a["candidate_name"] for a in sent] == ["Jane Roe", ""]
+
+
+def test_blind_job_correction_still_sends_empty_names(
+    monkeypatch: Any, client: Any
+) -> None:
+    view = _view(
+        uuid4(),
+        blind=True,
+        applicants=[_applicant([1, 2], name="Jane Roe"), _applicant([3, 4])],
+    )
+    # An API regression leaks a name into the blind payload.
+    view["proposal"]["applicants"][0]["candidate_name"] = "Jane Roe"
+
+    sent = _round_trip_payload(monkeypatch, client, view)
+
+    assert [a["candidate_name"] for a in sent] == ["", ""]

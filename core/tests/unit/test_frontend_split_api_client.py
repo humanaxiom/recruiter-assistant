@@ -165,3 +165,42 @@ def test_a_409_carries_the_backend_body_as_detail() -> None:
             client=_client([], 409, body),
         )
     assert info.value.detail == body
+
+
+# ------------------------------------------------ slice E5 (RED): listing
+
+
+def test_list_resume_splits_gets_the_jobs_pending_splits() -> None:
+    job_id = uuid4()
+    seen: list[httpx.Request] = []
+    items = [{"id": str(uuid4()), "status": "queued", "created_at": "2026-11-20"}]
+
+    out = api_client.list_resume_splits(job_id, client=_client(seen, 200, items))
+
+    assert out == items
+    (req,) = seen
+    assert req.method == "GET"
+    assert req.url.path == f"/jobs/{job_id}/resume-splits"
+
+
+@pytest.mark.parametrize(
+    ("status", "exc"),
+    [
+        (403, api_client.BadRequest),
+        (404, api_client.NotFound),
+        (503, api_client.BackendUnavailable),
+    ],
+)
+def test_list_resume_splits_maps_http_errors(status: int, exc: type[Exception]) -> None:
+    with pytest.raises(exc):
+        api_client.list_resume_splits(
+            uuid4(), client=_client([], status, {"detail": "x"})
+        )
+
+
+def test_list_resume_splits_client_is_keyword_only() -> None:
+    import inspect
+
+    param = inspect.signature(api_client.list_resume_splits).parameters["client"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
