@@ -136,6 +136,13 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # Sponsor Requirements PR2 slice 2 — Taleo candidate-roster CSV
         # reconciliation, same writer role gate as the résumé upload above.
         "/jobs/{job_id}/candidate-roster",
+        # In-app split of a combined Taleo export (ADR-017 amendment): upload,
+        # review, correct, accept, discard. Same writer role gate as above.
+        "/jobs/{job_id}/resumes/split-upload",
+        "/resume-splits/{split_id}",
+        "/resume-splits/{split_id}/correct",
+        "/resume-splits/{split_id}/accept",
+        "/resume-splits/{split_id}/discard",
         "/resumes/{resume_id}",
         "/resumes/{resume_id}/reveal",
         "/resumes/{resume_id}/match-jobs",

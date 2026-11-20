@@ -88,6 +88,12 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # the résumé upload above (audited screening declarations against real
     # people), so it carries the identical writer/session-role gate.
     ("POST", "/jobs/{job_id}/candidate-roster"),
+    # In-app Taleo split: every state change on a split request writes or
+    # ingests candidate documents, so it carries the same writer gate.
+    ("POST", "/jobs/{job_id}/resumes/split-upload"),
+    ("POST", "/resume-splits/{split_id}/correct"),
+    ("POST", "/resume-splits/{split_id}/accept"),
+    ("POST", "/resume-splits/{split_id}/discard"),
     ("POST", "/resumes/{resume_id}/reveal"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),
