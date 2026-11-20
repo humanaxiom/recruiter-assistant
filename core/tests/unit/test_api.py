@@ -140,8 +140,12 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # review, correct, accept, discard. Same writer role gate as above.
         "/jobs/{job_id}/resumes/split-upload",
         "/jobs/{job_id}/resume-splits",
-        # Export a job's résumés + covers as a ZIP (as-is + anonymized), writers.
-        "/jobs/{job_id}/resumes/export.zip",
+        # Export a job's résumés + covers as a ZIP (as-is + anonymized), built
+        # by a background job; status and download are requester-only.
+        "/jobs/{job_id}/resumes/exports",
+        "/jobs/{job_id}/resumes/exports/latest",
+        "/resume-exports/{export_id}",
+        "/resume-exports/{export_id}/download",
         "/resume-splits/{split_id}",
         "/resume-splits/{split_id}/correct",
         "/resume-splits/{split_id}/accept",

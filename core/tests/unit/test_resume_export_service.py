@@ -289,7 +289,8 @@ def test_as_is_entries_are_byte_identical_and_anonymized_are_clean() -> None:
     from src.services.resume_export_service import build_export_zip
 
     resume, cover = _resume_pdf(), _cover_pdf()
-    zf = _zip(build_export_zip([_applicant(cover_pdf=cover)], blind_review=False))
+    applicant = _applicant(resume_pdf=resume, cover_pdf=cover)
+    zf = _zip(build_export_zip([applicant], blind_review=False))
 
     assert zf.read("as-is/applicant-001_resume.pdf") == resume
     assert zf.read("as-is/applicant-001_cover_letter.pdf") == cover
