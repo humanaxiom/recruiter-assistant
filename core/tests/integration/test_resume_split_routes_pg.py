@@ -1094,7 +1094,11 @@ async def test_listing_on_a_blind_job_has_no_filename(
     assert resp.status_code == 200
     items = resp.json()
     assert len(items) == 4
-    assert "f-" not in resp.text and ".pdf" not in resp.text
+    # Seeded rows are named f-<status>.pdf. Match the whole name: a bare "f-"
+    # occurs inside the uuid4 ids in the same body ~64% of the time.
+    statuses = ("queued", "segmenting", "proposed", "failed")
+    assert all(f"f-{s}.pdf" not in resp.text for s in statuses)
+    assert ".pdf" not in resp.text
     for item in items:
         assert item.get("source_filename") is None
 
