@@ -473,7 +473,7 @@ _STATEMENTS: tuple[str, ...] = (
                                                'accepted', 'discarded', 'failed')),
         source_blob_key      TEXT,
         source_sha256        TEXT NOT NULL,
-        source_filename      TEXT NOT NULL,
+        source_filename      TEXT,
         page_count           INTEGER,
         proposal             BYTEA,
         proposal_version     INTEGER NOT NULL DEFAULT 0,
@@ -498,6 +498,9 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS resume_split_requests_status_idx
         ON resume_split_requests (status, updated_at)
     """,
+    # source_filename may carry a candidate's name, so every terminal state NULLs
+    # it; the column was NOT NULL on volumes created before that rule.
+    "ALTER TABLE resume_split_requests ALTER COLUMN source_filename DROP NOT NULL",
     # ── shortlist_entries ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS shortlist_entries (

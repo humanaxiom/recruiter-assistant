@@ -257,7 +257,12 @@ def validate_proposal(
     merged: list[int] = []
     cover_only: list[int] = []
     low_text: list[int] = []
+    misfiled: set[int] = set()
     for idx, a in enumerate(proposal.applicants, start=1):
+        for p in valid_pages(a.cover_letter_pages, page_count):
+            head = page_texts[p - 1]
+            if not is_cover(head) and EMAIL_RE.search(head[:_MERGED_HEAD]):
+                misfiled.add(p)
         r_pages = valid_pages(a.resume_pages, page_count)
         if not r_pages:
             if valid_pages(a.cover_letter_pages, page_count):
@@ -278,6 +283,7 @@ def validate_proposal(
         merged=merged,
         cover_only=cover_only,
         low_text=low_text,
+        misfiled_cover=sorted(misfiled),
     )
 
 

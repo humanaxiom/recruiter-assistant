@@ -230,7 +230,8 @@ async def _check_postgres(pg: Any, settings: Any) -> list[Finding]:
 _SPLIT_TERMINAL_HOLDING_SQL = """
 SELECT id FROM resume_split_requests
 WHERE status IN ('accepted', 'discarded', 'failed')
-  AND (source_blob_key IS NOT NULL OR proposal IS NOT NULL)
+  AND (source_blob_key IS NOT NULL OR proposal IS NOT NULL
+       OR source_filename IS NOT NULL)
 """
 
 

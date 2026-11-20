@@ -36,12 +36,15 @@ class ProposalDiagnostics(BaseModel):
     merged: list[int] = Field(default_factory=list)
     cover_only: list[int] = Field(default_factory=list)
     low_text: list[int] = Field(default_factory=list)
+    misfiled_cover: list[int] = Field(default_factory=list)
 
     @property
     def blocking(self) -> bool:
-        """Missing, duplicated or merged findings block accept; cover-only and
-        low-text applicants are excluded and disclosed instead."""
-        return bool(self.missing or self.duplicated or self.merged)
+        """Missing, duplicated, merged or misfiled-cover findings block accept;
+        cover-only and low-text applicants are excluded and disclosed instead."""
+        return bool(
+            self.missing or self.duplicated or self.merged or self.misfiled_cover
+        )
 
 
 class ApplicantSlice(BaseModel):

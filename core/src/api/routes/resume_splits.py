@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+from collections.abc import Sized
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -30,7 +32,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.api.deps import (
     Role,
@@ -56,9 +58,10 @@ from src.services import (
     taleo_split_service,
 )
 from src.settings import get_settings
-from src.storage.blob_store import BlobStore, get_blob_store
+from src.storage.blob_store import BlobNotFound, BlobStore, get_blob_store
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _WRITERS: tuple[Role, ...] = (Role.ADMIN, Role.RECRUITER)
 _GATES = [
@@ -89,6 +92,68 @@ class _CorrectBody(BaseModel):
     proposal_version: int
     applicants: list[_CorrectApplicant] = Field(default_factory=list)
     ignored_pages: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _bounded(self) -> _CorrectBody:
+        # Read at request time so the cap follows ``SPLIT_MAX_PAGES``.
+        cap = get_settings().split_max_pages
+        lists: list[Sized] = [self.applicants, self.ignored_pages]
+        for a in self.applicants:
+            lists.extend([a.resume_pages, a.cover_letter_pages])
+        if any(len(x) > cap for x in lists):
+            raise ValueError(f"a list exceeds the {cap}-entry cap")
+        return self
+
+
+async def _read_source(
+    blob_store: BlobStore, key: str | None
+) -> tuple[bytes, list[str]]:
+    """Read the stored export and extract its page text, bounded in size and
+    time, BEFORE any row lock is taken. Failures are fixed messages; only the
+    exception CLASS is logged (a parser message can quote a page)."""
+    settings = get_settings()
+    failure: str | None = None
+    blob = b""
+    texts: list[str] = []
+    try:
+        if not key:
+            raise BlobNotFound("no source key")
+        blob = await blob_store.get(key)
+        texts = await asyncio.wait_for(
+            asyncio.to_thread(taleo_split_service.extract_page_texts, blob),
+            timeout=settings.split_extract_timeout_s,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=422, detail="the export took too long to read"
+        ) from None
+    except Exception as exc:
+        failure = type(exc).__name__
+    if failure is not None:
+        logger.warning("split source unavailable: %s", failure)
+        raise ConflictError("source export unavailable; re-upload the export")
+    if sum(len(t) for t in texts) > settings.split_max_text_chars:
+        raise HTTPException(
+            status_code=422, detail="the export contains too much text to process"
+        )
+    return blob, texts
+
+
+async def _preread(
+    blob_store: BlobStore, pre: Any, version: int
+) -> tuple[bytes, list[str]] | None:
+    """Read + extract OUTSIDE the lock, only for a row that could succeed."""
+    if pre["status"] != "proposed" or version != pre["proposal_version"]:
+        return None
+    return await _read_source(blob_store, pre["source_blob_key"])
+
+
+def _locked_source(
+    row: Any, pre: Any, source: tuple[bytes, list[str]] | None
+) -> tuple[bytes, list[str]]:
+    if source is None or row["source_blob_key"] != pre["source_blob_key"]:
+        raise ConflictError("the split changed; reload and retry")
+    return source
 
 
 def _json_value(raw: Any) -> Any:
@@ -247,6 +312,7 @@ async def split_upload(
             created_by=created_by,
         )
         ids.append(split_id)
+        await arq.enqueue_job("segment_taleo_export", str(split_id))
         await _audit(
             db,
             user,
@@ -259,9 +325,6 @@ async def split_upload(
                 "sha256": hashlib.sha256(data).hexdigest(),
             },
         )
-    # Enqueue only after every row is created (and committed: no wrapping tx).
-    for split_id in ids:
-        await arq.enqueue_job("segment_taleo_export", str(split_id))
     return {
         "splits": [{"id": str(i), "status": "queued"} for i in ids],
         "split_ids": [str(i) for i in ids],
@@ -289,6 +352,10 @@ async def correct_split(
     blob_store: Annotated[BlobStore, Depends(get_blob_store)],
     user: Annotated[User | None, Depends(resolve_user)],
 ) -> dict[str, Any]:
+    pre = await db.fetchrow(_SELECT_SQL, split_id)
+    if pre is None:
+        raise _not_found(split_id)
+    source = await _preread(blob_store, pre, body.proposal_version)
     async with db.transaction():
         row = await db.fetchrow(_LOCK_SQL, split_id)
         if row is None:
@@ -302,8 +369,7 @@ async def correct_split(
                 "the proposal changed since it was loaded; reload and retry",
                 current_version=row["proposal_version"],
             )
-        blob = await blob_store.get(row["source_blob_key"])
-        texts = await asyncio.to_thread(taleo_split_service.extract_page_texts, blob)
+        texts = _locked_source(row, pre, source)[1]
         page_count = len(texts)
         every_page = list(body.ignored_pages)
         for a in body.applicants:
@@ -366,6 +432,10 @@ async def accept_split(
     split replays its stored result and ingests nothing."""
     settings = get_settings()
     results: list[ResumeUploadResult]
+    pre = await db.fetchrow(_SELECT_SQL, split_id)
+    if pre is None:
+        raise _not_found(split_id)
+    source = await _preread(blob_store, pre, body.proposal_version)
     async with db.transaction():
         row = await db.fetchrow(_LOCK_SQL, split_id)
         if row is None:
@@ -385,18 +455,18 @@ async def accept_split(
         proposal = await split_request_service.load_proposal(db, split_id)
         if proposal is None:
             raise ConflictError("the split has no stored proposal")
-        blob = await blob_store.get(row["source_blob_key"])
-        texts = await asyncio.to_thread(taleo_split_service.extract_page_texts, blob)
+        blob, texts = _locked_source(row, pre, source)
         # Recompute from the stored blob; the stored diagnostics are advisory.
         diagnostics = await asyncio.to_thread(
             taleo_split_service.validate_proposal, proposal, texts
         )
         if diagnostics.blocking:
             raise ConflictError(
-                "the proposal has missing, duplicated or merged pages",
+                "the proposal has missing, duplicated, merged or misfiled pages",
                 missing=diagnostics.missing,
                 duplicated=diagnostics.duplicated,
                 merged=diagnostics.merged,
+                misfiled_cover=diagnostics.misfiled_cover,
             )
         excluded_cover = set(diagnostics.cover_only)
         excluded_low = set(diagnostics.low_text)
@@ -448,9 +518,12 @@ async def accept_split(
             split_id,
             accepted_by=uploaded_by,
             ingest_result=dumped,
+            release_blob=False,
         ):
             raise ConflictError("the split was changed by another request")
 
+    # Only after the commit: a rollback must keep the source of a 'proposed' row.
+    await blob_store.delete(row["source_blob_key"])
     await _audit(
         db,
         user,

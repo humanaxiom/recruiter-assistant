@@ -46,8 +46,12 @@ _REQUIRED_CTX_KEYS = ("pg_pool", "blob_store", "llm")
 #: which startup overwrites with a plain client).
 _QUEUE_CTX_KEY = "arq"
 
-#: A queued/segmenting request idle this long is stalled, not busy.
-_STALE_MINUTES = 30
+
+def _stale_minutes() -> float:
+    """A queued/segmenting request is stalled only once it outlived the model's
+    worst case: (retries + 1) attempts of ``llm_timeout_s`` each, plus 5 min."""
+    s = get_settings()
+    return (s.llm_max_retries + 1) * s.llm_timeout_s / 60 + 5
 
 
 def _fallback_reason(exc: Exception) -> str:
@@ -172,7 +176,7 @@ async def expire_split_requests(ctx: dict[str, Any]) -> str:
         async with pool.acquire() as conn:
             expired = await srs.expire(conn, blob_store)
             swept = await srs.sweep_orphan_blobs(conn, blob_store)
-            stale = await srs.requeue_stale(conn, minutes=_STALE_MINUTES)
+            stale = await srs.requeue_stale(conn, minutes=_stale_minutes())
         for sid in stale:
             await arq.enqueue_job(
                 "segment_taleo_export",

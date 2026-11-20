@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     split_max_file_mib: int = 40
     split_max_pages: int = 300
     split_max_files: int = 5
+    split_max_text_chars: int = 2_000_000
+    split_extract_timeout_s: float = 120
     # Reversed 2026-09-09 (sponsor decision) to match JobCreate/DDL — has no
     # reader in src/ (nothing wires it up); kept only as a pinned setting.
     blind_review_default: bool = False

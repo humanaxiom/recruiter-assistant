@@ -28,6 +28,10 @@ from src.settings import get_settings
 from src.storage.blob_store import BlobStore
 
 SOURCE_PREFIX = "split_sources/"
+_FILENAME_MAX = 255
+# An unreferenced blob younger than this is a create in flight (the blob is
+# written BEFORE its row), not an orphan.
+ORPHAN_GRACE_S = 600.0
 STATUSES = ("queued", "segmenting", "proposed", "accepted", "discarded", "failed")
 LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"segmenting", "failed", "discarded"}),
@@ -103,7 +107,8 @@ WITH old AS (
     WHERE id = $1 AND status = ANY($2::text[]) FOR UPDATE
 )
 UPDATE resume_split_requests r
-SET status = $3, source_blob_key = NULL, proposal = NULL, updated_at = now()
+SET status = $3, source_blob_key = NULL, proposal = NULL,
+    source_filename = NULL, updated_at = now()
 FROM old
 WHERE r.id = old.id
 RETURNING old.source_blob_key AS source_blob_key
@@ -116,6 +121,7 @@ WITH old AS (
 )
 UPDATE resume_split_requests r
 SET status = 'failed', failure_reason = $2, source_blob_key = NULL,
+    source_filename = NULL,
     proposal = NULL, updated_at = now()
 FROM old
 WHERE r.id = old.id
@@ -129,6 +135,7 @@ WITH old AS (
 )
 UPDATE resume_split_requests r
 SET status = 'accepted', source_blob_key = NULL, proposal = NULL,
+    source_filename = NULL,
     accepted_by = $2, accepted_at = now(), ingest_result = $3::jsonb,
     updated_at = now()
 FROM old
@@ -140,7 +147,7 @@ _REQUEUE_SQL = """
 UPDATE resume_split_requests
 SET status = 'queued', updated_at = now()
 WHERE status IN ('queued', 'segmenting')
-  AND updated_at < now() - make_interval(mins => $1::int)
+  AND updated_at < now() - make_interval(secs => $1::double precision * 60)
 RETURNING id
 """
 
@@ -153,6 +160,7 @@ WITH old AS (
 )
 UPDATE resume_split_requests r
 SET status = 'discarded', source_blob_key = NULL, proposal = NULL,
+    source_filename = NULL,
     updated_at = now()
 FROM old
 WHERE r.id = old.id
@@ -189,7 +197,7 @@ async def create(
             job_id,
             key,
             hashlib.sha256(data).hexdigest(),
-            filename,
+            filename[:_FILENAME_MAX],
             consent_acknowledged,
             created_by,
         )
@@ -357,19 +365,23 @@ async def mark_accepted(
     *,
     accepted_by: str | None,
     ingest_result: list[dict[str, Any]],
+    release_blob: bool = True,
 ) -> bool:
     """CAS proposed -> accepted, storing the ingest result for idempotent
-    replays and releasing the blob and proposal."""
+    replays and releasing the proposal. ``release_blob=False`` leaves the blob
+    for the caller to delete AFTER its transaction commits (a rollback must not
+    have already destroyed the source of a proposal that is still 'proposed')."""
     row = await conn.fetchrow(
         _ACCEPT_SQL, split_id, accepted_by, json.dumps(ingest_result)
     )
     if row is None:
         return False
-    await _delete_blob(blob_store, row["source_blob_key"])
+    if release_blob:
+        await _delete_blob(blob_store, row["source_blob_key"])
     return True
 
 
-async def requeue_stale(conn: DbConn, *, minutes: int) -> list[UUID]:
+async def requeue_stale(conn: DbConn, *, minutes: float) -> list[UUID]:
     """Reset queued/segmenting rows idle for ``minutes`` to queued and return
     their ids; the caller re-runs them heuristic-only."""
     rows = await conn.fetch(_REQUEUE_SQL, minutes)
@@ -395,7 +407,14 @@ async def sweep_orphan_blobs(conn: DbConn, blob_store: BlobStore) -> int:
     if not keys:
         return 0
     referenced = {r["source_blob_key"] for r in await conn.fetch(_REFERENCED_SQL)}
-    orphans = [k for k in keys if k not in referenced]
+    orphans: list[str] = []
+    for k in keys:
+        if k in referenced:
+            continue
+        age = await blob_store.age_seconds(k)
+        if age is None or age < ORPHAN_GRACE_S:
+            continue
+        orphans.append(k)
     for key in orphans:
         await blob_store.delete(key)
     return len(orphans)
