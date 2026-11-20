@@ -116,7 +116,9 @@ def test_twelve_pages_three_distinct_emails_is_combined() -> None:
     assert "12" in reason
     assert "3" in reason
     assert "split it first" in reason
-    assert "scripts/split-taleo.sh" in reason
+    # The split moved in-app: the refusal points at the job-page control,
+    # not the shell script (test_combined_export_inapp_wording.py pins the rest).
+    assert "Split a combined Taleo export" in reason
 
 
 def test_reason_never_contains_a_filename() -> None:
