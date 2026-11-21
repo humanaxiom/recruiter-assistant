@@ -42,11 +42,14 @@ name, an address or an uploaded filename.
 
 from __future__ import annotations
 
+import datetime
 import functools
 import io
+import itertools
 import re
 import unicodedata
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,14 +77,16 @@ _MIN_TOKEN_LEN = 2
 _MIN_PHONE_DIGITS_BARE = 10
 _MIN_PHONE_DIGITS_SEPARATED = 7
 _MIN_RUN_ON_LEN = 4
-_MIN_SQUASHED_FULL = 5
+_MIN_SQUASHED_FULL = 4
 _MIN_SQUASHED_PART = 4
 
 _BIG = fitz.Rect(-20000, -20000, 20000, 20000)
 # No MediaBox clipping: text that sits outside the page is still text.
 _UNCLIPPED = fitz.TEXT_PRESERVE_WHITESPACE
 
-_APOSTROPHES = frozenset("‘’‛ʼ´`′")
+# Includes the modifier letters typed for an apostrophe (U+02BB, 02BD, 02BE, 02BF,
+# 02B9, 02C8 and A78C).
+_APOSTROPHES = frozenset("‘’‛ʼ´`′ʻʽʾʿʹˈꞌ")
 _DASHES = frozenset("‐‑‒–—―−")
 
 #: Letters Unicode gives no decomposition, so accent-stripping leaves them
@@ -99,14 +104,45 @@ _FOLD = {
     "œ": "oe",
     "ħ": "h",
     "ŧ": "t",
+    "ə": "a",
+    "ɓ": "b",
+    "ɗ": "d",
+    "ƙ": "k",
+    "ƴ": "y",
+    "ŋ": "n",
+    "ɛ": "e",
+    "ɔ": "o",
 }
+
+#: Letters that have a second, spelled-out form in a name: a-umlaut is also
+#: "ae", o-umlaut and o-slash "oe", u-umlaut "ue", a-ring "aa". Index 0 is the
+#: plain letter, index 1 the digraph.
+_UMLAUT_FORMS = {
+    "ä": ("a", "ae"),
+    "ö": ("o", "oe"),
+    "ü": ("u", "ue"),
+    "ø": ("o", "oe"),
+    "å": ("a", "aa"),
+}
+_DIGRAPH_RE = re.compile("ae|oe|ue|aa")
+#: Past this many variable spots in one name the variants are only the two
+#: extremes, so a pathological name cannot make thousands of patterns.
+_MAX_UMLAUT_SLOTS = 4
+_MAX_DIGRAPH_SLOTS = 3
+#: A token that only exists in a derived spelling must be this long: ``Joe``
+#: collapses to ``jo``, which is an ordinary word and not a name.
+_MIN_VARIANT_TOKEN_LEN = 3
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # U+00B7 (middle dot) is what a base-14 font writes for a dash it lacks.
 _PHONE_RE = re.compile(r"(?<![\w])\+?\(?\d[\d()./ \-·]{5,}\d(?![\w])")
 # "2015-2019", "2019 - 2021", "09/2019 - 04/2021": a span of years, not a phone.
 _YEAR_RANGE_RE = re.compile(
-    r"(?:\d{1,2}/)?(?:19|20)\d{2}\s*[-/ ]\s*(?:\d{1,2}/)?(?:19|20)\d{2}"
+    r"(?:(\d{1,2})/)?((?:19|20)\d{2})\s*[-/ ]\s*(?:(\d{1,2})/)?((?:19|20)\d{2})"
+)
+# A number written after one of these is a phone number, whatever its shape.
+_PHONE_LABEL_RE = re.compile(
+    r"(?<![a-z])(?:tel(?:ephone)?|phones?|cell(?:phone)?|mobile|fax)(?![a-z])"
 )
 _DATE_RE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}")
 _SEPARATORS = frozenset(" -./()·")
@@ -221,13 +257,26 @@ def _term_re(norm_term: str) -> re.Pattern[str]:
 # ----------------------------------------------------------------------- shapes
 
 
+def _plausible_year_range(span: str) -> bool:
+    """``span`` is a span of years a career could hold: months 1-12, the first
+    year not after the second, the second not past next year."""
+    m = _YEAR_RANGE_RE.fullmatch(span)
+    if m is None:
+        return False
+    for month in (m.group(1), m.group(3)):
+        if month is not None and not 1 <= int(month) <= 12:
+            return False
+    return int(m.group(2)) <= int(m.group(4)) <= datetime.date.today().year + 1
+
+
 def _phones(norm_line: str) -> list[re.Match[str]]:
     found: list[re.Match[str]] = []
     for m in _PHONE_RE.finditer(norm_line):
         span = m.group(0).strip()
         digits = sum(c.isdigit() for c in span)
         separated = any(c in _SEPARATORS for c in span)
-        if _YEAR_RANGE_RE.fullmatch(span) or _DATE_RE.fullmatch(span):
+        labelled = _PHONE_LABEL_RE.search(norm_line, 0, m.start()) is not None
+        if not labelled and (_plausible_year_range(span) or _DATE_RE.fullmatch(span)):
             continue
         bare = digits >= _MIN_PHONE_DIGITS_BARE
         local = separated and digits >= _MIN_PHONE_DIGITS_SEPARATED
@@ -262,11 +311,63 @@ def _shape_spans(norm_line: str) -> list[tuple[int, int]]:
 # -------------------------------------------------------------------- the terms
 
 
-def _name_forms(full_name: str) -> tuple[str, str]:
-    """``(normalized full name, normalized surname)`` -- the surname being the
-    last whitespace token of the full name."""
-    full = normalize_text(full_name)
-    return full, full.rsplit(" ", 1)[-1]
+def _expand_umlauts(raw: str) -> list[str]:
+    """The normalized spellings of ``raw`` with every umlaut-like letter written
+    both as itself and as its digraph (``Müller`` -> muller, mueller)."""
+    text = unicodedata.normalize("NFC", raw).casefold()
+    slots = [i for i, c in enumerate(text) if c in _UMLAUT_FORMS]
+    if not slots:
+        return [normalize_text(text)]
+    picks: Iterable[tuple[int, ...]]
+    if len(slots) > _MAX_UMLAUT_SLOTS:
+        picks = [(0,) * len(slots), (1,) * len(slots)]
+    else:
+        picks = itertools.product((0, 1), repeat=len(slots))
+    out: list[str] = []
+    for pick in picks:
+        chars = list(text)
+        for i, which in zip(slots, pick, strict=True):
+            chars[i] = _UMLAUT_FORMS[text[i]][which]
+        out.append(normalize_text("".join(chars)))
+    return list(dict.fromkeys(out))
+
+
+def _collapse_digraphs(norm: str) -> list[str]:
+    """``norm`` with each ae / oe / ue / aa kept or cut to its first letter
+    (``mueller`` -> muller)."""
+    spots = [m.span() for m in _DIGRAPH_RE.finditer(norm)]
+    if not spots:
+        return [norm]
+    picks: Iterable[tuple[int, ...]]
+    if len(spots) > _MAX_DIGRAPH_SLOTS:
+        picks = [(0,) * len(spots), (1,) * len(spots)]
+    else:
+        picks = itertools.product((0, 1), repeat=len(spots))
+    out: list[str] = []
+    for pick in picks:
+        pieces: list[str] = []
+        pos = 0
+        for (begin, end), collapse in zip(spots, pick, strict=True):
+            pieces.append(norm[pos:begin])
+            pieces.append(norm[begin] if collapse else norm[begin:end])
+            pos = end
+        pieces.append(norm[pos:])
+        out.append("".join(pieces))
+    return out
+
+
+def _name_variants(full_name: str) -> list[str]:
+    """The normalized full name FIRST, then the other ways the same name is
+    spelled by transliteration: each umlaut letter plain or as its digraph, and
+    each digraph kept or cut to one letter. Generated from the stored name only,
+    never by rewriting the document, so unrelated words are untouched."""
+    base = normalize_text(full_name)
+    found: dict[str, None] = {base: None}
+    for expanded in _expand_umlauts(full_name):
+        for variant in _collapse_digraphs(expanded):
+            if variant:
+                found.setdefault(variant, None)
+    return list(found)
 
 
 _NAME_SPLIT = re.compile(r"[\s,.]+")
@@ -314,26 +415,47 @@ def _run_on_re(norm_form: str) -> re.Pattern[str]:
     return re.compile(r"(?<![^\W\d_])" + re.escape(norm_form) + r"(?![^\W\d_])")
 
 
-def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], str, str]:
+def _name_re(norm_name: str) -> re.Pattern[str]:
+    """A name (or a token of it) as a pattern that stops at LETTERS only and
+    takes the digits and underscores glued to it along: ``mctestface88``,
+    ``88mctestface`` and ``doe_2024`` go whole. A digit is not a word boundary
+    for a name."""
+    return re.compile(
+        r"(?<![^\W\d_])[\d_]*" + re.escape(norm_name) + r"[\d_]*(?![^\W\d_])"
+    )
+
+
+def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], list[str]]:
     """Patterns for the terms, for the name's own tokens (and the parts of a
-    hyphenated or apostrophised one) and for the name's run-ons, so neither
-    redaction nor verification depends on the caller having listed them."""
+    hyphenated or apostrophised one) and for the name's run-ons -- for the name
+    AND each of its transliteration variants -- so neither redaction nor
+    verification depends on the caller having listed them. Also the normalized
+    full-name variants, the stored spelling first."""
     if not terms or not terms[0].strip():
         raise NotAnonymizedError("no candidate name to vouch for")
-    full, surname = _name_forms(terms[0])
-    wanted: dict[str, None] = {}
+    variants = _name_variants(terms[0])
+    names: dict[str, None] = {}
+    run_ons: dict[str, None] = {}
+    for i, variant in enumerate(variants):
+        floor = _MIN_TOKEN_LEN if i == 0 else _MIN_VARIANT_TOKEN_LEN
+        if variant:
+            names.setdefault(variant, None)
+        for token in _NAME_SPLIT.split(variant):
+            if len(token) >= floor:
+                names.setdefault(token, None)
+            for part in _parts(token):
+                if len(part) >= floor:
+                    names.setdefault(part, None)
+        run_ons.update(dict.fromkeys(_run_ons(variant)))
+    patterns = [_name_re(n) for n in names]
+    others: dict[str, None] = {}
     for term in terms:
         norm = normalize_text(term)
-        if norm:
-            wanted[norm] = None
-    for token in _NAME_SPLIT.split(full):
-        if len(token) >= _MIN_TOKEN_LEN:
-            wanted.setdefault(token, None)
-        for part in _parts(token):
-            wanted.setdefault(part, None)
-    patterns = [_term_re(t) for t in wanted]
-    patterns.extend(_run_on_re(f) for f in _run_ons(full))
-    return patterns, full, surname
+        if norm and norm not in names:
+            others[norm] = None
+    patterns.extend(_term_re(t) for t in others)
+    patterns.extend(_run_on_re(f) for f in run_ons)
+    return patterns, variants
 
 
 def _squash(text: str) -> str:
@@ -353,12 +475,12 @@ def _needles(full: str) -> list[str]:
     return list(dict.fromkeys(_squash(n) for n in found))
 
 
-def _squashed_spans(norm: str, full: str) -> list[tuple[int, int]]:
+def _squashed_spans(norm: str, fulls: list[str]) -> list[tuple[int, int]]:
     """Spans of ``norm`` where the full name or any part of it shows up with
     every space and separator removed -- ``J A N E  D O E``, ``J-A-N-E``,
     ``Mc Test face`` -- but only where it starts and ends on a token boundary,
     so ``Ann Ford`` never eats ``Stanford``."""
-    needles = _needles(full)
+    needles = list(dict.fromkeys(n for full in fulls for n in _needles(full)))
     if not needles:
         return []
     # The marker is ours, not the document's: blank it, keeping every index.
@@ -383,6 +505,14 @@ def _squashed_spans(norm: str, full: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _refuse_unrenderable_letters(text: str) -> None:
+    """A LETTER the renderer can only draw as ``?`` hides from every check while
+    a reader still knows the word: refuse. Symbols that draw as ``?`` are fine."""
+    for ch in set(text):
+        if unicodedata.category(ch).startswith("L") and renderable_text(ch) == "?":
+            raise NotAnonymizedError("a letter the copy cannot draw would be lost")
+
+
 def _refuse_other_scripts(text: str) -> None:
     if _OTHER_SCRIPT_RE.search(text):
         raise NotAnonymizedError("text in another script cannot be verified")
@@ -392,14 +522,16 @@ def _unify_line_breaks(text: str) -> str:
     return _LINE_BREAKS.sub("\n", text)
 
 
-def _require_name_found(norm_text: str, full: str, surname: str) -> None:
+def _require_name_found(norm_text: str, variants: list[str]) -> None:
     if not norm_text:
         raise NotAnonymizedError("no text layer to redact or verify")
-    if not full:
+    if not variants[0]:
         raise NotAnonymizedError("no candidate name to vouch for")
-    for name in (full, surname):
-        if _term_re(name).search(norm_text):
-            return
+    for i, full in enumerate(variants):
+        floor = _MIN_TOKEN_LEN if i == 0 else _MIN_VARIANT_TOKEN_LEN
+        for name in (full, full.rsplit(" ", 1)[-1]):
+            if len(name) >= floor and _term_re(name).search(norm_text):
+                return
     raise NotAnonymizedError("the candidate's name is not in the document text")
 
 
@@ -437,16 +569,16 @@ def redact_text(text: str, terms: list[str]) -> str:
     list cannot notice a name the list never held), when there is no text, or
     when text in a second script is left after redaction.
     """
-    patterns, full, surname = _compile_terms(terms)
+    patterns, variants = _compile_terms(terms)
     text = _unify_line_breaks(text)
     norm, origin = _norm_map(text)
-    _require_name_found(norm, full, surname)
+    _require_name_found(norm, variants)
 
     spans: list[tuple[int, int]] = []
     for pattern in patterns:
         for m in pattern.finditer(norm):
             spans.append((origin[m.start()], origin[m.end() - 1] + 1))
-    for begin, end in _squashed_spans(norm, full):
+    for begin, end in _squashed_spans(norm, variants):
         spans.append((origin[begin], origin[end - 1] + 1))
     offset = 0
     for line in text.split("\n"):
@@ -467,7 +599,7 @@ def verify_text(text: str, terms: list[str]) -> None:
     ``text``: a term, a name token or run-on, an e-mail, phone, URL, domain,
     @handle or postal code, the full name or surname once spaces and separators
     are removed, or a second script."""
-    patterns, full, _surname = _compile_terms(terms)
+    patterns, variants = _compile_terms(terms)
     text = _unify_line_breaks(text)
     norm, _origin = _norm_map(text)
     if any(p.search(norm) for p in patterns):
@@ -475,7 +607,7 @@ def verify_text(text: str, terms: list[str]) -> None:
     for line in text.split("\n"):
         if _shape_spans(_norm_map(line)[0]):
             raise NotAnonymizedError("contact or web data survived redaction")
-    if _squashed_spans(norm, full):
+    if _squashed_spans(norm, variants):
         raise NotAnonymizedError("the name survived with its letters spaced out")
     _refuse_other_scripts(text)
 
@@ -576,6 +708,22 @@ _SUBSTITUTES = {
     "Ÿ": "Y",
     "Œ": "OE",
     "œ": "oe",
+    "ə": "a",
+    "Ə": "A",
+    "ɓ": "b",
+    "Ɓ": "B",
+    "ɗ": "d",
+    "Ɗ": "D",
+    "ƙ": "k",
+    "Ƙ": "K",
+    "ƴ": "y",
+    "Ƴ": "Y",
+    "ŋ": "n",
+    "Ŋ": "N",
+    "ɛ": "e",
+    "Ɛ": "E",
+    "ɔ": "o",
+    "Ɔ": "O",
 }
 
 
@@ -742,6 +890,7 @@ def redact_pdf(pdf_bytes: bytes, terms: list[str]) -> bytes:
     try:
         source = _extract_source(pdf_bytes)
         redacted = redact_text(source, terms)
+        _refuse_unrenderable_letters(redacted)
         verify_text(redacted, terms)
         rendered = render_text_pdf(redacted)
         verify_text(_extract_rendered(rendered), terms)
