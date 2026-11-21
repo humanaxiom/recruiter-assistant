@@ -154,11 +154,17 @@ _PHONE_LABELS = (
     "tel|telephone|telefon|telefono|phones?|cell|cellphone|cel|celular|mobile|"
     "movil|mob|handy|fax|ph|whatsapp|tlf"
 )
+_PHONE_WORDS = (
+    "mobile|home|work|cell|office|fax|personal|private|main|direct|landline|whatsapp"
+)
+_PHONE_SEP = rf"(?:\s*/\s*|\s+)(?:{_PHONE_WORDS})"
+_PHONE_PAREN = rf"\s*(?:{_PHONE_WORDS})(?:{_PHONE_SEP})*\s*"
 _PHONE_LABEL_RE = re.compile(
     rf"(?<![a-z])(?:(?:{_PHONE_LABELS})(?![a-z])"
     r"(?:\s*(?:no\b\.?|number(?![a-z])|#))?"
-    r"(?:\s*\.)?(?:\s*\([^()\n]{1,20}\))?(?:\s*[:.\-|=>])*\s*"
-    r"|[mt]\s*:)\s*$"
+    rf"(?:\s*\.)?(?:\s*\({_PHONE_PAREN}\))?(?:\s*[:.\-|=>])*\s*"
+    r"|[mt]\s*:)\s*$",
+    re.IGNORECASE,
 )
 _DATE_RE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}")
 _SEPARATORS = frozenset(" -./()·")
@@ -288,7 +294,7 @@ def _plausible_year_range(span: str) -> bool:
 def _phones(norm_line: str) -> list[re.Match[str]]:
     found: list[re.Match[str]] = []
     for m in _PHONE_RE.finditer(norm_line):
-        span = m.group(0).strip()
+        span = m.group(0).strip().strip("() \t")
         digits = sum(c.isdigit() for c in span)
         separated = any(c in _SEPARATORS for c in span)
         labelled = _PHONE_LABEL_RE.search(norm_line[: m.start()]) is not None
@@ -612,7 +618,18 @@ def _unify_line_breaks(text: str) -> str:
     return _LINE_BREAKS.sub("\n", text)
 
 
-def _require_name_found(norm_text: str, variants: list[tuple[str, bool]]) -> None:
+def _kept_umlaut_word(raw_text: str, norm_word: str) -> bool:
+    """``raw_text`` holds a word that still carries an umlaut and folds to
+    ``norm_word`` (``Bär`` -> ``bar``)."""
+    for word in re.findall(r"\w+", unicodedata.normalize("NFC", raw_text)):
+        if any(c in "äöüÄÖÜ" for c in word) and normalize_text(word) == norm_word:
+            return True
+    return False
+
+
+def _require_name_found(
+    norm_text: str, variants: list[tuple[str, bool]], raw_text: str = ""
+) -> None:
     """The vouch. ``variants`` is ``(form, tail_ok)`` pairs, the stored spelling
     first. Every form may vouch as the FULL name (first name and surname
     adjacent). Only a ``tail_ok`` form (the stored spelling and its umlaut
@@ -626,7 +643,17 @@ def _require_name_found(norm_text: str, variants: list[tuple[str, bool]]) -> Non
         raise NotAnonymizedError("no candidate name to vouch for")
     for i, (full, tail_ok) in enumerate(variants):
         floor = _MIN_TOKEN_LEN if i == 0 else _MIN_VARIANT_TOKEN_LEN
-        names = (full, full.rsplit(" ", 1)[-1]) if tail_ok else (full,)
+        if tail_ok:
+            names: tuple[str, ...] = (full, full.rsplit(" ", 1)[-1])
+        elif " " in full.strip():
+            names = (full,)
+        else:
+            # A one-word read-back (Baer -> bar) is an ordinary word and never
+            # vouches on the plain letters; only a word that KEEPS the umlaut
+            # in the raw text (Bär) is the stored name's own spelling.
+            if len(full) >= floor and _kept_umlaut_word(raw_text, full):
+                return
+            continue
         for name in names:
             if len(name) >= floor and _term_re(name).search(norm_text):
                 return
@@ -670,7 +697,7 @@ def redact_text(text: str, terms: list[str]) -> str:
     patterns, squash, vouch = _compile_terms(terms)
     text = _unify_line_breaks(text)
     norm, origin = _norm_map(text)
-    _require_name_found(norm, vouch)
+    _require_name_found(norm, vouch, text)
 
     spans: list[tuple[int, int]] = []
     for pattern in patterns:
