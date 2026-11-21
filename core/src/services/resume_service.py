@@ -105,6 +105,53 @@ _CLAIM_PARSING_SQL = (
 )
 
 
+_RESET_FOR_REPARSE_SQL = """
+UPDATE resumes SET
+    status = 'uploaded',
+    failure_reason = NULL,
+    parsed = NULL,
+    parsed_at = NULL,
+    reconcile_attempts = 0,
+    reparse_requested_at = now()
+WHERE id = $1
+  AND withdrawn_at IS NULL
+  AND (
+        status = 'failed'
+     OR (status = 'parsed' AND COALESCE((parsed->>'degraded')::bool, false) IS TRUE)
+  )
+RETURNING id
+"""
+
+
+async def reset_for_reparse(conn: DbConn, resume_id: UUID) -> bool:
+    """Reset a résumé to ``'uploaded'`` so ``parse_resume`` can retry it.
+
+    True iff the row was eligible and reset. Eligible = ``failed``, or
+    ``parsed``-but-degraded; never withdrawn, never a clean parse (that would
+    unproject a ranked candidate for nothing), never ``uploaded``/``parsing``
+    (already in flight — the reconciler owns stalls, not this route).
+
+    Reset happens BEFORE enqueue, deliberately — the same race
+    ``job_service.clear_parse_failure`` guards against: enqueueing first risks
+    a fast worker finishing and being immediately wiped by this reset.
+    ``parsed`` is nulled so the stale degraded fallback is never displayed as
+    current while the retry runs. ``reconcile_attempts`` resets to 0 so the
+    reconciler's give-up cap starts fresh rather than inheriting the count
+    from the row's earlier, unrelated failure run. ``reparse_requested_at``
+    gives the retry its OWN 30-minute stall grace (see
+    ``worker.reconcile._SELECT_STALLED``'s ``GREATEST(...)`` expression) —
+    without it, an old ``uploaded_at`` would make the reconciler treat a
+    brand-new re-parse as already stalled and double-enqueue it.
+
+    Candidate name/email-hash columns and the roster's work-authorization/
+    internal flags are deliberately KEPT — they are recruiter/roster facts,
+    not parse output, and a successful re-parse overwrites the name/hash
+    anyway.
+    """
+    row = await conn.fetchrow(_RESET_FOR_REPARSE_SQL, resume_id)
+    return row is not None
+
+
 async def encrypt_pii_via_session(
     conn: DbConn, candidate: CandidateInfo
 ) -> EncryptedPii:
