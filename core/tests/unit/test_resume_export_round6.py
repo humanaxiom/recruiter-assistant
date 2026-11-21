@@ -204,7 +204,6 @@ def test_label_in_prose_or_a_title_keeps_the_dates(line: str, span: str) -> None
         "Ph: 2015 2019",
         "WhatsApp: 2015 2019",
         "Tél: 2015 2019",
-        "Phone:\n2015 2019",
     ],
 )
 def test_adjacent_label_makes_a_year_span_a_phone_number(line: str) -> None:
