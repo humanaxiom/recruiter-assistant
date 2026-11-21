@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     split_max_files: int = 5
     split_max_text_chars: int = 2_000_000
     split_extract_timeout_s: float = 120
+    # Résumé export (as-is + anonymized ZIP) built by a background job: a ready ZIP
+    # is deleted this long after it is built; a job with more live applicants is
+    # refused (422); a file longer than the page cap ships as-is only.
+    resume_export_ttl_minutes: int = 60
+    resume_export_max_applicants: int = 500
+    resume_export_max_pages_per_file: int = 20
     # Reversed 2026-09-09 (sponsor decision) to match JobCreate/DDL — has no
     # reader in src/ (nothing wires it up); kept only as a pinned setting.
     blind_review_default: bool = False

@@ -94,6 +94,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/resume-splits/{split_id}/correct"),
     ("POST", "/resume-splits/{split_id}/accept"),
     ("POST", "/resume-splits/{split_id}/discard"),
+    # Résumé export job: starting one queues a disclosure of every candidate
+    # file on the job, and the download is that disclosure -- writer gate.
+    ("POST", "/jobs/{job_id}/resumes/exports"),
+    ("POST", "/resume-exports/{export_id}/download"),
     ("POST", "/resumes/{resume_id}/reveal"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),

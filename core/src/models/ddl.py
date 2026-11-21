@@ -501,6 +501,34 @@ _STATEMENTS: tuple[str, ...] = (
     # source_filename may carry a candidate's name, so every terminal state NULLs
     # it; the column was NOT NULL on volumes created before that rule.
     "ALTER TABLE resume_split_requests ALTER COLUMN source_filename DROP NOT NULL",
+    # ── resume_export_requests (résumé export as a background job) ───────────
+    # One row per requested as-is + anonymized ZIP. ``requested_by`` is the CAS
+    # username (text, not an FK: an API-key caller has no users row). The built
+    # ZIP holds every applicant's identity, so ``blob_key`` is NULLed the moment
+    # the row turns expired or failed (the hourly sweep enforces it; the doctor
+    # checks it). ``counts`` carries numbers only, never a name.
+    """
+    CREATE TABLE IF NOT EXISTS resume_export_requests (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        job_id       UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        requested_by TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'queued'
+                     CHECK (status IN ('queued', 'building', 'ready',
+                                       'failed', 'expired')),
+        blob_key     TEXT,
+        counts       JSONB,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at   TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_export_requests_job_idx
+        ON resume_export_requests (job_id, requested_by, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_export_requests_status_idx
+        ON resume_export_requests (status, expires_at)
+    """,
     # ── shortlist_entries ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS shortlist_entries (

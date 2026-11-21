@@ -264,6 +264,10 @@ _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
         # one-shot token (action="document"), strictly stronger than the
         # session-wide page token this hook checks.
         "resume_document",
+        # The job's résumé export ZIP: same rule as resume_document -- its own
+        # one-shot token (action="export") bound to the export id, because the
+        # archive discloses every candidate at once.
+        "export_download",
     }
 )
 
@@ -875,9 +879,24 @@ def _render_job_detail(
             {**s, "source_filename": None if blind else s.get("source_filename")}
             for s in listed
         ]
+    export_latest: dict[str, Any] | None = None
+    export_csrf_token: str | None = None
+    if _is_writer_session():
+        try:
+            export_latest = api_client.get_latest_resume_export(job_id)
+        except (
+            api_client.BackendUnavailable,
+            api_client.BadRequest,
+            api_client.NotFound,
+        ):
+            export_latest = None  # none yet, or a convenience that must not break
+        if export_latest is not None and export_latest.get("status") == "ready":
+            export_csrf_token = csrf.ensure_token(export_latest["id"], action="export")
     return (
         render_template(
             "job_detail.html",
+            export_latest=export_latest,
+            export_csrf_token=export_csrf_token,
             job=job,
             job_id=job_id,
             resumes=resumes,
@@ -1285,6 +1304,71 @@ def split_upload(job_id: UUID) -> Any:
             + ", ".join(url_for("split_review", split_id=other) for other in ids[1:])
         )
     return redirect(url_for("split_review", split_id=ids[0]))
+
+
+@app.post("/jobs/<uuid:job_id>/resumes/exports")
+def export_start(job_id: UUID) -> Any:
+    """Queue the background build of the job's résumé ZIP, then go back to the
+    job page, which shows its status. Ordinary page-token CSRF: starting a build
+    discloses nothing -- the file leaves only through :func:`export_download`."""
+    try:
+        api_client.start_resume_export(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+    else:
+        flash("Export started. It is built in the background; refresh to see it.")
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/resume-exports/<uuid:export_id>/download")
+def export_download(export_id: UUID) -> Any:
+    """AUDITED. Stream the built ZIP to the requester.
+
+    Same guard shape as ``resume_document`` and for the same reason: the archive
+    discloses every candidate at once, so it is a reveal by another route.
+    Same-origin first, then a one-shot token in its own ``action="export"`` slot
+    bound to the export id -- both before anything reaches the backend, so a
+    forged submit can neither fetch the file nor write the audit row. POST, never
+    a link: a link is prefetchable. ``no-store`` keeps it out of every cache.
+
+    The hidden ``job_id`` is attacker-controllable form input: it is parsed as a
+    UUID and the redirect is built with ``url_for``, never echoed.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        export_id, request.form.get(csrf.FORM_FIELD), action="export"
+    ):
+        abort(403)
+    try:
+        body, disposition = api_client.download_resume_export(export_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.Conflict:
+        flash("This export is not ready, has expired, or its file is missing.")
+        try:
+            job_id = UUID((request.form.get("job_id") or "").strip())
+        except ValueError:
+            return redirect(url_for("index"))
+        return redirect(url_for("job_detail", job_id=job_id))
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return Response(
+        body,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": disposition
+            or f'attachment; filename="resumes-{export_id}.zip"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/resume-splits/<uuid:split_id>")

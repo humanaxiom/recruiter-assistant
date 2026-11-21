@@ -261,6 +261,38 @@ async def _check_split_requests(pg: Any) -> list[Finding]:
     ]
 
 
+#: Retention decision (résumé export): a built ZIP holds every applicant's
+#: identity, so its blob is deleted and ``blob_key`` NULLed the moment a request
+#: is expired or failed. A dead row still holding a key is a retention promise
+#: nothing enforced. Rows, not a count, for the same ``fetchval`` reason as above.
+_EXPORT_STALE_HOLDING_SQL = """
+SELECT id FROM resume_export_requests
+WHERE status IN ('expired', 'failed') AND blob_key IS NOT NULL
+"""
+
+
+async def _check_export_requests(pg: Any) -> list[Finding]:
+    async with pg.acquire() as conn:
+        rows = await conn.fetch(_EXPORT_STALE_HOLDING_SQL)
+    if not rows:
+        return []
+    n = len(rows)
+    return [
+        Finding(
+            check="pg.export_rows_retain_blob",
+            severity="fail",
+            count=n,
+            detail=f"{n} expired or failed résumé exports still hold a ZIP blob key",
+            remedy=(
+                "A dead export must release its ZIP. Check that the hourly "
+                "expire_resume_exports sweep is running, and find the code path "
+                "that reached expired/failed without NULLing blob_key and "
+                "deleting the blob."
+            ),
+        )
+    ]
+
+
 # ── Neo4j checks ─────────────────────────────────────────────────────────
 
 _UNLABELLED_EDGES = """
@@ -426,6 +458,7 @@ async def run_checks(
     checks: list[tuple[str, Any]] = [
         ("pg", lambda: _check_postgres(pg, settings)),
         ("pg.split", lambda: _check_split_requests(pg)),
+        ("pg.export", lambda: _check_export_requests(pg)),
         ("neo4j", lambda: _check_neo4j(neo4j)),
         ("model", lambda: _check_model_profile(settings, profiles)),
     ]

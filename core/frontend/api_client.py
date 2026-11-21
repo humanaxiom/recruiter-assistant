@@ -175,6 +175,8 @@ def _request(
             )
         except httpx.ConnectError as exc:
             raise BackendUnavailable(f"connection failed: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise BackendUnavailable(f"backend timed out: {exc}") from exc
         _raise_for_status(response)
         return response
     finally:
@@ -743,6 +745,36 @@ def list_resume_splits(job_id: UUID, *, client: httpx.Client | None = None) -> A
     """GET /jobs/{id}/resume-splits -- the job's pending (non-terminal) splits,
     newest first. Metadata only; never names or proposal contents."""
     return _request("GET", f"/jobs/{job_id}/resume-splits", client=client).json()
+
+
+def start_resume_export(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /jobs/{id}/resumes/exports -- queue the background build of the job's
+    résumé ZIP (as-is + anonymized). Returns ``{"id", "status"}``."""
+    return _request("POST", f"/jobs/{job_id}/resumes/exports", client=client).json()
+
+
+def get_latest_resume_export(
+    job_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """GET /jobs/{id}/resumes/exports/latest -- the caller's newest export of this
+    job (status and counts). A job they never exported is a 404 (``NotFound``)."""
+    return _request(
+        "GET", f"/jobs/{job_id}/resumes/exports/latest", client=client
+    ).json()
+
+
+def download_resume_export(
+    export_id: UUID, *, client: httpx.Client | None = None
+) -> tuple[bytes, str]:
+    """AUDITED. POST /resume-exports/{id}/download -- the built ZIP.
+
+    Returns ``(body, content_disposition)``: the backend chose the filename (from
+    the job id, never anything candidate-derived), so the Flask route passes it
+    through rather than re-deriving it. A 409 (not ready, expired, file gone) is
+    a ``Conflict``.
+    """
+    response = _request("POST", f"/resume-exports/{export_id}/download", client=client)
+    return response.content, response.headers.get("content-disposition", "")
 
 
 def get_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
