@@ -125,6 +125,8 @@ _UMLAUT_FORMS = {
     "å": ("a", "aa"),
 }
 _DIGRAPH_RE = re.compile("ae|oe|ue|aa")
+#: The digraphs that spell an umlaut (not ``aa``): the only ones the vouch reads back.
+_UMLAUT_DIGRAPH_RE = re.compile("ae|oe|ue")
 #: Past this many variable spots in one name the variants are only the two
 #: extremes, so a pathological name cannot make thousands of patterns.
 _MAX_UMLAUT_SLOTS = 4
@@ -140,9 +142,20 @@ _PHONE_RE = re.compile(r"(?<![\w])\+?\(?\d[\d()./ \-·]{5,}\d(?![\w])")
 _YEAR_RANGE_RE = re.compile(
     r"(?:(\d{1,2})/)?((?:19|20)\d{2})\s*[-/ ]\s*(?:(\d{1,2})/)?((?:19|20)\d{2})"
 )
-# A number written after one of these is a phone number, whatever its shape.
+# A number written right after one of these is a phone number, whatever its shape.
+# The text is normalized (accent-folded, case-folded) before it is matched, so
+# tel / tél, teléfono / telefono and móvil / movil are each one entry. The label
+# must be ADJACENT to the number: it ends the text before it, with at most a
+# "no." / "number" / "#" and one ":" "." or "-" between. A lone "M" or "T" only
+# counts when a ":" follows it.
+_PHONE_LABELS = (
+    "tel|telephone|telefon|telefono|phones?|cell|cellphone|cel|celular|mobile|"
+    "movil|mob|handy|fax|ph|whatsapp|tlf"
+)
 _PHONE_LABEL_RE = re.compile(
-    r"(?<![a-z])(?:tel(?:ephone)?|phones?|cell(?:phone)?|mobile|fax)(?![a-z])"
+    rf"(?<![a-z])(?:(?:{_PHONE_LABELS})(?![a-z])"
+    r"(?:\s*(?:no\b\.?|number(?![a-z])|#))?\s*[:.\-]?"
+    r"|[mt]\s*:)\s*$"
 )
 _DATE_RE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}")
 _SEPARATORS = frozenset(" -./()·")
@@ -275,7 +288,7 @@ def _phones(norm_line: str) -> list[re.Match[str]]:
         span = m.group(0).strip()
         digits = sum(c.isdigit() for c in span)
         separated = any(c in _SEPARATORS for c in span)
-        labelled = _PHONE_LABEL_RE.search(norm_line, 0, m.start()) is not None
+        labelled = _PHONE_LABEL_RE.search(norm_line[: m.start()]) is not None
         if not labelled and (_plausible_year_range(span) or _DATE_RE.fullmatch(span)):
             continue
         bare = digits >= _MIN_PHONE_DIGITS_BARE
@@ -332,6 +345,34 @@ def _expand_umlauts(raw: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _vouch_forms(token: str) -> list[str]:
+    """The spellings a token may VOUCH on: the stored one first, then its umlaut
+    expansions (``Müller`` -> mueller) and the umlaut digraphs of an already
+    spelled-out token read back as the letter (``Mueller`` -> muller, the
+    spelling a document that kept the umlaut shows). ``aa`` is deliberately not
+    read back (``Haas`` is not ``Has``), and a read-back token under
+    :data:`_MIN_VARIANT_TOKEN_LEN` letters is dropped (``Boe`` is not ``Bo``):
+    both are ordinary words in someone else's résumé."""
+    forms: dict[str, None] = {normalize_text(token): None}
+    for expanded in _expand_umlauts(token):
+        forms.setdefault(expanded, None)
+        spots = [m.span() for m in _UMLAUT_DIGRAPH_RE.finditer(expanded)]
+        if not spots or len(spots) > _MAX_DIGRAPH_SLOTS:
+            continue
+        for pick in itertools.product((0, 1), repeat=len(spots)):
+            pieces: list[str] = []
+            pos = 0
+            for (begin, end), cut in zip(spots, pick, strict=True):
+                pieces.append(expanded[pos:begin])
+                pieces.append(expanded[begin] if cut else expanded[begin:end])
+                pos = end
+            pieces.append(expanded[pos:])
+            form = "".join(pieces)
+            if len(form) >= _MIN_VARIANT_TOKEN_LEN:
+                forms.setdefault(form, None)
+    return list(forms)
+
+
 def _collapse_digraphs(norm: str) -> list[str]:
     """``norm`` with each ae / oe / ue / aa kept or cut to its first letter
     (``mueller`` -> muller)."""
@@ -356,17 +397,31 @@ def _collapse_digraphs(norm: str) -> list[str]:
     return out
 
 
-def _name_variants(full_name: str) -> list[str]:
-    """The normalized full name FIRST, then the other ways the same name is
-    spelled by transliteration: each umlaut letter plain or as its digraph, and
-    each digraph kept or cut to one letter. Generated from the stored name only,
-    never by rewriting the document, so unrelated words are untouched."""
-    base = normalize_text(full_name)
-    found: dict[str, None] = {base: None}
-    for expanded in _expand_umlauts(full_name):
+#: Past this many whole-name spellings the product of the per-token variants is
+#: cut off (every token is still matched on its own).
+_MAX_NAME_VARIANTS = 256
+
+
+def _token_variants(token: str) -> list[str]:
+    """The normalized token FIRST, then the other ways it is spelled by
+    transliteration: each umlaut letter plain or as its digraph, and each digraph
+    kept or cut to one letter. Built per token, so a name that mixes spellings
+    inside one token (``Muellerhofer`` for ``Müllerhöfer``) is covered whatever
+    the other tokens hold. Generated from the stored name only, never by
+    rewriting the document, so unrelated words are untouched."""
+    found: dict[str, None] = {normalize_text(token): None}
+    for expanded in _expand_umlauts(token):
         for variant in _collapse_digraphs(expanded):
             if variant:
                 found.setdefault(variant, None)
+    return list(found)
+
+
+def _joined(per_token: list[list[str]], base: str) -> list[str]:
+    """``base`` first, then every combination of one spelling per token."""
+    found: dict[str, None] = {base: None}
+    for combo in itertools.islice(itertools.product(*per_token), _MAX_NAME_VARIANTS):
+        found.setdefault(" ".join(combo), None)
     return list(found)
 
 
@@ -390,17 +445,15 @@ def _variants(token: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _run_ons(full: str) -> list[str]:
+def _run_ons(firsts: list[str], lasts: list[str]) -> list[str]:
     """Spellings a name takes when its parts are glued together or initialled:
     ``janedoe``, ``jane.doe``, ``jane_doe``, ``jdoe``, ``doej``... built per
     first-name part and per surname part, so ``Mary Smith-Jones`` also yields
-    ``mjones`` and ``jonesmary``."""
-    tokens = [t for t in _NAME_SPLIT.split(full) if t]
-    if len(tokens) < _MIN_TOKEN_LEN:
-        return []
+    ``mjones`` and ``jonesmary``. ``firsts`` and ``lasts`` are the spellings of
+    the first and of the last name token."""
     forms: list[str] = []
-    for first in _variants(tokens[0]):
-        for last in _variants(tokens[-1]):
+    for first in dict.fromkeys(v for t in firsts for v in _variants(t)):
+        for last in dict.fromkeys(v for t in lasts for v in _variants(t)):
             for sep in ("", ".", "_", "-"):
                 forms.append(first + sep + last)
                 forms.append(last + sep + first)
@@ -410,9 +463,12 @@ def _run_ons(full: str) -> list[str]:
 
 
 def _run_on_re(norm_form: str) -> re.Pattern[str]:
-    """A run-on as a pattern that stops at LETTERS only, so ``janedoe88`` and
-    ``jdoe_99`` match while ``Jonesboro`` does not."""
-    return re.compile(r"(?<![^\W\d_])" + re.escape(norm_form) + r"(?![^\W\d_])")
+    """A run-on as a pattern that stops at LETTERS only and takes the digits and
+    underscores glued to it along, so ``janedoe88`` and ``jdoe_99`` go whole while
+    ``Jonesboro`` does not."""
+    return re.compile(
+        r"(?<![^\W\d_])[\d_]*" + re.escape(norm_form) + r"[\d_]*(?![^\W\d_])"
+    )
 
 
 def _name_re(norm_name: str) -> re.Pattern[str]:
@@ -425,28 +481,44 @@ def _name_re(norm_name: str) -> re.Pattern[str]:
     )
 
 
-def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], list[str]]:
+def _compile_terms(
+    terms: list[str],
+) -> tuple[list[re.Pattern[str]], list[str], list[str]]:
     """Patterns for the terms, for the name's own tokens (and the parts of a
-    hyphenated or apostrophised one) and for the name's run-ons -- for the name
-    AND each of its transliteration variants -- so neither redaction nor
-    verification depends on the caller having listed them. Also the normalized
-    full-name variants, the stored spelling first."""
+    hyphenated or apostrophised one) and for the name's run-ons -- for every
+    transliteration variant of each token -- so neither redaction nor
+    verification depends on the caller having listed them. Also the spellings
+    the squashed check looks for, and the spellings the vouch may pass on: the
+    stored one and its umlaut expansions only, never a collapsed digraph."""
     if not terms or not terms[0].strip():
         raise NotAnonymizedError("no candidate name to vouch for")
-    variants = _name_variants(terms[0])
+    stored = terms[0]
+    base = normalize_text(stored)
+    tokens = [t for t in _NAME_SPLIT.split(stored) if t]
+    per_token = [_token_variants(t) for t in tokens]
+    variants = _joined(per_token, base)
+    vouch = _joined([_vouch_forms(t) for t in tokens], base)
+    stored_pieces = {
+        piece
+        for forms in per_token
+        for token in _NAME_SPLIT.split(forms[0])
+        for piece in (token, *_parts(token))
+    }
     names: dict[str, None] = {}
-    run_ons: dict[str, None] = {}
-    for i, variant in enumerate(variants):
-        floor = _MIN_TOKEN_LEN if i == 0 else _MIN_VARIANT_TOKEN_LEN
+    for variant in variants:
         if variant:
             names.setdefault(variant, None)
-        for token in _NAME_SPLIT.split(variant):
-            if len(token) >= floor:
-                names.setdefault(token, None)
-            for part in _parts(token):
-                if len(part) >= floor:
-                    names.setdefault(part, None)
-        run_ons.update(dict.fromkeys(_run_ons(variant)))
+    for forms in per_token:
+        for form in forms:
+            for token in _NAME_SPLIT.split(form):
+                for piece in (token, *_parts(token)):
+                    derived = piece not in stored_pieces
+                    floor = _MIN_VARIANT_TOKEN_LEN if derived else _MIN_TOKEN_LEN
+                    if len(piece) >= floor:
+                        names.setdefault(piece, None)
+    run_ons: dict[str, None] = {}
+    if len(tokens) >= _MIN_TOKEN_LEN:
+        run_ons.update(dict.fromkeys(_run_ons(per_token[0], per_token[-1])))
     patterns = [_name_re(n) for n in names]
     others: dict[str, None] = {}
     for term in terms:
@@ -455,7 +527,8 @@ def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], list[str]]:
             others[norm] = None
     patterns.extend(_term_re(t) for t in others)
     patterns.extend(_run_on_re(f) for f in run_ons)
-    return patterns, variants
+    squash = [*variants, *(form for forms in per_token for form in forms)]
+    return patterns, squash, vouch
 
 
 def _squash(text: str) -> str:
@@ -464,7 +537,7 @@ def _squash(text: str) -> str:
 
 def _needles(full: str) -> list[str]:
     """What to look for once spaces and separators are removed: the full name
-    (5+ letters) and every name token and part of it (4+ letters)."""
+    (4+ letters) and every name token and part of it (4+ letters)."""
     found: list[str] = []
     if len(squashed := _squash(full)) >= _MIN_SQUASHED_FULL:
         found.append(squashed)
@@ -523,6 +596,9 @@ def _unify_line_breaks(text: str) -> str:
 
 
 def _require_name_found(norm_text: str, variants: list[str]) -> None:
+    """The vouch. ``variants`` is the stored spelling first and then only its
+    umlaut expansions: a spelling made by CUTTING a digraph (``haas`` -> ``has``)
+    is an ordinary word and must never vouch for a document."""
     if not norm_text:
         raise NotAnonymizedError("no text layer to redact or verify")
     if not variants[0]:
@@ -569,16 +645,16 @@ def redact_text(text: str, terms: list[str]) -> str:
     list cannot notice a name the list never held), when there is no text, or
     when text in a second script is left after redaction.
     """
-    patterns, variants = _compile_terms(terms)
+    patterns, squash, vouch = _compile_terms(terms)
     text = _unify_line_breaks(text)
     norm, origin = _norm_map(text)
-    _require_name_found(norm, variants)
+    _require_name_found(norm, vouch)
 
     spans: list[tuple[int, int]] = []
     for pattern in patterns:
         for m in pattern.finditer(norm):
             spans.append((origin[m.start()], origin[m.end() - 1] + 1))
-    for begin, end in _squashed_spans(norm, variants):
+    for begin, end in _squashed_spans(norm, squash):
         spans.append((origin[begin], origin[end - 1] + 1))
     offset = 0
     for line in text.split("\n"):
@@ -599,7 +675,7 @@ def verify_text(text: str, terms: list[str]) -> None:
     ``text``: a term, a name token or run-on, an e-mail, phone, URL, domain,
     @handle or postal code, the full name or surname once spaces and separators
     are removed, or a second script."""
-    patterns, variants = _compile_terms(terms)
+    patterns, squash, _vouch = _compile_terms(terms)
     text = _unify_line_breaks(text)
     norm, _origin = _norm_map(text)
     if any(p.search(norm) for p in patterns):
@@ -607,7 +683,7 @@ def verify_text(text: str, terms: list[str]) -> None:
     for line in text.split("\n"):
         if _shape_spans(_norm_map(line)[0]):
             raise NotAnonymizedError("contact or web data survived redaction")
-    if _squashed_spans(norm, variants):
+    if _squashed_spans(norm, squash):
         raise NotAnonymizedError("the name survived with its letters spaced out")
     _refuse_other_scripts(text)
 
@@ -690,10 +766,7 @@ _SUBSTITUTES = {
     "—": "-",
     "―": "-",
     "−": "-",
-    "‘": "'",
-    "’": "'",
     "‚": "'",
-    "‛": "'",
     "“": '"',
     "”": '"',
     "„": '"',
@@ -706,25 +779,24 @@ _SUBSTITUTES = {
     "Ž": "Z",
     "ž": "z",
     "Ÿ": "Y",
-    "Œ": "OE",
-    "œ": "oe",
-    "ə": "a",
-    "Ə": "A",
-    "ɓ": "b",
-    "Ɓ": "B",
-    "ɗ": "d",
-    "Ɗ": "D",
-    "ƙ": "k",
-    "Ƙ": "K",
-    "ƴ": "y",
-    "Ƴ": "Y",
-    "ŋ": "n",
-    "Ŋ": "N",
-    "ɛ": "e",
-    "Ɛ": "E",
-    "ɔ": "o",
-    "Ɔ": "O",
 }
+
+
+def _derive_substitutes() -> None:
+    """Every letter ``_FOLD`` folds (both cases) and every apostrophe
+    ``_APOSTROPHES`` unifies is drawn as the plain text the normaliser reads, so
+    the renderer and the normaliser cannot drift apart: a letter one folds and
+    the other cannot draw would turn into ``?`` and refuse a good resume."""
+    for key, plain in _FOLD.items():
+        _SUBSTITUTES[key] = plain
+        upper = key.upper()
+        if upper != key and len(upper) == 1:
+            _SUBSTITUTES[upper] = plain.upper()
+    for ch in _APOSTROPHES:
+        _SUBSTITUTES[ch] = "'"
+
+
+_derive_substitutes()
 
 
 def _drawable(text: str) -> bool:
