@@ -74,6 +74,10 @@ PDF_PAGE_SIZE = (612.0, 792.0)
 COVER_TYPED_NOTE = "cover letter typed in the app; not exported"
 
 _MIN_TOKEN_LEN = 2
+# A run is a phone when it has >= 10 digits, OR >= 7 digits and it is separated
+# (space, dash, dot, slash, middle dot), wrapped in brackets, or labelled
+# ("Tel:", "Mobile:"). An unlabelled, unbracketed, unseparated 7-9 digit run is an
+# id or a count and stays text; 6 digits stay text even when labelled.
 _MIN_PHONE_DIGITS_BARE = 10
 _MIN_PHONE_DIGITS_SEPARATED = 7
 _MIN_RUN_ON_LEN = 4
@@ -294,14 +298,18 @@ def _plausible_year_range(span: str) -> bool:
 def _phones(norm_line: str) -> list[re.Match[str]]:
     found: list[re.Match[str]] = []
     for m in _PHONE_RE.finditer(norm_line):
-        span = m.group(0).strip().strip("() \t")
-        digits = sum(c.isdigit() for c in span)
-        separated = any(c in _SEPARATORS for c in span)
+        raw = m.group(0).strip()
+        # Digits and separators are counted on the UNSTRIPPED span, so a wrapping
+        # bracket still counts as a separator.
+        digits = sum(c.isdigit() for c in raw)
+        separated = any(c in _SEPARATORS for c in raw)
         labelled = _PHONE_LABEL_RE.search(norm_line[: m.start()]) is not None
+        # Only the date/year-range exemption looks at the bracket-stripped form.
+        span = raw.strip("() \t")
         if not labelled and (_plausible_year_range(span) or _DATE_RE.fullmatch(span)):
             continue
         bare = digits >= _MIN_PHONE_DIGITS_BARE
-        local = separated and digits >= _MIN_PHONE_DIGITS_SEPARATED
+        local = (separated or labelled) and digits >= _MIN_PHONE_DIGITS_SEPARATED
         if bare or local:
             found.append(m)
     return found
