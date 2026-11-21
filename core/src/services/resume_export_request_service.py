@@ -60,14 +60,34 @@ async def count_live_applicants(conn: DbConn, job_id: UUID) -> int:
     return int(n or 0)
 
 
-async def create(conn: DbConn, job_id: UUID, requested_by: str) -> UUID:
-    export_id: UUID = await conn.fetchval(
+async def create(conn: DbConn, job_id: UUID, requested_by: str) -> UUID | None:
+    """Queue a new export, or ``None`` when the requester already has a live
+    (queued/building) one for the job. The partial unique index decides, so six
+    simultaneous clicks make one row."""
+    export_id: UUID | None = await conn.fetchval(
         "INSERT INTO resume_export_requests (job_id, requested_by) "
-        "VALUES ($1, $2) RETURNING id",
+        "VALUES ($1, $2) "
+        "ON CONFLICT (job_id, requested_by) "
+        "WHERE status IN ('queued', 'building') DO NOTHING RETURNING id",
         job_id,
         requested_by,
     )
     return export_id
+
+
+async def live_for(
+    conn: DbConn, job_id: UUID, requested_by: str
+) -> dict[str, Any] | None:
+    """The requester's queued/building export for the job, if any."""
+    row = await conn.fetchrow(
+        f"SELECT {_STATUS_FIELDS} FROM resume_export_requests "
+        "WHERE job_id = $1 AND requested_by = $2 "
+        "AND status IN ('queued', 'building') "
+        "ORDER BY created_at DESC, id LIMIT 1",
+        job_id,
+        requested_by,
+    )
+    return None if row is None else dict(row)
 
 
 async def get(conn: DbConn, export_id: UUID) -> dict[str, Any] | None:
@@ -95,12 +115,16 @@ async def get_for_download(
     conn: DbConn, export_id: UUID, requested_by: str
 ) -> dict[str, Any] | None:
     """The requester's own row (nobody else's, admins included), with whether it
-    is downloadable right now: ``ready``, unexpired, holding a blob."""
+    is downloadable right now: ``ready``, unexpired, holding a blob.
+
+    ``blind_review`` is the value STORED at build (NULL, from before the column
+    existed, reads as false); ``job_blind_review`` is the job's value now."""
     row = await conn.fetchrow(
         "SELECT r.id, r.job_id, r.status, r.blob_key, r.counts, "
         "       (r.status = 'ready' AND r.blob_key IS NOT NULL "
         "        AND (r.expires_at IS NULL OR r.expires_at > now())) AS downloadable, "
-        "       j.blind_review "
+        "       j.blind_review AS job_blind_review, "
+        "       COALESCE(r.blind_review, FALSE) AS blind_review "
         "FROM resume_export_requests r JOIN jobs j ON j.id = r.job_id "
         "WHERE r.id = $1 AND r.requested_by = $2",
         export_id,
@@ -109,14 +133,26 @@ async def get_for_download(
     return None if row is None else dict(row)
 
 
-async def claim(conn: DbConn, export_id: UUID) -> ExportClaim | None:
-    """CAS queued -> building; ``None`` when unknown or another worker won."""
+async def claim(
+    conn: DbConn, export_id: UUID, *, retry: bool = False
+) -> ExportClaim | None:
+    """CAS queued -> building, storing the job's ``blind_review`` as it is NOW
+    (the download compares it with the job's later value). ``None`` when
+    unknown, finished, or another worker won.
+
+    On an arq retry (``retry``) a ``building`` row is accepted too: the first
+    attempt died with the row held, and nobody else is building it. A first
+    try still skips a ``building`` row, and a terminal row is never rebuilt."""
     row = await conn.fetchrow(
         "WITH c AS ("
-        "  UPDATE resume_export_requests SET status = 'building' "
-        "  WHERE id = $1 AND status = 'queued' RETURNING id, job_id"
-        ") SELECT c.id, c.job_id, j.blind_review FROM c JOIN jobs j ON j.id = c.job_id",
+        "  UPDATE resume_export_requests r SET status = 'building', "
+        "         blind_review = j.blind_review "
+        "  FROM jobs j "
+        "  WHERE r.id = $1 AND j.id = r.job_id AND r.status = ANY($2::text[]) "
+        "  RETURNING r.id, r.job_id, r.blind_review"
+        ") SELECT id, job_id, blind_review FROM c",
         export_id,
+        ["queued", "building"] if retry else ["queued"],
     )
     if row is None:
         return None

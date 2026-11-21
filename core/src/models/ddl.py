@@ -529,6 +529,29 @@ _STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS resume_export_requests_status_idx
         ON resume_export_requests (status, expires_at)
     """,
+    # The job's blind_review AT BUILD TIME. Nullable on purpose: NULL means the
+    # row was built before the column existed, and the download treats it as
+    # "not blind" (so a job that has since gone blind refuses the file).
+    "ALTER TABLE resume_export_requests ADD COLUMN IF NOT EXISTS blind_review BOOLEAN",
+    # One live (queued/building) export per job and requester: a second click
+    # returns that row instead of building twice. Rows that already break the
+    # rule (a double click before this index existed) are failed first, newest
+    # kept, or the index could not be created.
+    """
+    UPDATE resume_export_requests SET status = 'failed', blob_key = NULL
+    WHERE status IN ('queued', 'building')
+      AND id NOT IN (
+          SELECT DISTINCT ON (job_id, requested_by) id
+          FROM resume_export_requests
+          WHERE status IN ('queued', 'building')
+          ORDER BY job_id, requested_by, created_at DESC, id
+      )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS resume_export_requests_live_idx
+        ON resume_export_requests (job_id, requested_by)
+        WHERE status IN ('queued', 'building')
+    """,
     # ── shortlist_entries ────────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS shortlist_entries (

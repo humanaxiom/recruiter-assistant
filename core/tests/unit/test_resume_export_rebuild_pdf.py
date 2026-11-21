@@ -494,7 +494,8 @@ def test_render_text_pdf_makes_a_fresh_text_only_pdf() -> None:
 
     assert out.startswith(b"%PDF")
     _assert_fresh(out)
-    assert _flat(out) == "[redacted] analyst with sql skills"
+    # get_text() ends every line with "\n", so _flat always ends in a space.
+    assert _flat(out).strip() == "[redacted] analyst with sql skills"
 
 
 def test_render_text_pdf_wraps_long_lines_and_loses_no_word() -> None:

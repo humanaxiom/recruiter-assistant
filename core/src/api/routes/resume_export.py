@@ -51,6 +51,10 @@ _GATES = [
 ]
 
 _NOT_READY = "the export is not ready, has expired, or its file is missing"
+_BLIND_NOW = (
+    "this job is now a blind-review job but the export was built before that; "
+    "request a new export"
+)
 
 
 def _view(row: dict[str, Any]) -> dict[str, Any]:
@@ -90,6 +94,19 @@ async def start_export(
             detail=f"this job has more than {cap} applicants; too many to export",
         )
     export_id = await requests.create(db, job_id, user.cas_username)
+    if export_id is None:
+        # A double click (or six): hand back the export already in flight.
+        live = await requests.live_for(db, job_id, user.cas_username)
+        if live is None:
+            # It finished between the conflict and the read; start a new one.
+            export_id = await requests.create(db, job_id, user.cas_username)
+        else:
+            return JSONResponse(
+                status_code=202,
+                content={"id": str(live["id"]), "status": live["status"]},
+            )
+    if export_id is None:
+        raise HTTPException(status_code=409, detail="an export is already running")
     try:
         await arq.enqueue_job("build_resume_export", str(export_id))
     except Exception:
@@ -152,6 +169,10 @@ async def download_export(
         raise HTTPException(status_code=404, detail="export not found")
     if not row["downloadable"]:
         raise HTTPException(status_code=409, detail=_NOT_READY)
+    if row["job_blind_review"] and not row["blind_review"]:
+        # The job went blind after this ZIP was built: its as-is folder now
+        # identifies candidates the job promised to hide.
+        raise HTTPException(status_code=409, detail=_BLIND_NOW)
     try:
         data = await blob_store.get(row["blob_key"])
     except BlobNotFound:

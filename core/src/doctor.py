@@ -271,26 +271,59 @@ WHERE status IN ('expired', 'failed') AND blob_key IS NOT NULL
 """
 
 
+#: A ``ready`` export is expired by the hourly sweep. One still ready two hours
+#: after its ``expires_at`` means the sweep is not running (or is failing), so a
+#: ZIP of every applicant's identity is being kept past its promised life. Two
+#: hours is the sweep's own period plus slack, so a slow tick is not a finding.
+_EXPORT_READY_OVERDUE_SQL = """
+SELECT id FROM resume_export_requests
+WHERE status = 'ready' AND expires_at < now() - interval '2 hours'
+"""
+
+
 async def _check_export_requests(pg: Any) -> list[Finding]:
+    findings: list[Finding] = []
     async with pg.acquire() as conn:
         rows = await conn.fetch(_EXPORT_STALE_HOLDING_SQL)
-    if not rows:
-        return []
-    n = len(rows)
-    return [
-        Finding(
-            check="pg.export_rows_retain_blob",
-            severity="fail",
-            count=n,
-            detail=f"{n} expired or failed résumé exports still hold a ZIP blob key",
-            remedy=(
-                "A dead export must release its ZIP. Check that the hourly "
-                "expire_resume_exports sweep is running, and find the code path "
-                "that reached expired/failed without NULLing blob_key and "
-                "deleting the blob."
-            ),
+        overdue = await conn.fetch(_EXPORT_READY_OVERDUE_SQL)
+    if rows:
+        n = len(rows)
+        findings.append(
+            Finding(
+                check="pg.export_rows_retain_blob",
+                severity="fail",
+                count=n,
+                detail=(
+                    f"{n} expired or failed résumé exports still hold a ZIP blob key"
+                ),
+                remedy=(
+                    "A dead export must release its ZIP. Check that the hourly "
+                    "expire_resume_exports sweep is running, and find the code path "
+                    "that reached expired/failed without NULLing blob_key and "
+                    "deleting the blob."
+                ),
+            )
         )
-    ]
+    if overdue:
+        n = len(overdue)
+        findings.append(
+            Finding(
+                check="pg.export_ready_past_expiry",
+                severity="fail",
+                count=n,
+                detail=(
+                    f"{n} résumé exports are still ready more than 2 hours past "
+                    "their expiry"
+                ),
+                remedy=(
+                    "The hourly expire_resume_exports sweep is not running or is "
+                    "failing: check the worker logs for export.expire.error and "
+                    "that the cron is registered. Until it runs, expired ZIPs of "
+                    "every applicant's identity are retained on disk."
+                ),
+            )
+        )
+    return findings
 
 
 # ── Neo4j checks ─────────────────────────────────────────────────────────

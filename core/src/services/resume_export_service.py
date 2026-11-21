@@ -1,29 +1,40 @@
 """Export a job's résumés and cover letters as a ZIP: as-is and anonymized.
 
 Pure, synchronous and DB-free (the worker runs it in a thread and owns every
-read and write). The anonymized copy is made in four steps, and the last one
-does not trust the first three:
+read and write).
 
-1. **Strip.** Every channel that can carry identity without being page text is
-   removed from the document itself: links and every other annotation, form
-   fields, embedded files, the outline, the metadata, the CropBox (so text
-   outside it is no longer "outside the page"), and every image. An image is
-   pixels no text pass can verify, so a page that is mostly image is refused.
-2. **Vouch.** The candidate's full name, or failing that the surname, must be
-   findable in the ORIGINAL text. A verification that only checks the term list
-   cannot notice a name the list never held.
-3. **Redact.** Terms are located with PyMuPDF search, accepted only where they
-   are WHOLE words (so ``Ann Ford`` never eats ``Stanford``), and removed with
-   redaction annotations that are applied -- the text leaves the content stream,
-   it is not merely covered. E-mail addresses, phone numbers and profile URLs
-   are redacted by shape.
-4. **Verify the shipped bytes.** The output is re-opened and checked on its own:
-   nothing left of any channel from step 1, no term, e-mail, phone or profile
-   URL in the unclipped text. Anything that cannot be vouched for raises
-   :class:`NotAnonymizedError` -- fail closed, never ship an unverifiable file.
+**The anonymized copy is REBUILT, never edited.** Every earlier design redacted
+the original PDF in place and kept finding identity in channels nobody had
+thought of (vector-outline names, ``/ActualText``, XMP on form XObjects, UTF-16
+layer names, a second script, letter-spaced headers). So nothing from the
+original file survives here at all: the copy is a NEW PDF rendered from the
+résumé's extracted text, after that text was redacted and verified. The layout
+is lost, on purpose. The pipeline (:func:`redact_pdf`):
+
+1. **Extract** the text in reading order. A page that is mostly image, a file
+   with no text layer and anything unreadable or encrypted is refused.
+2. **Redact** (:func:`redact_text`): the candidate's name must be findable (the
+   vouch); then the name, its tokens and run-ons (``janedoe``, ``jdoe``,
+   ``jane.doe``), the stored e-mail / phone / location, employers and schools,
+   e-mail addresses, phone numbers, domains and URLs, @handles and postal codes
+   become the visible marker :data:`REDACTION_MARKER`, line for line. A second
+   script (Han, Cyrillic, Arabic, ...) that is left refuses the file.
+3. **Verify** (:func:`verify_text`) the redacted text on its own.
+4. **Render** (:func:`render_text_pdf`) a fresh PDF: one non-embedded Helvetica,
+   a fixed page size, no images, links, annotations, outline, layers, XMP,
+   marked content or drawing, and an ``/Info`` of Producer and Creator only.
+   The base-14 Helvetica draws anything outside Latin-1 as a middle dot, so the
+   text is first mapped by :func:`renderable_text` (dashes to ``-``, curly
+   quotes to straight ones, a few letters folded, ``?`` for what has no
+   mapping): that single mapping is the only one applied, so the text that was
+   verified is the text that is drawn.
+5. **Verify the rendered bytes**: extract the new PDF's own text and run
+   :func:`verify_text` again. Exactly those bytes are returned. Anything that
+   cannot be vouched for raises :class:`NotAnonymizedError` -- fail closed.
 
 All matching is on normalized text (:func:`normalize_text`): NFKC, case-folded,
-accent-stripped, with apostrophe and hyphen variants unified.
+accent-stripped, letters with no decomposition (o-slash, ae, eth, thorn, l-stroke
+...) folded to ASCII, with apostrophe and hyphen variants unified.
 
 Entry names and the manifest carry only ``applicant-NNN`` numbers -- never a
 name, an address or an uploaded filename.
@@ -31,7 +42,6 @@ name, an address or an uploaded filename.
 
 from __future__ import annotations
 
-import bisect
 import functools
 import io
 import re
@@ -48,41 +58,103 @@ from src.settings import get_settings
 #: scan or an image résumé keeps the identity in pixels no text pass can verify.
 MAX_IMAGE_AREA_FRACTION = 0.5
 
+#: What replaces every redacted span in the rebuilt copy.
+REDACTION_MARKER = "[redacted]"
+
+#: The fixed, generic document properties of every rebuilt PDF.
+PDF_PRODUCER = "Resume export (anonymized copy)"
+PDF_CREATOR = "Recruiter Assistant"
+#: US Letter, in points.
+PDF_PAGE_SIZE = (612.0, 792.0)
+
+#: The manifest note for an applicant who typed a cover letter into the app.
+COVER_TYPED_NOTE = "cover letter typed in the app; not exported"
+
 _MIN_TOKEN_LEN = 2
 _MIN_PHONE_DIGITS_BARE = 10
 _MIN_PHONE_DIGITS_SEPARATED = 7
-_MIN_RAW_NEEDLE_LEN = 6
+_MIN_RUN_ON_LEN = 4
+_MIN_SQUASHED_FULL = 5
+_MIN_SQUASHED_PART = 4
 
 _BIG = fitz.Rect(-20000, -20000, 20000, 20000)
-# No MediaBox clipping: the verification must see text that sits outside the page.
+# No MediaBox clipping: text that sits outside the page is still text.
 _UNCLIPPED = fitz.TEXT_PRESERVE_WHITESPACE
 
 _APOSTROPHES = frozenset("‘’‛ʼ´`′")
 _DASHES = frozenset("‐‑‒–—―−")
 
+#: Letters Unicode gives no decomposition, so accent-stripping leaves them
+#: alone: o-slash, ae, eth, d-stroke, thorn, l-stroke, l-middle-dot, dotless i,
+#: oe, h-stroke, t-stroke. Keyed by the CASEFOLDED letter.
+_FOLD = {
+    "ø": "o",
+    "æ": "ae",
+    "ð": "d",
+    "đ": "d",
+    "þ": "th",
+    "ł": "l",
+    "ŀ": "l",
+    "ı": "i",
+    "œ": "oe",
+    "ħ": "h",
+    "ŧ": "t",
+}
+
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-# U+00B7 (middle dot) is what PyMuPDF writes for a dash its base-14 font lacks.
+# U+00B7 (middle dot) is what a base-14 font writes for a dash it lacks.
 _PHONE_RE = re.compile(r"(?<![\w])\+?\(?\d[\d()./ \-·]{5,}\d(?![\w])")
-_URL_RE = re.compile(
-    r"(?:https?://)?(?:[a-z0-9-]+\.)*"
-    r"(?:linkedin\.com/(?:in|pub|company|profile)|github\.com)/[^\s]*"
+# "2015-2019", "2019 - 2021", "09/2019 - 04/2021": a span of years, not a phone.
+_YEAR_RANGE_RE = re.compile(
+    r"(?:\d{1,2}/)?(?:19|20)\d{2}\s*[-/ ]\s*(?:\d{1,2}/)?(?:19|20)\d{2}"
 )
-_YEAR_RANGE_RE = re.compile(r"(?:19|20)\d{2}\s*[-/ ]\s*(?:19|20)\d{2}")
 _DATE_RE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}")
 _SEPARATORS = frozenset(" -./()·")
 
-_CATALOG_KEEP = frozenset({"Type", "Pages"})
-_PAGE_STRIP_KEYS = (
-    "Annots",
-    "AA",
-    "Metadata",
-    "PieceInfo",
-    "Thumb",
-    "B",
-    "StructParents",
-    "LastModified",
+_SCHEME_URL_RE = re.compile(r"(?:https?|ftp)://[^\s]+|www\.[^\s]+")
+_TLDS = (
+    "com|org|net|edu|gov|io|ca|co|ai|dev|app|info|biz|us|uk|ly|xyz|tech|me|site|"
+    "online|page|blog|cv"
 )
-_CROP_KEYS = ("CropBox", "TrimBox", "BleedBox", "ArtBox")
+_DOMAIN_RE = re.compile(
+    rf"(?<![\w@])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:{_TLDS})(?![a-z0-9])"
+    r"(?:[/?#][^\s]*)?"
+)
+#: Tech names that are shaped like a domain and are not one.
+_NOT_DOMAINS = frozenset({"asp.net", "vb.net", "f.net", "c.net"})
+_TRAILING_PUNCT = ".,;:!?)]}'\""
+_HANDLE_RE = re.compile(r"(?<![\w@.])@[a-z0-9_]{2,}(?:\.[a-z0-9_]+)*")
+# Canadian postal code; the letters D, F, I, O, Q, U never occur, and W and Z
+# never lead.
+_POSTAL_RE = re.compile(
+    r"(?<![a-z0-9])[abceghj-nprstvxy]\d[abceghj-nprstv-z][ -]?"
+    r"\d[abceghj-nprstv-z]\d(?![a-z0-9])"
+)
+
+# A script a Latin-script résumé has no business holding after redaction: it is
+# where a name written in another script hides (and the Latin-only rebuild
+# could not show it anyway).
+_OTHER_SCRIPT_RE = re.compile(
+    "["
+    "Ѐ-ԯᲀ-᲏"  # Cyrillic
+    "֐-׿יִ-ﭏ"  # Hebrew
+    "؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿"  # Arabic
+    "ऀ-ॿ"  # Devanagari
+    "฀-๿"  # Thai
+    "Ͱ-Ͽἀ-῿"  # Greek, Greek Extended
+    "԰-֏"  # Armenian
+    "Ⴀ-ჿᲐ-Ჿⴀ-⴯"  # Georgian
+    "ሀ-᏿ⶀ-⷟"  # Ethiopic
+    "ঀ-૿"  # Bengali (the block range also takes Gurmukhi and Gujarati)
+    "஀-௿"  # Tamil
+    "Ꙁ-ꚟ"  # Cyrillic Extended-B
+    "ᄀ-ᇿ㄰-㆏가-힯"  # Hangul
+    "぀-ヿㇰ-ㇿｦ-ﾟ"  # Hiragana, Katakana
+    "㐀-䶿一-鿿豈-﫿\U00020000-\U0002fa1f"  # Han
+    "]"
+)
+
+_LINE_BREAKS = re.compile("\r\n|[\r\x0b\x0c\x85  ]")
 
 
 class NotAnonymizedError(Exception):
@@ -98,12 +170,17 @@ def _norm_char(ch: str) -> str:
         return "'"
     if ch in _DASHES:
         return "-"
+    # Before NFKC: U+013F (capital L with middle dot) would decompose to "l·".
+    if (letter := _FOLD.get(ch.casefold())) is not None:
+        return letter
     folded = unicodedata.normalize("NFKC", ch).casefold()
     out: list[str] = []
     for c in unicodedata.normalize("NFD", folded):
         if unicodedata.combining(c) or unicodedata.category(c) == "Cf":
             continue
-        if c in _APOSTROPHES:
+        if c in _FOLD:
+            c = _FOLD[c]
+        elif c in _APOSTROPHES:
             c = "'"
         elif c in _DASHES:
             c = "-"
@@ -141,6 +218,9 @@ def _term_re(norm_term: str) -> re.Pattern[str]:
     return re.compile(r"(?<![^\W_])" + re.escape(norm_term) + r"(?![^\W_])")
 
 
+# ----------------------------------------------------------------------- shapes
+
+
 def _phones(norm_line: str) -> list[re.Match[str]]:
     found: list[re.Match[str]] = []
     for m in _PHONE_RE.finditer(norm_line):
@@ -156,86 +236,255 @@ def _phones(norm_line: str) -> list[re.Match[str]]:
     return found
 
 
+def _trimmed(norm_line: str, begin: int, end: int) -> tuple[int, int]:
+    """``[begin, end)`` without the sentence punctuation that trails a URL."""
+    while end > begin + 1 and norm_line[end - 1] in _TRAILING_PUNCT:
+        end -= 1
+    return begin, end
+
+
 def _shape_spans(norm_line: str) -> list[tuple[int, int]]:
+    """Spans of one normalized line that are contact or web data by SHAPE:
+    e-mail, URL, domain, @handle, postal code and phone number."""
     spans = [m.span() for m in _EMAIL_RE.finditer(norm_line)]
-    spans.extend(m.span() for m in _URL_RE.finditer(norm_line))
+    spans.extend(
+        _trimmed(norm_line, *m.span()) for m in _SCHEME_URL_RE.finditer(norm_line)
+    )
+    for m in _DOMAIN_RE.finditer(norm_line):
+        if m.group(0) not in _NOT_DOMAINS:
+            spans.append(_trimmed(norm_line, *m.span()))
+    spans.extend(m.span() for m in _HANDLE_RE.finditer(norm_line))
+    spans.extend(m.span() for m in _POSTAL_RE.finditer(norm_line))
     spans.extend(m.span() for m in _phones(norm_line))
     return spans
 
 
-def _has_shape(norm_line: str) -> bool:
-    return bool(
-        _EMAIL_RE.search(norm_line) or _URL_RE.search(norm_line) or _phones(norm_line)
-    )
+# -------------------------------------------------------------------- the terms
+
+
+def _name_forms(full_name: str) -> tuple[str, str]:
+    """``(normalized full name, normalized surname)`` -- the surname being the
+    last whitespace token of the full name."""
+    full = normalize_text(full_name)
+    return full, full.rsplit(" ", 1)[-1]
+
+
+_NAME_SPLIT = re.compile(r"[\s,.]+")
+_PART_SPLIT = re.compile(r"[-']+")
+
+
+def _parts(token: str) -> list[str]:
+    """A name token cut at hyphens and apostrophes, keeping parts of two or more
+    letters: ``smith-jones`` -> smith, jones; ``o'brien`` -> brien."""
+    return [p for p in _PART_SPLIT.split(token) if len(p) >= _MIN_TOKEN_LEN]
+
+
+def _variants(token: str) -> list[str]:
+    """The ways a name token can be written as one word: each part on its own
+    and the whole token glued together (``obrien``, ``smithjones``)."""
+    out = _parts(token)
+    glued = _PART_SPLIT.sub("", token)
+    if len(glued) >= _MIN_TOKEN_LEN:
+        out.append(glued)
+    return list(dict.fromkeys(out))
+
+
+def _run_ons(full: str) -> list[str]:
+    """Spellings a name takes when its parts are glued together or initialled:
+    ``janedoe``, ``jane.doe``, ``jane_doe``, ``jdoe``, ``doej``... built per
+    first-name part and per surname part, so ``Mary Smith-Jones`` also yields
+    ``mjones`` and ``jonesmary``."""
+    tokens = [t for t in _NAME_SPLIT.split(full) if t]
+    if len(tokens) < _MIN_TOKEN_LEN:
+        return []
+    forms: list[str] = []
+    for first in _variants(tokens[0]):
+        for last in _variants(tokens[-1]):
+            for sep in ("", ".", "_", "-"):
+                forms.append(first + sep + last)
+                forms.append(last + sep + first)
+                forms.append(first[0] + sep + last)
+                forms.append(last + sep + first[0])
+    return [f for f in dict.fromkeys(forms) if len(f) >= _MIN_RUN_ON_LEN]
+
+
+def _run_on_re(norm_form: str) -> re.Pattern[str]:
+    """A run-on as a pattern that stops at LETTERS only, so ``janedoe88`` and
+    ``jdoe_99`` match while ``Jonesboro`` does not."""
+    return re.compile(r"(?<![^\W\d_])" + re.escape(norm_form) + r"(?![^\W\d_])")
+
+
+def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], str, str]:
+    """Patterns for the terms, for the name's own tokens (and the parts of a
+    hyphenated or apostrophised one) and for the name's run-ons, so neither
+    redaction nor verification depends on the caller having listed them."""
+    if not terms or not terms[0].strip():
+        raise NotAnonymizedError("no candidate name to vouch for")
+    full, surname = _name_forms(terms[0])
+    wanted: dict[str, None] = {}
+    for term in terms:
+        norm = normalize_text(term)
+        if norm:
+            wanted[norm] = None
+    for token in _NAME_SPLIT.split(full):
+        if len(token) >= _MIN_TOKEN_LEN:
+            wanted.setdefault(token, None)
+        for part in _parts(token):
+            wanted.setdefault(part, None)
+    patterns = [_term_re(t) for t in wanted]
+    patterns.extend(_run_on_re(f) for f in _run_ons(full))
+    return patterns, full, surname
+
+
+def _squash(text: str) -> str:
+    return "".join(c for c in text if c.isalnum())
+
+
+def _needles(full: str) -> list[str]:
+    """What to look for once spaces and separators are removed: the full name
+    (5+ letters) and every name token and part of it (4+ letters)."""
+    found: list[str] = []
+    if len(squashed := _squash(full)) >= _MIN_SQUASHED_FULL:
+        found.append(squashed)
+    for token in _NAME_SPLIT.split(full):
+        found.extend(
+            v for v in _variants(token) if len(_squash(v)) >= _MIN_SQUASHED_PART
+        )
+    return list(dict.fromkeys(_squash(n) for n in found))
+
+
+def _squashed_spans(norm: str, full: str) -> list[tuple[int, int]]:
+    """Spans of ``norm`` where the full name or any part of it shows up with
+    every space and separator removed -- ``J A N E  D O E``, ``J-A-N-E``,
+    ``Mc Test face`` -- but only where it starts and ends on a token boundary,
+    so ``Ann Ford`` never eats ``Stanford``."""
+    needles = _needles(full)
+    if not needles:
+        return []
+    # The marker is ours, not the document's: blank it, keeping every index.
+    masked = norm.replace(REDACTION_MARKER, " " * len(REDACTION_MARKER))
+    chars: list[str] = []
+    index: list[int] = []
+    for i, c in enumerate(masked):
+        if c.isalnum():
+            chars.append(c)
+            index.append(i)
+    flat = "".join(chars)
+    spans: list[tuple[int, int]] = []
+    for needle in needles:
+        at = flat.find(needle)
+        while at != -1:
+            begin, last = index[at], index[at + len(needle) - 1]
+            starts = begin == 0 or not masked[begin - 1].isalnum()
+            ends = last + 1 == len(masked) or not masked[last + 1].isalnum()
+            if starts and ends:
+                spans.append((begin, last + 1))
+            at = flat.find(needle, at + 1)
+    return spans
+
+
+def _refuse_other_scripts(text: str) -> None:
+    if _OTHER_SCRIPT_RE.search(text):
+        raise NotAnonymizedError("text in another script cannot be verified")
+
+
+def _unify_line_breaks(text: str) -> str:
+    return _LINE_BREAKS.sub("\n", text)
+
+
+def _require_name_found(norm_text: str, full: str, surname: str) -> None:
+    if not norm_text:
+        raise NotAnonymizedError("no text layer to redact or verify")
+    if not full:
+        raise NotAnonymizedError("no candidate name to vouch for")
+    for name in (full, surname):
+        if _term_re(name).search(norm_text):
+            return
+    raise NotAnonymizedError("the candidate's name is not in the document text")
+
+
+def _blank(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with every span replaced by the marker, one marker per LINE the
+    span touches, so the line count never changes."""
+    out: list[str] = []
+    pos = 0
+    for begin, end in _merged(spans):
+        out.append(text[pos:begin])
+        pieces = text[begin:end].split("\n")
+        out.append("\n".join(REDACTION_MARKER if p.strip() else p for p in pieces))
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for begin, end in sorted(spans):
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((begin, end))
+    return merged
+
+
+def redact_text(text: str, terms: list[str]) -> str:
+    """The text with every identifying span replaced by :data:`REDACTION_MARKER`.
+
+    Pure. Lines stay 1:1 and in order and ordinary text comes back untouched.
+    ``terms[0]`` is the candidate's FULL name (the :func:`collect_terms`
+    convention). Raises :class:`NotAnonymizedError` when neither the full name
+    nor the surname is in the text (the vouch: a check that only knows the term
+    list cannot notice a name the list never held), when there is no text, or
+    when text in a second script is left after redaction.
+    """
+    patterns, full, surname = _compile_terms(terms)
+    text = _unify_line_breaks(text)
+    norm, origin = _norm_map(text)
+    _require_name_found(norm, full, surname)
+
+    spans: list[tuple[int, int]] = []
+    for pattern in patterns:
+        for m in pattern.finditer(norm):
+            spans.append((origin[m.start()], origin[m.end() - 1] + 1))
+    for begin, end in _squashed_spans(norm, full):
+        spans.append((origin[begin], origin[end - 1] + 1))
+    offset = 0
+    for line in text.split("\n"):
+        norm_line, line_origin = _norm_map(line)
+        for begin, end in _shape_spans(norm_line):
+            spans.append(
+                (offset + line_origin[begin], offset + line_origin[end - 1] + 1)
+            )
+        offset += len(line) + 1
+
+    redacted = _blank(text, spans)
+    _refuse_other_scripts(redacted)
+    return redacted
+
+
+def verify_text(text: str, terms: list[str]) -> None:
+    """Raise :class:`NotAnonymizedError` if ANY identifying thing is still in
+    ``text``: a term, a name token or run-on, an e-mail, phone, URL, domain,
+    @handle or postal code, the full name or surname once spaces and separators
+    are removed, or a second script."""
+    patterns, full, _surname = _compile_terms(terms)
+    text = _unify_line_breaks(text)
+    norm, _origin = _norm_map(text)
+    if any(p.search(norm) for p in patterns):
+        raise NotAnonymizedError("identifying text survived redaction")
+    for line in text.split("\n"):
+        if _shape_spans(_norm_map(line)[0]):
+            raise NotAnonymizedError("contact or web data survived redaction")
+    if _squashed_spans(norm, full):
+        raise NotAnonymizedError("the name survived with its letters spaced out")
+    _refuse_other_scripts(text)
 
 
 # ------------------------------------------------------------------- the PDF
 
 
 def _raw_text(page: Any) -> str:
-    return str(page.get_text("text", clip=_BIG, flags=_UNCLIPPED))
-
-
-def _shrink(rect: Any) -> Any:
-    """A hair smaller than the glyph box, so a redaction never clips the glyphs
-    of a neighbouring word or line (any glyph the rect touches is removed)."""
-    r = fitz.Rect(rect)
-    dy = r.height * 0.15
-    dx = 0.3 if r.width > 1.0 else 0.0
-    return fitz.Rect(r.x0 + dx, r.y0 + dy, r.x1 - dx, r.y1 - dy)
-
-
-def _drop_keys(doc: Any, xref: int, keys: tuple[str, ...]) -> None:
-    present = set(doc.xref_get_keys(xref))
-    for key in keys:
-        if key in present:
-            doc.xref_set_key(xref, key, "null")
-
-
-def _strip_channels(doc: Any) -> None:
-    """Remove every non-text identity channel from the document structure."""
-    catalog = doc.pdf_catalog()
-    for key in doc.xref_get_keys(catalog):
-        if key not in _CATALOG_KEEP:
-            doc.xref_set_key(catalog, key, "null")
-    for pno in range(doc.page_count):
-        xref = doc.page_xref(pno)
-        _drop_keys(doc, xref, _PAGE_STRIP_KEYS)
-        # The boxes may be inherited from the page tree, so walk up.
-        node, hops = xref, 0
-        while node and hops < 32:
-            _drop_keys(doc, node, _CROP_KEYS)
-            kind, value = doc.xref_get_key(node, "Parent")
-            node = int(value.split()[0]) if kind == "xref" else 0
-            hops += 1
-    doc.set_metadata({})
-    doc.del_xml_metadata()
-
-
-def _open_stripped(pdf_bytes: bytes) -> Any:
-    """A fresh document (re-opened, so nothing stale is cached) with every
-    non-text channel stripped. Raises for unreadable or encrypted input."""
-    try:
-        first = fitz.open(stream=pdf_bytes, filetype="pdf")
-    except Exception as exc:
-        raise NotAnonymizedError("file is not a readable PDF") from exc
-    try:
-        if first.needs_pass or first.is_encrypted:
-            raise NotAnonymizedError("encrypted PDF")
-        if not first.is_pdf or first.page_count == 0:
-            raise NotAnonymizedError("file is not a readable PDF")
-        _strip_channels(first)
-        stripped: bytes = first.tobytes(garbage=3)
-    except NotAnonymizedError:
-        raise
-    except Exception as exc:
-        raise NotAnonymizedError("could not strip the document") from exc
-    finally:
-        first.close()
-    try:
-        return fitz.open(stream=stripped, filetype="pdf")
-    except Exception as exc:
-        raise NotAnonymizedError("stripped document unreadable") from exc
+    return str(page.get_text("text", clip=_BIG, flags=_UNCLIPPED, sort=True))
 
 
 def _image_boxes(page: Any) -> list[Any]:
@@ -258,252 +507,249 @@ def _refuse_image_heavy(doc: Any) -> None:
             raise NotAnonymizedError("page is mostly image; identity is in pixels")
 
 
-def _name_forms(full_name: str) -> tuple[str, str]:
-    """``(normalized full name, normalized surname)`` -- the surname being the
-    last whitespace token of the full name."""
-    full = normalize_text(full_name)
-    return full, full.rsplit(" ", 1)[-1]
-
-
-def _require_name_found(norm_raw_text: str, full: str, surname: str) -> None:
-    if not full:
-        raise NotAnonymizedError("no candidate name to vouch for")
-    for name in (full, surname):
-        if _term_re(name).search(norm_raw_text):
-            return
-    raise NotAnonymizedError("the candidate's name is not in the document text")
-
-
-def _search_variants(original: str) -> list[str]:
-    """Spellings of one matched span that MuPDF search may find: as extracted,
-    NFKC (ligatures expanded), accent-stripped, and with typographic hyphens
-    and apostrophes made plain."""
-    collapsed = " ".join(original.split())
-    nfkc = unicodedata.normalize("NFKC", collapsed)
-    plain = "".join(
-        c for c in unicodedata.normalize("NFD", nfkc) if not unicodedata.combining(c)
-    )
-    tidy = "".join(
-        "'" if c in _APOSTROPHES else "-" if c in _DASHES else c for c in plain
-    )
-    return list(dict.fromkeys(v for v in (collapsed, nfkc, plain, tidy) if v))
-
-
-@dataclass
-class _Flow:
-    """A page's words as one normalized string, so a term can be matched across
-    word and line breaks and mapped back to the words it covers."""
-
-    rects: list[Any]
-    raws: list[str]
-    origins: list[list[int]]
-    starts: list[int]
-    text: str
-
-    def word_at(self, pos: int) -> int:
-        return bisect.bisect_right(self.starts, pos) - 1
-
-    def original(self, begin: int, end: int) -> str:
-        """The original characters behind normalized ``[begin, end)``."""
-        first, last = self.word_at(begin), self.word_at(end - 1)
-        o_first = self.origins[first][begin - self.starts[first]]
-        o_last = self.origins[last][end - 1 - self.starts[last]]
-        if first == last:
-            return self.raws[first][o_first : o_last + 1]
-        parts = [self.raws[first][o_first:], *self.raws[first + 1 : last]]
-        parts.append(self.raws[last][: o_last + 1])
-        return " ".join(parts)
-
-
-def _build_flow(words: list[Any]) -> _Flow:
-    rects: list[Any] = []
-    raws: list[str] = []
-    origins: list[list[int]] = []
-    starts: list[int] = []
-    pieces: list[str] = []
-    pos = 0
-    for w in words:
-        raw = str(w[4])
-        norm, origin = _norm_map(raw)
-        if not norm:
-            continue
-        rects.append(fitz.Rect(w[0], w[1], w[2], w[3]))
-        raws.append(raw)
-        origins.append(origin)
-        starts.append(pos)
-        pieces.append(norm)
-        pos += len(norm) + 1
-    return _Flow(rects, raws, origins, starts, " ".join(pieces))
-
-
-def _word_span(flow: _Flow, begin: int, end: int) -> range:
-    return range(flow.word_at(begin), flow.word_at(end - 1) + 1)
-
-
-def _redact_terms(page: Any, flow: _Flow, patterns: list[re.Pattern[str]]) -> list[Any]:
-    """Rects to redact for every whole-word term match that PyMuPDF search can
-    locate. A match search cannot locate is left alone -- the verification then
-    refuses the file, which is the point."""
-    out: list[Any] = []
-    for pattern in patterns:
-        for m in pattern.finditer(flow.text):
-            covered = _word_span(flow, m.start(), m.end())
-            target = fitz.Rect(flow.rects[covered[0]])
-            for i in covered:
-                target |= flow.rects[i]
-            window = fitz.Rect(target.x0 - 1, target.y0, target.x1 + 1, target.y1)
-            for variant in _search_variants(flow.original(m.start(), m.end())):
-                hits = [
-                    fitz.Rect(h)
-                    for h in page.search_for(variant)
-                    if fitz.Rect(h).intersects(window)
-                ]
-                if hits:
-                    out.extend(hits)
-                    out.extend(flow.rects[i] for i in covered)
-                    break
-    return out
-
-
-def _redact_shapes(words: list[Any]) -> list[Any]:
-    """Word rects covering every e-mail, phone number and profile URL."""
-    lines: dict[tuple[int, int], list[Any]] = {}
-    for w in words:
-        lines.setdefault((int(w[5]), int(w[6])), []).append(w)
-    out: list[Any] = []
-    for line_words in lines.values():
-        flow = _build_flow(line_words)
-        for begin, end in _shape_spans(flow.text):
-            for i in _word_span(flow, begin, end):
-                out.append(flow.rects[i])
-    return out
-
-
-def _redact_page(page: Any, patterns: list[re.Pattern[str]]) -> None:
-    words = page.get_text("words")
-    flow = _build_flow(words)
-    rects = _redact_terms(page, flow, patterns)
-    rects.extend(_redact_shapes(words))
-    for rect in rects:
-        page.add_redact_annot(_shrink(rect), fill=(0, 0, 0))
-    for box in _image_boxes(page):
-        page.add_redact_annot(box, fill=(1, 1, 1))
-    if page.first_annot is not None:
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
-    page.clean_contents()
-
-
-def _prune_images(doc: Any) -> None:
-    """Drop any image still listed in a page's resources (redaction removed the
-    drawing operators; this removes the objects so nothing is carried)."""
-    for pno in range(doc.page_count):
-        xref = doc.page_xref(pno)
-        for image in doc.get_page_images(pno, full=True):
-            name = image[7]
-            try:
-                doc.xref_set_key(xref, f"Resources/XObject/{name}", "null")
-            except Exception:  # noqa: BLE001 - verification below is the gate
-                continue
-
-
-def _survives(raw_text: str, patterns: list[re.Pattern[str]]) -> bool:
-    flat = normalize_text(raw_text)
-    if any(p.search(flat) for p in patterns):
-        return True
-    for line in raw_text.splitlines():
-        if _has_shape(normalize_text(line)):
-            return True
-    return False
-
-
-def _verify(
-    out: bytes,
-    page_count: int,
-    patterns: list[re.Pattern[str]],
-    raw_needles: list[bytes],
-) -> None:
-    """Check the bytes that will actually ship, on their own terms."""
+def _open_pdf(pdf_bytes: bytes) -> Any:
+    """The document, or :class:`NotAnonymizedError` for unreadable or encrypted
+    input. Only its text is ever used; nothing else is carried over."""
     try:
-        check = fitz.open(stream=out, filetype="pdf")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
-        raise NotAnonymizedError("redacted output unreadable") from exc
+        raise NotAnonymizedError("file is not a readable PDF") from exc
+    if doc.needs_pass or doc.is_encrypted:
+        doc.close()
+        raise NotAnonymizedError("encrypted PDF")
+    if not doc.is_pdf or doc.page_count == 0:
+        doc.close()
+        raise NotAnonymizedError("file is not a readable PDF")
+    return doc
+
+
+def _extract_source(pdf_bytes: bytes) -> str:
+    doc = _open_pdf(pdf_bytes)
     try:
-        if check.page_count != page_count:
-            raise NotAnonymizedError("page count changed")
-        if check.embfile_count() != 0 or check.get_toc():
-            raise NotAnonymizedError("embedded files or outline survived")
-        for page in check:
-            if page.get_links() or list(page.annots() or []):
-                raise NotAnonymizedError("links or annotations survived")
-            if page.get_images(full=True):
-                raise NotAnonymizedError("images survived")
-            if _survives(_raw_text(page), patterns):
-                raise NotAnonymizedError("identifying text survived redaction")
-    except NotAnonymizedError:
-        raise
-    except Exception as exc:
-        raise NotAnonymizedError("redacted output could not be verified") from exc
+        _refuse_image_heavy(doc)
+        return "\n".join(_raw_text(page).rstrip("\n") for page in doc)
     finally:
-        check.close()
-    lowered = out.lower()
-    if any(needle in lowered for needle in raw_needles):
-        raise NotAnonymizedError("identifying text survived in the file bytes")
+        doc.close()
 
 
-def _compile_terms(terms: list[str]) -> tuple[list[re.Pattern[str]], str, str]:
-    """Whole-word patterns for the terms AND for the name's own tokens, so the
-    final check does not depend on the caller having listed the tokens."""
-    if not terms or not terms[0].strip():
-        raise NotAnonymizedError("no candidate name to vouch for")
-    full, surname = _name_forms(terms[0])
-    wanted: dict[str, None] = {}
-    for term in terms:
-        norm = normalize_text(term)
-        if norm:
-            wanted[norm] = None
-    for token in re.split(r"[\s,.]+", full):
-        if len(token) >= _MIN_TOKEN_LEN:
-            wanted.setdefault(token, None)
-    return [_term_re(t) for t in wanted], full, surname
+def _extract_rendered(pdf_bytes: bytes) -> str:
+    doc = _open_pdf(pdf_bytes)
+    try:
+        return "\n".join(_raw_text(page).rstrip("\n") for page in doc)
+    finally:
+        doc.close()
+
+
+# ---------------------------------------------------------------- the renderer
+
+_FONT = "helv"  # the base-14 Helvetica, never embedded: it draws Latin-1 only
+_FONT_SIZE = 11.0
+_LEADING = 14.0
+_MARGIN = 72.0
+
+#: What the renderer shows for characters Latin-1 lacks. PyMuPDF writes every
+#: other character as a middle dot (U+00B7), which is how "2019" + en dash +
+#: "2021" once became a "phone number" and a good resume was refused.
+_SUBSTITUTES = {
+    "‐": "-",
+    "‑": "-",
+    "‒": "-",
+    "–": "-",
+    "—": "-",
+    "―": "-",
+    "−": "-",
+    "‘": "'",
+    "’": "'",
+    "‚": "'",
+    "‛": "'",
+    "“": '"',
+    "”": '"',
+    "„": '"',
+    "•": "-",
+    "…": "...",
+    "€": "EUR",
+    "™": "TM",
+    "Š": "S",
+    "š": "s",
+    "Ž": "Z",
+    "ž": "z",
+    "Ÿ": "Y",
+    "Œ": "OE",
+    "œ": "oe",
+}
+
+
+def _drawable(text: str) -> bool:
+    """``text`` is Latin-1 that Helvetica draws as itself: no control character
+    and no middle dot (which the source may hold, but a mapping must not add)."""
+    return all(
+        0x20 <= ord(c) <= 0xFF and not 0x7F <= ord(c) <= 0x9F and c != "·" for c in text
+    )
+
+
+def _map_char(ch: str) -> str:
+    """One character that is neither whitespace, a control nor a format
+    character, as the text Helvetica will draw for it."""
+    if ord(ch) <= 0xFF:
+        return ch
+    if (sub := _SUBSTITUTES.get(ch)) is not None:
+        return sub
+    decomposed = unicodedata.normalize("NFKD", ch)
+    base = "".join(
+        _SUBSTITUTES.get(c, c) for c in decomposed if not unicodedata.combining(c)
+    )
+    return base if base and _drawable(base) else "?"
+
+
+def renderable_text(text: str) -> str:
+    """``text`` exactly as :func:`render_text_pdf` will show it -- the ONLY
+    mapping the renderer applies, so what is verified is what is drawn.
+
+    Newlines are kept; other whitespace and control characters become a space;
+    format (Cf) characters are dropped; Latin-1 passes through; dashes, curly
+    quotes, the bullet, the ellipsis, the euro and trademark signs and a few
+    letters Latin-1 lacks become ASCII; anything else becomes ``?``. The result
+    is always Latin-1."""
+    out: list[str] = []
+    for ch in text:
+        if ch == "\n":
+            out.append(ch)
+        elif ch.isspace() or ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F:
+            out.append(" ")
+        elif unicodedata.category(ch) == "Cf":
+            continue
+        else:
+            out.append(_map_char(ch))
+    return "".join(out)
+
+
+def _width(text: str) -> float:
+    """The width ``text`` takes on a line. PyMuPDF under-measures a Latin-1
+    letter above U+007F (a row of accented words then runs off the page, where
+    the words are lost), so each of those is counted at a full em, which no
+    Helvetica glyph exceeds."""
+    plain = "".join(c for c in text if ord(c) < 0x80)
+    measured = float(fitz.get_text_length(plain, fontname=_FONT, fontsize=_FONT_SIZE))
+    return measured + (len(text) - len(plain)) * _FONT_SIZE
+
+
+def _pieces(word: str, limit: float) -> list[str]:
+    """A word that is wider than a line, cut into lines' worth."""
+    if _width(word) <= limit:
+        return [word]
+    parts: list[str] = []
+    current = ""
+    for ch in word:
+        if current and _width(current + ch) > limit:
+            parts.append(current)
+            current = ch
+        else:
+            current += ch
+    parts.append(current)
+    return parts
+
+
+def _wrap(line: str, limit: float) -> list[str]:
+    words = line.split()
+    if not words:
+        return [""]
+    rows: list[str] = []
+    current = ""
+    for word in words:
+        for piece in _pieces(word, limit):
+            candidate = f"{current} {piece}" if current else piece
+            if current and _width(candidate) > limit:
+                rows.append(current)
+                current = piece
+            else:
+                current = candidate
+    rows.append(current)
+    return rows
+
+
+def _pin_info(doc: Any) -> None:
+    """Producer and Creator only, whatever else the library may have put there."""
+    doc.set_metadata({"producer": PDF_PRODUCER, "creator": PDF_CREATOR})
+    # The catalog must hold only Type and Pages: the Info reference belongs in
+    # the trailer. Some PyMuPDF versions leave it on the catalog too.
+    catalog = doc.pdf_catalog()
+    kind, value = doc.xref_get_key(-1, "Info")
+    if kind != "xref":
+        kind, value = doc.xref_get_key(catalog, "Info")
+        if kind != "xref":
+            return
+        doc.xref_set_key(-1, "Info", f"{int(value.split()[0])} 0 R")
+    if set(doc.xref_get_keys(catalog)) - {"Type", "Pages"}:
+        # Setting a key to "null" would leave a literal null entry behind.
+        pages = doc.xref_get_key(catalog, "Pages")[1]
+        doc.update_object(catalog, f"<</Type/Catalog/Pages {pages}>>")
+    info = int(value.split()[0])
+    for key in doc.xref_get_keys(info):
+        if key not in ("Producer", "Creator"):
+            doc.xref_set_key(info, key, "null")
+
+
+def render_text_pdf(text: str) -> bytes:
+    """A NEW PDF holding only ``text``: one non-embedded Helvetica, fixed page
+    size, long lines wrapped, pages added as needed, in the given order. No
+    images, annotations, links, embedded files, outline, layers, XMP, forms,
+    marked content or drawing; ``/Info`` holds Producer and Creator only."""
+    width, height = PDF_PAGE_SIZE
+    limit = width - 2 * _MARGIN
+    first_baseline = _MARGIN + _FONT_SIZE
+    last_baseline = height - _MARGIN
+    doc = fitz.open()
+    try:
+        page: Any = None
+        y = first_baseline
+        blank_run = False
+        for raw in renderable_text(text).split("\n"):
+            for row in _wrap(raw, limit):
+                if not row:
+                    # One blank line at most, and none at the top of a page.
+                    if blank_run or page is None or y == first_baseline:
+                        continue
+                    blank_run = True
+                    y += _LEADING
+                    continue
+                blank_run = False
+                if page is None or y > last_baseline:
+                    page = doc.new_page(width=width, height=height)
+                    y = first_baseline
+                page.insert_text((_MARGIN, y), row, fontname=_FONT, fontsize=_FONT_SIZE)
+                y += _LEADING
+        if page is None:
+            doc.new_page(width=width, height=height)
+        _pin_info(doc)
+        data: bytes = doc.tobytes(garbage=4, deflate=True)
+        return data
+    finally:
+        doc.close()
+
+
+# ----------------------------------------------------------------- the pipeline
 
 
 def redact_pdf(pdf_bytes: bytes, terms: list[str]) -> bytes:
-    """Return a stripped, redacted, independently verified copy of the PDF.
+    """A NEW PDF built from the redacted, twice-verified text of ``pdf_bytes``.
 
     ``terms[0]`` is the candidate's FULL name (the :func:`collect_terms`
     convention). Raises :class:`NotAnonymizedError` when the input is not a
     readable, unencrypted PDF with a text layer, is mostly image, never shows
-    the candidate's name, or anything identifying could survive.
+    the candidate's name, holds a second script, or anything identifying could
+    survive -- in the redacted text or in the rendered PDF's own text.
     """
-    patterns, full, surname = _compile_terms(terms)
-    doc = _open_stripped(pdf_bytes)
     try:
-        _refuse_image_heavy(doc)
-        raw = [_raw_text(page) for page in doc]
-        original = normalize_text("\n".join(raw))
-        if not original:
-            raise NotAnonymizedError("no text layer to redact or verify")
-        _require_name_found(original, full, surname)
-        page_count = doc.page_count
-        for page in doc:
-            _redact_page(page, patterns)
-        _prune_images(doc)
-        doc.set_metadata({})
-        doc.del_xml_metadata()
-        out: bytes = doc.tobytes(garbage=4, deflate=True)
+        source = _extract_source(pdf_bytes)
+        redacted = redact_text(source, terms)
+        verify_text(redacted, terms)
+        rendered = render_text_pdf(redacted)
+        verify_text(_extract_rendered(rendered), terms)
     except NotAnonymizedError:
         raise
     except Exception as exc:
-        raise NotAnonymizedError("redaction failed") from exc
-    finally:
-        doc.close()
-    needles = [
-        n.encode("utf-8")
-        for n in {full, *(normalize_text(t) for t in terms if "@" in t)}
-        if len(n) >= _MIN_RAW_NEEDLE_LEN and n.isascii()
-    ]
-    _verify(out, page_count, patterns, needles)
-    return out
+        raise NotAnonymizedError("the anonymized copy could not be built") from exc
+    return rendered
 
 
 # ---------------------------------------------------------------- the term list
@@ -563,6 +809,7 @@ class ExportApplicant:
     cover_pdf: bytes | None
     terms: list[str] | None  # None == unparsed: cannot be anonymized
     cover_missing: bool = False  # a cover letter exists but its file is gone
+    cover_typed: bool = False  # a cover letter was typed in the app (no file)
 
 
 @dataclass(frozen=True)
@@ -609,7 +856,10 @@ def build_export(
     *,
     blind_review: bool,
     max_pages_per_file: int | None = None,
+    not_exported: int = 0,
 ) -> ExportResult:
+    """The ZIP. ``not_exported`` is how many live applicants the caller left out
+    (the worker's cap); when it is above zero the manifest says so in one line."""
     cap = (
         max_pages_per_file
         if max_pages_per_file is not None
@@ -620,13 +870,14 @@ def build_export(
     anonymized = 0
     for n, a in enumerate(applicants, start=1):
         label = f"applicant-{n:03d}"
+        note = f"; {COVER_TYPED_NOTE}" if a.cover_typed else ""
         resume_anon = _try_redact(a.resume_pdf, a.terms, cap)
         cover_anon = _try_redact(a.cover_pdf, a.terms, cap)
         cover_failed = a.cover_pdf is not None and cover_anon is None
         full = resume_anon is not None and not cover_failed
         if blind_review and not full:
             reason = "file missing" if a.resume_pdf is None else "not anonymized"
-            lines.append(f"{label}: omitted ({reason}; blind-review job)")
+            lines.append(f"{label}: omitted ({reason}; blind-review job){note}")
             continue
         if not blind_review:
             if a.resume_pdf is not None:
@@ -638,18 +889,18 @@ def build_export(
         if cover_anon is not None:
             entries.append((f"anonymized/{label}_cover_letter.pdf", cover_anon))
         if a.resume_pdf is None:
-            lines.append(f"{label}: file missing (not anonymized)")
+            lines.append(f"{label}: file missing (not anonymized){note}")
         elif full:
             anonymized += 1
             if a.cover_missing:
-                lines.append(f"{label}: anonymized (cover letter file missing)")
+                lines.append(f"{label}: anonymized (cover letter file missing){note}")
             else:
-                lines.append(f"{label}: anonymized")
+                lines.append(f"{label}: anonymized{note}")
         elif resume_anon is None:
-            lines.append(f"{label}: as-is only (not anonymized)")
+            lines.append(f"{label}: as-is only (not anonymized){note}")
         else:
             lines.append(
-                f"{label}: anonymized resume only (cover letter not anonymized)"
+                f"{label}: anonymized resume only (cover letter not anonymized){note}"
             )
     total = len(applicants)
     manifest = "\n".join(
@@ -658,6 +909,11 @@ def build_export(
             f"applicants: {total}",
             f"anonymized: {anonymized}",
             f"not anonymized: {total - anonymized}",
+            *(
+                [f"{not_exported} applicants not exported (over the cap)"]
+                if not_exported > 0
+                else []
+            ),
             *([] if blind_review else ["", _WARNING]),
             "",
             *lines,
@@ -677,7 +933,12 @@ def build_export_zip(applicants: list[ExportApplicant], *, blind_review: bool) -
 
 
 __all__ = [
+    "COVER_TYPED_NOTE",
     "MAX_IMAGE_AREA_FRACTION",
+    "PDF_CREATOR",
+    "PDF_PAGE_SIZE",
+    "PDF_PRODUCER",
+    "REDACTION_MARKER",
     "ExportApplicant",
     "ExportResult",
     "NotAnonymizedError",
@@ -686,4 +947,8 @@ __all__ = [
     "collect_terms",
     "normalize_text",
     "redact_pdf",
+    "redact_text",
+    "render_text_pdf",
+    "renderable_text",
+    "verify_text",
 ]

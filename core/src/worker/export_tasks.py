@@ -17,6 +17,7 @@ all on the row for the same reason.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 from typing import Any
@@ -25,16 +26,23 @@ from uuid import UUID
 from src.services import pii
 from src.services import resume_export_request_service as requests
 from src.services import resume_export_service as export
+from src.settings import get_settings
 from src.storage.blob_store import BlobNotFound, BlobStore
 
 log = logging.getLogger(__name__)
 
 _ROWS_SQL = """
 SELECT blob_key, cover_letter_blob_key, candidate_name, candidate_email,
-       candidate_phone, parsed
+       candidate_phone, parsed,
+       cover_letter_text IS NOT NULL AS cover_typed
 FROM resumes
 WHERE job_id = $1 AND withdrawn_at IS NULL
 ORDER BY uploaded_at, id
+LIMIT $2
+"""
+
+_LIVE_COUNT_SQL = """
+SELECT count(*) FROM resumes WHERE job_id = $1 AND withdrawn_at IS NULL
 """
 
 
@@ -49,13 +57,19 @@ async def _read(blob_store: BlobStore, key: str | None) -> bytes | None:
         return None
 
 
-async def _applicant_rows(conn: Any, job_id: UUID) -> list[dict[str, Any]]:
-    """The job's live applicants with the identity columns decrypted. The pii
-    key is transaction-scoped, so everything happens inside one transaction."""
+async def _applicant_rows(
+    conn: Any, job_id: UUID, cap: int
+) -> tuple[list[dict[str, Any]], int]:
+    """The job's live applicants (at most ``cap``: the request refused a bigger
+    job, but a job can grow before the build) with the identity columns
+    decrypted, and how many live applicants the cap left out. The pii key is
+    transaction-scoped, so everything happens inside one transaction."""
     async with conn.transaction():
         await pii.set_pii_key(conn)
-        rows = await conn.fetch(_ROWS_SQL, job_id)
-        return [
+        rows = await conn.fetch(_ROWS_SQL, job_id, cap)
+        live = int(await conn.fetchval(_LIVE_COUNT_SQL, job_id) or 0)
+        left_out = max(0, live - cap)
+        held = [
             {
                 "blob_key": r["blob_key"],
                 "cover_key": r["cover_letter_blob_key"],
@@ -63,9 +77,11 @@ async def _applicant_rows(conn: Any, job_id: UUID) -> list[dict[str, Any]]:
                 "email": await pii.decrypt(conn, r["candidate_email"]),
                 "phone": await pii.decrypt(conn, r["candidate_phone"]),
                 "parsed": r["parsed"],
+                "cover_typed": bool(r["cover_typed"]),
             }
             for r in rows
         ]
+        return held, left_out
 
 
 def _parsed(raw: Any) -> dict[str, Any] | None:
@@ -91,6 +107,7 @@ async def _load_applicants(
                     phone=r["phone"],
                 ),
                 cover_missing=bool(r["cover_key"]) and cover_pdf is None,
+                cover_typed=bool(r["cover_typed"]) and not r["cover_key"],
             )
         )
     return applicants
@@ -105,9 +122,12 @@ async def build_resume_export(ctx: dict[str, Any], export_id: str) -> str:
         return "skipped"
     pool = ctx["pg_pool"]
     blob_store: BlobStore = ctx["blob_store"]
+    # arq counts attempts from 1; a retry means the first attempt died holding
+    # the row in "building".
+    retry = int(ctx.get("job_try", 1)) > 1
 
     async with pool.acquire() as conn:
-        claim = await requests.claim(conn, eid)
+        claim = await requests.claim(conn, eid, retry=retry)
     if claim is None:
         return "skipped"
 
@@ -115,11 +135,18 @@ async def build_resume_export(ctx: dict[str, Any], export_id: str) -> str:
     stored = False
     try:
         async with pool.acquire() as conn:
-            rows = await _applicant_rows(conn, claim.job_id)
+            rows, left_out = await _applicant_rows(
+                conn, claim.job_id, get_settings().resume_export_max_applicants
+            )
         # The connection is back in the pool before any file or PDF work.
         applicants = await _load_applicants(blob_store, rows)
         result = await asyncio.to_thread(
-            export.build_export, applicants, blind_review=claim.blind_review
+            functools.partial(
+                export.build_export,
+                applicants,
+                blind_review=claim.blind_review,
+                not_exported=left_out,
+            )
         )
         await blob_store.put(key, result.data, "application/zip")
         stored = True
