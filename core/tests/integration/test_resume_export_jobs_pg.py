@@ -715,6 +715,13 @@ async def test_latest_is_the_requesters_newest_export_for_that_job(
     assert (await _call(mine, "GET", path)).status_code == 404  # none yet
 
     first = UUID((await _start(mine, job_id)).json()["id"])
+    # A live (queued/building) export is reused by a second click, so finish
+    # the first one before asking again: "latest" must then be the new row.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE resume_export_requests SET status = 'failed' WHERE id = $1",
+            first,
+        )
     second = UUID((await _start(mine, job_id)).json()["id"])
 
     resp = await _call(mine, "GET", path)

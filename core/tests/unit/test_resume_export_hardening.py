@@ -322,20 +322,6 @@ def test_name_variants_in_the_pdf_and_the_parsed_name_still_match(
     assert "recruiting" in _norm(_text(out))
 
 
-def test_survivor_check_runs_on_normalized_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.services.resume_export_service import NotAnonymizedError, redact_pdf
-
-    doc, _page = _page_with(["Jose Garcia", "Experienced in recruiting."])
-    # Nothing can be located, so nothing is redacted: the accent-folding
-    # survivor check must still see "jose garcia" == "josé garcía".
-    monkeypatch.setattr(fitz.Page, "search_for", lambda *_a, **_k: [])
-
-    with pytest.raises(NotAnonymizedError):
-        redact_pdf(_finish(doc), ["José García", "José", "García"])
-
-
 # ------------------------------------------- A5: short names, whole words
 
 

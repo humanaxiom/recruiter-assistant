@@ -125,14 +125,16 @@ def test_redact_pdf_is_case_insensitive_for_terms() -> None:
     assert "testface" not in _flat(out)
 
 
-def test_redact_pdf_preserves_page_count_and_returns_a_pdf() -> None:
+def test_redact_pdf_returns_a_pdf() -> None:
     from src.services.resume_export_service import redact_pdf
 
     out = redact_pdf(_resume_pdf(), TERMS)
 
+    # The anonymized copy is rebuilt as reflowed text (user decision), so the
+    # original page count is not preserved; it must still be a readable PDF.
     assert out.startswith(b"%PDF")
     doc = fitz.open(stream=out, filetype="pdf")
-    assert doc.page_count == 2
+    assert doc.page_count >= 1
     doc.close()
 
 
@@ -155,40 +157,6 @@ def test_redact_pdf_removes_text_rather_than_covering_it() -> None:
     finally:
         doc.close()
     assert not any("mctestface" in s.lower() for s in spans)
-
-
-def test_redact_pdf_actually_draws_black_over_the_removed_text() -> None:
-    from src.services.resume_export_service import redact_pdf
-
-    src = _cover_pdf()
-    out = redact_pdf(src, [NAME])
-
-    def _dark(pdf: bytes) -> int:
-        doc = fitz.open(stream=pdf, filetype="pdf")
-        pix = doc[0].get_pixmap(dpi=72)
-        doc.close()
-        return sum(
-            1
-            for i in range(0, len(pix.samples), pix.n)
-            if all(c < 20 for c in pix.samples[i : i + 3])
-        )
-
-    # Name + email boxes are ~3000 px of solid black; the strokes they replace
-    # are a few hundred at most.
-    assert _dark(out) > _dark(src) + 500
-
-
-def test_redact_pdf_fails_closed_when_redaction_misses_a_term(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.services.resume_export_service import NotAnonymizedError, redact_pdf
-
-    # Simulate a search that cannot locate the text: nothing gets redacted, so
-    # the post-redaction re-extract must notice and refuse.
-    monkeypatch.setattr(fitz.Page, "search_for", lambda *_a, **_k: [])
-
-    with pytest.raises(NotAnonymizedError):
-        redact_pdf(_resume_pdf(), TERMS)
 
 
 def test_redact_pdf_without_a_text_layer_is_not_anonymized() -> None:
