@@ -146,7 +146,9 @@ _YEAR_RANGE_RE = re.compile(
 # The text is normalized (accent-folded, case-folded) before it is matched, so
 # tel / tél, teléfono / telefono and móvil / movil are each one entry. The label
 # must be ADJACENT to the number: it ends the text before it, with at most a
-# "no." / "number" / "#" and one ":" "." or "-" between. A lone "M" or "T" only
+# "no." / "number" / "#", an abbreviation ".", ONE short "(mobile)" parenthetical
+# directly after the label, and any run of ":" "." "-" "|" "=" ">" between (a
+# parenthetical anywhere else does not count). A lone "M" or "T" only
 # counts when a ":" follows it.
 _PHONE_LABELS = (
     "tel|telephone|telefon|telefono|phones?|cell|cellphone|cel|celular|mobile|"
@@ -154,7 +156,8 @@ _PHONE_LABELS = (
 )
 _PHONE_LABEL_RE = re.compile(
     rf"(?<![a-z])(?:(?:{_PHONE_LABELS})(?![a-z])"
-    r"(?:\s*(?:no\b\.?|number(?![a-z])|#))?\s*[:.\-]?"
+    r"(?:\s*(?:no\b\.?|number(?![a-z])|#))?"
+    r"(?:\s*\.)?(?:\s*\([^()\n]{1,20}\))?(?:\s*[:.\-|=>])*\s*"
     r"|[mt]\s*:)\s*$"
 )
 _DATE_RE = re.compile(r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}")
@@ -345,17 +348,19 @@ def _expand_umlauts(raw: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _vouch_forms(token: str) -> list[str]:
-    """The spellings a token may VOUCH on: the stored one first, then its umlaut
-    expansions (``Müller`` -> mueller) and the umlaut digraphs of an already
-    spelled-out token read back as the letter (``Mueller`` -> muller, the
-    spelling a document that kept the umlaut shows). ``aa`` is deliberately not
-    read back (``Haas`` is not ``Has``), and a read-back token under
-    :data:`_MIN_VARIANT_TOKEN_LEN` letters is dropped (``Boe`` is not ``Bo``):
-    both are ordinary words in someone else's résumé."""
-    forms: dict[str, None] = {normalize_text(token): None}
+def _vouch_forms(token: str) -> list[tuple[str, bool]]:
+    """The spellings a token may VOUCH on, each tagged ``tail_ok``: the stored one
+    first, then its umlaut expansions (``Müller`` -> mueller), both tail-eligible;
+    and the umlaut digraphs of an already spelled-out token read back as the
+    letter (``Mueller`` -> muller, the spelling a document that kept the umlaut
+    shows), which are FULL-ONLY (``tail_ok`` False): ``Baer`` -> ``bar`` is an
+    ordinary word, so such a form may vouch only inside the whole name. ``aa`` is
+    deliberately not read back (``Haas`` is not ``Has``), and a read-back token
+    under :data:`_MIN_VARIANT_TOKEN_LEN` letters is dropped (``Boe`` is not
+    ``Bo``): both are ordinary words in someone else's résumé."""
+    forms: dict[str, bool] = {normalize_text(token): True}
     for expanded in _expand_umlauts(token):
-        forms.setdefault(expanded, None)
+        forms[expanded] = True
         spots = [m.span() for m in _UMLAUT_DIGRAPH_RE.finditer(expanded)]
         if not spots or len(spots) > _MAX_DIGRAPH_SLOTS:
             continue
@@ -369,8 +374,8 @@ def _vouch_forms(token: str) -> list[str]:
             pieces.append(expanded[pos:])
             form = "".join(pieces)
             if len(form) >= _MIN_VARIANT_TOKEN_LEN:
-                forms.setdefault(form, None)
-    return list(forms)
+                forms.setdefault(form, False)
+    return list(forms.items())
 
 
 def _collapse_digraphs(norm: str) -> list[str]:
@@ -423,6 +428,18 @@ def _joined(per_token: list[list[str]], base: str) -> list[str]:
     for combo in itertools.islice(itertools.product(*per_token), _MAX_NAME_VARIANTS):
         found.setdefault(" ".join(combo), None)
     return list(found)
+
+
+def _vouch_joined(
+    per_token: list[list[tuple[str, bool]]], base: str
+) -> list[tuple[str, bool]]:
+    """``base`` first (tail-eligible), then every combination of one spelling per
+    token. A combination is tail-eligible only if EVERY token's form is."""
+    found: dict[str, bool] = {base: True}
+    for combo in itertools.islice(itertools.product(*per_token), _MAX_NAME_VARIANTS):
+        joined = " ".join(form for form, _ in combo)
+        found[joined] = found.get(joined, False) or all(ok for _, ok in combo)
+    return list(found.items())
 
 
 _NAME_SPLIT = re.compile(r"[\s,.]+")
@@ -483,7 +500,7 @@ def _name_re(norm_name: str) -> re.Pattern[str]:
 
 def _compile_terms(
     terms: list[str],
-) -> tuple[list[re.Pattern[str]], list[str], list[str]]:
+) -> tuple[list[re.Pattern[str]], list[str], list[tuple[str, bool]]]:
     """Patterns for the terms, for the name's own tokens (and the parts of a
     hyphenated or apostrophised one) and for the name's run-ons -- for every
     transliteration variant of each token -- so neither redaction nor
@@ -497,7 +514,7 @@ def _compile_terms(
     tokens = [t for t in _NAME_SPLIT.split(stored) if t]
     per_token = [_token_variants(t) for t in tokens]
     variants = _joined(per_token, base)
-    vouch = _joined([_vouch_forms(t) for t in tokens], base)
+    vouch = _vouch_joined([_vouch_forms(t) for t in tokens], base)
     stored_pieces = {
         piece
         for forms in per_token
@@ -595,17 +612,22 @@ def _unify_line_breaks(text: str) -> str:
     return _LINE_BREAKS.sub("\n", text)
 
 
-def _require_name_found(norm_text: str, variants: list[str]) -> None:
-    """The vouch. ``variants`` is the stored spelling first and then only its
-    umlaut expansions: a spelling made by CUTTING a digraph (``haas`` -> ``has``)
-    is an ordinary word and must never vouch for a document."""
+def _require_name_found(norm_text: str, variants: list[tuple[str, bool]]) -> None:
+    """The vouch. ``variants`` is ``(form, tail_ok)`` pairs, the stored spelling
+    first. Every form may vouch as the FULL name (first name and surname
+    adjacent). Only a ``tail_ok`` form (the stored spelling and its umlaut
+    expansions) may also vouch as the surname alone; a form containing an
+    ae/oe/ue -> plain read-back (``baer`` -> ``bar``) is an ordinary word on its
+    own and never vouches through the tail, and a spelling made by cutting
+    ``aa`` is never offered at all."""
     if not norm_text:
         raise NotAnonymizedError("no text layer to redact or verify")
-    if not variants[0]:
+    if not variants[0][0]:
         raise NotAnonymizedError("no candidate name to vouch for")
-    for i, full in enumerate(variants):
+    for i, (full, tail_ok) in enumerate(variants):
         floor = _MIN_TOKEN_LEN if i == 0 else _MIN_VARIANT_TOKEN_LEN
-        for name in (full, full.rsplit(" ", 1)[-1]):
+        names = (full, full.rsplit(" ", 1)[-1]) if tail_ok else (full,)
+        for name in names:
             if len(name) >= floor and _term_re(name).search(norm_text):
                 return
     raise NotAnonymizedError("the candidate's name is not in the document text")
