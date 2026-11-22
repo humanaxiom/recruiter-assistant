@@ -676,7 +676,7 @@ async def test_a_name_inside_a_requirement_never_reaches_the_prompt_or_the_store
         _req("Kubernetes operations", "partial", QUOTE),
         _req("Budget ownership for Jane Smith's team", "missing"),
     ]
-    llm = _FakeLLM(_ingest(_q(1, "Walk me through the lab deployment.", QUOTE)))
+    llm = _FakeLLM(_ingest(_q(0, "Walk me through the lab deployment.", QUOTE)))
     h = _Harness(monkeypatch, llm=llm, requirements=reqs)
 
     assert await h.run() == "ready"

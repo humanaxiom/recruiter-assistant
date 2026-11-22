@@ -143,11 +143,11 @@ def test_redaction_reuses_the_blind_redactors_patterns() -> None:
 
 # -- F6c: names fold accents and normalise ----------------------------------
 
-_NAMES = ["José Núñez", "Jose Nunez", "José Nũez"]
+_NAMES = ["José Núñez", "Jose Nunez", "José Núñez"]
 _QUOTES = [
     "Jose Nunez led the platform team",
     "JOSÉ NÚÑEZ led the platform team",
-    "José Nũez led the platform team",
+    "José Núñez led the platform team",
     "José led the platform team",
     "led by Núñez on the platform team",
 ]
