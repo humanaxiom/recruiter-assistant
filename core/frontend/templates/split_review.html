@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Review split{% endblock %}
+{# Server-rendered, no client-side behaviour: base.html's htmx body header is
+   dropped (forms carry the page token as a hidden field instead). #}
+{% block body_attrs %}{% endblock %}
+{% block content %}
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<div class="card">
+  <h1 style="margin:0">Review split of a combined Taleo export</h1>
+  <p class="muted">
+    {{ split.page_count }} page(s)
+    {% if source_filename %} · {{ source_filename }}{% endif %}
+    · status: {{ split.status }}
+  </p>
+  <p><a href="{{ url_for('job_detail', job_id=split.job_id) }}">Back to the job</a></p>
+
+  {% if split.status in ("queued", "segmenting") %}
+  <p>Still working: this export is {{ split.status }}. Refresh this page in a
+    minute to see the proposed split.</p>
+  <p><a class="btn btn-secondary btn-sm"
+        href="{{ url_for('split_review', split_id=split.id) }}">Refresh</a></p>
+
+  {% elif split.status == "failed" %}
+  <p class="error">The split failed: {{ failure_text }}. Nothing was imported.
+    Upload the export again from the job page.</p>
+
+  {% elif split.status == "accepted" %}
+  <p>This split has already been accepted and imported.</p>
+
+  {% elif split.status == "discarded" %}
+  <p>This split was discarded. Nothing was imported.</p>
+
+  {% elif split.status == "proposed" and split.proposal %}
+
+  {% if split.method == "heuristic" %}
+  <p class="muted"><strong>Fallback split.</strong> The model was not available,
+    so this split was made by simple rules. Check every applicant row against
+    the source before accepting.</p>
+  {% endif %}
+
+  {% if findings %}
+  <ul>
+    {% for f in findings %}
+    <li>{{ f }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if blocking_findings %}
+  <ul class="error">
+    {% for f in blocking_findings %}
+    <li>{{ f }}</li>
+    {% endfor %}
+  </ul>
+  <p class="error">Accept is blocked until these are fixed. Correct the page
+    lists below, or discard the split.</p>
+  {% endif %}
+
+  <form action="{{ url_for('split_correct', split_id=split.id) }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <input type="hidden" name="proposal_version" value="{{ split.proposal_version }}">
+    <p class="hint">Pages are 1-based. Use ranges and commas, for example
+      1-2,5. Leave both boxes of a row empty to drop it.</p>
+    <table>
+      <thead>
+        <tr><th>Applicant</th><th>Résumé pages</th><th>Cover letter pages</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.label }}{% if row.name %} ({{ row.name }}){% endif %}
+            {% if row.name %}<input type="hidden" name="candidate_name_{{ row.n }}"
+                                    value="{{ row.name }}">{% endif %}</td>
+          <td><input class="input" type="text" name="resume_pages_{{ row.n }}"
+                     value="{{ row.resume }}"
+                     aria-label="{{ row.label }} résumé pages"></td>
+          <td><input class="input" type="text" name="cover_pages_{{ row.n }}"
+                     value="{{ row.cover }}"
+                     aria-label="{{ row.label }} cover letter pages"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="form-group">
+      <label class="label" for="ignored_pages">Ignored pages (not imported)</label>
+      <input class="input" id="ignored_pages" type="text" name="ignored_pages"
+             value="{{ ignored }}">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Save correction</button>
+    </div>
+  </form>
+
+  <div class="form-actions">
+    <form action="{{ url_for('split_accept', split_id=split.id) }}" method="post"
+          style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <input type="hidden" name="proposal_version" value="{{ split.proposal_version }}">
+      <button class="btn btn-primary" type="submit"
+              {% if blocking_findings %}disabled{% endif %}>Accept and import</button>
+    </form>
+    <form action="{{ url_for('split_discard', split_id=split.id) }}" method="post"
+          style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <button class="btn btn-secondary" type="submit">Discard</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

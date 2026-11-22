@@ -222,6 +222,110 @@ async def _check_postgres(pg: Any, settings: Any) -> list[Finding]:
     return found
 
 
+#: Retention decision (in-app Taleo split): the combined PDF blob is deleted and
+#: the encrypted proposal NULLed the moment a request turns terminal. A terminal
+#: row still holding either is a retention promise that nothing enforced.
+#: Rows, not a count: the existing doctor fakes feed ``fetchval`` from a fixed
+#: list, so this check must read through ``conn.fetch``.
+_SPLIT_TERMINAL_HOLDING_SQL = """
+SELECT id FROM resume_split_requests
+WHERE status IN ('accepted', 'discarded', 'failed')
+  AND (source_blob_key IS NOT NULL OR proposal IS NOT NULL
+       OR source_filename IS NOT NULL)
+"""
+
+
+async def _check_split_requests(pg: Any) -> list[Finding]:
+    async with pg.acquire() as conn:
+        rows = await conn.fetch(_SPLIT_TERMINAL_HOLDING_SQL)
+    if not rows:
+        return []
+    n = len(rows)
+    return [
+        Finding(
+            check="pg.split_terminal_rows_retain_data",
+            severity="fail",
+            count=n,
+            detail=(
+                f"{n} finished split requests still hold a combined-export blob "
+                "key or an encrypted proposal"
+            ),
+            remedy=(
+                "Terminal split requests must release their blob and proposal. "
+                "Find the code path that reached accepted/discarded/failed "
+                "without split_request_service releasing them; the hourly "
+                "expire_split_requests sweep frees orphan blobs but does not "
+                "NULL these columns."
+            ),
+        )
+    ]
+
+
+#: Retention decision (résumé export): a built ZIP holds every applicant's
+#: identity, so its blob is deleted and ``blob_key`` NULLed the moment a request
+#: is expired or failed. A dead row still holding a key is a retention promise
+#: nothing enforced. Rows, not a count, for the same ``fetchval`` reason as above.
+_EXPORT_STALE_HOLDING_SQL = """
+SELECT id FROM resume_export_requests
+WHERE status IN ('expired', 'failed') AND blob_key IS NOT NULL
+"""
+
+
+#: A ``ready`` export is expired by the hourly sweep. One still ready two hours
+#: after its ``expires_at`` means the sweep is not running (or is failing), so a
+#: ZIP of every applicant's identity is being kept past its promised life. Two
+#: hours is the sweep's own period plus slack, so a slow tick is not a finding.
+_EXPORT_READY_OVERDUE_SQL = """
+SELECT id FROM resume_export_requests
+WHERE status = 'ready' AND expires_at < now() - interval '2 hours'
+"""
+
+
+async def _check_export_requests(pg: Any) -> list[Finding]:
+    findings: list[Finding] = []
+    async with pg.acquire() as conn:
+        rows = await conn.fetch(_EXPORT_STALE_HOLDING_SQL)
+        overdue = await conn.fetch(_EXPORT_READY_OVERDUE_SQL)
+    if rows:
+        n = len(rows)
+        findings.append(
+            Finding(
+                check="pg.export_rows_retain_blob",
+                severity="fail",
+                count=n,
+                detail=(
+                    f"{n} expired or failed résumé exports still hold a ZIP blob key"
+                ),
+                remedy=(
+                    "A dead export must release its ZIP. Check that the hourly "
+                    "expire_resume_exports sweep is running, and find the code path "
+                    "that reached expired/failed without NULLing blob_key and "
+                    "deleting the blob."
+                ),
+            )
+        )
+    if overdue:
+        n = len(overdue)
+        findings.append(
+            Finding(
+                check="pg.export_ready_past_expiry",
+                severity="fail",
+                count=n,
+                detail=(
+                    f"{n} résumé exports are still ready more than 2 hours past "
+                    "their expiry"
+                ),
+                remedy=(
+                    "The hourly expire_resume_exports sweep is not running or is "
+                    "failing: check the worker logs for export.expire.error and "
+                    "that the cron is registered. Until it runs, expired ZIPs of "
+                    "every applicant's identity are retained on disk."
+                ),
+            )
+        )
+    return findings
+
+
 # ── Neo4j checks ─────────────────────────────────────────────────────────
 
 _UNLABELLED_EDGES = """
@@ -386,6 +490,8 @@ async def run_checks(
     profiles = profile_dir if profile_dir is not None else _DEFAULT_PROFILE_DIR
     checks: list[tuple[str, Any]] = [
         ("pg", lambda: _check_postgres(pg, settings)),
+        ("pg.split", lambda: _check_split_requests(pg)),
+        ("pg.export", lambda: _check_export_requests(pg)),
         ("neo4j", lambda: _check_neo4j(neo4j)),
         ("model", lambda: _check_model_profile(settings, profiles)),
     ]

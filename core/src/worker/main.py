@@ -42,12 +42,14 @@ from src.models.ddl import init_schema
 from src.pipeline.llm import CachedEmbedder, LLMClient
 from src.settings import get_settings
 from src.storage.blob_store import BlobStore
+from src.worker.export_tasks import build_resume_export, expire_resume_exports
 from src.worker.graph_tasks import project_to_graph
 from src.worker.manager_prompt_task import extract_manager_prompt
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 from src.worker.reconcile import reconcile_stalled_parses
 from src.worker.resume_tasks import parse_resume
+from src.worker.split_tasks import expire_split_requests, segment_taleo_export
 from src.worker.taleo_sync_task import sync_taleo_jobs
 from src.worker.tasks import parse_job
 
@@ -180,6 +182,11 @@ class WorkerSettings:
         # SPONSOR I4, 2026-09-03. Enqueued by name from PATCH /jobs/{id}
         # whenever that request touches the manager note.
         extract_manager_prompt,
+        # In-app Taleo split: enqueued by name from the split-upload route.
+        segment_taleo_export,
+        # Résumé export (as-is + anonymized ZIP) as a background job: enqueued by
+        # name from POST /jobs/{id}/resumes/exports.
+        build_resume_export,
     ]
     # Phase 4b: the graph-projection drainer runs on its own schedule, not by
     # enqueue — every ~5s, matching decision 3's rationale (skill resolution
@@ -204,6 +211,13 @@ class WorkerSettings:
         # TALEO_ENABLED=false still fires this tick; the task returns
         # "skipped" without opening a socket.
         cron(sync_taleo_jobs, hour={3}, minute={0}),
+        # Hourly at :17 -- expire unaccepted split proposals, sweep orphan
+        # split_sources/ blobs, re-queue stalled segmentations. Cron-only: never
+        # enqueued by name, so it stays out of `functions`.
+        cron(expire_split_requests, minute={17}),
+        # Hourly at :43 -- expire built export ZIPs past their TTL and sweep orphan
+        # resume_exports/ blobs. Cron-only: never enqueued by name.
+        cron(expire_resume_exports, minute={43}),
     ]
     on_startup = startup
     on_shutdown = shutdown

@@ -18,7 +18,17 @@ from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
 
 from src.api.deps import log_auth_mode, require_role_assigned
-from src.api.routes import audit, auth, job_assignees, jobs, resumes, shortlist, users
+from src.api.routes import (
+    audit,
+    auth,
+    job_assignees,
+    jobs,
+    resume_export,
+    resume_splits,
+    resumes,
+    shortlist,
+    users,
+)
 from src.errors import AppError
 from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
@@ -111,6 +121,8 @@ app.include_router(auth.router)
 app.include_router(job_assignees.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(jobs.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(resumes.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(resume_splits.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(resume_export.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(shortlist.router, dependencies=[Depends(require_role_assigned)])
 # /users is gated by its own, stricter _require_admin_session (the CAS
 # session role) — see src.api.routes.users's module docstring — so it is

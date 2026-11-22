@@ -45,6 +45,10 @@ EXPECTED_PROMPT_NAMES: tuple[str, ...] = (
     "resume_skills_v2",
     "shortlist_evidence_v1",
     "shortlist_evidence_v2",
+    # In-app split of a combined Taleo export: the segmentation prompt moved out
+    # of core/scripts/split_taleo_pdf.py so the worker and model-check render
+    # the same text.
+    "taleo_segment_v1",
 )
 
 

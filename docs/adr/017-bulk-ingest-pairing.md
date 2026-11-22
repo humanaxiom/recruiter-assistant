@@ -347,3 +347,71 @@ unambiguous** — `repair_orphan_pages` folds an orphan page into the immediatel
 that, following) applicant's résumé pages only when the orphan carries exactly one email matching that
 neighbour's adjoining résumé page, printing a loud `REPAIRED:` line per fix and leaving every other orphan
 for the existing `PAGE ACCOUNTING FAILURE` to catch.
+
+## Amendment 2026-11-21 — the in-app split of a combined Taleo export (branch `feat/taleo-inapp-split`)
+
+The 2026-09-18 amendment refused an unsplit export and sent the recruiter to
+`scripts/split-taleo.sh`, a shell step outside the product with no confirmation
+step. This records the in-app replacement. It is a second producer for the
+ingest path above, not a new ingest path.
+
+**Decisions**
+
+1. **One ingest path.** The upload route's ingest body moved to
+   `resume_ingest_service.ingest_files` ([core/src/services/resume_ingest_service.py:31](../../core/src/services/resume_ingest_service.py#L31)).
+   Both the upload route and the split's accept call it. Split output is named
+   `applicant-NNN_resume.pdf` / `applicant-NNN_cover_letter.pdf` and paired by a
+   manifest from `build_pairing_manifest`, so decisions 2–3 above apply unchanged.
+   Accept sets `max_files` from its own bound, so a valid export of more than 50
+   applicants is not refused by the route's file-count cap.
+2. **The model proposes; a recruiter decides.** `llm_segment` returns page
+   assignments only. `ignored_pages` and every guessed `candidate_name` are
+   cleared before it returns ([core/src/services/taleo_split_service.py:370](../../core/src/services/taleo_split_service.py#L370)).
+   The recruiter corrects, accepts or discards the proposal on a server-rendered
+   review screen. Nothing is ingested without that step.
+3. **Validation is recomputed server-side.** Accept reads the stored per-page
+   text, not the proposal's own claims. It returns 409 when pages are missing,
+   duplicated, merged (two or more distinct e-mail addresses across one
+   applicant's résumé pages) or misfiled. Pages in `ignored_pages`, set by the
+   reviewer, count as accounted for.
+4. **Cover-only and low-text applicants are excluded and disclosed.** An
+   applicant with under 200 characters of text, or with cover pages only, is
+   not ingested and is listed as rejected. There is no override in v1.
+5. **A fallback is visible.** If the model call fails, a contact-block heuristic
+   runs. Cover pages go to the cover list through the splitter's cover test,
+   never into the résumé. The proposal is recorded as `method=heuristic` with a
+   value from a fixed `fallback_reason` enum, and the screen shows a banner. No
+   free text from a model or parser is stored.
+6. **Retention.** The combined PDF is deleted when the request reaches
+   accepted, discarded or failed, and the encrypted proposal is nulled in the
+   same step. An unaccepted proposal expires after `split_proposal_ttl_h` (72
+   hours). An hourly cron also sweeps `split_sources/` blobs that no row
+   references.
+7. **Caps.** 40 MiB per file, 300 pages, 5 files per request
+   ([core/src/settings.py:139](../../core/src/settings.py#L139)).
+8. **The budget is unmeasured.** `TALEO_SEGMENT_MAX_TOKENS` is an alias of
+   `REASONING_JSON_MIN_TOKENS` (8192) at
+   [core/src/services/taleo_split_service.py:32](../../core/src/services/taleo_split_service.py#L32).
+   No model profile for `taleo_segment_v1` exists. Read it as a floor, not a
+   measurement. ROADMAP §5 tracks it.
+
+**Alternatives considered**
+
+- *Keep the operator CLI only* (the 2026-09-18 state). Rejected: the product
+  refused the upload and sent the recruiter to a script outside it, with no
+  confirmation step.
+- *Ingest the model's segmentation without a review screen.* Rejected: a
+  mis-split attributes one person's experience to another, and segmentation was
+  intermittent on the DTO's bundle (the 2026-09-19 runs recorded in HANDOFF).
+- *Heuristic only, no model.* Not chosen as the primary path, and kept as the
+  fallback. Its accuracy on the real bundle is not measured, and this amendment
+  does not claim it.
+
+**Consequences**
+
+- Every split needs a recruiter's confirmation before any file is ingested.
+  That is slower than an automatic import, and it is deliberate.
+- A model failure degrades to heuristic boundaries. They are shown as such, and
+  they are not measured.
+- Cover-only and low-text applicants are absent from the job, and the review
+  screen says so. They are not promoted to résumés.
