@@ -763,6 +763,46 @@ Each card has a collapsible **Evidence** section. Inside, per requirement:
 verification is shown as **missing**, never as met — the product will not credit
 a citation it could not confirm.
 
+### Interview questions
+
+On a candidate's entry page (the **Why this rank?** page, reached from the
+card), there is an **Interview questions** panel.
+
+- A **recruiter or admin** clicks **Generate interview questions**. Hiring
+  managers and auditors can read a set that already exists, but cannot generate
+  one.
+- The questions target requirements the résumé does **not** show evidence for:
+  those marked *missing* or *partial*. Requirements marked *met* get no question.
+  The questions are grouped under the requirement each one probes. A gap can
+  produce fewer than three questions, or none.
+- Generation runs on the local model and **takes minutes**. The panel shows
+  *Generating…* and updates itself. The set is stored, so you can leave the page
+  and come back.
+- If the candidate was never evaluated against the job (ranked beyond the
+  evidence cut-off), the panel refuses: there is nothing to base questions on.
+- If the requirements a candidate is measured against have changed since the set
+  was generated, the panel shows a **stale** banner and offers **Regenerate**.
+- On a **blind** job, a set generated *before* the job became blind is hidden
+  until someone regenerates it.
+- What the model is sent: the requirement text and the short partial-match quotes
+  from the evidence panel. It is **not** sent the résumé, the cover letter, or the
+  candidate's name, email or phone. Identifiers the system knows about are removed
+  from that text first, on a best-effort basis.
+- Each generation is written to the access record, as is each read by an auditor.
+
+> ### ⚠️ Be aware
+>
+> - **The questions are suggestions.** The interviewer decides what to ask.
+> - **Do not ask about protected characteristics** (for example age, family
+>   status, disability, religion, ethnic origin, or immigration status beyond a
+>   lawful work-eligibility question). The generator is instructed not to suggest
+>   them, but that instruction is the only control. The system does not screen
+>   questions for these. Read every question before you ask it.
+> - **The redaction is best-effort.** It catches the name, email and phone the
+>   system holds and the common ways they are written. It cannot catch every
+>   spelling, handle or number format.
+> - **Regenerate has no limit**, and each press runs the model again.
+
 ### Revealing an identity (blind jobs)
 
 Press **Reveal identity (audited)** on a card, or on the candidate page. The
@@ -1089,6 +1129,7 @@ All paths are relative to the repository root.
 | §8 tiles + chips + manager chips | `core/frontend/templates/shortlist_cards.html:366-417`, `core/src/schemas/matching.py:357-445` |
 | §8 internal chip | `core/frontend/templates/shortlist_cards.html:266-292` |
 | §8 evidence panel + verification | `core/frontend/templates/shortlist_cards.html:419-449`, `core/frontend/templates/shortlist_entry.html:225-233` |
+| §8 interview questions panel | `core/frontend/templates/_interview_questions_panel.html`, included at `core/frontend/templates/shortlist_entry.html:264`; routes `core/src/api/routes/shortlist.py:277-392` (POST claim + enqueue, GET read with stale/blind/stalled logic); gap selection, refusals, redaction and filtering `core/src/services/interview_questions.py:106-132,303-400`; prompt input is gaps only `:403-405`; persistence `core/src/services/interview_question_service.py`; worker `core/src/worker/interview_tasks.py`; "not evaluated" refusal and evidence cut-off `docs/adr/040-evidence-cliff-disclosure.md`; audit action `generate_interview_questions` `shortlist.py:309-322` |
 | §8 reveal / withdraw / reinstate | `core/frontend/app.py:1516-1594,1773-1794`, `core/frontend/templates/resume_detail.html:47-157` |
 | §8 export buttons + columns | `core/frontend/templates/shortlist_list.html:11-19`, `core/frontend/app.py:1887-1930`, `core/src/services/shortlist_service.py:1348-1392,1457-1470` |
 | §8 exports always anonymised | `core/src/services/shortlist_service.py:1170-1194`, `core/src/api/routes/shortlist.py:87-110` |
