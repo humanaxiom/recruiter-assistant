@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from src.services import DbConn
+from src.services import DbConn, pii
 from src.services.interview_questions import (
     PROMPT_VERSION,
     Gap,
@@ -35,6 +35,7 @@ class FailureReason(enum.StrEnum):
     ENTRY_GONE = "entry_gone"
     INVALID_OUTPUT = "invalid_output"
     NO_QUESTIONS = "no_questions"
+    LLM_UNAVAILABLE = "llm_unavailable"
 
 
 # A pending row is claimable again once it is older than the stall window (the
@@ -63,8 +64,8 @@ RETURNING true
 _READY_SQL = """
 INSERT INTO interview_questions
     (job_id, resume_id, status, questions, gaps_sha256, prompt_version, model,
-     generated_at)
-VALUES ($1, $2, 'ready', $3::jsonb, $4, $5, $6, now())
+     generated_at, blind_review)
+VALUES ($1, $2, 'ready', $3::jsonb, $4, $5, $6, now(), $7)
 ON CONFLICT (job_id, resume_id) DO UPDATE SET
     status = 'ready',
     reason = NULL,
@@ -72,7 +73,8 @@ ON CONFLICT (job_id, resume_id) DO UPDATE SET
     gaps_sha256 = EXCLUDED.gaps_sha256,
     prompt_version = EXCLUDED.prompt_version,
     model = EXCLUDED.model,
-    generated_at = now()
+    generated_at = now(),
+    blind_review = EXCLUDED.blind_review
 """
 
 _SETTLE_SQL = """
@@ -88,7 +90,7 @@ ON CONFLICT (job_id, resume_id) DO UPDATE SET
 
 _GET_SQL = """
 SELECT status, reason, questions, gaps_sha256, prompt_version, model,
-       generated_at, requested_at, created_by
+       generated_at, requested_at, created_by, blind_review
 FROM interview_questions
 WHERE job_id = $1 AND resume_id = $2
 """
@@ -103,6 +105,8 @@ class InterviewQuestionsRecord:
     prompt_version: str | None
     model: str | None
     generated_at: datetime | None
+    requested_at: datetime | None = None
+    blind_review: bool = False
 
 
 async def claim(
@@ -123,6 +127,7 @@ async def record_ready(
     questions: Sequence[InterviewQuestionItem],
     gaps: Sequence[Gap],
     model: str,
+    blind_review: bool = False,
 ) -> None:
     """Store the questions with their requirement text, so a stored row stays
     readable after the shortlist's gaps move, stamped with the gap hash the
@@ -148,6 +153,7 @@ async def record_ready(
         gaps_hash(gaps),
         PROMPT_VERSION,
         model,
+        blind_review,
     )
 
 
@@ -183,4 +189,28 @@ async def get(
         prompt_version=row["prompt_version"],
         model=row["model"],
         generated_at=row["generated_at"],
+        requested_at=row["requested_at"],
+        blind_review=bool(row["blind_review"]),
     )
+
+
+_IDENTIFIERS_SQL = (
+    "SELECT candidate_name, candidate_email, candidate_phone FROM resumes WHERE id = $1"
+)
+
+
+async def load_identifiers(
+    conn: DbConn, resume_id: UUID
+) -> tuple[str | None, str | None, str | None]:
+    """The candidate's decrypted ``(name, email, phone)``, used ONLY to scrub
+    quotes and requirement text and to filter questions. Never enters a prompt
+    or a response. ``(None, None, None)`` when the résumé row is gone."""
+    row = await conn.fetchrow(_IDENTIFIERS_SQL, resume_id)
+    if row is None:
+        return None, None, None
+    async with conn.transaction():
+        await pii.set_pii_key(conn)
+        name = await pii.decrypt(conn, row["candidate_name"])
+        email = await pii.decrypt(conn, row["candidate_email"])
+        phone = await pii.decrypt(conn, row["candidate_phone"])
+    return name, email, phone

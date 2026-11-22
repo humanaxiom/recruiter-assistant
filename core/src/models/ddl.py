@@ -779,9 +779,15 @@ _STATEMENTS: tuple[str, ...] = (
         created_by      TEXT,
         requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
         generated_at    TIMESTAMPTZ,
+        blind_review    BOOLEAN NOT NULL DEFAULT false,
         UNIQUE (job_id, resume_id)
     )
     """,
+    # Review round 1 (F1): the job's blind state when the set was generated.
+    # CREATE TABLE IF NOT EXISTS never alters a live table, so a dedicated
+    # idempotent ALTER adds the column to a deployment that already has it.
+    "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS blind_review "
+    "BOOLEAN NOT NULL DEFAULT FALSE",
 )
 
 

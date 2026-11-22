@@ -24,6 +24,7 @@ import enum
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from src.pipeline.llm.client import REASONING_JSON_MIN_TOKENS, LLMClient
 from src.prompts import load_prompt
 from src.schemas.matching import CleanText, EvidenceStatus, ShortlistEntry
+from src.services.redaction import _EMAIL_RE, _MIN_PHONE_DIGITS, _PHONE_CAND_RE
 
 PROMPT_VERSION = "interview_questions_v1"
 
@@ -45,7 +47,7 @@ MAX_QUESTION_CHARS = 400
 _MAX_RAW_ITEMS = MAX_QUESTIONS_TOTAL * 4
 
 _MIN_NAME_TOKEN_CHARS = 2
-_MIN_PHONE_DIGITS = 7
+_MIN_SHORT_PHONE_DIGITS = 7
 
 
 class RefusalReason(enum.StrEnum):
@@ -180,44 +182,95 @@ def _norm(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+REDACTED = "[redacted]"
+
+# Per-character fold: NFKC, then NFKD with combining marks dropped, then
+# casefold. Done per character so every folded character maps back to the
+# ORIGINAL index it came from (a combining mark folds to nothing and is
+# swallowed into the match that precedes it).
+_FOLD_CACHE: dict[str, str] = {}
+
+
+def _fold_char(ch: str) -> str:
+    cached = _FOLD_CACHE.get(ch)
+    if cached is None:
+        decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", ch))
+        cached = "".join(c for c in decomposed if not unicodedata.combining(c))
+        cached = cached.casefold()
+        _FOLD_CACHE[ch] = cached
+    return cached
+
+
+def _fold_with_map(text: str) -> tuple[str, list[int]]:
+    folded: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(text):
+        piece = _fold_char(ch)
+        folded.append(piece)
+        index.extend([i] * len(piece))
+    return "".join(folded), index
+
+
+def _fold(text: str) -> str:
+    return _fold_with_map(text)[0]
+
+
 def _name_pattern(name: str | None) -> re.Pattern[str] | None:
+    """Whole-token matcher over the FOLDED text, so ``Jose Nunez`` and a
+    composed or decomposed ``José Núñez`` all meet. Match against ``_fold``."""
     if not name:
         return None
-    tokens = [t for t in re.findall(r"\w+", name) if len(t) >= _MIN_NAME_TOKEN_CHARS]
+    tokens = [
+        t for t in re.findall(r"\w+", _fold(name)) if len(t) >= _MIN_NAME_TOKEN_CHARS
+    ]
     if not tokens:
         return None
-    alternation = "|".join(re.escape(t) for t in tokens)
-    return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
+    alternation = "|".join(re.escape(t) for t in sorted(set(tokens)))
+    return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)")
 
 
-_PHONE_RUN = re.compile(r"\+?[\d\s().\-]{7,}")
+def _redact_names(text: str, name_re: re.Pattern[str]) -> str:
+    folded, index = _fold_with_map(text)
+    spans: list[tuple[int, int]] = []
+    for m in name_re.finditer(folded):
+        start = index[m.start()]
+        end = index[m.end() - 1] + 1
+        # swallow combining marks that follow the last matched character
+        while end < len(text) and unicodedata.combining(text[end]):
+            end += 1
+        spans.append((start, end))
+    for start, end in reversed(spans):
+        text = text[:start] + REDACTED + text[end:]
+    return text
 
 
-def _digit_runs(text: str) -> list[str]:
-    return [re.sub(r"\D", "", m.group()) for m in _PHONE_RUN.finditer(text)]
+_PHONE_LOOSE_SEP = r"[\s().\-]*"
+
+
+def _phone_key(phone: str | None) -> str:
+    """The stored phone's digits that identify it: its last 10 digits when it
+    has at least 10 (a country code never decides a match), all of them when it
+    has 7-9, ``""`` when too short to match safely."""
+    digits = re.sub(r"\D", "", phone) if phone else ""
+    if len(digits) >= _MIN_PHONE_DIGITS:
+        return digits[-_MIN_PHONE_DIGITS:]
+    return digits if len(digits) >= _MIN_SHORT_PHONE_DIGITS else ""
 
 
 def _email_key(email: str | None) -> str | None:
     return email.strip().casefold() if email and email.strip() else None
 
 
-def _phone_key(phone: str | None) -> str:
-    """The phone's digits, or ``""`` when too short to match safely."""
-    digits = re.sub(r"\D", "", phone) if phone else ""
-    return digits if len(digits) >= _MIN_PHONE_DIGITS else ""
-
-
-REDACTED = "[redacted]"
-
-
 def scrub_identifiers(
     text: str, *, name: str | None, email: str | None, phone: str | None
 ) -> str:
-    """``text`` with the candidate's email, phone and name tokens replaced by
-    ``[redacted]``. Uses the SAME matching rules as ``filter_questions``.
+    """``text`` with the candidate's identifiers -- and ANY email-shaped or
+    phone-shaped string -- replaced by ``[redacted]``. ``filter_questions``
+    uses the SAME rules (it drops what this would change).
 
     Email first (it contains name tokens), then phone, then name -- so no
-    fragment of an address survives a name substitution.
+    fragment of an address survives a name substitution. The email and phone
+    patterns are the blind redactor's own.
     """
     email_n = _email_key(email)
     if email_n is not None:
@@ -228,22 +281,25 @@ def scrub_identifiers(
         domain = email_n.rpartition("@")[2]
         if "." in domain:
             text = re.sub(re.escape(domain), REDACTED, text, flags=re.IGNORECASE)
-    phone_digits = _phone_key(phone)
-    if phone_digits:
+    text = _EMAIL_RE.sub(REDACTED, text)
 
-        def _phone_sub(match: re.Match[str]) -> str:
-            run = match.group()
-            if phone_digits not in re.sub(r"\D", "", run):
-                return run
-            core = run.strip()
-            lead = run[: len(run) - len(run.lstrip())]
-            trail = run[len(run.rstrip()) :]
-            return f"{lead}{REDACTED}{trail}" if core else run
+    key = _phone_key(phone)
 
-        text = _PHONE_RUN.sub(_phone_sub, text)
+    def _phone_sub(match: re.Match[str]) -> str:
+        digits = re.sub(r"\D", "", match.group())
+        if len(digits) >= _MIN_PHONE_DIGITS or (key and key in digits):
+            return REDACTED
+        return match.group()
+
+    text = _PHONE_CAND_RE.sub(_phone_sub, text)
+    if key and len(key) < _MIN_PHONE_DIGITS:
+        # a 7-9 digit number is below the candidate pattern's reach when it is
+        # written without separators; match its own digits directly
+        loose = _PHONE_LOOSE_SEP.join(re.escape(d) for d in key)
+        text = re.sub(rf"(?<!\d){loose}(?!\d)", REDACTED, text)
     name_re = _name_pattern(name)
     if name_re is not None:
-        text = name_re.sub(REDACTED, text)
+        text = _redact_names(text, name_re)
     return text
 
 
@@ -257,7 +313,9 @@ def redact_gaps(
     return [
         Gap(
             index=g.index,
-            requirement=g.requirement,
+            requirement=scrub_identifiers(
+                g.requirement, name=name, email=email, phone=phone
+            ),
             status=g.status,
             quote=(
                 scrub_identifiers(g.quote, name=name, email=email, phone=phone)
@@ -280,18 +338,9 @@ def filter_questions(
     """Keep the questions that cite a supplied gap, probe only a supplied quote
     and echo no candidate identifier. Returns ``(kept, dropped_count)``."""
     by_index = {g.index: g for g in gaps}
-    name_re = _name_pattern(name)
-    email_n = _email_key(email)
-    phone_digits = _phone_key(phone)
 
     def leaks(text: str) -> bool:
-        if name_re is not None and name_re.search(text):
-            return True
-        if email_n is not None and email_n in text.casefold():
-            return True
-        return bool(phone_digits) and any(
-            phone_digits in run for run in _digit_runs(text)
-        )
+        return scrub_identifiers(text, name=name, email=email, phone=phone) != text
 
     kept: list[InterviewQuestionItem] = []
     dropped = 0

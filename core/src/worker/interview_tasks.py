@@ -12,7 +12,10 @@ SQL on ``resumes.parsed`` -- and returns the status it recorded.
 * Candidate name/email/phone are decrypted ONLY to scrub partial quotes (a
   non-blind job's evidence quote can carry them) before the prompt is built and
   to drive ``filter_questions`` afterwards. They never enter a message.
-* ``LLMUnavailableError`` propagates so arq retries; nothing is recorded.
+* ``LLMUnavailableError`` raises ``arq.Retry`` until the final try (``job_try``
+  reaching ``resume_parse_max_tries``), recording nothing; the final try settles
+  ``failed``/``llm_unavailable``. A parent row deleted mid-run (FK violation) is
+  a ``failed`` status, not a crash.
   Schema-invalid output is ``failed``/``invalid_output``; an empty or fully
   filtered result is ``failed``/``no_questions``.
 """
@@ -23,10 +26,13 @@ import logging
 from typing import Any
 from uuid import UUID
 
+import asyncpg
+from arq import Retry
+
 from src.errors import NotFoundError
-from src.pipeline.llm import LLMClient, LLMOutputInvalidError
+from src.pipeline.llm import LLMClient, LLMOutputInvalidError, LLMUnavailableError
 from src.services import interview_question_service as iq_service
-from src.services import pii, shortlist_service
+from src.services import shortlist_service
 from src.services.interview_question_service import FailureReason
 from src.services.interview_questions import (
     InterviewRefusal,
@@ -40,9 +46,7 @@ from src.settings import get_settings
 log = logging.getLogger(__name__)
 
 _ENTRY_ID_SQL = "SELECT id FROM shortlist_entries WHERE job_id = $1 AND resume_id = $2"
-_IDENTIFIERS_SQL = (
-    "SELECT candidate_name, candidate_email, candidate_phone FROM resumes WHERE id = $1"
-)
+_RETRY_DEFER_SECONDS = 30
 
 
 async def generate_interview_questions(
@@ -64,22 +68,27 @@ async def generate_interview_questions(
         try:
             gaps = select_gaps(entry)
         except InterviewRefusal as refusal:
-            await iq_service.record_refused(conn, job_uuid, resume_uuid, refusal.reason)
+            try:
+                await iq_service.record_refused(
+                    conn, job_uuid, resume_uuid, refusal.reason
+                )
+            except asyncpg.ForeignKeyViolationError:
+                return "failed"
             return "refused"
 
-        row = await conn.fetchrow(_IDENTIFIERS_SQL, resume_uuid)
-        name = email = phone = None
-        if row is not None:
-            async with conn.transaction():
-                await pii.set_pii_key(conn)
-                name = await pii.decrypt(conn, row["candidate_name"])
-                email = await pii.decrypt(conn, row["candidate_email"])
-                phone = await pii.decrypt(conn, row["candidate_phone"])
+        name, email, phone = await iq_service.load_identifiers(conn, resume_uuid)
 
     # The connection is released before the (slow) model call.
     scrubbed = redact_gaps(gaps, name=name, email=email, phone=phone)
     try:
         ingest = await generate(llm, scrubbed)
+    except LLMUnavailableError as exc:
+        job_try = ctx.get("job_try", 1)
+        if job_try >= get_settings().resume_parse_max_tries:
+            return await _settle_failed(
+                pool, job_uuid, resume_uuid, FailureReason.LLM_UNAVAILABLE.value
+            )
+        raise Retry(defer=_RETRY_DEFER_SECONDS * job_try) from exc
     except LLMOutputInvalidError:
         return await _settle_failed(pool, job_uuid, resume_uuid, "invalid_output")
 
@@ -95,26 +104,36 @@ async def generate_interview_questions(
     )
     if not kept:
         return await _settle_failed(pool, job_uuid, resume_uuid, "no_questions")
-    async with pool.acquire() as conn:
-        await iq_service.record_ready(
-            conn,
-            job_uuid,
-            resume_uuid,
-            questions=kept,
-            gaps=scrubbed,
-            model=get_settings().llm_model_generation,
-        )
+    try:
+        async with pool.acquire() as conn:
+            await iq_service.record_ready(
+                conn,
+                job_uuid,
+                resume_uuid,
+                questions=kept,
+                gaps=scrubbed,
+                model=get_settings().llm_model_generation,
+                blind_review=entry.blinded,
+            )
+    except asyncpg.ForeignKeyViolationError:
+        return "failed"
     return "ready"
 
 
 async def _failed(
     conn: Any, job_id: UUID, resume_id: UUID, reason: FailureReason
 ) -> str:
-    await iq_service.record_failed(conn, job_id, resume_id, reason.value)
+    try:
+        await iq_service.record_failed(conn, job_id, resume_id, reason.value)
+    except asyncpg.ForeignKeyViolationError:
+        pass
     return "failed"
 
 
 async def _settle_failed(pool: Any, job_id: UUID, resume_id: UUID, reason: str) -> str:
-    async with pool.acquire() as conn:
-        await iq_service.record_failed(conn, job_id, resume_id, reason)
+    try:
+        async with pool.acquire() as conn:
+            await iq_service.record_failed(conn, job_id, resume_id, reason)
+    except asyncpg.ForeignKeyViolationError:
+        pass
     return "failed"

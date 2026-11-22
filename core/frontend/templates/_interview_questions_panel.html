@@ -22,14 +22,27 @@
   'invalid_output': 'The model returned an unusable answer. Please try again.',
   'no_questions': 'The model produced no questions. Please try again.',
   'entry_gone': 'This shortlist entry no longer exists.',
+  'llm_unavailable': 'The language model was not reachable. Please try again in a few minutes.',
+  'stalled': 'Generation did not finish. Please try again.',
 } %}
-{% if status == 'pending' %}
+{% if status == 'unavailable' %}
+<div id="interview-questions" class="card">
+  <h3>Interview questions</h3>
+  <p class="muted">Interview questions could not be loaded. Reload the page to try again.</p>
+</div>
+{% elif status == 'pending' %}
 <div id="interview-questions" class="card"
      hx-get="/shortlist/{{ entry_id }}/interview-questions-panel"
      hx-trigger="every 3s"
      hx-swap="outerHTML">
   <h3>Interview questions</h3>
   <p class="muted">Generating interview questions — this can take a minute.</p>
+</div>
+{% elif status == 'ready' and iq.reason == 'blind_changed' %}
+<div id="interview-questions" class="card">
+  <h3>Interview questions</h3>
+  <p class="muted">This job is now blind review, and these questions were generated before it was. They are hidden so they cannot identify the candidate. Regenerate them to get a blind-safe set.</p>
+  {{ writer_form('Regenerate') }}
 </div>
 {% elif status == 'ready' %}
 <div id="interview-questions" class="card">

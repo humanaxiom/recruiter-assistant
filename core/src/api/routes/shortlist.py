@@ -9,7 +9,7 @@ unmatched-route 404 (proving the route table itself has no entry), never a
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -36,6 +36,7 @@ from src.services.interview_questions import (
     PROMPT_VERSION,
     InterviewRefusal,
     gaps_hash,
+    redact_gaps,
     select_gaps,
 )
 from src.services.pii import set_pii_key
@@ -339,9 +340,14 @@ async def get_interview_questions(
     entry = await shortlist_service.get_one(db, entry_id, user_id=user_id)
     record = await interview_question_service.get(db, entry.job_id, entry.resume_id)
     try:
-        current: str | None = gaps_hash(select_gaps(entry))
+        gaps = select_gaps(entry)
     except InterviewRefusal:
-        current = None
+        current: str | None = None
+    else:
+        name, email, phone = await interview_question_service.load_identifiers(
+            db, entry.resume_id
+        )
+        current = gaps_hash(redact_gaps(gaps, name=name, email=email, phone=phone))
     await log_auditor_read(
         db,
         user,
@@ -352,6 +358,25 @@ async def get_interview_questions(
     )
     if record is None:
         return InterviewQuestionsResponse(status="none", current_gaps_sha256=current)
+    if record.status == "pending" and _is_stalled(record.requested_at):
+        # Read-only: the claim already lets a stalled row be re-claimed, so
+        # nothing is written; the reader just stops seeing a spinner.
+        return InterviewQuestionsResponse(
+            status="failed",
+            reason="stalled",
+            current_gaps_sha256=current,
+        )
+    if record.status == "ready" and entry.blinded and not record.blind_review:
+        # The set was generated while the job was not blind and may quote the
+        # candidate; withhold every question and quote now that it is.
+        return InterviewQuestionsResponse(
+            status="ready",
+            reason="blind_changed",
+            gaps_sha256=record.gaps_sha256,
+            current_gaps_sha256=current,
+            stale=True,
+            generated_at=record.generated_at,
+        )
     return InterviewQuestionsResponse(
         status=record.status,
         reason=record.reason,
@@ -361,6 +386,13 @@ async def get_interview_questions(
         stale=record.gaps_sha256 is not None and record.gaps_sha256 != current,
         generated_at=record.generated_at,
     )
+
+
+def _is_stalled(requested_at: datetime | None) -> bool:
+    if requested_at is None:
+        return False
+    window = timedelta(minutes=get_settings().interview_questions_stall_minutes)
+    return datetime.now(UTC) - requested_at > window
 
 
 __all__ = ["router"]

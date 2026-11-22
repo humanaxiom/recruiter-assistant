@@ -2060,12 +2060,13 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
 
 
 def _fetch_interview_questions(entry_id: UUID) -> dict[str, Any]:
-    """The panel's state, tolerant: any failure degrades to ``none`` so the
+    """The panel's state, tolerant: any failure degrades to ``unavailable``
+    (never ``none``, which would offer a Generate form) so the
     entry page itself never breaks on the questions fetch."""
     try:
         raw = api_client.get_interview_questions(entry_id)
     except api_client.BackendError:
-        return {"status": "none"}
+        return {"status": "unavailable"}
     return raw if isinstance(raw, dict) else {"status": "none"}
 
 
@@ -2075,8 +2076,12 @@ def interview_questions_panel(entry_id: UUID) -> Any:
         raw = api_client.get_interview_questions(entry_id)
     except api_client.NotFound:
         abort(404)
-    except api_client.BackendUnavailable as exc:
-        return _unavailable(exc)
+    except api_client.BackendError:
+        return render_template(
+            "_interview_questions_panel.html",
+            iq={"status": "unavailable"},
+            entry_id=entry_id,
+        )
     iq = raw if isinstance(raw, dict) else {"status": "none"}
     return render_template("_interview_questions_panel.html", iq=iq, entry_id=entry_id)
 
