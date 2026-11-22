@@ -297,9 +297,10 @@ async def request_interview_questions(
     or candidate text, and is written only after the claim succeeded."""
     entry = await shortlist_service.get_one(db, entry_id)
     created_by = user.cas_username if user is not None else None
-    if not await interview_question_service.claim(
+    claim_id = await interview_question_service.claim(
         db, entry.job_id, entry.resume_id, created_by
-    ):
+    )
+    if claim_id is None:
         raise ConflictError(
             "interview questions are already being generated for this candidate",
             entry_id=str(entry_id),
@@ -320,7 +321,10 @@ async def request_interview_questions(
         },
     )
     await arq.enqueue_job(
-        "generate_interview_questions", str(entry.job_id), str(entry.resume_id)
+        "generate_interview_questions",
+        str(entry.job_id),
+        str(entry.resume_id),
+        str(claim_id),
     )
     return {"status": "pending"}
 
@@ -391,7 +395,7 @@ async def get_interview_questions(
 def _is_stalled(requested_at: datetime | None) -> bool:
     if requested_at is None:
         return False
-    window = timedelta(minutes=get_settings().interview_questions_stall_minutes)
+    window = timedelta(minutes=interview_question_service.effective_stall_minutes())
     return datetime.now(UTC) - requested_at > window
 
 

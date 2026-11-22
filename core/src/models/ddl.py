@@ -780,6 +780,7 @@ _STATEMENTS: tuple[str, ...] = (
         requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
         generated_at    TIMESTAMPTZ,
         blind_review    BOOLEAN NOT NULL DEFAULT false,
+        claim_id        UUID,
         UNIQUE (job_id, resume_id)
     )
     """,
@@ -788,6 +789,9 @@ _STATEMENTS: tuple[str, ...] = (
     # idempotent ALTER adds the column to a deployment that already has it.
     "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS blind_review "
     "BOOLEAN NOT NULL DEFAULT FALSE",
+    # Review round 2 (G1): every winning claim mints a fresh id; settles and
+    # heartbeats are scoped to it so a stale run cannot overwrite a newer one.
+    "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS claim_id uuid",
 )
 
 

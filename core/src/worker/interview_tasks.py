@@ -1,6 +1,6 @@
 """arq task for the interview-question generator (S2).
 
-``generate_interview_questions(ctx, job_id, resume_id)`` settles the
+``generate_interview_questions(ctx, job_id, resume_id, claim_id)`` settles the
 ``interview_questions`` row the route claimed as ``pending``. It takes ids only
 (no free text through Redis), rebuilds the entry through
 ``shortlist_service.get_one`` -- the blind-redacted, unscoped DTO, never raw
@@ -47,33 +47,46 @@ log = logging.getLogger(__name__)
 
 _ENTRY_ID_SQL = "SELECT id FROM shortlist_entries WHERE job_id = $1 AND resume_id = $2"
 _RETRY_DEFER_SECONDS = 30
+_ROW_SQL = "SELECT 1 FROM interview_questions WHERE job_id = $1 AND resume_id = $2"
 
 
 async def generate_interview_questions(
-    ctx: dict[str, Any], job_id: str, resume_id: str
+    ctx: dict[str, Any], job_id: str, resume_id: str, claim_id: str
 ) -> str:
     pool = ctx["pg_pool"]
     llm: LLMClient = ctx["llm"]
     job_uuid, resume_uuid = UUID(job_id), UUID(resume_id)
+    claim_uuid = UUID(claim_id)
 
     async with pool.acquire() as conn:
+        # Every try refreshes the claim's requested_at first, so a slow model
+        # or a long retry chain is not mistaken for a dead worker. A False
+        # (superseded) is ignored: the settles below then no-op and say so.
+        await iq_service.heartbeat(conn, job_uuid, resume_uuid, claim_id=claim_uuid)
         entry_id = await conn.fetchval(_ENTRY_ID_SQL, job_uuid, resume_uuid)
         if entry_id is None:
-            return await _failed(conn, job_uuid, resume_uuid, FailureReason.ENTRY_GONE)
+            return await _failed(
+                conn, job_uuid, resume_uuid, claim_uuid, FailureReason.ENTRY_GONE
+            )
         try:
             entry = await shortlist_service.get_one(conn, entry_id)
         except NotFoundError:
-            return await _failed(conn, job_uuid, resume_uuid, FailureReason.ENTRY_GONE)
+            return await _failed(
+                conn, job_uuid, resume_uuid, claim_uuid, FailureReason.ENTRY_GONE
+            )
 
         try:
             gaps = select_gaps(entry)
         except InterviewRefusal as refusal:
             try:
-                await iq_service.record_refused(
-                    conn, job_uuid, resume_uuid, refusal.reason
+                written = await iq_service.record_refused(
+                    conn, job_uuid, resume_uuid, refusal.reason, claim_id=claim_uuid
                 )
             except asyncpg.ForeignKeyViolationError:
                 return "failed"
+            if not written and await _row_gone(conn, job_uuid, resume_uuid):
+                return "failed"
+            _warn_if_superseded(written, job_id, resume_id)
             return "refused"
 
         name, email, phone = await iq_service.load_identifiers(conn, resume_uuid)
@@ -86,11 +99,17 @@ async def generate_interview_questions(
         job_try = ctx.get("job_try", 1)
         if job_try >= get_settings().resume_parse_max_tries:
             return await _settle_failed(
-                pool, job_uuid, resume_uuid, FailureReason.LLM_UNAVAILABLE.value
+                pool,
+                job_uuid,
+                resume_uuid,
+                claim_uuid,
+                FailureReason.LLM_UNAVAILABLE.value,
             )
         raise Retry(defer=_RETRY_DEFER_SECONDS * job_try) from exc
     except LLMOutputInvalidError:
-        return await _settle_failed(pool, job_uuid, resume_uuid, "invalid_output")
+        return await _settle_failed(
+            pool, job_uuid, resume_uuid, claim_uuid, "invalid_output"
+        )
 
     kept, dropped = filter_questions(
         ingest, scrubbed, name=name, email=email, phone=phone
@@ -103,37 +122,68 @@ async def generate_interview_questions(
         dropped,
     )
     if not kept:
-        return await _settle_failed(pool, job_uuid, resume_uuid, "no_questions")
+        return await _settle_failed(
+            pool, job_uuid, resume_uuid, claim_uuid, "no_questions"
+        )
     try:
         async with pool.acquire() as conn:
-            await iq_service.record_ready(
+            written = await iq_service.record_ready(
                 conn,
                 job_uuid,
                 resume_uuid,
+                claim_id=claim_uuid,
                 questions=kept,
                 gaps=scrubbed,
                 model=get_settings().llm_model_generation,
                 blind_review=entry.blinded,
             )
+            if not written and await _row_gone(conn, job_uuid, resume_uuid):
+                return "failed"
     except asyncpg.ForeignKeyViolationError:
         return "failed"
+    _warn_if_superseded(written, job_id, resume_id)
     return "ready"
 
 
+async def _row_gone(conn: Any, job_id: UUID, resume_id: UUID) -> bool:
+    """A no-op settle with NO row left means the parent job or résumé was
+    deleted mid-run (the cascade took the row): that is a failed run, not a
+    superseded one."""
+    return await conn.fetchval(_ROW_SQL, job_id, resume_id) is None
+
+
+def _warn_if_superseded(written: bool, job_id: str, resume_id: str) -> None:
+    if not written:
+        log.warning(
+            "interview_questions job=%s resume=%s settle superseded: the claim "
+            "is no longer the row's pending claim; nothing written",
+            job_id,
+            resume_id,
+        )
+
+
 async def _failed(
-    conn: Any, job_id: UUID, resume_id: UUID, reason: FailureReason
+    conn: Any, job_id: UUID, resume_id: UUID, claim_id: UUID, reason: FailureReason
 ) -> str:
     try:
-        await iq_service.record_failed(conn, job_id, resume_id, reason.value)
+        written = await iq_service.record_failed(
+            conn, job_id, resume_id, reason.value, claim_id=claim_id
+        )
     except asyncpg.ForeignKeyViolationError:
-        pass
+        return "failed"
+    _warn_if_superseded(written, str(job_id), str(resume_id))
     return "failed"
 
 
-async def _settle_failed(pool: Any, job_id: UUID, resume_id: UUID, reason: str) -> str:
+async def _settle_failed(
+    pool: Any, job_id: UUID, resume_id: UUID, claim_id: UUID, reason: str
+) -> str:
     try:
         async with pool.acquire() as conn:
-            await iq_service.record_failed(conn, job_id, resume_id, reason)
+            written = await iq_service.record_failed(
+                conn, job_id, resume_id, reason, claim_id=claim_id
+            )
     except asyncpg.ForeignKeyViolationError:
-        pass
+        return "failed"
+    _warn_if_superseded(written, str(job_id), str(resume_id))
     return "failed"

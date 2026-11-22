@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from src.pipeline.llm.client import REASONING_JSON_MIN_TOKENS, LLMClient
 from src.prompts import load_prompt
 from src.schemas.matching import CleanText, EvidenceStatus, ShortlistEntry
-from src.services.redaction import _EMAIL_RE, _MIN_PHONE_DIGITS, _PHONE_CAND_RE
+from src.services.redaction import _EMAIL_RE, _MIN_PHONE_DIGITS
 
 PROMPT_VERSION = "interview_questions_v1"
 
@@ -48,6 +48,21 @@ _MAX_RAW_ITEMS = MAX_QUESTIONS_TOTAL * 4
 
 _MIN_NAME_TOKEN_CHARS = 2
 _MIN_SHORT_PHONE_DIGITS = 7
+
+# A name token that is this short, or in this list, is also an ordinary English
+# word ("An Tran", "Will Grant"): it is redacted only as part of the full-name
+# sequence, never alone, or every "an"/"will"/"grant" in a question is eaten.
+_MIN_STRONG_NAME_TOKEN_CHARS = 3
+_COMMON_WORD_NAME_TOKENS = frozenset(
+    "an can do will may mark grant max rose june guy bill art ray page hope joy "
+    "sky".split()
+)
+
+# The blind redactor's candidate pattern, widened with the en dash, em dash,
+# slash and middle dot as separators (U+2013, U+2014, U+00B7). Only
+# a candidate with >= 10 digits (or the stored phone's key) is redacted, so
+# "2016-2019" style runs are untouched.
+_PHONE_CAND_RE = re.compile(r"(?<!\w)\+?\d[\d().\-\s\u2013\u2014\u00b7/]{6,}\d(?!\w)")
 
 
 class RefusalReason(enum.StrEnum):
@@ -225,7 +240,22 @@ def _name_pattern(name: str | None) -> re.Pattern[str] | None:
     ]
     if not tokens:
         return None
-    alternation = "|".join(re.escape(t) for t in sorted(set(tokens)))
+    strong = sorted(
+        {
+            t
+            for t in tokens
+            if len(t) >= _MIN_STRONG_NAME_TOKEN_CHARS
+            and t not in _COMMON_WORD_NAME_TOKENS
+        }
+    )
+    options: list[str] = []
+    if len(tokens) > 1:
+        # the full-name sequence first, so it wins over a single token
+        options.append(r"\s+".join(re.escape(t) for t in tokens))
+    options.extend(re.escape(t) for t in strong)
+    if not options:
+        return None
+    alternation = "|".join(options)
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)")
 
 
