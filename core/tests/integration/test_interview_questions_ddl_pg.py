@@ -139,6 +139,7 @@ _COLUMNS: dict[str, str] = {
     "created_by": "text",
     "requested_at": "timestamp with time zone",
     "generated_at": "timestamp with time zone",
+    "blind_review": "boolean",
 }
 
 
@@ -160,6 +161,7 @@ async def test_table_has_the_contract_columns_and_types(pg_pool: asyncpg.Pool) -
         "status",
         "questions",
         "requested_at",
+        "blind_review",
     ):
         assert by_name[not_null]["is_nullable"] == "NO", not_null
     for nullable in (
@@ -624,3 +626,109 @@ async def test_free_text_reasons_never_reach_the_table(pg_pool: asyncpg.Pool) ->
             await _svc().record_refused(conn, job_id, resume_id, "Jane Smith refused")
         rec = await _svc().get(conn, job_id, resume_id)
     assert (rec.status, rec.reason) == ("pending", None)
+
+
+# ── review round 1: blind_review ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_blind_review_defaults_false_on_the_claims_minimal_insert(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO interview_questions "
+            "(job_id, resume_id, status, created_by) "
+            "VALUES ($1, $2, 'pending', 'alice')",
+            job_id,
+            resume_id,
+        )
+    assert (await _row(pg_pool, job_id, resume_id))["blind_review"] is False
+
+
+@pytest.mark.asyncio
+async def test_blind_review_cannot_be_null(pg_pool: asyncpg.Pool) -> None:
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        with pytest.raises(asyncpg.NotNullViolationError):
+            await conn.execute(
+                "INSERT INTO interview_questions "
+                "(job_id, resume_id, status, created_by, blind_review) "
+                "VALUES ($1, $2, 'pending', 'alice', NULL)",
+                job_id,
+                resume_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_init_schema_adds_blind_review_to_a_table_that_predates_it(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` skips an existing table, so a deployment
+    that already has ``interview_questions`` needs the dedicated ALTER; its
+    existing rows must come out ``false`` (the conservative stamp)."""
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await conn.execute("ALTER TABLE interview_questions DROP COLUMN blind_review")
+        await conn.execute(
+            "INSERT INTO interview_questions "
+            "(job_id, resume_id, status, created_by) VALUES ($1, $2, 'ready', 'a')",
+            job_id,
+            resume_id,
+        )
+    await init_schema(pg_pool)
+    assert (await _row(pg_pool, job_id, resume_id))["blind_review"] is False
+
+
+@pytest.mark.parametrize("blind", [True, False])
+@pytest.mark.asyncio
+async def test_record_ready_persists_the_blind_review_stamp(
+    blind: bool, pg_pool: asyncpg.Pool
+) -> None:
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await _svc().claim(conn, job_id, resume_id, "alice")
+        await _svc().record_ready(
+            conn,
+            job_id,
+            resume_id,
+            questions=[],
+            gaps=[],
+            model="m",
+            blind_review=blind,
+        )
+        rec = await _svc().get(conn, job_id, resume_id)
+    assert (await _row(pg_pool, job_id, resume_id))["blind_review"] is blind
+    assert rec.blind_review is blind
+    assert rec.requested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_a_regenerate_overwrites_the_previous_blind_stamp(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        for blind in (True, False):
+            await _svc().claim(conn, job_id, resume_id, "alice")
+            await _svc().record_ready(
+                conn,
+                job_id,
+                resume_id,
+                questions=[],
+                gaps=[],
+                model="m",
+                blind_review=blind,
+            )
+            assert (await _row(pg_pool, job_id, resume_id))["blind_review"] is blind
+
+
+@pytest.mark.asyncio
+async def test_record_failed_accepts_llm_unavailable(pg_pool: asyncpg.Pool) -> None:
+    job_id, resume_id = await _pair(pg_pool)
+    async with pg_pool.acquire() as conn:
+        await _svc().claim(conn, job_id, resume_id, "alice")
+        await _svc().record_failed(conn, job_id, resume_id, "llm_unavailable")
+    row = await _row(pg_pool, job_id, resume_id)
+    assert (row["status"], row["reason"]) == ("failed", "llm_unavailable")

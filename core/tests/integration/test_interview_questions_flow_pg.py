@@ -958,3 +958,239 @@ async def test_identifiers_in_a_partial_quote_are_scrubbed_on_a_non_blind_job(
     async with pg_pool.acquire() as conn:
         rec = await _svc().get(conn, job_id, resume_id)
     assert [q["question"] for q in rec.questions] == ["Which pod?", Q2]
+
+
+# ── review round 1 ───────────────────────────────────────────────────────
+
+EMPLOYER = "Acme Corp"
+EMPLOYER_QUOTE = f"Led platform engineering at {EMPLOYER} for three years"
+EMPLOYER_QUESTION = f"Tell me about the scale of the {EMPLOYER} platform."
+
+
+async def _flip_blind(pool: asyncpg.Pool, job_id: uuid.UUID, *, blind: bool) -> None:
+    """Flip ``jobs.blind_review`` through the real service path (the same
+    function ``PATCH /jobs/{id}`` calls, including its audit row)."""
+    from src.schemas.jobs import JobUpdate
+    from src.services import job_service
+
+    async with pool.acquire() as conn:
+        await job_service.update_job(
+            conn,
+            job_id,
+            JobUpdate(blind_review=blind),
+            actor_kind="service",
+            actor_user_id=None,
+            actor_service="api",
+        )
+
+
+async def _get_body(
+    harness: _App,
+    settings: Settings,
+    pool: asyncpg.Pool,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_id: uuid.UUID,
+) -> Any:
+    async with harness.client() as client:
+        _, _, sid = await _login(pool, client, settings, monkeypatch, role="recruiter")
+        return await client.get(
+            _URL.format(entry_id), cookies={settings.session_cookie_name: sid}
+        )
+
+
+@pytest.mark.asyncio
+async def test_f1_flipping_the_job_blind_withholds_a_set_generated_non_blind(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    harness = _App(pg_pool)
+    job_id = await _job(pg_pool, blind=False)
+    resume_id = await _resume(pg_pool, job_id)
+    entry_id = await _shortlist(
+        pg_pool, job_id, resume_id, evidence=_evidence(partial_quote=EMPLOYER_QUOTE)
+    )
+    llm = _FakeLLM(
+        {
+            "requirement_index": 1,
+            "question": EMPLOYER_QUESTION,
+            "probes_quote": EMPLOYER_QUOTE,
+        },
+        {"requirement_index": 2, "question": Q2, "probes_quote": None},
+    )
+    assert await _claim_and_run(pg_pool, job_id, resume_id, llm) == "ready"
+    stored = await _iq_row(pg_pool)
+    assert stored[0]["blind_review"] is False
+
+    before = await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)
+    assert before.status_code == 200
+    assert EMPLOYER in before.text, "the set must be readable before the flip"
+
+    await _flip_blind(pg_pool, job_id, blind=True)
+    after = await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)
+
+    assert after.status_code == 200
+    assert EMPLOYER not in after.text
+    assert "Acme" not in after.text
+    body = after.json()
+    assert body["questions"] == []
+    assert body["reason"] == "blind_changed"
+    assert body["stale"] is True
+
+
+@pytest.mark.asyncio
+async def test_f1_a_regenerate_on_the_now_blind_job_serves_again_and_restamps(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    harness = _App(pg_pool)
+    job_id = await _job(pg_pool, blind=False)
+    resume_id = await _resume(pg_pool, job_id)
+    entry_id = await _shortlist(pg_pool, job_id, resume_id)
+    assert await _claim_and_run(pg_pool, job_id, resume_id, _standard_llm()) == "ready"
+    await _flip_blind(pg_pool, job_id, blind=True)
+
+    assert await _claim_and_run(pg_pool, job_id, resume_id, _standard_llm()) == "ready"
+
+    assert (await _iq_row(pg_pool))[0]["blind_review"] is True
+    body = (await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)).json()
+    assert body["reason"] is None
+    assert body["stale"] is False
+    assert [q["question"] for q in body["questions"]] == [Q1, Q2]
+
+
+@pytest.mark.asyncio
+async def test_f1_unblinding_a_job_does_not_withhold_a_blind_generated_set(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    harness = _App(pg_pool)
+    job_id = await _job(pg_pool, blind=True)
+    resume_id = await _resume(pg_pool, job_id)
+    entry_id = await _shortlist(pg_pool, job_id, resume_id)
+    assert await _claim_and_run(pg_pool, job_id, resume_id, _standard_llm()) == "ready"
+    assert (await _iq_row(pg_pool))[0]["blind_review"] is True
+
+    await _flip_blind(pg_pool, job_id, blind=False)
+    body = (await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)).json()
+
+    assert body["reason"] is None
+    assert len(body["questions"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected"),
+    [(21, ("failed", "stalled")), (60, ("failed", "stalled")), (19, ("pending", None))],
+)
+@pytest.mark.asyncio
+async def test_f3_an_old_pending_row_is_reported_failed_stalled(
+    minutes: int,
+    expected: tuple[str, str | None],
+    pg_pool: asyncpg.Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    harness = _App(pg_pool)
+    job_id = await _job(pg_pool)
+    resume_id = await _resume(pg_pool, job_id)
+    entry_id = await _shortlist(pg_pool, job_id, resume_id)
+    async with pg_pool.acquire() as conn:
+        await _svc().claim(conn, job_id, resume_id, "alice")
+        await conn.execute(
+            "UPDATE interview_questions "
+            "SET requested_at = now() - make_interval(mins => $1)",
+            minutes,
+        )
+
+    resp = await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)
+
+    body = resp.json()
+    assert (body["status"], body["reason"]) == expected
+    assert body["questions"] == []
+    assert (await _iq_row(pg_pool))[0]["status"] == "pending", "GET must not write"
+
+
+@pytest.mark.parametrize("victim", ["jobs", "resumes"])
+@pytest.mark.asyncio
+async def test_f5_the_worker_survives_its_job_or_resume_deleted_after_the_claim(
+    victim: str, pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    job_id = await _job(pg_pool)
+    resume_id = await _resume(pg_pool, job_id)
+    await _shortlist(pg_pool, job_id, resume_id)
+    async with pg_pool.acquire() as conn:
+        await _svc().claim(conn, job_id, resume_id, "alice")
+        target = job_id if victim == "jobs" else resume_id
+        await conn.execute(f"DELETE FROM {victim} WHERE id = $1", target)
+
+    result = await _run_worker(pg_pool, job_id, resume_id, _standard_llm())
+
+    assert result == "failed"
+    assert await _iq_row(pg_pool) == []
+
+
+@pytest.mark.asyncio
+async def test_f5_the_worker_survives_a_job_deleted_while_the_model_runs(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    job_id = await _job(pg_pool)
+    resume_id = await _resume(pg_pool, job_id)
+    await _shortlist(pg_pool, job_id, resume_id)
+
+    class _DeletingLLM(_FakeLLM):
+        async def chat_json(self, messages: Any, schema: Any, **kw: Any) -> Any:
+            async with pg_pool.acquire() as conn:
+                await conn.execute("DELETE FROM jobs WHERE id = $1", job_id)
+            return await super().chat_json(messages, schema, **kw)
+
+    llm = _DeletingLLM(
+        {"requirement_index": 1, "question": Q1, "probes_quote": QUOTE},
+        {"requirement_index": 2, "question": Q2, "probes_quote": None},
+    )
+
+    result = await _claim_and_run(pg_pool, job_id, resume_id, llm)
+
+    assert result == "failed"
+    assert llm.messages, "the model must have run"
+    assert await _iq_row(pg_pool) == []
+
+
+@pytest.mark.asyncio
+async def test_f7_a_requirement_naming_the_candidate_is_scrubbed_and_not_stale(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    harness = _App(pg_pool)
+    job_id = await _job(pg_pool, blind=False)
+    resume_id = await _resume(pg_pool, job_id)
+    entry_id = await _shortlist(
+        pg_pool,
+        job_id,
+        resume_id,
+        evidence=_evidence(missing_text=f"{REQ_MISSING} for {NAME} team"),
+    )
+    llm = _standard_llm()
+
+    assert await _claim_and_run(pg_pool, job_id, resume_id, llm) == "ready"
+
+    blob = llm.blob().casefold()
+    assert REQ_MISSING.casefold() in blob
+    assert "jane" not in blob and "smith" not in blob
+    stored = json.dumps(
+        json.loads((await _iq_row(pg_pool))[0]["questions"]), ensure_ascii=False
+    ).casefold()
+    assert "jane" not in stored and "smith" not in stored
+
+    resp = await _get_body(harness, settings, pg_pool, monkeypatch, entry_id)
+    body = resp.json()
+    assert body["stale"] is False
+    assert body["gaps_sha256"] == body["current_gaps_sha256"] is not None
+    assert "jane" not in resp.text.casefold()

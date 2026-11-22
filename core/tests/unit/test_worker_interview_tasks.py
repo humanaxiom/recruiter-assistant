@@ -19,8 +19,9 @@ Contract (decisions of this RED commit):
   never call the model.
 * Schema-invalid output (``LLMOutputInvalidError``) -> ``failed`` /
   ``invalid_output``. Nothing survives the filter -> ``failed`` /
-  ``no_questions``. ``LLMUnavailableError`` propagates (arq retries) and
-  records nothing.
+  ``no_questions``. ``LLMUnavailableError`` raises ``arq.Retry`` until the final try
+  (``job_try >= settings.resume_parse_max_tries``), then records
+  ``failed`` / ``llm_unavailable`` (review round 1, F2).
 * name / email / phone come from decrypting the résumé's candidate columns via
   ``src.services.pii`` (``set_pii_key`` then ``decrypt``, module attributes),
   are used ONLY for the post-generation filter, and appear in no message sent
@@ -38,7 +39,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
+import asyncpg
 import pytest
+from arq import Retry
 
 from src.errors import NotFoundError
 from src.pipeline.llm import LLMOutputInvalidError, LLMUnavailableError
@@ -474,16 +477,25 @@ async def test_a_vanished_entry_records_failed_entry_gone_and_skips_the_model(
     assert llm.calls == []
 
 
+# Provably wrong before review round 1 (F2): this test asserted that
+# ``LLMUnavailableError`` simply propagates "for arq retry". arq does NOT retry a
+# plain exception -- only ``arq.Retry`` -- so the exception was swallowed as a
+# permanent failure, the row stayed ``pending`` for the whole stall window and
+# the writer saw a spinner that never resolved. The contract is now the
+# ``resume_tasks`` one: ``raise Retry(defer=...)`` until ``job_try`` reaches
+# ``settings.resume_parse_max_tries`` (the arq ``max_tries`` the worker is
+# configured with), then settle ``failed`` / ``llm_unavailable``.
 @pytest.mark.asyncio
-async def test_llm_unavailable_propagates_for_arq_retry_and_records_nothing(
+async def test_llm_unavailable_raises_arq_retry_and_records_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     llm = _FakeLLM(error=LLMUnavailableError("breaker open"))
     h = _Harness(monkeypatch, llm=llm)
 
-    with pytest.raises(LLMUnavailableError):
+    with pytest.raises(Retry) as info:
         await h.run()
 
+    assert info.value.defer_score is not None and info.value.defer_score > 0
     assert h.recorded() == (0, 0, 0)
 
 
@@ -561,3 +573,119 @@ async def test_the_filter_runs_against_the_scrubbed_gaps(
         quote = (gap.quote or "").casefold()
         for forbidden in ("jane", "smith", EMAIL, PHONE, "555-0192"):
             assert forbidden.casefold() not in quote, forbidden
+
+
+# ── review round 1 ───────────────────────────────────────────────────────
+
+_MAX_TRIES = get_settings().resume_parse_max_tries
+
+
+@pytest.mark.parametrize("job_try", [1, 2, _MAX_TRIES - 1])
+@pytest.mark.asyncio
+async def test_llm_unavailable_retries_until_the_final_try(
+    job_try: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: every try short of the ceiling defers via ``arq.Retry`` and leaves
+    the row ``pending`` (nothing recorded)."""
+    h = _Harness(monkeypatch, llm=_FakeLLM(error=LLMUnavailableError("down")))
+    h.ctx["job_try"] = job_try
+
+    with pytest.raises(Retry):
+        await h.run()
+
+    assert h.recorded() == (0, 0, 0)
+
+
+@pytest.mark.parametrize("job_try", [_MAX_TRIES, _MAX_TRIES + 1])
+@pytest.mark.asyncio
+async def test_llm_unavailable_on_the_final_try_records_failed_llm_unavailable(
+    job_try: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = _Harness(monkeypatch, llm=_FakeLLM(error=LLMUnavailableError("down")))
+    h.ctx["job_try"] = job_try
+
+    assert await h.run() == "failed"
+
+    assert h.recorded() == (0, 1, 0)
+    assert _reason(_aw(h.failed)) == "llm_unavailable"
+    assert tuple(_aw(h.failed).args[1:3]) == (h.job_id, h.resume_id)
+
+
+def test_failure_reason_gains_llm_unavailable() -> None:
+    assert "llm_unavailable" in {m.value for m in _iq().FailureReason}
+
+
+@pytest.mark.parametrize("blinded", [True, False])
+@pytest.mark.asyncio
+async def test_record_ready_is_told_the_blind_state_the_set_was_generated_under(
+    blinded: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: the worker stamps ``blind_review=entry.blinded`` (the DTO's flag is
+    the job's state at generation time) via ``record_ready(..., blind_review=)``."""
+    h = _Harness(
+        monkeypatch,
+        llm=_FakeLLM(_ingest(_q(2, "Describe a budget."))),
+        blinded=blinded,
+    )
+
+    assert await h.run() == "ready"
+
+    assert _aw(h.ready).kwargs["blind_review"] is blinded
+
+
+@pytest.mark.asyncio
+async def test_a_job_deleted_before_the_failure_is_recorded_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F5: the FK violation of ``record_failed`` on a vanished job is a
+    status, not a crash."""
+    h = _Harness(monkeypatch, llm=_FakeLLM(), lookup_hit=False)
+    h.failed.side_effect = asyncpg.ForeignKeyViolationError("job gone")
+
+    assert await h.run() == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_job_deleted_before_the_questions_are_recorded_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = _Harness(monkeypatch, llm=_FakeLLM(_ingest(_q(2, "Describe a budget."))))
+    h.ready.side_effect = asyncpg.ForeignKeyViolationError("job gone")
+
+    assert await h.run() == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_job_deleted_before_a_refusal_is_recorded_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = _Harness(monkeypatch, llm=_FakeLLM(), evaluated=False)
+    h.refused.side_effect = asyncpg.ForeignKeyViolationError("job gone")
+
+    assert await h.run() == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_name_inside_a_requirement_never_reaches_the_prompt_or_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F7: the requirement text is scrubbed before the prompt AND before the
+    gaps are handed to ``record_ready`` (which stores requirement text and
+    hashes it)."""
+    reqs = [
+        _req("Kubernetes operations", "partial", QUOTE),
+        _req("Budget ownership for Jane Smith's team", "missing"),
+    ]
+    llm = _FakeLLM(_ingest(_q(1, "Walk me through the lab deployment.", QUOTE)))
+    h = _Harness(monkeypatch, llm=llm, requirements=reqs)
+
+    assert await h.run() == "ready"
+
+    blob = _prompt_blob(llm).casefold()
+    assert "budget ownership" in blob
+    assert "jane" not in blob and "smith" not in blob
+    stored = _aw(h.ready).kwargs["gaps"]
+    assert [g.requirement for g in stored][1].startswith("Budget ownership for ")
+    for gap in stored:
+        assert "jane" not in gap.requirement.casefold()
+        assert "smith" not in gap.requirement.casefold()

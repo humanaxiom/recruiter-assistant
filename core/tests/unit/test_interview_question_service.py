@@ -49,8 +49,14 @@ from src.settings import Settings
 _NOW = dt.datetime(2026, 11, 21, tzinfo=dt.UTC)
 
 _STALL_FIELD = "interview_questions_stall_minutes"
-_FAILURE_REASONS = {"entry_gone", "invalid_output", "no_questions"}
+_FAILURE_REASONS = {
+    "entry_gone",
+    "invalid_output",
+    "no_questions",
+    "llm_unavailable",
+}
 _REFUSAL_REASONS = {r.value for r in RefusalReason}
+_ALTER_FRAGMENT = "addcolumnifnotexistsblind_reviewbooleannotnulldefaultfalse"
 
 
 def _svc() -> Any:
@@ -130,6 +136,7 @@ def test_ddl_declares_the_table_idempotently() -> None:
         "generated_attimestamptz",
         "unique(job_id,resume_id)",
         "'pending','ready','failed','refused'",
+        "blind_reviewbooleannotnulldefaultfalse",
     ],
 )
 def test_ddl_carries_the_contract_fragment(fragment: str) -> None:
@@ -330,3 +337,67 @@ def test_the_public_surface_exists() -> None:
     svc = _svc()
     for name in ("claim", "record_ready", "record_failed", "record_refused", "get"):
         assert callable(getattr(svc, name)), name
+
+
+# ── review round 1: blind_review column, record_ready / get ──────────────
+
+
+def test_a_dedicated_idempotent_alter_adds_blind_review_to_a_live_table() -> None:
+    """``CREATE TABLE IF NOT EXISTS`` never touches a table that already exists,
+    so a deployment that has the table needs its own ALTER (as ``jobs`` has for
+    ``blind_review`` / ``description_sha256``)."""
+    alters = [
+        re.sub(r"\s+", "", s).lower()
+        for s in _STATEMENTS
+        if re.search(r"alter\s+table\s+interview_questions\b", s, re.I)
+    ]
+    assert _ALTER_FRAGMENT in " ".join(alters), alters
+
+
+@pytest.mark.parametrize("blind", [True, False])
+@pytest.mark.asyncio
+async def test_record_ready_binds_the_blind_review_state(blind: bool) -> None:
+    conn = _conn()
+    await _svc().record_ready(
+        conn,
+        uuid4(),
+        uuid4(),
+        questions=_items(),
+        gaps=_gaps(),
+        model="m",
+        blind_review=blind,
+    )
+    sql = conn.execute.await_args.args[0]
+    assert "blind_review" in sql
+    bools = [a for a in conn.execute.await_args.args[1:] if isinstance(a, bool)]
+    assert bools == [blind]
+
+
+@pytest.mark.asyncio
+async def test_record_ready_defaults_to_non_blind_when_not_told() -> None:
+    conn = _conn()
+    await _svc().record_ready(
+        conn, uuid4(), uuid4(), questions=_items(), gaps=_gaps(), model="m"
+    )
+    bools = [a for a in conn.execute.await_args.args[1:] if isinstance(a, bool)]
+    assert bools == [False]
+
+
+@pytest.mark.parametrize("blind", [True, False])
+@pytest.mark.asyncio
+async def test_get_exposes_blind_review_and_requested_at(blind: bool) -> None:
+    row = _Row(
+        status="ready",
+        reason=None,
+        questions="[]",
+        gaps_sha256="abc",
+        prompt_version=PROMPT_VERSION,
+        model="m",
+        generated_at=_NOW,
+        requested_at=_NOW,
+        created_by="alice",
+        blind_review=blind,
+    )
+    rec = await _svc().get(_conn(fetchrow=row), uuid4(), uuid4())
+    assert rec.blind_review is blind
+    assert rec.requested_at == _NOW

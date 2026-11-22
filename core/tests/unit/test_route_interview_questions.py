@@ -494,6 +494,19 @@ async def test_post_audit_details_hold_no_candidate_or_question_text(
 # ── GET: shape ───────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _no_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1 (F7): GET loads the candidate identifiers through
+    ``interview_question_service.load_identifiers`` to hash the scrubbed gaps;
+    these mocked-connection tests have no candidate row."""
+    monkeypatch.setattr(
+        _iq(),
+        "load_identifiers",
+        AsyncMock(return_value=(None, None, None)),
+        raising=False,
+    )
+
+
 def _ready_row(*, gaps_sha: str | None, status: str = "ready") -> _Row:
     stored = [
         {
