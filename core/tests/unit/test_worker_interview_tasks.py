@@ -236,18 +236,23 @@ class _Harness:
             return None if ct is None else _CT.get(ct)
 
         self.decrypt = AsyncMock(side_effect=_decrypt)
-        self.ready = AsyncMock(return_value=None)
-        self.failed = AsyncMock(return_value=None)
-        self.refused = AsyncMock(return_value=None)
+        self.ready = AsyncMock(return_value=True)
+        self.failed = AsyncMock(return_value=True)
+        self.refused = AsyncMock(return_value=True)
+        self.heartbeat = AsyncMock(return_value=True)
+        self.claim_id = uuid4()
         monkeypatch.setattr(shortlist_service, "get_one", self.get_one)
         monkeypatch.setattr(pii_service, "set_pii_key", self.set_key)
         monkeypatch.setattr(pii_service, "decrypt", self.decrypt)
         monkeypatch.setattr(_iq(), "record_ready", self.ready)
         monkeypatch.setattr(_iq(), "record_failed", self.failed)
         monkeypatch.setattr(_iq(), "record_refused", self.refused)
+        monkeypatch.setattr(_iq(), "heartbeat", self.heartbeat, raising=False)
 
     async def run(self) -> Any:
-        return await _task()(self.ctx, str(self.job_id), str(self.resume_id))
+        return await _task()(
+            self.ctx, str(self.job_id), str(self.resume_id), str(self.claim_id)
+        )
 
     def recorded(self) -> tuple[int, int, int]:
         return (
@@ -502,12 +507,17 @@ async def test_llm_unavailable_raises_arq_retry_and_records_nothing(
 # ── wiring ───────────────────────────────────────────────────────────────
 
 
-def test_the_task_is_a_coroutine_taking_ctx_and_two_ids() -> None:
+def test_the_task_is_a_coroutine_taking_ctx_two_ids_and_the_claim_id() -> None:
     import inspect
 
     fn = _task()
     assert inspect.iscoroutinefunction(fn)
-    assert list(inspect.signature(fn).parameters) == ["ctx", "job_id", "resume_id"]
+    assert list(inspect.signature(fn).parameters) == [
+        "ctx",
+        "job_id",
+        "resume_id",
+        "claim_id",
+    ]
 
 
 # ── identifiers inside a partial QUOTE (non-blind jobs) ──────────────────

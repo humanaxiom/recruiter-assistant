@@ -160,7 +160,7 @@ def test_failure_reason_is_exactly_the_fixed_set() -> None:
 @pytest.mark.asyncio
 async def test_record_failed_accepts_each_fixed_reason(reason: str) -> None:
     conn = _conn()
-    await _svc().record_failed(conn, uuid4(), uuid4(), reason)
+    await _svc().record_failed(conn, uuid4(), uuid4(), reason, claim_id=uuid4())
     assert reason in _flat_args(conn)
 
 
@@ -178,7 +178,7 @@ async def test_record_failed_accepts_each_fixed_reason(reason: str) -> None:
 async def test_record_failed_rejects_free_text_before_touching_the_db(bad: str) -> None:
     conn = _conn()
     with pytest.raises(ValueError):
-        await _svc().record_failed(conn, uuid4(), uuid4(), bad)
+        await _svc().record_failed(conn, uuid4(), uuid4(), bad, claim_id=uuid4())
     assert _db_calls(conn) == 0
 
 
@@ -186,7 +186,9 @@ async def test_record_failed_rejects_free_text_before_touching_the_db(bad: str) 
 @pytest.mark.asyncio
 async def test_record_refused_accepts_each_refusal_reason(reason: str) -> None:
     conn = _conn()
-    await _svc().record_refused(conn, uuid4(), uuid4(), RefusalReason(reason))
+    await _svc().record_refused(
+        conn, uuid4(), uuid4(), RefusalReason(reason), claim_id=uuid4()
+    )
     assert reason in _flat_args(conn)
 
 
@@ -199,7 +201,7 @@ async def test_record_refused_rejects_anything_outside_the_refusal_enum(
 ) -> None:
     conn = _conn()
     with pytest.raises(ValueError):
-        await _svc().record_refused(conn, uuid4(), uuid4(), bad)
+        await _svc().record_refused(conn, uuid4(), uuid4(), bad, claim_id=uuid4())
     assert _db_calls(conn) == 0
 
 
@@ -247,7 +249,13 @@ def _stored_questions(conn: MagicMock) -> list[dict[str, Any]]:
 async def test_record_ready_stores_questions_with_their_requirement_text() -> None:
     conn = _conn()
     await _svc().record_ready(
-        conn, uuid4(), uuid4(), questions=_items(), gaps=_gaps(), model="m-test"
+        conn,
+        uuid4(),
+        uuid4(),
+        questions=_items(),
+        gaps=_gaps(),
+        model="m-test",
+        claim_id=uuid4(),
     )
     stored = _stored_questions(conn)
     assert [q["requirement_index"] for q in stored] == [1, 2]
@@ -265,7 +273,13 @@ async def test_record_ready_stamps_gap_hash_prompt_version_and_model() -> None:
     conn = _conn()
     gaps = _gaps()
     await _svc().record_ready(
-        conn, uuid4(), uuid4(), questions=_items(), gaps=gaps, model="m-test"
+        conn,
+        uuid4(),
+        uuid4(),
+        questions=_items(),
+        gaps=gaps,
+        model="m-test",
+        claim_id=uuid4(),
     )
     args = _flat_args(conn)
     assert gaps_hash(gaps) in args
@@ -278,7 +292,13 @@ async def test_record_ready_binds_the_row_identity() -> None:
     conn = _conn()
     job_id, resume_id = uuid4(), uuid4()
     await _svc().record_ready(
-        conn, job_id, resume_id, questions=_items(), gaps=_gaps(), model="m"
+        conn,
+        job_id,
+        resume_id,
+        questions=_items(),
+        gaps=_gaps(),
+        model="m",
+        claim_id=uuid4(),
     )
     args = _flat_args(conn)
     assert job_id in args and resume_id in args
@@ -365,6 +385,7 @@ async def test_record_ready_binds_the_blind_review_state(blind: bool) -> None:
         questions=_items(),
         gaps=_gaps(),
         model="m",
+        claim_id=uuid4(),
         blind_review=blind,
     )
     sql = conn.execute.await_args.args[0]
@@ -377,7 +398,13 @@ async def test_record_ready_binds_the_blind_review_state(blind: bool) -> None:
 async def test_record_ready_defaults_to_non_blind_when_not_told() -> None:
     conn = _conn()
     await _svc().record_ready(
-        conn, uuid4(), uuid4(), questions=_items(), gaps=_gaps(), model="m"
+        conn,
+        uuid4(),
+        uuid4(),
+        questions=_items(),
+        gaps=_gaps(),
+        model="m",
+        claim_id=uuid4(),
     )
     bools = [a for a in conn.execute.await_args.args[1:] if isinstance(a, bool)]
     assert bools == [False]

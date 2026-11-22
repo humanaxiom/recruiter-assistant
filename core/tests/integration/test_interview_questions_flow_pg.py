@@ -350,18 +350,23 @@ def _standard_llm() -> _FakeLLM:
 
 
 async def _run_worker(
-    pool: asyncpg.Pool, job_id: uuid.UUID, resume_id: uuid.UUID, llm: Any
+    pool: asyncpg.Pool,
+    job_id: uuid.UUID,
+    resume_id: uuid.UUID,
+    llm: Any,
+    claim_id: uuid.UUID,
 ) -> Any:
     ctx = {"pg_pool": pool, "llm": llm, "job_try": 1}
-    return await _worker_task()(ctx, str(job_id), str(resume_id))
+    return await _worker_task()(ctx, str(job_id), str(resume_id), str(claim_id))
 
 
 async def _claim_and_run(
     pool: asyncpg.Pool, job_id: uuid.UUID, resume_id: uuid.UUID, llm: Any
 ) -> Any:
     async with pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
-    return await _run_worker(pool, job_id, resume_id, llm)
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
+    assert cid is not None
+    return await _run_worker(pool, job_id, resume_id, llm, cid)
 
 
 _URL = "/shortlist/{}/interview-questions"
@@ -397,7 +402,10 @@ async def test_post_claims_enqueues_ids_only_and_audits(
     assert rows[0]["status"] == "pending"
     assert rows[0]["created_by"] == username
     harness.arq.enqueue_job.assert_awaited_once_with(
-        "generate_interview_questions", str(job_id), str(resume_id)
+        "generate_interview_questions",
+        str(job_id),
+        str(resume_id),
+        str(rows[0]["claim_id"]),
     )
 
     audit = await _audit(pg_pool, "generate_interview_questions")
@@ -565,7 +573,13 @@ async def test_post_then_worker_then_get_serves_the_questions(
             await client.post(_URL.format(entry_id), cookies=cookies)
         ).status_code == 202
         pending = (await client.get(_URL.format(entry_id), cookies=cookies)).json()
-        assert await _run_worker(pg_pool, job_id, resume_id, _standard_llm()) == "ready"
+        enqueued = harness.arq.enqueue_job.await_args
+        assert enqueued is not None
+        cid = uuid.UUID(enqueued.args[3])
+        assert (
+            await _run_worker(pg_pool, job_id, resume_id, _standard_llm(), cid)
+            == "ready"
+        )
         ready = (await client.get(_URL.format(entry_id), cookies=cookies)).json()
 
     assert pending["status"] == "pending"
@@ -744,7 +758,7 @@ async def test_a_pending_claim_survives_a_regenerate_and_still_blocks_a_post(
     resume_id = await _resume(pg_pool, job_id)
     await _shortlist(pg_pool, job_id, resume_id)
     async with pg_pool.acquire() as conn:
-        assert await _svc().claim(conn, job_id, resume_id, "alice") is True
+        assert await _svc().claim(conn, job_id, resume_id, "alice") is not None
     new_entry = await _shortlist(pg_pool, job_id, resume_id)
 
     async with harness.client() as client:
@@ -810,13 +824,13 @@ async def test_the_worker_records_entry_gone_for_a_withdrawn_resume(
     resume_id = await _resume(pg_pool, job_id)
     await _shortlist(pg_pool, job_id, resume_id)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await conn.execute(
             "UPDATE resumes SET withdrawn_at = now() WHERE id = $1", resume_id
         )
     llm = _standard_llm()
 
-    assert await _run_worker(pg_pool, job_id, resume_id, llm) == "failed"
+    assert await _run_worker(pg_pool, job_id, resume_id, llm, cid) == "failed"
 
     async with pg_pool.acquire() as conn:
         rec = await _svc().get(conn, job_id, resume_id)
@@ -838,11 +852,11 @@ async def test_the_worker_records_entry_gone_when_the_shortlist_lost_the_resume(
     other = await _resume(pg_pool, job_id)
     await _shortlist(pg_pool, job_id, resume_id)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
     await _shortlist(pg_pool, job_id, other)  # regenerate WITHOUT resume_id
     llm = _standard_llm()
 
-    assert await _run_worker(pg_pool, job_id, resume_id, llm) == "failed"
+    assert await _run_worker(pg_pool, job_id, resume_id, llm, cid) == "failed"
 
     async with pg_pool.acquire() as conn:
         rec = await _svc().get(conn, job_id, resume_id)
@@ -1124,11 +1138,11 @@ async def test_f5_the_worker_survives_its_job_or_resume_deleted_after_the_claim(
     resume_id = await _resume(pg_pool, job_id)
     await _shortlist(pg_pool, job_id, resume_id)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         target = job_id if victim == "jobs" else resume_id
         await conn.execute(f"DELETE FROM {victim} WHERE id = $1", target)
 
-    result = await _run_worker(pg_pool, job_id, resume_id, _standard_llm())
+    result = await _run_worker(pg_pool, job_id, resume_id, _standard_llm(), cid)
 
     assert result == "failed"
     assert await _iq_row(pg_pool) == []
@@ -1194,3 +1208,83 @@ async def test_f7_a_requirement_naming_the_candidate_is_scrubbed_and_not_stale(
     assert body["stale"] is False
     assert body["gaps_sha256"] == body["current_gaps_sha256"] is not None
     assert "jane" not in resp.text.casefold()
+
+
+# -- review round 2 (G1 / G2) ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_g1_a_stale_worker_cannot_overwrite_the_newer_claims_row(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run A is slow past the stall window, a regenerate (claim B) starts, and
+    A finally settles. A's settle must be a no-op; B's row is untouched."""
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    job_id = await _job(pg_pool)
+    resume_id = await _resume(pg_pool, job_id)
+    await _shortlist(pg_pool, job_id, resume_id)
+    async with pg_pool.acquire() as conn:
+        claim_a = await _svc().claim(conn, job_id, resume_id, "alice")
+        await conn.execute(
+            "UPDATE interview_questions "
+            "SET requested_at = now() - interval '600 minutes'"
+        )
+        claim_b = await _svc().claim(conn, job_id, resume_id, "bob")
+    assert claim_a is not None and claim_b is not None and claim_a != claim_b
+
+    result = await _run_worker(pg_pool, job_id, resume_id, _standard_llm(), claim_a)
+
+    assert result == "ready"  # what A meant to record; the write was a no-op
+    [row] = await _iq_row(pg_pool)
+    assert (row["status"], row["claim_id"], row["created_by"]) == (
+        "pending",
+        claim_b,
+        "bob",
+    )
+    assert json.loads(row["questions"]) == []
+
+    assert (
+        await _run_worker(pg_pool, job_id, resume_id, _standard_llm(), claim_b)
+        == "ready"
+    )
+    [row] = await _iq_row(pg_pool)
+    assert (row["status"], row["claim_id"]) == ("ready", claim_b)
+
+
+@pytest.mark.asyncio
+async def test_g2_the_worker_refreshes_requested_at_before_it_calls_the_model(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    job_id = await _job(pg_pool)
+    resume_id = await _resume(pg_pool, job_id)
+    await _shortlist(pg_pool, job_id, resume_id)
+    async with pg_pool.acquire() as conn:
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
+        await conn.execute(
+            "UPDATE interview_questions "
+            "SET requested_at = now() - interval '15 minutes'"
+        )
+    ages: list[float] = []
+
+    class _WatchingLLM(_FakeLLM):
+        async def chat_json(self, messages: Any, schema: Any, **kw: Any) -> Any:
+            async with pg_pool.acquire() as conn:
+                age = await conn.fetchval(
+                    "SELECT extract(epoch FROM now() - requested_at) "
+                    "FROM interview_questions"
+                )
+            ages.append(float(age))
+            return await super().chat_json(messages, schema, **kw)
+
+    llm = _WatchingLLM(
+        {"requirement_index": 1, "question": Q1, "probes_quote": QUOTE},
+        {"requirement_index": 2, "question": Q2, "probes_quote": None},
+    )
+
+    assert await _run_worker(pg_pool, job_id, resume_id, llm, cid) == "ready"
+
+    assert len(ages) == 1
+    assert ages[0] < 120, "requested_at must be refreshed before the model runs"

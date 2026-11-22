@@ -209,6 +209,7 @@ class _Wiring:
     ) -> None:
         self.order: list[str] = []
         self.entry = entry
+        self.claim_id = uuid4()
 
         async def _get_one(*_a: Any, **_k: Any) -> ShortlistEntry:
             self.order.append("get_one")
@@ -216,9 +217,9 @@ class _Wiring:
                 raise NotFoundError("shortlist entry not found")
             return entry
 
-        async def _claim(*_a: Any, **_k: Any) -> bool:
+        async def _claim(*_a: Any, **_k: Any) -> UUID | None:
             self.order.append("claim")
-            return claim
+            return self.claim_id if claim else None
 
         self.get_one = AsyncMock(side_effect=_get_one)
         self.claim = AsyncMock(side_effect=_claim)
@@ -255,7 +256,7 @@ async def test_post_returns_202_pending_and_enqueues_ids_only(
     assert resp.status_code == 202
     assert resp.json()["status"] == "pending"
     w.arq.enqueue_job.assert_awaited_once_with(
-        _ENQUEUE_NAME, str(job_id), str(resume_id)
+        _ENQUEUE_NAME, str(job_id), str(resume_id), str(w.claim_id)
     )
 
 

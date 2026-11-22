@@ -140,6 +140,7 @@ _COLUMNS: dict[str, str] = {
     "requested_at": "timestamp with time zone",
     "generated_at": "timestamp with time zone",
     "blind_review": "boolean",
+    "claim_id": "uuid",
 }
 
 
@@ -170,6 +171,7 @@ async def test_table_has_the_contract_columns_and_types(pg_pool: asyncpg.Pool) -
         "prompt_version",
         "model",
         "generated_at",
+        "claim_id",
     ):
         assert by_name[nullable]["is_nullable"] == "YES", nullable
 
@@ -333,7 +335,7 @@ async def test_init_schema_is_idempotent_with_the_table_populated(
 async def test_first_claim_wins_and_writes_a_pending_row(pg_pool: asyncpg.Pool) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        assert await _svc().claim(conn, job_id, resume_id, "alice") is True
+        assert await _svc().claim(conn, job_id, resume_id, "alice") is not None
     row = await _row(pg_pool, job_id, resume_id)
     assert row["status"] == "pending"
     assert row["created_by"] == "alice"
@@ -345,7 +347,7 @@ async def test_first_claim_wins_and_writes_a_pending_row(pg_pool: asyncpg.Pool) 
 async def test_claim_accepts_an_anonymous_creator(pg_pool: asyncpg.Pool) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        assert await _svc().claim(conn, job_id, resume_id, None) is True
+        assert await _svc().claim(conn, job_id, resume_id, None) is not None
     assert (await _row(pg_pool, job_id, resume_id))["created_by"] is None
 
 
@@ -355,9 +357,9 @@ async def test_a_second_claim_on_a_fresh_pending_row_loses(
 ) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        assert await _svc().claim(conn, job_id, resume_id, "alice") is True
+        assert await _svc().claim(conn, job_id, resume_id, "alice") is not None
         before = await _row(pg_pool, job_id, resume_id)
-        assert await _svc().claim(conn, job_id, resume_id, "bob") is False
+        assert await _svc().claim(conn, job_id, resume_id, "bob") is None
     after = await _row(pg_pool, job_id, resume_id)
     assert after["requested_at"] == before["requested_at"]
     assert after["created_by"] == "alice"
@@ -372,7 +374,7 @@ async def test_a_stale_pending_row_can_be_reclaimed_after_the_stall_window(
         await _svc().claim(conn, job_id, resume_id, "alice")
         await _backdate(pg_pool, job_id, resume_id, 21)
         old = (await _row(pg_pool, job_id, resume_id))["requested_at"]
-        assert await _svc().claim(conn, job_id, resume_id, "bob") is True
+        assert await _svc().claim(conn, job_id, resume_id, "bob") is not None
     row = await _row(pg_pool, job_id, resume_id)
     assert row["status"] == "pending"
     assert row["requested_at"] > old
@@ -387,7 +389,7 @@ async def test_a_pending_row_inside_the_stall_window_is_not_reclaimable(
     async with pg_pool.acquire() as conn:
         await _svc().claim(conn, job_id, resume_id, "alice")
         await _backdate(pg_pool, job_id, resume_id, 19)
-        assert await _svc().claim(conn, job_id, resume_id, "bob") is False
+        assert await _svc().claim(conn, job_id, resume_id, "bob") is None
 
 
 @pytest.mark.asyncio
@@ -395,19 +397,22 @@ async def test_the_stall_window_comes_from_settings(
     pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A hard-coded 20 would pass the two tests above; this one moves the
-    window to 5 minutes and expects a 6-minute-old pending row to be claimable.
+    window to 15 minutes (above the honest-window floor of 13 for the default
+    LLM timeout) and expects a 16-minute-old pending row to be claimable.
     The service must therefore read ``get_settings`` from its own module."""
     monkeypatch.setattr(
-        _svc(), "get_settings", lambda: Settings(interview_questions_stall_minutes=5)
+        _svc(), "get_settings", lambda: Settings(interview_questions_stall_minutes=15)
     )
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
         await _svc().claim(conn, job_id, resume_id, "alice")
-        await _backdate(pg_pool, job_id, resume_id, 6)
-        assert await _svc().claim(conn, job_id, resume_id, "bob") is True
+        await _backdate(pg_pool, job_id, resume_id, 16)
+        assert await _svc().claim(conn, job_id, resume_id, "bob") is not None
 
 
-async def _terminate(conn: Any, how: str, job_id: UUID, resume_id: UUID) -> None:
+async def _terminate(
+    conn: Any, how: str, job_id: UUID, resume_id: UUID, cid: UUID | None
+) -> None:
     svc = _svc()
     if how == "ready":
         gaps = [Gap(index=2, requirement="Budget ownership", status="missing")]
@@ -415,12 +420,20 @@ async def _terminate(conn: Any, how: str, job_id: UUID, resume_id: UUID) -> None
             InterviewQuestionItem(requirement_index=2, question="Describe a budget.")
         ]
         await svc.record_ready(
-            conn, job_id, resume_id, questions=items, gaps=gaps, model="m"
+            conn,
+            job_id,
+            resume_id,
+            questions=items,
+            gaps=gaps,
+            model="m",
+            claim_id=cid,
         )
     elif how == "failed":
-        await svc.record_failed(conn, job_id, resume_id, "invalid_output")
+        await svc.record_failed(conn, job_id, resume_id, "invalid_output", claim_id=cid)
     else:
-        await svc.record_refused(conn, job_id, resume_id, RefusalReason.NO_GAPS)
+        await svc.record_refused(
+            conn, job_id, resume_id, RefusalReason.NO_GAPS, claim_id=cid
+        )
 
 
 @pytest.mark.parametrize("how", ["ready", "failed", "refused"])
@@ -430,10 +443,10 @@ async def test_a_terminal_row_is_always_reclaimable_and_goes_back_to_pending(
 ) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
-        await _terminate(conn, how, job_id, resume_id)
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
+        await _terminate(conn, how, job_id, resume_id, cid)
         assert (await _row(pg_pool, job_id, resume_id))["status"] == how
-        assert await _svc().claim(conn, job_id, resume_id, "bob") is True
+        assert await _svc().claim(conn, job_id, resume_id, "bob") is not None
     row = await _row(pg_pool, job_id, resume_id)
     assert row["status"] == "pending"
     assert row["reason"] is None
@@ -447,8 +460,8 @@ async def test_exactly_one_of_many_concurrent_claims_wins(
 
     async def _try(i: int) -> bool:
         async with pg_pool.acquire() as conn:
-            won: bool = await _svc().claim(conn, job_id, resume_id, f"user-{i}")
-            return won
+            cid = await _svc().claim(conn, job_id, resume_id, f"user-{i}")
+            return cid is not None
 
     results = await asyncio.gather(*(_try(i) for i in range(8)))
     assert results.count(True) == 1
@@ -464,8 +477,8 @@ async def test_claims_on_different_pairs_do_not_interfere(
     job_id = await _job(pg_pool)
     a, b = await _resume(pg_pool, job_id), await _resume(pg_pool, job_id)
     async with pg_pool.acquire() as conn:
-        assert await _svc().claim(conn, job_id, a, "alice") is True
-        assert await _svc().claim(conn, job_id, b, "alice") is True
+        assert await _svc().claim(conn, job_id, a, "alice") is not None
+        assert await _svc().claim(conn, job_id, b, "alice") is not None
 
 
 # ── record_* / get ───────────────────────────────────────────────────────
@@ -518,7 +531,7 @@ async def test_record_ready_round_trips_through_real_jsonb(
     job_id, resume_id = await _pair(pg_pool)
     gaps = _gaps()
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await _svc().record_ready(
             conn,
             job_id,
@@ -535,6 +548,7 @@ async def test_record_ready_round_trips_through_real_jsonb(
             ],
             gaps=gaps,
             model="m-test",
+            claim_id=cid,
         )
         rec = await _svc().get(conn, job_id, resume_id)
     assert rec.status == "ready"
@@ -563,7 +577,7 @@ async def test_record_ready_round_trips_through_real_jsonb(
 async def test_record_ready_replaces_rather_than_appends(pg_pool: asyncpg.Pool) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await _svc().record_ready(
             conn,
             job_id,
@@ -571,8 +585,9 @@ async def test_record_ready_replaces_rather_than_appends(pg_pool: asyncpg.Pool) 
             questions=_items("First?", "Second?"),
             gaps=_gaps(),
             model="m1",
+            claim_id=cid,
         )
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await _svc().record_ready(
             conn,
             job_id,
@@ -580,6 +595,7 @@ async def test_record_ready_replaces_rather_than_appends(pg_pool: asyncpg.Pool) 
             questions=_items("Third?"),
             gaps=_gaps(),
             model="m2",
+            claim_id=cid,
         )
         rec = await _svc().get(conn, job_id, resume_id)
         count = await conn.fetchval("SELECT count(*) FROM interview_questions")
@@ -594,8 +610,8 @@ async def test_record_failed_stores_status_and_fixed_reason(
 ) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
-        await _svc().record_failed(conn, job_id, resume_id, "entry_gone")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
+        await _svc().record_failed(conn, job_id, resume_id, "entry_gone", claim_id=cid)
         rec = await _svc().get(conn, job_id, resume_id)
     assert (rec.status, rec.reason) == ("failed", "entry_gone")
     assert rec.questions == []
@@ -607,9 +623,9 @@ async def test_record_refused_stores_status_and_the_refusal_reason(
 ) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await _svc().record_refused(
-            conn, job_id, resume_id, RefusalReason.NOT_EVALUATED
+            conn, job_id, resume_id, RefusalReason.NOT_EVALUATED, claim_id=cid
         )
         rec = await _svc().get(conn, job_id, resume_id)
     assert (rec.status, rec.reason) == ("refused", "not_evaluated")
@@ -619,11 +635,15 @@ async def test_record_refused_stores_status_and_the_refusal_reason(
 async def test_free_text_reasons_never_reach_the_table(pg_pool: asyncpg.Pool) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         with pytest.raises(ValueError):
-            await _svc().record_failed(conn, job_id, resume_id, "Jane Smith failed")
+            await _svc().record_failed(
+                conn, job_id, resume_id, "Jane Smith failed", claim_id=cid
+            )
         with pytest.raises(ValueError):
-            await _svc().record_refused(conn, job_id, resume_id, "Jane Smith refused")
+            await _svc().record_refused(
+                conn, job_id, resume_id, "Jane Smith refused", claim_id=cid
+            )
         rec = await _svc().get(conn, job_id, resume_id)
     assert (rec.status, rec.reason) == ("pending", None)
 
@@ -688,7 +708,7 @@ async def test_record_ready_persists_the_blind_review_stamp(
 ) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
         await _svc().record_ready(
             conn,
             job_id,
@@ -696,6 +716,7 @@ async def test_record_ready_persists_the_blind_review_stamp(
             questions=[],
             gaps=[],
             model="m",
+            claim_id=cid,
             blind_review=blind,
         )
         rec = await _svc().get(conn, job_id, resume_id)
@@ -711,7 +732,7 @@ async def test_a_regenerate_overwrites_the_previous_blind_stamp(
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
         for blind in (True, False):
-            await _svc().claim(conn, job_id, resume_id, "alice")
+            cid = await _svc().claim(conn, job_id, resume_id, "alice")
             await _svc().record_ready(
                 conn,
                 job_id,
@@ -719,6 +740,7 @@ async def test_a_regenerate_overwrites_the_previous_blind_stamp(
                 questions=[],
                 gaps=[],
                 model="m",
+                claim_id=cid,
                 blind_review=blind,
             )
             assert (await _row(pg_pool, job_id, resume_id))["blind_review"] is blind
@@ -728,7 +750,9 @@ async def test_a_regenerate_overwrites_the_previous_blind_stamp(
 async def test_record_failed_accepts_llm_unavailable(pg_pool: asyncpg.Pool) -> None:
     job_id, resume_id = await _pair(pg_pool)
     async with pg_pool.acquire() as conn:
-        await _svc().claim(conn, job_id, resume_id, "alice")
-        await _svc().record_failed(conn, job_id, resume_id, "llm_unavailable")
+        cid = await _svc().claim(conn, job_id, resume_id, "alice")
+        await _svc().record_failed(
+            conn, job_id, resume_id, "llm_unavailable", claim_id=cid
+        )
     row = await _row(pg_pool, job_id, resume_id)
     assert (row["status"], row["reason"]) == ("failed", "llm_unavailable")

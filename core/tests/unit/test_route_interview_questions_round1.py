@@ -218,8 +218,9 @@ async def test_a_pending_row_with_no_timestamp_is_not_called_stalled(
 async def test_the_stall_window_comes_from_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hard-coded 20 would pass the cases above; a 6-minute-old row with a
-    5-minute window must be stalled."""
+    """A hard-coded 20 would pass the cases above; a 16-minute-old row with a
+    15-minute window must be stalled (15 is above the honest-window floor of
+    13 minutes at the default LLM timeout)."""
     from src.api.routes import shortlist as routes
     from src.settings import Settings
 
@@ -229,11 +230,11 @@ async def test_the_stall_window_comes_from_settings(
         monkeypatch.setattr(
             module,
             "get_settings",
-            lambda: Settings(interview_questions_stall_minutes=5),
+            lambda: Settings(interview_questions_stall_minutes=15),
             raising=False,
         )
 
-    body = await _get(_build_app(_conn(fetchrow=_pending(6))), entry_id)
+    body = await _get(_build_app(_conn(fetchrow=_pending(16))), entry_id)
 
     assert (body["status"], body["reason"]) == ("failed", "stalled")
 
