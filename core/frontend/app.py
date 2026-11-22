@@ -38,6 +38,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
 from src.schemas.matching import ShortlistEntry
+from src.services.cas_origin import is_loopback_host
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
 from src.settings import Settings, get_settings, validate_startup_session_secret
 
@@ -194,6 +195,15 @@ API = _settings.api_base_url
 _CAS_GATE_EXEMPT_PATHS = frozenset({"/health"})
 
 
+def _cas_api_base(settings: Settings) -> str:
+    """The browser-reachable API origin for THIS page's origin
+    (fix/cas-local-origin): the localhost one when the page was served on a
+    loopback host and it is configured, else the static public one."""
+    if settings.cas_local_service_base_url and is_loopback_host(request.host):
+        return settings.cas_local_service_base_url.rstrip("/")
+    return settings.cas_service_base_url.rstrip("/")
+
+
 @app.before_request
 def _cas_auth_gate() -> Any:
     """FU-5 slice 11 (ADR-019 §10/§3/§10b) — gate unauthenticated browser
@@ -225,9 +235,8 @@ def _cas_auth_gate() -> Any:
         if status.get("role") is None:
             return render_template("pending_access.html"), 200
         return None
-    login_url = (
-        f"{settings.cas_service_base_url.rstrip('/')}/auth/cas/login?"
-        + urlencode({"next": request.path})
+    login_url = f"{_cas_api_base(settings)}/auth/cas/login?" + urlencode(
+        {"next": request.path}
     )
     return redirect(login_url)
 
@@ -382,7 +391,7 @@ def inject_current_user() -> dict[str, Any]:
     UX control only.
     """
     settings = get_settings()
-    base = settings.cas_service_base_url.rstrip("/")
+    base = _cas_api_base(settings)
     current_user = getattr(g, "cas_user", None)
     is_writer = _is_writer_session()
     return {
@@ -2045,7 +2054,12 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
 
 
 def _render_resume_detail(
-    resume_id: UUID, resume: dict[str, Any], *, revealed: bool
+    resume_id: UUID,
+    resume: dict[str, Any],
+    *,
+    revealed: bool,
+    error: str | None = None,
+    status_code: int = 200,
 ) -> Any:
     """Shared by BOTH ``resume_detail`` (GET) and ``resume_reveal`` (POST).
 
@@ -2068,34 +2082,39 @@ def _render_resume_detail(
     (current/aging/stale). Passed in so the comparison stays deterministic
     and doesn't need any candidate.* field.
     """
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=revealed,
-        # FU-4/D4: the one-shot anti-forgery token the reveal form posts
-        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
-        # manufacture an audit row. Not minted at all once revealed=True: the
-        # reveal form never renders again on this page (see resume_detail.html
-        # — it's shown only for `resume.blinded and not revealed`), so there
-        # is nothing left to bind a fresh reveal token to.
-        csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
-        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
-        # the withdraw/reinstate controls the template renders — same résumé
-        # id, distinct action, so minting it never disturbs the reveal token
-        # above.
-        withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
-        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
-        # (which are mutually exclusive on the page, so they can share one),
-        # the work-authorization control renders ALONGSIDE whichever of those
-        # is shown — sharing a slot would mean using one control silently
-        # invalidated the other's token.
-        work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
-        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
-        # reveal, withdraw and work-authorization controls, so every one of them
-        # needs its own one-shot token: sharing a slot would mean using one
-        # silently invalidated the others.
-        document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+    return (
+        render_template(
+            "resume_detail.html",
+            resume=resume,
+            current_year=dt.date.today().year,
+            revealed=revealed,
+            error=error,
+            # FU-4/D4: the one-shot anti-forgery token the reveal form posts
+            # back, bound to THIS résumé id, so a cross-site auto-submit
+            # cannot manufacture an audit row. Not minted at all once
+            # revealed=True: the reveal form never renders again on this page
+            # (see resume_detail.html — it's shown only for
+            # `resume.blinded and not revealed`), so there is nothing left to
+            # bind a fresh reveal token to.
+            csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
+            # FU-8/ADR-026: a SECOND, independent one-shot token for whichever
+            # of the withdraw/reinstate controls the template renders — same
+            # résumé id, distinct action, so minting it never disturbs the
+            # reveal token above.
+            withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
+            # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
+            # (which are mutually exclusive on the page, so they can share
+            # one), the work-authorization control renders ALONGSIDE
+            # whichever of those is shown — sharing a slot would mean using
+            # one control silently invalidated the other's token.
+            work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
+            # SPONSOR §O4 -- a FOURTH slot. The download button renders
+            # alongside the reveal, withdraw and work-authorization controls,
+            # so every one of them needs its own one-shot token: sharing a
+            # slot would mean using one silently invalidated the others.
+            document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+        ),
+        status_code,
     )
 
 
@@ -2112,6 +2131,50 @@ def resume_detail(resume_id: UUID) -> Any:
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     return _render_resume_detail(resume_id, resume, revealed=False)
+
+
+@app.post("/resumes/<uuid:resume_id>/reparse")
+def resume_reparse(resume_id: UUID) -> Any:
+    """Re-queue a résumé parse that failed or came back degraded — the
+    résumé side of ``reparse_job``.
+
+    Guarded by the ORDINARY ``_csrf_gate`` page-token hook, deliberately NOT
+    added to ``_CSRF_HOOK_EXEMPT_ENDPOINTS``: unlike reveal/withdraw/
+    reinstate/work-authorization/document, this action carries no per-résumé
+    one-shot token of its own (see the ``shortlist_work_authorization``
+    docstring's 64-token budget for why a new one-shot slot per résumé per
+    action does not scale) — the session-wide reusable page token is the
+    right guard here.
+
+    Error handling mirrors ``reparse_job`` exactly: ``Conflict`` re-renders
+    the résumé page with the error and HTTP 409 (fetched blind, unrevealed —
+    a 409 from this route is not itself a reveal); ``NotFound`` -> 404;
+    ``BackendUnavailable`` -> the shared unavailable page; a stray
+    ``BadRequest`` (e.g. a non-writer CAS session, ADR-033) -> its own status
+    code rather than an unhandled 500."""
+    try:
+        api_client.reparse_resume(resume_id)
+    except api_client.Conflict as exc:
+        try:
+            resume = api_client.get_resume(resume_id)
+        except api_client.NotFound:
+            abort(404)
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        return _render_resume_detail(
+            resume_id,
+            resume,
+            revealed=False,
+            error=_format_error(exc.detail),
+            status_code=409,
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
 @app.post("/resumes/<uuid:resume_id>/reveal")

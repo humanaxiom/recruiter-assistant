@@ -99,6 +99,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/jobs/{job_id}/resumes/exports"),
     ("POST", "/resume-exports/{export_id}/download"),
     ("POST", "/resumes/{resume_id}/reveal"),
+    # SPEC 2026-09-23 (resume re-parse recovery path) — a write that
+    # rewrites a resume row and spends GPU time re-running the parse, same
+    # gate shape as POST /jobs/{job_id}/reparse above.
+    ("POST", "/resumes/{resume_id}/reparse"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),
     # SPONSOR 2026-09-02 §O2. A WRITE that records an adverse screening

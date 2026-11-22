@@ -448,6 +448,7 @@ _STATEMENTS: tuple[str, ...] = (
     # re-queued forever, burning an LLM pass each time on a peer shared with
     # other systems.
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER",
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS reparse_requested_at TIMESTAMPTZ",
     # Powers the per-job status breakdown's ``withdrawn`` bucket and any
     # "excluded résumés" listing — partial so it only indexes the rare
     # withdrawn rows.

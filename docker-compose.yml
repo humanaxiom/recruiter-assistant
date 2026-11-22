@@ -3,6 +3,7 @@ name: recruiter-assistant
 services:
   # ─── Data Tier ───────────────────────────────────────────────────────────
   postgres:
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: app
@@ -21,6 +22,7 @@ services:
       retries: 10
 
   neo4j:
+    restart: unless-stopped
     image: neo4j:5-community
     environment:
       NEO4J_AUTH: neo4j/recruiterpass
@@ -35,6 +37,7 @@ services:
       retries: 12
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     ports: ["${REDIS_PORT:-6379}:6379"]
     healthcheck:
@@ -45,6 +48,7 @@ services:
 
   # ─── App Tier ────────────────────────────────────────────────────────────
   api:
+    restart: unless-stopped
     # Every setting in `.env` reaches this container. NOT a style choice: before
     # this line, `CAS_ENABLED` appeared ONLY in a comment below saying "Set in
     # .env" — and a variable in `.env` reaches a container solely if the compose
@@ -124,6 +128,7 @@ services:
       redis: { condition: service_healthy }
 
   worker:
+    restart: unless-stopped
     build:
       context: ./core
       dockerfile: Dockerfile
@@ -140,6 +145,7 @@ services:
       redis: { condition: service_healthy }
 
   frontend:
+    restart: unless-stopped
     # Same reason as the api service above — the browser-side CAS gate in
     # frontend/app.py reads settings.cas_enabled, so without this it is an
     # unconditional passthrough no matter what `.env` says.

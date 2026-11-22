@@ -10,7 +10,7 @@ lessons lists verbatim, is archived at
 
 ### 1. Start here — `feat/taleo-inapp-split` (worktree `C:\repos\ra-taleo-split`)
 
-**State, 2026-11-21.** Built on this branch, not merged, PR not yet opened.
+**State, 2026-11-21.** PR #112, open; main (with #110) merged in.
 
 **Done:**
 - **In-app split of a combined Taleo export.** Upload → model segmentation
@@ -46,7 +46,7 @@ lessons lists verbatim, is archived at
 **Not done:** F1/F2 (ROADMAP §5, under the split item), and the anonymizer and
 export residuals recorded beside it.
 
-**Next step, exactly:** open the PR for `feat/taleo-inapp-split`; then features
+**Next step, exactly:** merge PR #112 (user's call); then features
 3 (interview-question generator), 2, 4, 5.
 
 **Before this reaches the pilot box (CAS on):** the rule in §3 applies. `smoke.sh`

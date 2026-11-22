@@ -11,8 +11,11 @@
 # `service` and the /auth/cas/validate callback are built from it, and it must
 # be byte-identical on the login and validate legs. localhost:8000 works when
 # the browser is on this machine. Change it to the deployment's public URL in
-# a real deploy. DEFAULT_ADMIN_CAS_USERNAME already defaults to "asalah"
-# (ADR-019 §10a) — first login by that CAS id lands as admin.
+# .env (CAS_SERVICE_BASE_URL / CAS_FRONTEND_BASE_URL) for a real deploy — the
+# localhost value is only the fallback when .env sets nothing; hard-coding it
+# here silently undid the sfuai.ca deploy on every quickstart run.
+# DEFAULT_ADMIN_CAS_USERNAME already defaults to "asalah" (ADR-019 §10a) —
+# first login by that CAS id lands as admin.
 services:
   api:
     environment:
@@ -21,10 +24,16 @@ services:
       # Browser-reachable API base — derived from API_PORT so it stays in sync
       # with the (unique) published host port. Must be byte-identical on the
       # login `service` and the /auth/cas/validate callback.
-      CAS_SERVICE_BASE_URL: "http://localhost:${API_PORT:-8000}"
+      CAS_SERVICE_BASE_URL: "${CAS_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
       # After a successful CAS validate, land the browser back on the FRONTEND
       # origin, not the API — they are split origins in dev.
-      CAS_FRONTEND_BASE_URL: "http://localhost:${FRONTEND_PORT:-5000}"
+      CAS_FRONTEND_BASE_URL: "${CAS_FRONTEND_BASE_URL:-http://localhost:${FRONTEND_PORT:-5000}}"
+      # The same stack reached at localhost ON THE BOX, where a public name
+      # like sfuai.ca does not resolve back to it. Used only for a request
+      # whose Host is loopback (fix/cas-local-origin); outside traffic always
+      # gets the two values above.
+      CAS_LOCAL_SERVICE_BASE_URL: "${CAS_LOCAL_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
+      CAS_LOCAL_FRONTEND_BASE_URL: "${CAS_LOCAL_FRONTEND_BASE_URL:-http://localhost:${FRONTEND_PORT:-5000}}"
   frontend:
     environment:
       API_BASE_URL: http://api:8000
@@ -35,4 +44,5 @@ services:
       # real people logged in.
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY must be set — 32 random bytes, base64; run scripts/quickstart.ps1}
       CAS_ENABLED: "true"
-      CAS_SERVICE_BASE_URL: "http://localhost:${API_PORT:-8000}"
+      CAS_SERVICE_BASE_URL: "${CAS_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
+      CAS_LOCAL_SERVICE_BASE_URL: "${CAS_LOCAL_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
