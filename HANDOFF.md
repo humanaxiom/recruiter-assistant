@@ -77,8 +77,28 @@ three are on this branch, `feat/e2e-stress-build`.
 > was running on the same GPU**, so that number is contended and not a clean
 > measurement. `scripts/split-taleo.sh` also needed the MSYS path guard the
 > other scripts carry. Still not built: the in-app split with the sponsor's
-> confirmation screen; and there is no way to re-parse a failed résumé from
-> the UI (recorded).
+> confirmation screen.
+>
+> **2026-09-23, `feat/resume-reparse` (stacked on this branch): a failed or
+> degraded résumé can be re-parsed from its own page.** The 4-of-19 failures
+> above had no recovery but re-upload. `POST /resumes/{id}/reparse` resets
+> the row to `uploaded` (failure reason, parse output and reconcile count
+> cleared, `reparse_requested_at` stamped so the reconciler gives the retry
+> its own 30-minute grace instead of double-enqueueing it) and enqueues
+> `parse_resume`; 409 with a plain reason for withdrawn, in-flight or
+> cleanly-parsed rows. The button sits on the reusable page token — no
+> fourth one-shot slot. **Driven end to end on the isolated stack** (stub
+> LLM stopped → upload → `failed: llm unavailable after 5 retries` → stub
+> started → page shows "Reason:" + button → POST without token 403, with
+> the form token 302 → `uploaded`/`parsing`/`parsed` in 30 s → button gone →
+> POST on the clean parse 409); the worker log shows exactly one new arq
+> job and no reconciler re-queue; `doctor.sh` on that stack reports only
+> its by-design CAS-off finding. Gates: `verify.sh all` 6451 unit @ 92.12%,
+> 655 integration, green. **Also on that branch: `scripts/verify.sh` now
+> works from a `git worktree`** (it mounts the main checkout's `.git`
+> read-only and sets `GIT_DIR`) — before that it died on the branch-name
+> gate, so every earlier "gated from the worktree" claim went through
+> something narrower.
 
 **What's on this branch:**
 - [docs/guides/managers-guide.md](docs/guides/managers-guide.md) — screen-by-screen,
