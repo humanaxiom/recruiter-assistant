@@ -926,3 +926,35 @@ async def test_the_worker_records_failed_no_questions_for_an_empty_result(
         rec = await _svc().get(conn, job_id, resume_id)
     assert (rec.status, rec.reason) == ("failed", "no_questions")
     assert rec.questions == []
+
+
+@pytest.mark.asyncio
+async def test_identifiers_in_a_partial_quote_are_scrubbed_on_a_non_blind_job(
+    pg_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings()
+    _patch_settings(monkeypatch, settings)
+    job_id = await _job(pg_pool, blind=False)
+    resume_id = await _resume(pg_pool, job_id)
+    await _shortlist(
+        pg_pool, job_id, resume_id, evidence=_evidence(partial_quote=QUOTE_WITH_PII)
+    )
+    fragment = "deployed a pod once in a lab"
+    llm = _FakeLLM(
+        # The original quote is not a substring of the scrubbed one: dropped.
+        {"requirement_index": 1, "question": Q1, "probes_quote": QUOTE_WITH_PII},
+        {"requirement_index": 1, "question": "Which pod?", "probes_quote": fragment},
+        {"requirement_index": 2, "question": Q2, "probes_quote": None},
+    )
+
+    assert await _claim_and_run(pg_pool, job_id, resume_id, llm) == "ready"
+
+    blob = llm.blob()
+    assert blob, "the model was never called"
+    for forbidden in ("jane", "smith", EMAIL, "example.test", PHONE, "555-0192"):
+        assert forbidden.casefold() not in blob.casefold(), forbidden
+    assert "[redacted]" in blob
+    assert fragment in blob
+    async with pg_pool.acquire() as conn:
+        rec = await _svc().get(conn, job_id, resume_id)
+    assert [q["question"] for q in rec.questions] == ["Which pod?", Q2]

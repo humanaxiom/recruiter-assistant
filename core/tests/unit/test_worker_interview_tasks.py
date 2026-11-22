@@ -496,3 +496,68 @@ def test_the_task_is_a_coroutine_taking_ctx_and_two_ids() -> None:
     fn = _task()
     assert inspect.iscoroutinefunction(fn)
     assert list(inspect.signature(fn).parameters) == ["ctx", "job_id", "resume_id"]
+
+
+# ── identifiers inside a partial QUOTE (non-blind jobs) ──────────────────
+
+PII_QUOTE = (
+    "Jane deployed a pod once in a lab; mail jane.smith@example.test; "
+    "call 604-555-0192 for details"
+)
+QUOTE_FRAGMENT = "deployed a pod once in a lab"
+
+
+def _pii_quote_requirements() -> list[RequirementEvidence]:
+    return [
+        _req("5 years of Python", "met", "Built Python services since 2016"),
+        _req("Kubernetes operations", "partial", PII_QUOTE),
+        _req("Budget ownership", "missing"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_identifiers_in_a_partial_quote_never_reach_the_prompt_on_a_non_blind_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = _FakeLLM(_ingest(_q(2, "Describe a budget.")))
+    h = _Harness(monkeypatch, llm=llm, requirements=_pii_quote_requirements())
+    assert h.entry.blinded is False
+
+    await h.run()
+
+    blob = _prompt_blob(llm)
+    assert blob, "the model was never called"
+    folded = blob.casefold()
+    for forbidden in ("jane", "smith", EMAIL, "example.test", PHONE, "555-0192"):
+        assert forbidden.casefold() not in folded, forbidden
+    assert "[redacted]" in blob
+    assert QUOTE_FRAGMENT in blob  # only the identifiers go, not the evidence
+
+
+@pytest.mark.asyncio
+async def test_the_filter_runs_against_the_scrubbed_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``probes_quote`` must match the REDACTED quote: the original
+    (identifier-bearing) text is no longer a substring and is dropped, while a
+    fragment that survived the scrub is kept."""
+    llm = _FakeLLM(
+        _ingest(
+            _q(1, "Walk me through the full original quote.", PII_QUOTE),
+            _q(1, "Walk me through the lab deployment.", QUOTE_FRAGMENT),
+            _q(2, "Describe a budget you were accountable for."),
+        )
+    )
+    h = _Harness(monkeypatch, llm=llm, requirements=_pii_quote_requirements())
+
+    assert await h.run() == "ready"
+
+    kept = [k.question for k in _aw(h.ready).kwargs["questions"]]
+    assert kept == [
+        "Walk me through the lab deployment.",
+        "Describe a budget you were accountable for.",
+    ]
+    for gap in _aw(h.ready).kwargs["gaps"]:
+        quote = (gap.quote or "").casefold()
+        for forbidden in ("jane", "smith", EMAIL, PHONE, "555-0192"):
+            assert forbidden.casefold() not in quote, forbidden
