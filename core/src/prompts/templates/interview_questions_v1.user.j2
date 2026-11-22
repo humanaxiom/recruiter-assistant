@@ -1,0 +1,11 @@
+Requirements that are not evidenced in the résumé:
+
+{% for gap in gaps -%}
+requirement_index: {{ gap.index }}
+requirement: {{ gap.requirement }}
+status: {{ gap.status }}
+{% if gap.quote -%}
+quote: {{ gap.quote }}
+{% endif %}
+{% endfor -%}
+Return the JSON object now.
