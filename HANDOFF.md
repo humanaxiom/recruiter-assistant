@@ -29,7 +29,24 @@ interview-question generator, for a candidate's shortlist entry page.
   Details: ADR-017 amendment 2026-11-21, ADR-011 amendment, and
   [docs/archive/](docs/archive/).
 
-**Hand-over results:** pending
+**Hand-over results (2026-11-22, isolated `recruiter-stress` stack at 1442d0f, CAS off, 127.0.0.1):**
+
+- `smoke.sh` on the real model: 10 ERROR at setup — the 3 fixture résumés were
+  still parsing at the 900s wait (gb10 shared with a foreign `gpt-oss:120b`).
+  Contention, not this branch. Re-run on the stub (`LLM_BASE_URL=http://llmstub:8000/v1`):
+  `10 passed in 16.28s`.
+- `doctor.sh`: one finding, `deploy.auth_disabled` — expected on this stack.
+- By hand (curl through Flask, page CSRF token, polling the panel fragment):
+  - stub, all evidence `met`: Generate → 302 → pending (polls every 3s) →
+    "no gaps to probe" + Retry; row `refused|no_gaps`. Audit row details
+    `{"model": "gpt-oss:20b", "prompt_version": "interview_questions_v1"}` only.
+  - real `gpt-oss:20b` on gb10, Kubernetes `partial` (quote holds the
+    candidate's name and phone) + AWS `missing` set by SQL: ready in ~21s (worker
+    18.17s), one question per gap, no name or phone in either.
+  - blind OFF, evidence changed → "evidence has changed" + Regenerate →
+    regenerated non-blind set (3 groups) → blind ON → "This job is now blind
+    review… hidden" + Regenerate. Row `blind_review=f`.
+  - Not driven: `llm_unavailable` / `stalled` (covered by integration tests only).
 
 **Not done:** S4, the model-check profile for `interview_questions_v1`. It is
 not measured: gb10 has been contended by a foreign `gpt-oss:120b` all session.
