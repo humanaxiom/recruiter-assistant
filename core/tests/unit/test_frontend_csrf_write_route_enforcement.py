@@ -64,6 +64,7 @@ _HOOK_PROTECTED_ROUTES: tuple[tuple[str, str], ...] = (
     ("generate_shortlist", "/jobs/{job}/shortlist"),
     ("resume_match_jobs", "/resumes/{resume}/match-jobs"),
     ("admin_set_user_role", "/admin/users/{user}/role"),
+    ("request_interview_questions", "/shortlist/{resume}/interview-questions"),
 )
 
 
