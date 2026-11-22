@@ -51,8 +51,16 @@ _ROW_SQL = "SELECT 1 FROM interview_questions WHERE job_id = $1 AND resume_id = 
 
 
 async def generate_interview_questions(
-    ctx: dict[str, Any], job_id: str, resume_id: str, claim_id: str
+    ctx: dict[str, Any], job_id: str, resume_id: str, claim_id: str | None = None
 ) -> str:
+    if claim_id is None:
+        # a job queued before claims existed: nothing to settle against
+        log.warning(
+            "interview_questions job=%s resume=%s has no claim_id; skipped",
+            job_id,
+            resume_id,
+        )
+        return "failed"
     pool = ctx["pg_pool"]
     llm: LLMClient = ctx["llm"]
     job_uuid, resume_uuid = UUID(job_id), UUID(resume_id)
@@ -61,8 +69,15 @@ async def generate_interview_questions(
     async with pool.acquire() as conn:
         # Every try refreshes the claim's requested_at first, so a slow model
         # or a long retry chain is not mistaken for a dead worker. A False
-        # (superseded) is ignored: the settles below then no-op and say so.
-        await iq_service.heartbeat(conn, job_uuid, resume_uuid, claim_id=claim_uuid)
+        # means superseded: skip the model entirely.
+        beat = await iq_service.heartbeat(
+            conn, job_uuid, resume_uuid, claim_id=claim_uuid
+        )
+        if not beat:
+            if await _row_gone(conn, job_uuid, resume_uuid):
+                return "failed"
+            _warn_if_superseded(False, job_id, resume_id)
+            return "ready"  # what this run meant to record; nothing was written
         entry_id = await conn.fetchval(_ENTRY_ID_SQL, job_uuid, resume_uuid)
         if entry_id is None:
             return await _failed(

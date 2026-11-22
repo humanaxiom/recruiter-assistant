@@ -62,7 +62,10 @@ _COMMON_WORD_NAME_TOKENS = frozenset(
 # slash and middle dot as separators (U+2013, U+2014, U+00B7). Only
 # a candidate with >= 10 digits (or the stored phone's key) is redacted, so
 # "2016-2019" style runs are untouched.
-_PHONE_CAND_RE = re.compile(r"(?<!\w)\+?\d[\d().\-\s\u2013\u2014\u00b7/]{6,}\d(?!\w)")
+_PHONE_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d"
+_PHONE_CAND_RE = re.compile(
+    rf"(?<!\w)\+?\d[\d().\-\s{_PHONE_DASHES}\u00b7/]{{6,}}\d(?!\w)"
+)
 
 
 class RefusalReason(enum.StrEnum):
@@ -250,11 +253,15 @@ def _name_pattern(name: str | None) -> re.Pattern[str] | None:
     )
     options: list[str] = []
     if len(tokens) > 1:
-        # the full-name sequence first, so it wins over a single token
+        # the full-name sequences first, so they win over a single token
         options.append(r"\s+".join(re.escape(t) for t in tokens))
+        options.append(r"[\s,]+".join(re.escape(t) for t in reversed(tokens)))
     options.extend(re.escape(t) for t in strong)
-    if not options:
-        return None
+    # A weak SURNAME (or a one-word weak name) matches alone only when its
+    # source span is Title-case; _redact_names enforces that on group "weak".
+    surname = tokens[-1]
+    if surname not in strong:
+        options.append(rf"(?P<weak>{re.escape(surname)})")
     alternation = "|".join(options)
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)")
 
@@ -264,6 +271,8 @@ def _redact_names(text: str, name_re: re.Pattern[str]) -> str:
     spans: list[tuple[int, int]] = []
     for m in name_re.finditer(folded):
         start = index[m.start()]
+        if m.groupdict().get("weak") is not None and not text[start].isupper():
+            continue
         end = index[m.end() - 1] + 1
         # swallow combining marks that follow the last matched character
         while end < len(text) and unicodedata.combining(text[end]):
@@ -274,7 +283,7 @@ def _redact_names(text: str, name_re: re.Pattern[str]) -> str:
     return text
 
 
-_PHONE_LOOSE_SEP = r"[\s().\-]*"
+_PHONE_LOOSE_SEP = rf"[\s().\-{_PHONE_DASHES}]*"
 
 
 def _phone_key(phone: str | None) -> str:
