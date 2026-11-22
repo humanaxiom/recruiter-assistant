@@ -9,14 +9,17 @@ unmatched-route 404 (proving the route table itself has no entry), never a
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Query, Response, status
+from pydantic import BaseModel
 
 from src.api.deps import (
     Role,
+    actor_fields_from_user,
     get_arq,
     log_auditor_read,
     require_role,
@@ -24,11 +27,19 @@ from src.api.deps import (
     resolve_user,
     scoped_user_id_or_403,
 )
+from src.errors import ConflictError
 from src.models.pool import Db
 from src.schemas.auth import User
 from src.schemas.matching import ShortlistEntry, ShortlistStatusResponse
-from src.services import shortlist_service
+from src.services import audit_service, interview_question_service, shortlist_service
+from src.services.interview_questions import (
+    PROMPT_VERSION,
+    InterviewRefusal,
+    gaps_hash,
+    select_gaps,
+)
 from src.services.pii import set_pii_key
+from src.settings import get_settings
 
 router = APIRouter()
 
@@ -238,6 +249,118 @@ async def get_shortlist_entry(
         subject_id=entry_id,
     )
     return entry
+
+
+class InterviewQuestionOut(BaseModel):
+    requirement_index: int
+    requirement: str
+    question: str
+    probes_quote: str | None = None
+
+
+class InterviewQuestionsResponse(BaseModel):
+    """``status`` is ``none`` (nothing requested), ``pending``, ``ready``,
+    ``failed`` or ``refused``. ``reason`` is a fixed vocabulary, never free
+    text. ``stale`` is true when the stored gap hash no longer matches the
+    entry's current gaps (including when current gaps cannot be computed)."""
+
+    status: str
+    reason: str | None = None
+    questions: list[InterviewQuestionOut] = []
+    gaps_sha256: str | None = None
+    current_gaps_sha256: str | None = None
+    stale: bool = False
+    generated_at: datetime | None = None
+
+
+@router.post(
+    "/shortlist/{entry_id}/interview-questions",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_role(*_SHORTLIST_WRITERS)),
+        Depends(require_session_role(*_SHORTLIST_WRITERS)),
+    ],
+)
+async def request_interview_questions(
+    entry_id: UUID,
+    db: Db,
+    arq: Annotated[ArqRedis, Depends(get_arq)],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> dict[str, str]:
+    """Generate interview questions for one candidate's evidence gaps.
+
+    Order matters: resolve the entry (404), CLAIM the row (409 when a fresh
+    pending one exists -- pending is true before the job is queued, so the
+    first poll sees it), audit, then enqueue ids only (never free text through
+    Redis). The audit row holds the model and prompt version, never question
+    or candidate text, and is written only after the claim succeeded."""
+    entry = await shortlist_service.get_one(db, entry_id)
+    created_by = user.cas_username if user is not None else None
+    if not await interview_question_service.claim(
+        db, entry.job_id, entry.resume_id, created_by
+    ):
+        raise ConflictError(
+            "interview questions are already being generated for this candidate",
+            entry_id=str(entry_id),
+        )
+    actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
+    await audit_service.record_audit(
+        db,
+        actor_kind=actor_kind,
+        actor_user_id=actor_user_id,
+        actor_service=actor_service,
+        action="generate_interview_questions",
+        subject_type="shortlist_entry",
+        subject_id=entry_id,
+        job_id=entry.job_id,
+        details={
+            "model": get_settings().llm_model_generation,
+            "prompt_version": PROMPT_VERSION,
+        },
+    )
+    await arq.enqueue_job(
+        "generate_interview_questions", str(entry.job_id), str(entry.resume_id)
+    )
+    return {"status": "pending"}
+
+
+@router.get("/shortlist/{entry_id}/interview-questions")
+async def get_interview_questions(
+    entry_id: UUID,
+    db: Db,
+    role: Annotated[Role, Depends(require_role(*_SHORTLIST_READERS))],
+    user: Annotated[User | None, Depends(resolve_user)],
+) -> InterviewQuestionsResponse:
+    """The stored questions for one candidate, row-scoped for a hiring_manager
+    session exactly like ``get_shortlist_entry``. The entry is resolved FIRST,
+    so an unknown, unassigned or withdrawn entry is a 404 that never reads the
+    questions table. A real auditor's read is logged."""
+    user_id = await scoped_user_id_or_403(user, role)
+    entry = await shortlist_service.get_one(db, entry_id, user_id=user_id)
+    record = await interview_question_service.get(db, entry.job_id, entry.resume_id)
+    try:
+        current: str | None = gaps_hash(select_gaps(entry))
+    except InterviewRefusal:
+        current = None
+    await log_auditor_read(
+        db,
+        user,
+        action="read_interview_questions",
+        subject_type="shortlist_entry",
+        subject_id=entry_id,
+        job_id=entry.job_id,
+    )
+    if record is None:
+        return InterviewQuestionsResponse(status="none", current_gaps_sha256=current)
+    return InterviewQuestionsResponse(
+        status=record.status,
+        reason=record.reason,
+        questions=[InterviewQuestionOut.model_validate(q) for q in record.questions],
+        gaps_sha256=record.gaps_sha256,
+        current_gaps_sha256=current,
+        stale=record.gaps_sha256 is not None and record.gaps_sha256 != current,
+        generated_at=record.generated_at,
+    )
 
 
 __all__ = ["router"]

@@ -313,6 +313,12 @@ class Settings(BaseSettings):
     # apart.
     resume_parse_max_tries: int = 5
 
+    # ── Interview-question generator (S2) ─────────────────────────────────────
+    # A `pending` interview_questions row older than this is treated as stalled
+    # (worker died, job lost) and may be claimed again. Must exceed the worst
+    # LLM call latency or a slow-but-alive run is double-enqueued.
+    interview_questions_stall_minutes: int = Field(default=20, ge=1)
+
     # ── FU-7 §2 (ADR-021 §2 / ADR-029): fail-closed shortlist ranking ─────────
     # The arq JOB-layer retry ceiling ``shortlist_job``'s
     # ``RankingUnavailableError`` boundary reads (via ``ctx.get("job_try", 1)``)

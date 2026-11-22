@@ -659,6 +659,31 @@ _STATEMENTS: tuple[str, ...] = (
     # required to actually reverse a LIVE deployment, not just a fresh
     # install's CREATE TABLE. Must run after ``jobs`` exists.
     "ALTER TABLE jobs ALTER COLUMN blind_review SET DEFAULT FALSE",
+    # Interview-question generator (S2). One row per (job, résumé) -- NOT keyed
+    # on ``shortlist_entries.id``, because ``persist_shortlist`` deletes and
+    # reinserts every entry on each regenerate and the questions must survive
+    # that. ``gaps_sha256`` lets a reader tell a stored set is stale. ``reason``
+    # is a fixed vocabulary enforced in the service (never free text), and
+    # ``questions`` / ``requested_at`` default so the claim's minimal INSERT
+    # works. The CHECK pins ``status``.
+    """
+    CREATE TABLE IF NOT EXISTS interview_questions (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        job_id          UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        resume_id       UUID NOT NULL REFERENCES resumes (id) ON DELETE CASCADE,
+        status          TEXT NOT NULL
+                        CHECK (status IN ('pending','ready','failed','refused')),
+        reason          TEXT,
+        questions       JSONB NOT NULL DEFAULT '[]',
+        gaps_sha256     TEXT,
+        prompt_version  TEXT,
+        model           TEXT,
+        created_by      TEXT,
+        requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        generated_at    TIMESTAMPTZ,
+        UNIQUE (job_id, resume_id)
+    )
+    """,
 )
 
 

@@ -197,6 +197,78 @@ def _digit_runs(text: str) -> list[str]:
     return [re.sub(r"\D", "", m.group()) for m in _PHONE_RUN.finditer(text)]
 
 
+def _email_key(email: str | None) -> str | None:
+    return email.strip().casefold() if email and email.strip() else None
+
+
+def _phone_key(phone: str | None) -> str:
+    """The phone's digits, or ``""`` when too short to match safely."""
+    digits = re.sub(r"\D", "", phone) if phone else ""
+    return digits if len(digits) >= _MIN_PHONE_DIGITS else ""
+
+
+REDACTED = "[redacted]"
+
+
+def scrub_identifiers(
+    text: str, *, name: str | None, email: str | None, phone: str | None
+) -> str:
+    """``text`` with the candidate's email, phone and name tokens replaced by
+    ``[redacted]``. Uses the SAME matching rules as ``filter_questions``.
+
+    Email first (it contains name tokens), then phone, then name -- so no
+    fragment of an address survives a name substitution.
+    """
+    email_n = _email_key(email)
+    if email_n is not None:
+        text = re.sub(re.escape(email_n), REDACTED, text, flags=re.IGNORECASE)
+        # The blind redactor (``get_one``) can already have replaced the local
+        # part, leaving "[name redacted]@example.test": the full address no
+        # longer matches, so redact the residual domain too.
+        domain = email_n.rpartition("@")[2]
+        if "." in domain:
+            text = re.sub(re.escape(domain), REDACTED, text, flags=re.IGNORECASE)
+    phone_digits = _phone_key(phone)
+    if phone_digits:
+
+        def _phone_sub(match: re.Match[str]) -> str:
+            run = match.group()
+            if phone_digits not in re.sub(r"\D", "", run):
+                return run
+            core = run.strip()
+            lead = run[: len(run) - len(run.lstrip())]
+            trail = run[len(run.rstrip()) :]
+            return f"{lead}{REDACTED}{trail}" if core else run
+
+        text = _PHONE_RUN.sub(_phone_sub, text)
+    name_re = _name_pattern(name)
+    if name_re is not None:
+        text = name_re.sub(REDACTED, text)
+    return text
+
+
+def redact_gaps(
+    gaps: Sequence[Gap], *, name: str | None, email: str | None, phone: str | None
+) -> list[Gap]:
+    """``gaps`` with identifiers scrubbed from each partial quote. A non-blind
+    job's evidence quote can still carry the candidate's own name or contact
+    details; this runs BEFORE the prompt is built and the same scrubbed gaps
+    are what ``filter_questions`` checks ``probes_quote`` against."""
+    return [
+        Gap(
+            index=g.index,
+            requirement=g.requirement,
+            status=g.status,
+            quote=(
+                scrub_identifiers(g.quote, name=name, email=email, phone=phone)
+                if g.quote is not None
+                else None
+            ),
+        )
+        for g in gaps
+    ]
+
+
 def filter_questions(
     ingest: InterviewQuestionsIngest,
     gaps: Sequence[Gap],
@@ -209,10 +281,8 @@ def filter_questions(
     and echo no candidate identifier. Returns ``(kept, dropped_count)``."""
     by_index = {g.index: g for g in gaps}
     name_re = _name_pattern(name)
-    email_n = email.strip().casefold() if email and email.strip() else None
-    phone_digits = re.sub(r"\D", "", phone) if phone else ""
-    if len(phone_digits) < _MIN_PHONE_DIGITS:
-        phone_digits = ""
+    email_n = _email_key(email)
+    phone_digits = _phone_key(phone)
 
     def leaks(text: str) -> bool:
         if name_re is not None and name_re.search(text):
