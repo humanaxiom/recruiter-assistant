@@ -52,6 +52,7 @@ _MUST_CLEAR_FLOOR = (
     "worker/resume_tasks.py",
     "worker/tasks.py",
     "pipeline/skill_classifier.py",
+    "services/interview_questions.py",
 )
 
 #: Below-floor call sites that a MEASUREMENT says are safe, mapped to the exact
