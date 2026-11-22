@@ -430,6 +430,29 @@ def get_shortlist_entry(entry_id: UUID, *, client: httpx.Client | None = None) -
     return response.json()
 
 
+def get_interview_questions(
+    entry_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """GET /shortlist/{id}/interview-questions — the stored question set and its
+    state. Blind like every shortlist read: no ``reveal`` parameter."""
+    response = _request(
+        "GET", f"/shortlist/{entry_id}/interview-questions", client=client
+    )
+    return response.json()
+
+
+def request_interview_questions(
+    entry_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """POST /shortlist/{id}/interview-questions — enqueue generation (202
+    ``{"status": "pending"}``). 409 surfaces as ``Conflict``, 403 as
+    ``BadRequest``."""
+    response = _request(
+        "POST", f"/shortlist/{entry_id}/interview-questions", client=client
+    )
+    return response.json()
+
+
 def get_shortlist_status(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
     """GET /jobs/{id}/shortlist/status (FU-7 §2) — the fail-closed ranking
     state ``{job_id, state, reason, at}``. ``state`` is ``"awaiting_llm"`` when
@@ -698,6 +721,8 @@ __all__ = [
     "BackendUnavailable",
     "BadRequest",
     "Conflict",
+    "get_interview_questions",
+    "request_interview_questions",
     "build_client",
     "list_jobs",
     "my_jobs",

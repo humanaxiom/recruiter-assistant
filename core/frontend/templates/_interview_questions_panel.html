@@ -1,0 +1,67 @@
+{#
+  Interview-questions panel. Fed ``iq`` (the JSON dict from the API, so every
+  timestamp is a STRING -- hence the ``day`` filter, never ``.strftime``) and
+  ``entry_id``. Only the ``pending`` state carries an ``every`` trigger, so
+  polling stops by itself the moment the state changes. Writer forms use the
+  shared page token, not a one-shot slot.
+#}
+{% set status = iq.status or 'none' %}
+{% set post_url = '/shortlist/' ~ entry_id ~ '/interview-questions' %}
+{% macro writer_form(label) %}
+{% if is_writer %}
+<form method="post" action="{{ post_url }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+  <button type="submit" class="btn btn-secondary btn-sm">{{ label }}</button>
+</form>
+{% endif %}
+{% endmacro %}
+{% set reason_copy = {
+  'not_evaluated': 'This candidate has not been evaluated against the job yet, so there is nothing to base questions on.',
+  'no_requirements': 'This job has no requirements to build questions from.',
+  'no_gaps': 'Every requirement is evidenced in the résumé, so there are no gaps to probe.',
+  'invalid_output': 'The model returned an unusable answer. Please try again.',
+  'no_questions': 'The model produced no questions. Please try again.',
+  'entry_gone': 'This shortlist entry no longer exists.',
+} %}
+{% if status == 'pending' %}
+<div id="interview-questions" class="card"
+     hx-get="/shortlist/{{ entry_id }}/interview-questions-panel"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  <h3>Interview questions</h3>
+  <p class="muted">Generating interview questions — this can take a minute.</p>
+</div>
+{% elif status == 'ready' %}
+<div id="interview-questions" class="card">
+  <h3>Interview questions</h3>
+  {% if iq.stale %}
+  <p class="muted"><strong>The evidence has changed since these questions were generated.</strong>
+    They may no longer match this candidate's current evidence.</p>
+  {% endif %}
+  <p class="muted">Generated {{ iq.generated_at | day }}. Each group probes a
+    requirement that is not evidenced in the résumé.</p>
+  {% for group in (iq.questions or []) | groupby('requirement_index') %}
+  <div class="req">
+    <strong>{{ group.list[0].requirement }}</strong>
+    <ul>
+      {% for q in group.list %}
+      <li>{{ q.question }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+  {% if iq.stale %}{{ writer_form('Regenerate') }}{% endif %}
+</div>
+{% elif status == 'failed' or status == 'refused' %}
+<div id="interview-questions" class="card">
+  <h3>Interview questions</h3>
+  <p class="muted">{{ reason_copy.get(iq.reason, 'Interview questions could not be generated for this entry.') }}</p>
+  {{ writer_form('Retry') }}
+</div>
+{% else %}
+<div id="interview-questions" class="card">
+  <h3>Interview questions</h3>
+  <p class="muted">No interview questions have been generated for this entry.</p>
+  {{ writer_form('Generate interview questions') }}
+</div>
+{% endif %}
