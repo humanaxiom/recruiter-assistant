@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -272,6 +273,10 @@ _CSRF_HOOK_EXEMPT_ENDPOINTS = frozenset(
         # one-shot token (action="document"), strictly stronger than the
         # session-wide page token this hook checks.
         "resume_document",
+        # The job's résumé export ZIP: same rule as resume_document -- its own
+        # one-shot token (action="export") bound to the export id, because the
+        # archive discloses every candidate at once.
+        "export_download",
     }
 )
 
@@ -868,9 +873,39 @@ def _render_job_detail(
     hiring_managers: list[Any] | None = []
     if _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
+    pending_splits: list[dict[str, Any]] = []
+    if _is_writer_session():
+        try:
+            listed = api_client.list_resume_splits(job_id)
+        except (
+            api_client.BackendUnavailable,
+            api_client.BadRequest,
+            api_client.NotFound,
+        ):
+            listed = []  # the listing is a convenience; never break the job page
+        blind = bool(job.get("blind_review"))
+        pending_splits = [
+            {**s, "source_filename": None if blind else s.get("source_filename")}
+            for s in listed
+        ]
+    export_latest: dict[str, Any] | None = None
+    export_csrf_token: str | None = None
+    if _is_writer_session():
+        try:
+            export_latest = api_client.get_latest_resume_export(job_id)
+        except (
+            api_client.BackendUnavailable,
+            api_client.BadRequest,
+            api_client.NotFound,
+        ):
+            export_latest = None  # none yet, or a convenience that must not break
+        if export_latest is not None and export_latest.get("status") == "ready":
+            export_csrf_token = csrf.ensure_token(export_latest["id"], action="export")
     return (
         render_template(
             "job_detail.html",
+            export_latest=export_latest,
+            export_csrf_token=export_csrf_token,
             job=job,
             job_id=job_id,
             resumes=resumes,
@@ -880,6 +915,7 @@ def _render_job_detail(
             error=error,
             job_assignees=assignees,
             hiring_managers=hiring_managers,
+            pending_splits=pending_splits,
         ),
         status_code,
     )
@@ -1050,6 +1086,451 @@ def upload_candidate_roster(job_id: UUID) -> Any:
     for message in _summarise_roster_report(report):
         flash(message)
     return redirect(url_for("job_detail", job_id=job_id))
+
+
+_PAGE_ITEM = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
+
+
+def _parse_page_list(raw: str) -> list[int]:
+    """Parse ``"1-2, 5"`` into ``[1, 2, 5]`` (order kept, repeats kept so the
+    API's duplicate finding still sees them). Empty text is an empty list;
+    anything outside the grammar, a zero page or a backwards range raises
+    ``ValueError``."""
+    text = raw.strip()
+    if not text:
+        return []
+    cap = get_settings().split_max_pages
+    pages: list[int] = []
+    for part in text.split(","):
+        match = _PAGE_ITEM.fullmatch(part.strip())
+        if match is None:
+            raise ValueError(f"{part.strip()!r} is not a page or a page range")
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) is not None else first
+        if first < 1 or last < first:
+            raise ValueError(f"{part.strip()!r} is not a valid page range")
+        if last - first + len(pages) >= cap:
+            raise ValueError("the page list is too long")
+        pages.extend(range(first, last + 1))
+    return pages
+
+
+def _format_page_list(pages: list[int]) -> str:
+    """Inverse of :func:`_parse_page_list`: runs of consecutive ascending pages
+    collapse to ``a-b``; everything else is kept in order."""
+    out: list[str] = []
+    i = 0
+    while i < len(pages):
+        j = i
+        while j + 1 < len(pages) and pages[j + 1] == pages[j] + 1:
+            j += 1
+        out.append(str(pages[i]) if j == i else f"{pages[i]}-{pages[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def _join_numbers(values: list[int]) -> str:
+    return ", ".join(str(v) for v in values)
+
+
+_SPLIT_FAILURE_TEXT = {
+    "unreadable_pdf": "the PDF could not be read",
+}
+
+
+def _split_findings(
+    diagnostics: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Plain-words ``(informational, blocking)`` diagnostics. Applicant numbers
+    are the same 1-based labels the review rows carry."""
+
+    def nums(key: str) -> list[int]:
+        raw = diagnostics.get(key) or []
+        return [int(v) for v in raw if isinstance(v, int)]
+
+    blocking: list[str] = []
+    missing, duplicated = nums("missing"), nums("duplicated")
+    if missing:
+        blocking.append(
+            f"Page(s) {_join_numbers(missing)} are missing: not assigned to "
+            "any applicant or to the ignored pages."
+        )
+    if duplicated:
+        blocking.append(f"Page(s) {_join_numbers(duplicated)} appear more than once.")
+    for n in nums("merged"):
+        blocking.append(
+            f"Applicant {n} looks like it contains more than one person's pages."
+        )
+    for n in nums("misfiled_cover"):
+        blocking.append(
+            f"Applicant {n} has a cover letter filed as a résumé page, or a "
+            "résumé page filed as a cover letter."
+        )
+    info: list[str] = []
+    for n in nums("cover_only"):
+        info.append(f"Applicant {n} will not be imported: only cover-letter pages.")
+    for n in nums("low_text"):
+        info.append(f"Applicant {n} will not be imported: too little readable text.")
+    return info, blocking
+
+
+def _submitted_row_numbers(form: Any) -> set[int]:
+    return {
+        int(m.group(1))
+        for key in form
+        if (m := re.fullmatch(r"(?:resume|cover)_pages_(\d+)", key))
+    }
+
+
+def _render_split_review(
+    split_id: UUID,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    submitted: Any = None,
+) -> Any:
+    """``submitted`` (a form mapping) re-renders the recruiter's own text after
+    a rejected save instead of the stored version."""
+    try:
+        view = api_client.get_resume_split(split_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(403 if exc.status_code == 403 else 400)
+    blind = bool(view.get("blind_review"))
+    proposal = view.get("proposal") or {}
+    rows: list[dict[str, Any]] = []
+    for n, a in enumerate(proposal.get("applicants") or [], start=1):
+        rows.append(
+            {
+                "n": n,
+                "label": f"Applicant {n}",
+                # Blind review: a name is never rendered, whatever the API sent.
+                "name": "" if blind else (a.get("candidate_name") or ""),
+                "resume": _format_page_list(list(a.get("resume_pages") or [])),
+                "cover": _format_page_list(list(a.get("cover_letter_pages") or [])),
+            }
+        )
+    for n in (len(rows) + 1, len(rows) + 2):
+        rows.append(
+            {
+                "n": n,
+                "label": f"Applicant {n} (new)",
+                "name": "",
+                "resume": "",
+                "cover": "",
+            }
+        )
+    ignored_text = _format_page_list(list(proposal.get("ignored_pages") or []))
+    if submitted is not None:
+        stored = len(proposal.get("applicants") or [])
+        numbers = sorted(_submitted_row_numbers(submitted))
+        rows = [
+            {
+                "n": n,
+                "label": f"Applicant {n}" if n <= stored else f"Applicant {n} (new)",
+                "name": (
+                    "" if blind else str(submitted.get(f"candidate_name_{n}", ""))[:200]
+                ),
+                "resume": str(submitted.get(f"resume_pages_{n}", "")),
+                "cover": str(submitted.get(f"cover_pages_{n}", "")),
+            }
+            for n in numbers
+        ]
+        ignored_text = str(submitted.get("ignored_pages", ""))
+    info, blocking = _split_findings(view.get("diagnostics") or {})
+    reason = str(view.get("failure_reason") or "")
+    return (
+        render_template(
+            "split_review.html",
+            split=view,
+            rows=rows,
+            ignored=ignored_text,
+            findings=info,
+            blocking_findings=blocking,
+            source_filename="" if blind else (view.get("source_filename") or ""),
+            failure_text=_SPLIT_FAILURE_TEXT.get(
+                reason, "the export could not be segmented"
+            ),
+            error=error,
+        ),
+        status_code,
+    )
+
+
+@app.post("/jobs/<uuid:job_id>/resumes/split-upload")
+def split_upload(job_id: UUID) -> Any:
+    """Queue the in-app split of combined Taleo export(s). Consent is checked
+    here BEFORE any backend call, as ``upload_resumes`` does. Guarded by the
+    ordinary ``_csrf_gate`` page token -- no exemption, no one-shot slot."""
+    consent = (request.form.get("consent_acknowledged") or "").strip().lower() == "true"
+    if not consent:
+        return _render_job_detail(
+            job_id,
+            error="You must confirm the candidates' consent to this processing.",
+            status_code=400,
+        )
+    files: list[tuple[str, bytes, str]] = [
+        (
+            upload.filename or "export.pdf",
+            upload.read(),
+            upload.content_type or "application/pdf",
+        )
+        for upload in request.files.getlist("files")
+        if upload.filename
+    ]
+    if not files:
+        return _render_job_detail(
+            job_id,
+            error="Select at least one combined Taleo export (PDF).",
+            status_code=400,
+        )
+    try:
+        result = api_client.split_upload(job_id, files, consent_acknowledged=True)
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+        return redirect(url_for("job_detail", job_id=job_id))
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    ids: list[UUID] = []
+    raw_ids = result.get("split_ids") if isinstance(result, dict) else None
+    for raw in raw_ids or []:
+        try:
+            ids.append(UUID(str(raw)))
+        except ValueError:
+            continue
+    if not ids:
+        flash("The export was not queued; please try again.")
+        return redirect(url_for("job_detail", job_id=job_id))
+    if len(ids) > 1:
+        flash(
+            f"{len(ids)} exports queued. Review this one first; the others are "
+            "at: "
+            + ", ".join(url_for("split_review", split_id=other) for other in ids[1:])
+        )
+    return redirect(url_for("split_review", split_id=ids[0]))
+
+
+@app.post("/jobs/<uuid:job_id>/resumes/exports")
+def export_start(job_id: UUID) -> Any:
+    """Queue the background build of the job's résumé ZIP, then go back to the
+    job page, which shows its status. Ordinary page-token CSRF: starting a build
+    discloses nothing -- the file leaves only through :func:`export_download`."""
+    try:
+        api_client.start_resume_export(job_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+    else:
+        flash("Export started. It is built in the background; refresh to see it.")
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/resume-exports/<uuid:export_id>/download")
+def export_download(export_id: UUID) -> Any:
+    """AUDITED. Stream the built ZIP to the requester.
+
+    Same guard shape as ``resume_document`` and for the same reason: the archive
+    discloses every candidate at once, so it is a reveal by another route.
+    Same-origin first, then a one-shot token in its own ``action="export"`` slot
+    bound to the export id -- both before anything reaches the backend, so a
+    forged submit can neither fetch the file nor write the audit row. POST, never
+    a link: a link is prefetchable. ``no-store`` keeps it out of every cache.
+
+    The hidden ``job_id`` is attacker-controllable form input: it is parsed as a
+    UUID and the redirect is built with ``url_for``, never echoed.
+    """
+    if not csrf.same_origin(request):
+        abort(403)
+    if not csrf.verify_and_consume(
+        export_id, request.form.get(csrf.FORM_FIELD), action="export"
+    ):
+        abort(403)
+    try:
+        body, disposition = api_client.download_resume_export(export_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.Conflict:
+        flash("This export is not ready, has expired, or its file is missing.")
+        try:
+            job_id = UUID((request.form.get("job_id") or "").strip())
+        except ValueError:
+            return redirect(url_for("index"))
+        return redirect(url_for("job_detail", job_id=job_id))
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return Response(
+        body,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": disposition
+            or f'attachment; filename="resumes-{export_id}.zip"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/resume-splits/<uuid:split_id>")
+def split_review(split_id: UUID) -> Any:
+    return _render_split_review(split_id)
+
+
+def _split_posted_version() -> int | None:
+    try:
+        return int(request.form.get("proposal_version", ""))
+    except ValueError:
+        return None
+
+
+@app.post("/resume-splits/<uuid:split_id>/correct")
+def split_correct(split_id: UUID) -> Any:
+    version = _split_posted_version()
+    if version is None:
+        return _render_split_review(
+            split_id,
+            error="The proposal version is missing or not a number; reload the page.",
+            status_code=400,
+        )
+    numbers = sorted(_submitted_row_numbers(request.form))
+    if len(numbers) > get_settings().split_max_pages:
+        return _render_split_review(
+            split_id,
+            error="Too many applicant rows were submitted.",
+            status_code=400,
+        )
+    applicants: list[dict[str, Any]] = []
+    try:
+        for n in numbers:
+            resume = _parse_page_list(request.form.get(f"resume_pages_{n}", ""))
+            cover = _parse_page_list(request.form.get(f"cover_pages_{n}", ""))
+            if resume or cover:
+                applicants.append(
+                    {
+                        # The API blanks it on a blind job; it only echoes
+                        # the name the page showed (hidden field per row).
+                        "candidate_name": request.form.get(f"candidate_name_{n}", "")[
+                            :200
+                        ],
+                        "resume_pages": resume,
+                        "cover_letter_pages": cover,
+                    }
+                )
+        ignored = _parse_page_list(request.form.get("ignored_pages", ""))
+    except ValueError as exc:
+        return _render_split_review(
+            split_id,
+            error=f"Check the page lists: {exc}. Use pages like 1-2,5.",
+            status_code=400,
+            submitted=request.form,
+        )
+    try:
+        api_client.correct_resume_split(
+            split_id,
+            proposal_version=version,
+            applicants=applicants,
+            ignored_pages=ignored,
+        )
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id,
+            error=(
+                "Someone else changed this split (or it can no longer be "
+                f"edited): {_format_error(exc.detail)}. The page below shows "
+                "the current version; re-apply your edits if needed."
+            ),
+            status_code=409,
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            submitted=request.form,
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("split_review", split_id=split_id))
+
+
+def _summarise_split_accept(results: Any) -> str:
+    """Counts only -- never a filename or name, so a blind-review job cannot
+    leak one through the flash."""
+    rows = results if isinstance(results, list) else []
+    counts = {"accepted": 0, "duplicate": 0, "rejected": 0}
+    for r in rows:
+        if isinstance(r, dict) and r.get("outcome") in counts:
+            counts[str(r["outcome"])] += 1
+    message = f"{counts['accepted']} accepted"
+    if counts["duplicate"]:
+        message += f", {counts['duplicate']} duplicate"
+    message += f", {counts['rejected']} rejected"
+    return message + " from the split export."
+
+
+def _redirect_to_split_job(split_id: UUID) -> Any:
+    try:
+        job_id = UUID(str(api_client.get_resume_split(split_id).get("job_id")))
+    except (api_client.BackendError, ValueError):
+        return redirect(url_for("index"))
+    return redirect(url_for("job_detail", job_id=job_id))
+
+
+@app.post("/resume-splits/<uuid:split_id>/accept")
+def split_accept(split_id: UUID) -> Any:
+    version = _split_posted_version()
+    if version is None:
+        return _render_split_review(
+            split_id,
+            error="The proposal version is missing or not a number; reload the page.",
+            status_code=400,
+        )
+    try:
+        results = api_client.accept_resume_split(split_id, proposal_version=version)
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    flash(_summarise_split_accept(results))
+    return _redirect_to_split_job(split_id)
+
+
+@app.post("/resume-splits/<uuid:split_id>/discard")
+def split_discard(split_id: UUID) -> Any:
+    try:
+        api_client.discard_resume_split(split_id)
+    except api_client.Conflict as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=409
+        )
+    except api_client.BadRequest as exc:
+        return _render_split_review(
+            split_id, error=_format_error(exc.detail), status_code=400
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return _redirect_to_split_job(split_id)
 
 
 @app.get("/jobs/<uuid:job_id>/resumes-table")
@@ -1573,7 +2054,12 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
 
 
 def _render_resume_detail(
-    resume_id: UUID, resume: dict[str, Any], *, revealed: bool
+    resume_id: UUID,
+    resume: dict[str, Any],
+    *,
+    revealed: bool,
+    error: str | None = None,
+    status_code: int = 200,
 ) -> Any:
     """Shared by BOTH ``resume_detail`` (GET) and ``resume_reveal`` (POST).
 
@@ -1596,34 +2082,39 @@ def _render_resume_detail(
     (current/aging/stale). Passed in so the comparison stays deterministic
     and doesn't need any candidate.* field.
     """
-    return render_template(
-        "resume_detail.html",
-        resume=resume,
-        current_year=dt.date.today().year,
-        revealed=revealed,
-        # FU-4/D4: the one-shot anti-forgery token the reveal form posts
-        # back, bound to THIS résumé id, so a cross-site auto-submit cannot
-        # manufacture an audit row. Not minted at all once revealed=True: the
-        # reveal form never renders again on this page (see resume_detail.html
-        # — it's shown only for `resume.blinded and not revealed`), so there
-        # is nothing left to bind a fresh reveal token to.
-        csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
-        # FU-8/ADR-026: a SECOND, independent one-shot token for whichever of
-        # the withdraw/reinstate controls the template renders — same résumé
-        # id, distinct action, so minting it never disturbs the reveal token
-        # above.
-        withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
-        # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
-        # (which are mutually exclusive on the page, so they can share one),
-        # the work-authorization control renders ALONGSIDE whichever of those
-        # is shown — sharing a slot would mean using one control silently
-        # invalidated the other's token.
-        work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
-        # SPONSOR §O4 -- a FOURTH slot. The download button renders alongside the
-        # reveal, withdraw and work-authorization controls, so every one of them
-        # needs its own one-shot token: sharing a slot would mean using one
-        # silently invalidated the others.
-        document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+    return (
+        render_template(
+            "resume_detail.html",
+            resume=resume,
+            current_year=dt.date.today().year,
+            revealed=revealed,
+            error=error,
+            # FU-4/D4: the one-shot anti-forgery token the reveal form posts
+            # back, bound to THIS résumé id, so a cross-site auto-submit
+            # cannot manufacture an audit row. Not minted at all once
+            # revealed=True: the reveal form never renders again on this page
+            # (see resume_detail.html — it's shown only for
+            # `resume.blinded and not revealed`), so there is nothing left to
+            # bind a fresh reveal token to.
+            csrf_token=csrf.ensure_token(resume_id) if not revealed else "",
+            # FU-8/ADR-026: a SECOND, independent one-shot token for whichever
+            # of the withdraw/reinstate controls the template renders — same
+            # résumé id, distinct action, so minting it never disturbs the
+            # reveal token above.
+            withdraw_csrf_token=csrf.ensure_token(resume_id, action="withdraw"),
+            # SPONSOR §O2: a THIRD independent slot. Unlike withdraw/reinstate
+            # (which are mutually exclusive on the page, so they can share
+            # one), the work-authorization control renders ALONGSIDE
+            # whichever of those is shown — sharing a slot would mean using
+            # one control silently invalidated the other's token.
+            work_auth_csrf_token=csrf.ensure_token(resume_id, action="work_auth"),
+            # SPONSOR §O4 -- a FOURTH slot. The download button renders
+            # alongside the reveal, withdraw and work-authorization controls,
+            # so every one of them needs its own one-shot token: sharing a
+            # slot would mean using one silently invalidated the others.
+            document_csrf_token=csrf.ensure_token(resume_id, action="document"),
+        ),
+        status_code,
     )
 
 
@@ -1640,6 +2131,50 @@ def resume_detail(resume_id: UUID) -> Any:
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     return _render_resume_detail(resume_id, resume, revealed=False)
+
+
+@app.post("/resumes/<uuid:resume_id>/reparse")
+def resume_reparse(resume_id: UUID) -> Any:
+    """Re-queue a résumé parse that failed or came back degraded — the
+    résumé side of ``reparse_job``.
+
+    Guarded by the ORDINARY ``_csrf_gate`` page-token hook, deliberately NOT
+    added to ``_CSRF_HOOK_EXEMPT_ENDPOINTS``: unlike reveal/withdraw/
+    reinstate/work-authorization/document, this action carries no per-résumé
+    one-shot token of its own (see the ``shortlist_work_authorization``
+    docstring's 64-token budget for why a new one-shot slot per résumé per
+    action does not scale) — the session-wide reusable page token is the
+    right guard here.
+
+    Error handling mirrors ``reparse_job`` exactly: ``Conflict`` re-renders
+    the résumé page with the error and HTTP 409 (fetched blind, unrevealed —
+    a 409 from this route is not itself a reveal); ``NotFound`` -> 404;
+    ``BackendUnavailable`` -> the shared unavailable page; a stray
+    ``BadRequest`` (e.g. a non-writer CAS session, ADR-033) -> its own status
+    code rather than an unhandled 500."""
+    try:
+        api_client.reparse_resume(resume_id)
+    except api_client.Conflict as exc:
+        try:
+            resume = api_client.get_resume(resume_id)
+        except api_client.NotFound:
+            abort(404)
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        return _render_resume_detail(
+            resume_id,
+            resume,
+            revealed=False,
+            error=_format_error(exc.detail),
+            status_code=409,
+        )
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    except api_client.BadRequest as exc:
+        abort(exc.status_code)
+    return redirect(url_for("resume_detail", resume_id=resume_id))
 
 
 @app.post("/resumes/<uuid:resume_id>/reveal")

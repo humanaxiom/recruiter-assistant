@@ -253,3 +253,15 @@ flowchart TB
   `score_evidence_completeness` columns), which are populated from the *unfolded* dict, not from
   `ScoreBreakdown` itself. An explicit pop keeps the fold/unfold symmetric and reviewable in one place
   (`_parse_entry_jsonb`) rather than relying on a permissive model config to paper over it.
+
+## Amendment 2026-11-21 — the résumé export's anonymized copy is rebuilt as text-only, not redacted in place (branch `feat/taleo-inapp-split`)
+
+**Context.** The résumé ZIP export (`core/src/services/resume_export_service.py`) ships an `anonymized/` copy of each résumé. The approved plan redacted in place, with PyMuPDF redaction annotations and the layout kept.
+
+**Decision.** The anonymized copy is rebuilt as a new text-only PDF: one non-embedded Helvetica, a fixed page size, no images, links, annotations, outline, layers, XMP, marked content or drawing, and `/Info` holding Producer and Creator only. The pipeline is extract → redact → verify → render → re-extract → verify, and only those verified bytes ship. Anything that cannot be vouched for (scanned pages, no name match, another script, a letter the font cannot draw) is omitted and listed in the manifest as not anonymized. The redaction terms are the same inputs `redaction.blind_label_map` uses: name, e-mail, phone, parsed location, employers and schools.
+
+**Why.** Security probes against in-place redaction found the removed text still reachable through images, link and annotation objects, XMP, optional-content layers and ActualText. Each was a whole class, not a single bug. A rebuilt file can carry only text that was verified.
+
+**Alternatives.** (1) In-place redaction, the plan's default: rejected for the leak classes above. (2) Rasterise every page: rejected, because it destroys the text a reviewer reads and still needs OCR to verify. (3) Rebuild as text-only: chosen.
+
+**Trade-off.** The anonymized copy loses layout, images and the candidate's own formatting. Scanned pages and unrenderable letters are refused, not drawn. Name matching is heuristic; its known residuals are recorded in ROADMAP §5 under the in-app split item.

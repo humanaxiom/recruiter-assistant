@@ -136,6 +136,20 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # Sponsor Requirements PR2 slice 2 — Taleo candidate-roster CSV
         # reconciliation, same writer role gate as the résumé upload above.
         "/jobs/{job_id}/candidate-roster",
+        # In-app split of a combined Taleo export (ADR-017 amendment): upload,
+        # review, correct, accept, discard. Same writer role gate as above.
+        "/jobs/{job_id}/resumes/split-upload",
+        "/jobs/{job_id}/resume-splits",
+        # Export a job's résumés + covers as a ZIP (as-is + anonymized), built
+        # by a background job; status and download are requester-only.
+        "/jobs/{job_id}/resumes/exports",
+        "/jobs/{job_id}/resumes/exports/latest",
+        "/resume-exports/{export_id}",
+        "/resume-exports/{export_id}/download",
+        "/resume-splits/{split_id}",
+        "/resume-splits/{split_id}/correct",
+        "/resume-splits/{split_id}/accept",
+        "/resume-splits/{split_id}/discard",
         "/resumes/{resume_id}",
         "/resumes/{resume_id}/reveal",
         "/resumes/{resume_id}/match-jobs",
@@ -202,6 +216,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # is prefetchable, and a speculative fetch would both fabricate an
         # audit row and pull candidate PII into a cache.
         "/resumes/{resume_id}/document",
+        # The résumé side of "/jobs/{job_id}/reparse" above — re-queue a
+        # failed or degraded résumé parse (ROADMAP §5).
+        "/resumes/{resume_id}/reparse",
     }
 )
 

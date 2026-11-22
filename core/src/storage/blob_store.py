@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from pathlib import Path
 
 from fastapi import Request
@@ -143,6 +144,18 @@ class BlobStore:
         """True iff ``key`` is a regular file under the root."""
         path = self._resolve(key)
         return await asyncio.to_thread(path.is_file)
+
+    async def age_seconds(self, key: str) -> float | None:
+        """Seconds since ``key`` was last written (mtime), or ``None`` if absent."""
+        path = self._resolve(key)
+
+        def _age() -> float | None:
+            try:
+                return max(0.0, time.time() - path.stat().st_mtime)
+            except FileNotFoundError:
+                return None
+
+        return await asyncio.to_thread(_age)
 
     async def list_keys(self, prefix: str = "") -> list[str]:
         """Sorted, root-relative, POSIX-separated keys of regular files under

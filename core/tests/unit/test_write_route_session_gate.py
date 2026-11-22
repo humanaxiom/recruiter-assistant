@@ -88,7 +88,21 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # the résumé upload above (audited screening declarations against real
     # people), so it carries the identical writer/session-role gate.
     ("POST", "/jobs/{job_id}/candidate-roster"),
+    # In-app Taleo split: every state change on a split request writes or
+    # ingests candidate documents, so it carries the same writer gate.
+    ("POST", "/jobs/{job_id}/resumes/split-upload"),
+    ("POST", "/resume-splits/{split_id}/correct"),
+    ("POST", "/resume-splits/{split_id}/accept"),
+    ("POST", "/resume-splits/{split_id}/discard"),
+    # Résumé export job: starting one queues a disclosure of every candidate
+    # file on the job, and the download is that disclosure -- writer gate.
+    ("POST", "/jobs/{job_id}/resumes/exports"),
+    ("POST", "/resume-exports/{export_id}/download"),
     ("POST", "/resumes/{resume_id}/reveal"),
+    # SPEC 2026-09-23 (resume re-parse recovery path) — a write that
+    # rewrites a resume row and spends GPU time re-running the parse, same
+    # gate shape as POST /jobs/{job_id}/reparse above.
+    ("POST", "/resumes/{resume_id}/reparse"),
     ("POST", "/resumes/{resume_id}/withdraw"),
     ("POST", "/resumes/{resume_id}/reinstate"),
     # SPONSOR 2026-09-02 §O2. A WRITE that records an adverse screening

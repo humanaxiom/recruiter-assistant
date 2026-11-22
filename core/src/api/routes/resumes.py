@@ -13,7 +13,6 @@ in blind form (D2) but may never un-blind one.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -49,6 +48,7 @@ from src.schemas.matching import JobMatchResultOut
 from src.schemas.resumes import (
     ResumeListItem,
     ResumeOut,
+    ResumeReparseOut,
     ResumeStatusBreakdown,
     ResumeUploadResult,
     WithdrawRequest,
@@ -58,7 +58,7 @@ from src.services import (
     audit_service,
     bulk_ingest_service,
     candidate_roster_service,
-    combined_export,
+    resume_ingest_service,
     resume_service,
     # FU-5 slice 8 (ADR-019 §6): no longer CALLED from this module — the
     # reveal route now writes `audit_log` via `audit_service` instead. KEPT
@@ -70,7 +70,7 @@ from src.services import (
     reveal_service,  # noqa: F401
     shortlist_service,
 )
-from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected, expand_zip_entries
+from src.services.zip_upload import _MAX_ZIP_ENTRIES, ZipRejected
 from src.storage.blob_store import BlobStore, get_blob_store
 
 router = APIRouter()
@@ -129,102 +129,10 @@ async def upload_resumes(
             count=len(files),
         )
 
-    expanded: list[tuple[str, bytes]] = []
-    for f in files:
-        filename = f.filename or "upload"
-        data = await f.read()
-        if filename.lower().endswith(".zip"):
-            try:
-                expanded.extend(expand_zip_entries(data))
-            except ZipRejected as exc:
-                # A ``manifest.json`` zipped WITH the résumés trips the zip
-                # allowlist (json isn't an accepted résumé extension). Surface
-                # the fix, not the generic "disallowed extension" message.
-                detail = str(exc)
-                if ".json" in detail.lower():
-                    detail = (
-                        "upload the pairing manifest as its own field, not "
-                        "inside the résumé zip"
-                    )
-                raise HTTPException(status_code=400, detail=detail) from exc
-        else:
-            expanded.append((filename, data))
-
-    # Combined-Taleo-export detection (refuse, don't mis-ingest): a combined
-    # export PDF concatenates MANY applicants; uploaded as-is it would become
-    # ONE résumé row with every page (cover letters included) parsed as that
-    # one applicant. Run the cheap heuristic on every expanded PDF part —
-    # off the event loop (PyMuPDF is sync/CPU-bound) — and turn a flagged
-    # file into a rejected row rather than killing the whole batch.
-    combined_rejected: list[ResumeUploadResult] = []
-    kept: list[tuple[str, bytes]] = []
-    for name, data in expanded:
-        reason: str | None = None
-        if name.lower().endswith(".pdf"):
-            reason = await asyncio.to_thread(
-                combined_export.looks_like_combined_export, data, "application/pdf"
-            )
-        if reason is not None:
-            combined_rejected.append(
-                ResumeUploadResult(
-                    original_filename=name, outcome="rejected", reason=reason
-                )
-            )
-        else:
-            kept.append((name, data))
-    expanded = kept
-
-    # FU-3 Slice 3: an explicit résumé↔cover pairing manifest (its own field).
-    # A malformed manifest raises ``ManifestError`` (AppError, 422) → the global
-    # handler renders it before any body is persisted. Parsed BEFORE the
-    # provisional pairing pass below (F2), which needs it to find the same
-    # leftover set the real pairing pass will use.
-    manifest: dict[str, str | None] | None = None
-    if pairing_manifest is not None:
-        manifest = bulk_ingest_service.parse_pairing_manifest(
-            await pairing_manifest.read()
-        )
-
-    # An orphaned cover-NAMED file (no matching résumé) must never be
-    # promoted to a résumé when its ACTUAL text reads as a cover letter
-    # (ADR-017 amendment, 2026-09-18). Extracting text needs a thread (sync,
-    # CPU-bound PyMuPDF/python-docx), which a plain callable can't do.
-    #
-    # Security audit F2 (2026-09-18): extraction must run ONLY on the
-    # leftover cover-named files that actually reach the demotion branch
-    # (no matching résumé) — NOT on every cover-named file, which wastefully
-    # re-parses a cover letter that's about to pair cleanly with its own
-    # résumé anyway. ``leftover_cover_files`` runs a cheap provisional
-    # pairing pass (pure, no I/O) to learn exactly that set; the real
-    # pairing pass below (with the content callable) reuses the identical
-    # leftover set, since both are pure functions of the same
-    # ``expanded``/``manifest``.
-    orphan_covers = bulk_ingest_service.leftover_cover_files(
-        expanded, manifest=manifest
+    uploads = [(f.filename or "upload", await f.read()) for f in files]
+    manifest_bytes = (
+        await pairing_manifest.read() if pairing_manifest is not None else None
     )
-
-    # Security audit F3 (2026-09-18): three states, not two. ``None`` in the
-    # map means "could not extract" (encrypted/corrupt/oversized) — this must
-    # NEVER be treated the same as "extracted fine, not cover-shaped" (which
-    # would silently ingest a file nobody could actually verify).
-    cover_text_map: dict[str, str | None] = {}
-    for cover_name, cover_data in orphan_covers:
-        try:
-            cover_mime = resume_service.detect_mime(cover_name, cover_data)
-            extracted = await asyncio.to_thread(extract_text, cover_data, cover_mime)
-            cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = (
-                extracted.full_text
-            )
-        except Exception:
-            cover_text_map[bulk_ingest_service.basename_lower(cover_name)] = None
-
-    def _is_cover_content(f: tuple[str, bytes]) -> bool | None:
-        key = bulk_ingest_service.basename_lower(f[0])
-        text = cover_text_map.get(key, "")
-        if text is None:
-            return None
-        return combined_export.is_cover_letter_text(text)
-
     cover_file: tuple[str, bytes] | None = None
     if cover_letter_file is not None:
         cover_file = (
@@ -232,77 +140,32 @@ async def upload_resumes(
             await cover_letter_file.read(),
         )
 
-    # FU-3 Slice 2/3: pair each résumé with ITS OWN cover letter. The manifest
-    # (when supplied) takes precedence; everything it doesn't name falls back to
-    # the filename convention. A plain no-suffix upload with no manifest pairs
-    # no cover → empty maps → today's behaviour.
-    pairing = bulk_ingest_service.pair_applicants(
-        expanded, manifest=manifest, is_cover_content=_is_cover_content
-    )
-    resume_files: list[tuple[str, bytes]] = []
-    cover_letter_map: dict[str, tuple[str, bytes]] = {}
-    warnings_map: dict[str, list[str]] = {}
-    for pair in pairing.pairs:
-        key = bulk_ingest_service.basename_lower(pair.resume[0])
-        resume_files.append(pair.resume)
-        if pair.cover_letter is not None:
-            cover_letter_map[key] = pair.cover_letter
-        if pair.note:
-            warnings_map.setdefault(key, []).append(pair.note)
-
-    # Ambiguity guard: per-résumé pairing AND a singular batch cover letter
-    # together is ambiguous — never silently pick one.
-    has_singular_cover = cover_file is not None or bool(
-        cover_letter_text and cover_letter_text.strip()
-    )
-    if cover_letter_map and has_singular_cover:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "ambiguous: both per-résumé cover pairing and a single batch "
-                "cover letter were supplied"
-            ),
-        )
-
-    consent = consent_acknowledged.strip().lower() == "true"
-    uploaded_by = user.cas_username if user is not None else None
     try:
-        results = await resume_service.upload_resumes(
+        results = await resume_ingest_service.ingest_files(
             db,
             blob_store,
             job_id=job_id,
-            files=resume_files,
-            consent_acknowledged=consent,
-            uploaded_by=uploaded_by,
+            files=uploads,
+            manifest_bytes=manifest_bytes,
+            consent_acknowledged=consent_acknowledged.strip().lower() == "true",
+            uploaded_by=user.cas_username if user is not None else None,
             cover_letter_text=cover_letter_text,
             cover_letter_file=cover_file,
-            cover_letter_map=cover_letter_map or None,
-            warnings_map=warnings_map or None,
+            extract=extract_text,
         )
+    except ZipRejected as exc:
+        # A ``manifest.json`` zipped WITH the résumés trips the zip
+        # allowlist (json isn't an accepted résumé extension). Surface
+        # the fix, not the generic "disallowed extension" message.
+        detail = str(exc)
+        if ".json" in detail.lower():
+            detail = (
+                "upload the pairing manifest as its own field, not "
+                "inside the résumé zip"
+            )
+        raise HTTPException(status_code=400, detail=detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    # Manifest references to files that weren't uploaded (Slice 3) surface as
-    # rejected rows so the operator sees what was dropped — never a silent loss.
-    for missing_name, reason in pairing.rejected:
-        results.append(
-            ResumeUploadResult(
-                original_filename=missing_name, outcome="rejected", reason=reason
-            )
-        )
-
-    # A cover-shaped orphan (ADR-017 amendment) and a refused combined export
-    # both surface as rejected rows too — never silently dropped, never
-    # ingested as a résumé.
-    for unattached_name, unattached_reason in pairing.unattached:
-        results.append(
-            ResumeUploadResult(
-                original_filename=unattached_name,
-                outcome="rejected",
-                reason=unattached_reason,
-            )
-        )
-    results.extend(combined_rejected)
 
     for r in results:
         if r.outcome == "accepted" and r.resume_id is not None:
@@ -747,6 +610,51 @@ async def get_match_results(resume_id: UUID, db: Db) -> JobMatchResultOut:
     there is no blind-review boundary to enforce here (unlike ``GET
     /resumes/{id}`` itself)."""
     return await shortlist_service.get_reverse_match_result(db, resume_id)
+
+
+@router.post(
+    "/resumes/{resume_id}/reparse",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_role(*_RESUME_WRITERS)),
+        Depends(require_session_role(*_RESUME_WRITERS)),
+    ],
+)
+async def reparse_resume(
+    resume_id: UUID, db: Db, arq: Annotated[ArqRedis, Depends(get_arq)]
+) -> ResumeReparseOut:
+    """Re-enqueue ``parse_resume`` for a failed or degraded résumé — the
+    résumé side of ``jobs.reparse_job``.
+
+    **Why this exists.** On the DTO's real bundle (2026-09-19) 4 of 19 résumé
+    parses failed: 1 degraded (the skills-pass empty-content fallback) and 3
+    abandoned by the stalled-parse reconciler. The only recovery was
+    re-upload. ROADMAP §5 recorded the gap: "No ``POST /resumes/{id}/reparse``
+    route — a degraded résumé cannot be recovered without re-upload."
+
+    **Eligibility lives in ``resume_service.reset_for_reparse``, not here** —
+    ``failed``, or ``parsed``-but-degraded; never withdrawn, never a clean
+    parse, never already in flight (``uploaded``/``parsing`` — the reconciler
+    owns stalls). The reset happens BEFORE the enqueue, deliberately: the
+    reverse order races a fast worker into wiping its own fresh failure (the
+    same race ``job_service.clear_parse_failure`` guards against).
+
+    On ineligibility we re-fetch the résumé (its own ``NotFoundError`` 404s,
+    exactly as ``get_resume`` does) purely to pick a plain, state-specific 409
+    reason — the reset itself never distinguishes WHY it declined.
+    """
+    ok = await resume_service.reset_for_reparse(db, resume_id)
+    if not ok:
+        resume = await resume_service.get_one(db, resume_id)
+        if resume.withdrawn_at is not None:
+            reason = "résumé is withdrawn — reinstate it first"
+        elif resume.status in ("uploaded", "parsing"):
+            reason = "a parse is already queued or running"
+        else:
+            reason = "résumé parsed cleanly; there is nothing to recover"
+        raise HTTPException(status_code=409, detail=reason)
+    await arq.enqueue_job("parse_resume", str(resume_id))
+    return ResumeReparseOut(id=resume_id, status="queued")
 
 
 __all__ = ["router"]

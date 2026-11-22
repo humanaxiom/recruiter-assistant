@@ -175,6 +175,8 @@ def _request(
             )
         except httpx.ConnectError as exc:
             raise BackendUnavailable(f"connection failed: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise BackendUnavailable(f"backend timed out: {exc}") from exc
         _raise_for_status(response)
         return response
     finally:
@@ -449,6 +451,17 @@ def get_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
     return response.json()
 
 
+def reparse_resume(resume_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /resumes/{id}/reparse — re-queue a failed or degraded résumé
+    parse. Mirrors :func:`reparse_job`.
+
+    A backend 409 (the résumé is withdrawn, already in flight, or already
+    parsed cleanly) surfaces as ``Conflict`` so the route can say that
+    plainly rather than redirecting as though it had queued something."""
+    response = _request("POST", f"/resumes/{resume_id}/reparse", client=client)
+    return response.json()
+
+
 def reveal_resume(
     resume_id: UUID,
     *,
@@ -712,3 +725,111 @@ __all__ = [
     "set_user_role",
     "get_cas_user",
 ]
+
+
+def split_upload(
+    job_id: UUID,
+    files: list[tuple[str, bytes, str]],
+    *,
+    consent_acknowledged: bool,
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /jobs/{id}/resumes/split-upload (multipart) -- queue the in-app
+    split of one or more combined Taleo exports. ``files`` is a list of
+    ``(filename, content, content_type)`` tuples sent as repeated ``files``
+    parts; consent is the ``"true"``/``"false"`` form field. Returns
+    ``{"splits": [...], "split_ids": [...]}``."""
+    multipart = [
+        ("files", (filename, content, ctype)) for filename, content, ctype in files
+    ]
+    response = _request(
+        "POST",
+        f"/jobs/{job_id}/resumes/split-upload",
+        data={"consent_acknowledged": "true" if consent_acknowledged else "false"},
+        files=multipart,
+        client=client,
+    )
+    return response.json()
+
+
+def list_resume_splits(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /jobs/{id}/resume-splits -- the job's pending (non-terminal) splits,
+    newest first. Metadata only; never names or proposal contents."""
+    return _request("GET", f"/jobs/{job_id}/resume-splits", client=client).json()
+
+
+def start_resume_export(job_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /jobs/{id}/resumes/exports -- queue the background build of the job's
+    résumé ZIP (as-is + anonymized). Returns ``{"id", "status"}``."""
+    return _request("POST", f"/jobs/{job_id}/resumes/exports", client=client).json()
+
+
+def get_latest_resume_export(
+    job_id: UUID, *, client: httpx.Client | None = None
+) -> Any:
+    """GET /jobs/{id}/resumes/exports/latest -- the caller's newest export of this
+    job (status and counts). A job they never exported is a 404 (``NotFound``)."""
+    return _request(
+        "GET", f"/jobs/{job_id}/resumes/exports/latest", client=client
+    ).json()
+
+
+def download_resume_export(
+    export_id: UUID, *, client: httpx.Client | None = None
+) -> tuple[bytes, str]:
+    """AUDITED. POST /resume-exports/{id}/download -- the built ZIP.
+
+    Returns ``(body, content_disposition)``: the backend chose the filename (from
+    the job id, never anything candidate-derived), so the Flask route passes it
+    through rather than re-deriving it. A 409 (not ready, expired, file gone) is
+    a ``Conflict``.
+    """
+    response = _request("POST", f"/resume-exports/{export_id}/download", client=client)
+    return response.content, response.headers.get("content-disposition", "")
+
+
+def get_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """GET /resume-splits/{id} -- the review view (status, proposal, diagnostics)."""
+    return _request("GET", f"/resume-splits/{split_id}", client=client).json()
+
+
+def correct_resume_split(
+    split_id: UUID,
+    *,
+    proposal_version: int,
+    applicants: list[dict[str, Any]],
+    ignored_pages: list[int],
+    client: httpx.Client | None = None,
+) -> Any:
+    """POST /resume-splits/{id}/correct -- replace the proposal. A stale
+    ``proposal_version`` surfaces as :class:`Conflict`."""
+    response = _request(
+        "POST",
+        f"/resume-splits/{split_id}/correct",
+        json={
+            "proposal_version": proposal_version,
+            "applicants": applicants,
+            "ignored_pages": ignored_pages,
+        },
+        client=client,
+    )
+    return response.json()
+
+
+def accept_resume_split(
+    split_id: UUID, *, proposal_version: int, client: httpx.Client | None = None
+) -> Any:
+    """POST /resume-splits/{id}/accept -- slice, ingest and return the
+    ``ResumeUploadResult[]`` rows."""
+    response = _request(
+        "POST",
+        f"/resume-splits/{split_id}/accept",
+        json={"proposal_version": proposal_version},
+        client=client,
+    )
+    return response.json()
+
+
+def discard_resume_split(split_id: UUID, *, client: httpx.Client | None = None) -> Any:
+    """POST /resume-splits/{id}/discard."""
+    return _request("POST", f"/resume-splits/{split_id}/discard", client=client).json()

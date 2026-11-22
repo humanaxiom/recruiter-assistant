@@ -148,7 +148,8 @@ def looks_like_combined_export(data: bytes, mime: str) -> str | None:
             f"this PDF has {page_count} pages and {contributing_pages} distinct "
             "applicant emails in the first lines of its pages — it looks like a "
             "combined Taleo export, not one résumé; split it first with "
-            "scripts/split-taleo.sh and upload the per-applicant files"
+            '"Split a combined Taleo export" on the job page, then review and '
+            "accept the per-applicant files"
         )
     finally:
         try:

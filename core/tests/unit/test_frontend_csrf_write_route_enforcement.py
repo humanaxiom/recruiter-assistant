@@ -207,6 +207,10 @@ def test_the_hook_exemption_set_is_exactly_the_one_shot_routes() -> None:
             # matter more, not less -- a session-wide page token would let one
             # forged submit fetch ANY candidate's file.
             "resume_document",
+            # The job's résumé export ZIP: same rule as resume_document, its
+            # own one-shot token in an action="export" slot bound to the
+            # export id, because it discloses every candidate's file at once.
+            "export_download",
         }
     ), (
         "the CSRF hook's exemption set changed. Every exemption is a route "

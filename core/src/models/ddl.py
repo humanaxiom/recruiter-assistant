@@ -448,12 +448,110 @@ _STATEMENTS: tuple[str, ...] = (
     # re-queued forever, burning an LLM pass each time on a peer shared with
     # other systems.
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER",
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS reparse_requested_at TIMESTAMPTZ",
     # Powers the per-job status breakdown's ``withdrawn`` bucket and any
     # "excluded résumés" listing — partial so it only indexes the rare
     # withdrawn rows.
     """
     CREATE INDEX IF NOT EXISTS resumes_withdrawn_idx ON resumes (job_id)
         WHERE withdrawn_at IS NOT NULL
+    """,
+    # ── resume_split_requests (in-app Taleo combined-export split) ───────────
+    # One row per uploaded combined export awaiting segmentation / review.
+    # ``consent_acknowledged`` is NOT NULL with NO default on purpose: the one
+    # writer (split_request_service.create) always supplies it, and a row that
+    # cannot say whether consent was given must not exist. Every column that a
+    # later state machine step sets is nullable or defaulted so the first real
+    # INSERT (queued) succeeds. ``proposal`` is pgp_sym_encrypt ciphertext
+    # (page assignments + manager-corrected names are PII-adjacent).
+    # ``source_blob_key`` and ``proposal`` are NULLed on every terminal state.
+    """
+    CREATE TABLE IF NOT EXISTS resume_split_requests (
+        id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        job_id               UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        status               TEXT NOT NULL DEFAULT 'queued'
+                             CHECK (status IN ('queued', 'segmenting', 'proposed',
+                                               'accepted', 'discarded', 'failed')),
+        source_blob_key      TEXT,
+        source_sha256        TEXT NOT NULL,
+        source_filename      TEXT,
+        page_count           INTEGER,
+        proposal             BYTEA,
+        proposal_version     INTEGER NOT NULL DEFAULT 0,
+        diagnostics          JSONB,
+        method               TEXT CHECK (method IN ('llm', 'heuristic')),
+        fallback_reason      TEXT,
+        failure_reason       TEXT,
+        consent_acknowledged BOOLEAN NOT NULL,
+        created_by           TEXT,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        accepted_by          TEXT,
+        accepted_at          TIMESTAMPTZ,
+        ingest_result        JSONB
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_split_requests_job_idx
+        ON resume_split_requests (job_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_split_requests_status_idx
+        ON resume_split_requests (status, updated_at)
+    """,
+    # source_filename may carry a candidate's name, so every terminal state NULLs
+    # it; the column was NOT NULL on volumes created before that rule.
+    "ALTER TABLE resume_split_requests ALTER COLUMN source_filename DROP NOT NULL",
+    # ── resume_export_requests (résumé export as a background job) ───────────
+    # One row per requested as-is + anonymized ZIP. ``requested_by`` is the CAS
+    # username (text, not an FK: an API-key caller has no users row). The built
+    # ZIP holds every applicant's identity, so ``blob_key`` is NULLed the moment
+    # the row turns expired or failed (the hourly sweep enforces it; the doctor
+    # checks it). ``counts`` carries numbers only, never a name.
+    """
+    CREATE TABLE IF NOT EXISTS resume_export_requests (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        job_id       UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        requested_by TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'queued'
+                     CHECK (status IN ('queued', 'building', 'ready',
+                                       'failed', 'expired')),
+        blob_key     TEXT,
+        counts       JSONB,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at   TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_export_requests_job_idx
+        ON resume_export_requests (job_id, requested_by, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS resume_export_requests_status_idx
+        ON resume_export_requests (status, expires_at)
+    """,
+    # The job's blind_review AT BUILD TIME. Nullable on purpose: NULL means the
+    # row was built before the column existed, and the download treats it as
+    # "not blind" (so a job that has since gone blind refuses the file).
+    "ALTER TABLE resume_export_requests ADD COLUMN IF NOT EXISTS blind_review BOOLEAN",
+    # One live (queued/building) export per job and requester: a second click
+    # returns that row instead of building twice. Rows that already break the
+    # rule (a double click before this index existed) are failed first, newest
+    # kept, or the index could not be created.
+    """
+    UPDATE resume_export_requests SET status = 'failed', blob_key = NULL
+    WHERE status IN ('queued', 'building')
+      AND id NOT IN (
+          SELECT DISTINCT ON (job_id, requested_by) id
+          FROM resume_export_requests
+          WHERE status IN ('queued', 'building')
+          ORDER BY job_id, requested_by, created_at DESC, id
+      )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS resume_export_requests_live_idx
+        ON resume_export_requests (job_id, requested_by)
+        WHERE status IN ('queued', 'building')
     """,
     # ── shortlist_entries ────────────────────────────────────────────────────
     """

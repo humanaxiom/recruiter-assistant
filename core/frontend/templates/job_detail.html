@@ -396,6 +396,79 @@
   {% endif %}
 
   {% if is_writer %}
+  <h3>Export résumés</h3>
+  <form action="{{ url_for('export_start', job_id=job.id) }}" method="post"
+        style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <button class="btn" type="submit">Export résumés (as-is + anonymized)</button>
+  </form>
+  {% if export_latest %}
+  <p class="hint">Your latest export:
+    <strong data-export-status="{{ export_latest.status }}">{{ export_latest.status }}</strong>
+    {% if export_latest.counts and export_latest.counts.applicants is not none %}
+    ({{ export_latest.counts.applicants }} applicants,
+    {{ export_latest.counts.anonymized }} anonymized)
+    {% endif %}
+    {% if export_latest.status in ('queued', 'building') %}
+    &mdash; it is built in the background; refresh to see it.
+    {% elif export_latest.status == 'failed' %}
+    &mdash; the build failed; start it again.
+    {% elif export_latest.status == 'expired' %}
+    &mdash; it expired; start it again.
+    {% endif %}
+  </p>
+  {% if export_latest.status == 'ready' and export_csrf_token %}
+  <form action="{{ url_for('export_download', export_id=export_latest.id) }}"
+        method="post" style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{ export_csrf_token }}">
+    <input type="hidden" name="job_id" value="{{ job.id }}">
+    <button class="btn btn-secondary" type="submit">Download the export (audited)</button>
+  </form>
+  <p class="hint">Contains every applicant's file. Do not forward the as-is
+    folder to blind reviewers. Deleted after it expires.</p>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+
+  {% if is_writer %}
+  <h3>Split a combined Taleo export</h3>
+  <form action="{{ url_for('split_upload', job_id=job.id) }}" method="post"
+        enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <div class="form-group">
+      <label class="label" for="split-files">Combined Taleo export(s) — PDF</label>
+      <input class="input" id="split-files" name="files" type="file" multiple
+             accept=".pdf,application/pdf">
+      <p class="hint">One PDF holding many applicants. You review how it was
+        divided before anything is imported.</p>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="split_consent_acknowledged"
+             name="consent_acknowledged" value="true" required>
+      <label class="label" for="split_consent_acknowledged" style="margin:0">
+        I confirm the candidates consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Split export</button>
+    </div>
+  </form>
+  {% if pending_splits %}
+  <h4>Pending splits</h4>
+  <ul>
+    {% for s in pending_splits %}
+    <li>
+      <a href="{{ url_for('split_review', split_id=s.id) }}">Review split</a>
+      · {{ s.status }}
+      {% if s.page_count %} · {{ s.page_count }} page(s){% endif %}
+      {% if s.created_at %} · {{ s.created_at }}{% endif %}
+      {% if s.source_filename %} · {{ s.source_filename }}{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+
+  {% if is_writer %}
   <h3>Import candidate roster (Taleo)</h3>
   <form action="{{ url_for('upload_candidate_roster', job_id=job.id) }}"
         method="post" enctype="multipart/form-data">

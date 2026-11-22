@@ -39,6 +39,7 @@ from src.worker.main import WorkerSettings, startup
 from src.worker.manager_prompt_task import extract_manager_prompt
 from src.worker.matching_tasks import reverse_match_job, shortlist_job
 from src.worker.resume_tasks import parse_resume
+from src.worker.split_tasks import segment_taleo_export
 from src.worker.taleo_sync_task import sync_taleo_jobs
 from src.worker.tasks import parse_job
 
@@ -135,6 +136,8 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
     replaces, which a change that dropped Phase 3's two tasks would still
     fail.
     """
+    from src.worker.export_tasks import build_resume_export  # RED: not yet there
+
     assert WorkerSettings.functions == [
         parse_job,
         parse_resume,
@@ -153,6 +156,11 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         # ``status = 'draft'``, so on an open requisition -- the case editing a
         # note exists for -- it would have done nothing and reported success.
         extract_manager_prompt,
+        # In-app Taleo split: enqueued by name from the split-upload route.
+        segment_taleo_export,
+        # Résumé export (as-is + anonymized ZIP) as a background job: enqueued by
+        # name from POST /jobs/{id}/resumes/exports.
+        build_resume_export,
         # Interview-question generator S2. Enqueued by name from
         # ``POST /shortlist/{entry_id}/interview-questions`` with ids only.
         # Imported inside a helper so a missing module fails THIS test, not
