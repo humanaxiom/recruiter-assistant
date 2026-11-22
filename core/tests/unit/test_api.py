@@ -147,6 +147,9 @@ _PHASE_6_ROUTES: frozenset[str] = frozenset(
         # of the shortlist routes.
         "/jobs/{job_id}/shortlist/status",
         "/shortlist/{entry_id}",
+        # Interview-question generator S2 -- POST (enqueue, admin+recruiter) and GET
+        # (poll, all roles, row-scoped) share this one path on the shortlist router.
+        "/shortlist/{entry_id}/interview-questions",
         # FU-5 slice 6 (ADR-019 §10) — src.api.routes.auth, mounted with
         # prefix="/auth" per test_route_auth.py's locked contract.
         "/auth/cas/login",

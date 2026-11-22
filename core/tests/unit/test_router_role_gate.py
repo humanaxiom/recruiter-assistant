@@ -61,6 +61,7 @@ _KNOWN_BUSINESS_PATHS: tuple[str, ...] = (
     "/jobs/{job_id}/shortlist",
     "/jobs/{job_id}/shortlist/export",
     "/shortlist/{entry_id}",
+    "/shortlist/{entry_id}/interview-questions",
     "/audit/reveals-legacy",
     "/jobs/{job_id}/assignees",
     "/jobs/{job_id}/assignees/{user_id}",

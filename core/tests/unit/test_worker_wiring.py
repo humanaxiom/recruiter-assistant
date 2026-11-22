@@ -153,7 +153,18 @@ def test_worker_registers_the_parse_and_matching_tasks() -> None:
         # ``status = 'draft'``, so on an open requisition -- the case editing a
         # note exists for -- it would have done nothing and reported success.
         extract_manager_prompt,
+        # Interview-question generator S2. Enqueued by name from
+        # ``POST /shortlist/{entry_id}/interview-questions`` with ids only.
+        # Imported inside a helper so a missing module fails THIS test, not
+        # the collection of every worker-wiring test in the file.
+        _generate_interview_questions(),
     ]
+
+
+def _generate_interview_questions() -> Any:
+    from src.worker.interview_tasks import generate_interview_questions
+
+    return generate_interview_questions
 
 
 # ── F3 (LOW, round 3) — empty PII_KEY must fail startup loud ────────────────

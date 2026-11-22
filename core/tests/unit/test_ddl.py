@@ -71,6 +71,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "audit_log",
         "sessions",
         "job_assignees",
+        "interview_questions",
     }
 )
 
