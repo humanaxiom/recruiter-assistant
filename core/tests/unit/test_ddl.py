@@ -77,6 +77,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         # A requested résumé export (as-is + anonymized ZIP), built by the
         # worker and held until expires_at.
         "resume_export_requests",
+        "interview_questions",
     }
 )
 

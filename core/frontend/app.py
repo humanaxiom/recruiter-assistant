@@ -2050,7 +2050,57 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
     # The template is handed the VALIDATED DTO (or the coerced header), never
     # the raw payload -- so a field the backend should not have sent has no
     # route to the page at all.
-    return render_template("shortlist_entry.html", entry=entry, explanation=explanation)
+    return render_template(
+        "shortlist_entry.html",
+        entry=entry,
+        explanation=explanation,
+        iq=_fetch_interview_questions(entry_id),
+        entry_id=entry_id,
+    )
+
+
+def _fetch_interview_questions(entry_id: UUID) -> dict[str, Any]:
+    """The panel's state, tolerant: any failure degrades to ``unavailable``
+    (never ``none``, which would offer a Generate form) so the
+    entry page itself never breaks on the questions fetch."""
+    try:
+        raw = api_client.get_interview_questions(entry_id)
+    except api_client.BackendError:
+        return {"status": "unavailable"}
+    return raw if isinstance(raw, dict) else {"status": "none"}
+
+
+@app.get("/shortlist/<uuid:entry_id>/interview-questions-panel")
+def interview_questions_panel(entry_id: UUID) -> Any:
+    try:
+        raw = api_client.get_interview_questions(entry_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BackendError:
+        return render_template(
+            "_interview_questions_panel.html",
+            iq={"status": "unavailable"},
+            entry_id=entry_id,
+        )
+    iq = raw if isinstance(raw, dict) else {"status": "none"}
+    return render_template("_interview_questions_panel.html", iq=iq, entry_id=entry_id)
+
+
+@app.post("/shortlist/<uuid:entry_id>/interview-questions")
+def request_interview_questions(entry_id: UUID) -> Any:
+    """Enqueue question generation, then PRG back to the entry page. Ordinary
+    page-token CSRF (shared budget; no per-card one-shot token)."""
+    try:
+        api_client.request_interview_questions(entry_id)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.Conflict:
+        flash("Interview questions are already being generated for this entry.")
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("shortlist_entry_detail", entry_id=entry_id))
 
 
 def _render_resume_detail(

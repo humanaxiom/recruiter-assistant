@@ -29,6 +29,8 @@ _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "src" / "prompts" / "temp
 
 EXPECTED_PROMPT_NAMES: tuple[str, ...] = (
     "cover_letter_v1",
+    # Interview questions for a shortlisted candidate's evidence gaps.
+    "interview_questions_v1",
     # v1 is SUPERSEDED but must stay on disk. ``prompt_version`` is written into
     # the Neo4j job projection, so every job parsed before 2026-09-03 carries
     # ``jd_extract_v1``; deleting the file would make that stamp unresolvable.

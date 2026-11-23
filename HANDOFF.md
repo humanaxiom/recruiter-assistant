@@ -8,46 +8,53 @@ lessons lists verbatim, is archived at
 
 ---
 
-### 1. Start here — `feat/taleo-inapp-split` (worktree `C:\repos\ra-taleo-split`)
+### 1. Start here — `feat/interview-questions` (worktree `C:\repos\ra-interview-q`)
 
-**State, 2026-11-21.** PR #112, open; main (with #110) merged in.
+**State, 2026-11-22.** Built, **not merged, PR not opened.** Feature 3, the
+interview-question generator, for a candidate's shortlist entry page.
 
 **Done:**
-- **In-app split of a combined Taleo export.** Upload → model segmentation
-  (heuristic fallback) → recruiter review (correct, accept or discard) → each
-  accepted applicant is ingested as a résumé file and a cover-letter file,
-  through the same `ingest_files` path as ordinary uploads. Pure logic:
-  `core/src/services/taleo_split_service.py`. State machine:
-  `split_request_service.py`. Routes: `core/src/api/routes/resume_splits.py`.
-  Decision record: ADR-017, amendment 2026-11-21.
-- **Résumé export.** A background arq job builds a ZIP with `as-is/` and
-  `anonymized/`. The anonymized copy is a **rebuilt, text-only PDF**, not an
-  in-place redaction, because in-place redaction leaked through images, links,
-  annotations, XMP, layers and ActualText. Pipeline: extract → redact → verify
-  → render → re-extract → verify; it refuses scanned pages, a missing name
-  vouch, other scripts and letters it cannot draw. Blind-review jobs omit
-  `as-is/`. Routes: `POST /jobs/{job_id}/resumes/exports` (202),
-  `GET /jobs/{job_id}/resumes/exports/latest`, `GET /resume-exports/{id}`,
-  `POST /resume-exports/{id}/download` (requester only, one-shot CSRF token,
-  `no-store`, audit row with counts only). Caps: TTL 60 min, 500 applicants,
-  20 pages per file; over the cap, the manifest records how many were left
-  out. Hourly `expire_resume_exports` cron. Doctor invariants
-  `pg.export_rows_retain_blob` and `pg.export_ready_past_expiry`.
-- Nothing here egresses. `TALEO_ENABLED` is unrelated.
+- **S1, pure layer:** `core/src/services/interview_questions.py` (gap selection,
+  evidence-cliff refusal, scrub, filter, prompt input is gaps only).
+- **S2, table and worker:** `interview_questions` table;
+  `core/src/services/interview_question_service.py` (atomic claim, settle);
+  `core/src/worker/interview_tasks.py`; routes in
+  `core/src/api/routes/shortlist.py` (`POST` 202 claim-and-enqueue, `GET` read);
+  audit action `generate_interview_questions`.
+- **S3, panel:** `core/frontend/templates/_interview_questions_panel.html`,
+  included from `shortlist_entry.html`.
+- Three review rounds done. No ADR (fails the ADR bar); the reasoning is in the
+  module docstrings and commit messages.
+- Merged, for reference: the in-app Taleo split and résumé export (#110, #112).
+  Details: ADR-017 amendment 2026-11-21, ADR-011 amendment, and
+  [docs/archive/](docs/archive/).
 
-**Hand-over results:**
-- `smoke.sh`: **10 passed** against the isolated `recruiter-stress` stack in
-  stub-LLM mode. The real-model smoke run **did not complete**: it timed out at
-  900 s on parse while gb10 was contended.
-- `doctor.sh`: only `deploy.auth_disabled`, expected with CAS off.
-- By-hand drive on the real model: split, accept, export and download all
-  worked, with no leaks and no 500s.
+**Hand-over results (2026-11-22, isolated `recruiter-stress` stack at 1442d0f, CAS off, 127.0.0.1):**
 
-**Not done:** F1/F2 (ROADMAP §5, under the split item), and the anonymizer and
-export residuals recorded beside it.
+- `smoke.sh` on the real model: 10 ERROR at setup — the 3 fixture résumés were
+  still parsing at the 900s wait (gb10 shared with a foreign `gpt-oss:120b`).
+  Contention, not this branch. Re-run on the stub (`LLM_BASE_URL=http://llmstub:8000/v1`):
+  `10 passed in 16.28s`.
+- `doctor.sh`: one finding, `deploy.auth_disabled` — expected on this stack.
+- By hand (curl through Flask, page CSRF token, polling the panel fragment):
+  - stub, all evidence `met`: Generate → 302 → pending (polls every 3s) →
+    "no gaps to probe" + Retry; row `refused|no_gaps`. Audit row details
+    `{"model": "gpt-oss:20b", "prompt_version": "interview_questions_v1"}` only.
+  - real `gpt-oss:20b` on gb10, Kubernetes `partial` (quote holds the
+    candidate's name and phone) + AWS `missing` set by SQL: ready in ~21s (worker
+    18.17s), one question per gap, no name or phone in either.
+  - blind OFF, evidence changed → "evidence has changed" + Regenerate →
+    regenerated non-blind set (3 groups) → blind ON → "This job is now blind
+    review… hidden" + Regenerate. Row `blind_review=f`.
+  - Not driven: `llm_unavailable` / `stalled` (covered by integration tests only).
 
-**Next step, exactly:** merge PR #112 (user's call); then features
-3 (interview-question generator), 2, 4, 5.
+**Not done:** S4, the model-check profile for `interview_questions_v1`. It is
+not measured: gb10 has been contended by a foreign `gpt-oss:120b` all session.
+The call uses `REASONING_JSON_MIN_TOKENS=8192` (`interview_questions.py:413`),
+which is unmeasured for this prompt. Residuals are recorded under ROADMAP §5.
+
+**Next step, exactly:** finish hand-over, open the PR, then S4 when gb10 is
+uncontended, then features 2, 4, 5.
 
 **Before this reaches the pilot box (CAS on):** the rule in §3 applies. `smoke.sh`
 cannot run there, so the obligation is `doctor.sh` plus a by-hand drive signed

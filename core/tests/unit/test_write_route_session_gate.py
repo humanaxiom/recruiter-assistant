@@ -116,6 +116,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/resumes/{resume_id}/document"),
     ("POST", "/resumes/{resume_id}/match-jobs"),
     ("POST", "/jobs/{job_id}/shortlist"),
+    # Interview-question generator S2 -- enqueues LLM work about a named candidate
+    # and writes an audit row, so it is a writer-gated write like the shortlist
+    # generate above.
+    ("POST", "/shortlist/{entry_id}/interview-questions"),
     ("POST", "/jobs/{job_id}/assignees"),
     ("DELETE", "/jobs/{job_id}/assignees/{user_id}"),
     # D1 = option C — the audited reveal of a withheld audit_log detail. A

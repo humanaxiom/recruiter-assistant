@@ -41,6 +41,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "outbox",
         "users",
         "audit_log",
+        "interview_questions",
     }
 )
 
