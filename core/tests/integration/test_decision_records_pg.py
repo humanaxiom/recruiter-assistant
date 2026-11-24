@@ -143,8 +143,10 @@ async def _count(pool: asyncpg.Pool, job_id: UUID, resume_id: UUID) -> int:
 
 
 def _user(*, role: str = "recruiter", name: str = "alice") -> User:
+    # A stable id per name, so the same reviewer is the same user on every call
+    # (and _ensure_user can create the row audit_log's actor FK requires).
     return User(
-        id=uuid.uuid4(),
+        id=uuid.uuid5(uuid.NAMESPACE_URL, f"decision-test-user:{name}"),
         cas_username=name,
         display_name=name,
         email=None,
@@ -231,8 +233,27 @@ async def _record(
     body = _schemas().DecisionIn.model_validate(
         {"decision": decision, "rationale": rationale}
     )
+    who = user or _user()
     async with pool.acquire() as conn:
-        return await _svc().record(conn, entry=entry, user=user or _user(), body=body)
+        await _ensure_user(conn, who)
+        return await _svc().record(conn, entry=entry, user=who, body=body)
+
+
+_DEV_SENTINEL_ID = UUID("00000000-0000-0000-0000-000000000000")
+
+
+async def _ensure_user(conn: asyncpg.Connection, user: User) -> None:
+    """A real (non-sentinel) reviewer is audited with ``actor_user_id``, a real
+    FK to ``users`` -- so the row has to exist, as it does for a signed-in user."""
+    if user.id == _DEV_SENTINEL_ID:
+        return
+    await conn.execute(
+        "INSERT INTO users (id, cas_username, display_name, email, role) "
+        "VALUES ($1, $2, $2, NULL, $3) ON CONFLICT DO NOTHING",
+        user.id,
+        user.cas_username,
+        user.role,
+    )
 
 
 # -- the table -------------------------------------------------------------

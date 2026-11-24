@@ -120,6 +120,10 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # and writes an audit row, so it is a writer-gated write like the shortlist
     # generate above.
     ("POST", "/shortlist/{entry_id}/interview-questions"),
+    # Human decision record -- an audited accept/reject/hold about a real
+    # person; session-gated like the writes above, but its decider set also
+    # includes an ASSIGNED hiring manager (row scope via get_one).
+    ("POST", "/shortlist/{entry_id}/human-decisions"),
     ("POST", "/jobs/{job_id}/assignees"),
     ("DELETE", "/jobs/{job_id}/assignees/{user_id}"),
     # D1 = option C — the audited reveal of a withheld audit_log detail. A
