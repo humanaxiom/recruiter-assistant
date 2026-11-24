@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job page redesign mockups</title>
+<link rel="stylesheet" href="../../../core/frontend/static/app.css">
+<style>
+/* mockup-only styles; everything else comes from app.css */
+body{padding-bottom:60px}
+.mock-bar{background:#0f172a;color:#fff;padding:10px 0;position:sticky;top:0;z-index:50}
+.mock-bar .container{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.mock-bar b{margin-right:6px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center}
+.seg span.lbl{font-size:12px;color:#94a3b8;margin:0 2px 0 8px}
+.seg button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer}
+.seg button.on{background:#2563eb;color:#fff;border-color:#2563eb}
+.note{background:#fef9c3;border:1px solid #facc15;color:#713f12;font-size:13px;border-radius:6px;padding:6px 10px;margin:8px 0}
+.note::before{content:"\1F4A1  "}
+.opt{display:none}
+body[data-opt=A] #optA,body[data-opt=B] #optB,body[data-opt=C] #optC{display:block}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row.sp{justify-content:space-between}
+.grow{flex:1 1 220px;min-width:0}
+h1.t{margin:0;font-size:22px}h2.s{font-size:17px;margin:0 0 8px}h3.s{font-size:15px;margin:0 0 6px}
+.stepper{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0;padding:0;list-style:none;font-size:13px}
+.stepper li{padding:3px 12px;border-radius:999px;background:#f1f5f9;color:#64748b}
+.stepper li.done{background:#dcfce7;color:#15803d}
+.stepper li.cur{background:var(--primary);color:#fff;font-weight:600}
+.stepper li+li::before{content:"\2192";margin-right:8px;color:#94a3b8}
+.stepper li.cur::before,.stepper li.done::before{color:inherit}
+.tabs{display:flex;gap:2px;border-bottom:2px solid var(--border);margin:16px 0;overflow-x:auto}
+.tabs button{background:none;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;padding:9px 14px;font-size:14px;cursor:pointer;color:var(--muted);white-space:nowrap}
+.tabs button.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.panel{display:none}
+body[data-tab=overview] #p-overview,body[data-tab=candidates] #p-candidates,body[data-tab=requirements] #p-requirements,body[data-tab=shortlist] #p-shortlist,body[data-tab=settings] #p-settings{display:block}
+body[data-view=hm] .writer,body[data-view=hm] .tabs button[data-t=settings]{display:none}
+body[data-state=parsing] .when-open{display:none}
+body[data-state=open] .when-parsing{display:none}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
+.stat b{display:block;font-size:24px}.stat span{font-size:12px;color:var(--muted)}
+.check{list-style:none;padding:0;margin:0}.check li{padding:6px 0;border-bottom:1px solid var(--border);font-size:14px}
+.check li:last-child{border:0}.check .ok::before{content:"\2713  ";color:#15803d}.check .todo::before{content:"\25CB  ";color:#64748b}
+.menu{position:relative;display:inline-block}
+.menu>div{display:none;position:absolute;right:0;top:100%;z-index:20;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 6px 18px rgba(0,0,0,.12);padding:8px;min-width:240px}
+.menu.open>div{display:block}
+.menu a{display:block;padding:6px 8px;font-size:14px;color:var(--text);text-decoration:none;border-radius:6px}.menu a:hover{background:var(--bg)}
+.drawer{display:none}.drawer.open{display:block}
+.intake{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:1000px){.intake{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.intake{grid-template-columns:1fr}.container{padding:0 14px}}
+.intake .card{margin:0;display:flex;flex-direction:column;gap:8px;font-size:13px}
+.intake .card h3{margin:0;font-size:14px}.intake .when{color:var(--muted);font-size:12.5px;margin:0}
+.intake .num{display:inline-block;background:var(--primary);color:#fff;border-radius:50%;width:20px;height:20px;text-align:center;font-size:12px;line-height:20px;margin-right:6px}
+.intake .card .btn{align-self:flex-start;margin-top:auto}
+.tblwrap{overflow-x:auto}
+.cands{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.cands .card{margin:0;padding:12px;font-size:13px}
+.blind{background:#eff6ff;border:1px solid #bfdbfe;border-radius:var(--radius);padding:8px 12px;font-size:13px;margin-bottom:12px}
+.empty{text-align:center;padding:30px 16px;color:var(--muted);border:2px dashed var(--border);border-radius:var(--radius)}
+.danger{border-color:#fecaca}
+.rail{display:grid;grid-template-columns:200px 1fr;gap:20px}
+@media(max-width:700px){.rail{grid-template-columns:1fr}}
+.rail ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+@media(max-width:700px){.rail ol{flex-direction:row;flex-wrap:wrap}}
+.rail li button{width:100%;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px;cursor:pointer;font-size:14px}
+.rail li button.on{border-color:var(--primary);box-shadow:0 0 0 2px #bfdbfe}
+.rail li small{display:block;color:var(--muted);font-size:12px}
+.rail li.done button small::before{content:"\2713 ";color:#15803d}
+.bstep{display:none}
+body[data-step="1"] #b1,body[data-step="2"] #b2,body[data-step="3"] #b3,body[data-step="4"] #b4{display:block}
+.sticky{position:sticky;top:44px;z-index:10;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.sticky a{padding:4px 12px;border:1px solid var(--border);border-radius:999px;background:var(--surface);font-size:13px;color:var(--text);text-decoration:none}
+.sec-h{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--border);padding-bottom:4px;margin:28px 0 12px}
+details.fold{margin-bottom:12px}details.fold summary{cursor:pointer;font-weight:600}
+</style>
+</head>
+<body data-opt="A" data-tab="overview" data-view="rec" data-state="open" data-step="2">
+
+<div class="mock-bar"><div class="container">
+  <b>Job page redesign</b>
+  <span class="seg" data-key="opt">
+    <button data-v="A" class="on">A &middot; Workspace tabs (recommended)</button>
+    <button data-v="B">B &middot; Guided steps</button>
+    <button data-v="C">C &middot; Tidy single page</button>
+  </span>
+</div></div>
+
+<div class="nav"><div class="container nav-inner">
+  <span class="nav-logo">recruiter-assistant</span>
+  <span class="nav-links"><a href="#">Jobs</a> <a href="#">Access record</a> <span class="nav-user">mockup-user (recruiter)</span></span>
+</div></div>
+
+<main class="container">
+
+<!-- ======================= OPTION A ======================= -->
+<section class="opt" id="optA">
+  <div class="note">Idea: one persistent header + one primary action; the 15 stacked sections become 5 tabs. Use the switches below to see states and roles.</div>
+  <div class="row" style="margin:8px 0">
+    <span class="seg" data-key="view"><span class="lbl">View as:</span><button data-v="rec" class="on">Recruiter</button><button data-v="hm">Hiring manager</button></span>
+    <span class="seg" data-key="state"><span class="lbl">State:</span><button data-v="parsing">Parsing</button><button data-v="open" class="on">Open</button></span>
+  </div>
+
+  <div class="card">
+    <div class="row sp">
+      <div class="grow">
+        <h1 class="t">Admissions Coordinator <span class="pill pill-open when-open">open</span><span class="pill pill-parsing when-parsing">parsing&hellip;</span></h1>
+        <div class="muted">Student Services &middot; Burnaby (BBY) &middot; <a href="#">Taleo req 7483 &#8599;</a></div>
+      </div>
+      <div class="writer">
+        <button class="btn btn-primary when-open" onclick="go('candidates');openPanel(1)">Add candidates</button>
+        <button class="btn btn-primary when-parsing" disabled>Waiting for parse&hellip;</button>
+      </div>
+      <div class="hm-only muted" style="display:none">Read-only for your role</div>
+    </div>
+    <ul class="stepper">
+      <li class="done">Draft</li><li class="done when-open">Parsed</li><li class="cur when-parsing">Parsed</li>
+      <li class="cur when-open">Open</li><li class="when-parsing">Open</li><li>Closed</li>
+    </ul>
+    <div class="note">Next-action button follows state: Parsing &rarr; disabled "Waiting for parse"; Parsed &rarr; "Open for applicants"; Open &rarr; "Add candidates"; Ranked &rarr; "View shortlist". Hiring managers get "View shortlist" only.</div>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button data-t="overview" class="on">Overview</button>
+    <button data-t="candidates">Candidates <span class="pill pill-gray">24</span></button>
+    <button data-t="requirements">Requirements</button>
+    <button data-t="shortlist">Shortlist</button>
+    <button data-t="settings">Settings</button>
+  </div>
+
+  <!-- Overview -->
+  <div class="panel" id="p-overview">
+    <div class="stats">
+      <div class="stat"><b>24</b><span>received</span></div>
+      <div class="stat"><b>21</b><span>parsed</span></div>
+      <div class="stat"><b style="color:#b91c1c">2</b><span>failed</span></div>
+      <div class="stat"><b>1</b><span>parsing</span></div>
+      <div class="stat"><b>Ready</b><span>shortlist (top 5)</span></div>
+      <div class="stat"><b>3 / 5</b><span>decisions recorded</span></div>
+    </div>
+    <div class="card">
+      <h2 class="s">What to do next</h2>
+      <ul class="check">
+        <li class="ok">Job description parsed (12 requirements)</li>
+        <li class="ok">Hiring manager assigned: Manager Example</li>
+        <li class="ok">24 r&eacute;sum&eacute;s received</li>
+        <li class="todo writer">Review 2 failed r&eacute;sum&eacute;s &mdash; <a href="#" onclick="go('candidates');return false">Candidates</a></li>
+        <li class="todo writer">Review proposed Taleo split (3 pending) &mdash; <a href="#" onclick="go('candidates');openPanel(1);return false">Add candidates</a></li>
+        <li class="todo">Record decisions on the shortlist (2 left) &mdash; <a href="#" onclick="go('shortlist');return false">Shortlist</a></li>
+      </ul>
+      <div class="note">Hiring-manager view keeps only the checklist items that are theirs.</div>
+    </div>
+  </div>
+
+  <!-- Candidates -->
+  <div class="panel" id="p-candidates">
+    <div class="empty when-parsing"><b>No candidates yet</b><p>You can add candidates once the job is open. The description is still being parsed (about 5 minutes).</p><button class="btn btn-secondary btn-sm" onclick="setKey('state','open')">Refresh status</button></div>
+    <div class="when-open">
+      <div class="row sp" style="margin-bottom:12px">
+        <div class="filter-row" style="margin:0"><a class="active" href="#">All 24</a><a href="#">Parsed 21</a><a href="#">Parsing 1</a><a href="#">Failed 2</a><a href="#">Withdrawn 0</a></div>
+        <div class="row writer">
+          <button class="btn btn-primary btn-sm" onclick="togglePanel(1)">Add candidates &#9662;</button>
+          <span class="menu" id="exp"><button class="btn btn-secondary btn-sm" onclick="document.getElementById('exp').classList.toggle('open')">Export &#9662;</button>
+            <div><a href="#">As-is ZIP</a><a href="#">Anonymized ZIP (blind review)</a><p class="hint" style="padding:4px 8px">Last export: anonymized, 2 days ago, 24 r&eacute;sum&eacute;s</p></div></span>
+        </div>
+      </div>
+      <div class="note writer">Add candidates and Export are hidden for hiring managers and auditors (no intake, no export).</div>
+
+      <div class="drawer writer card" id="intake1" style="background:#f8fafc">
+        <div class="row sp"><h2 class="s">Add candidates &mdash; choose how your candidates arrive</h2><button class="btn btn-secondary btn-sm" onclick="togglePanel(0)">Close</button></div>
+        <div class="note">Four cards, one per source, each with a one-line "use this when". Replaces the single long upload form + buried split + roster import.</div>
+        <div class="intake">
+          <div class="card"><h3><span class="num">1</span>One r&eacute;sum&eacute;</h3><p class="when">Use when a single candidate emailed you their file.</p>
+            <label class="label">R&eacute;sum&eacute; (PDF/DOCX)</label><input class="input" type="file">
+            <label class="label">Cover letter (optional)</label><input class="input" type="file">
+            <textarea class="textarea input" rows="2" placeholder="&hellip;or paste cover letter text"></textarea>
+            <label class="checkbox-row"><input type="checkbox"> Consent acknowledged</label>
+            <button class="btn btn-primary btn-sm">Upload r&eacute;sum&eacute;</button></div>
+          <div class="card"><h3><span class="num">2</span>Many r&eacute;sum&eacute;s (.zip)</h3><p class="when">Use when you have a folder of separate files.</p>
+            <label class="label">ZIP of r&eacute;sum&eacute;s</label><input class="input" type="file">
+            <label class="label">Pairing manifest (optional)</label><input class="input" type="file">
+            <p class="hint">Pairs each r&eacute;sum&eacute; with its cover letter by file name.</p>
+            <label class="checkbox-row"><input type="checkbox"> Consent acknowledged</label>
+            <button class="btn btn-primary btn-sm">Upload ZIP</button></div>
+          <div class="card"><h3><span class="num">3</span>Taleo export PDF</h3><p class="when">Use for the one combined PDF HR downloads from Taleo.</p>
+            <label class="label">Combined PDF</label><input class="input" type="file">
+            <p class="hint">We split it into candidates, then you confirm the split.</p>
+            <button class="btn btn-primary btn-sm">Split into candidates</button>
+            <a class="btn btn-secondary btn-sm" href="#" style="text-align:center">Review proposed split (3 pending)</a></div>
+          <div class="card"><h3><span class="num">4</span>Taleo roster (CSV)</h3><p class="when">Use to enrich candidates already added (internal status, etc.). <b>Adds no r&eacute;sum&eacute;s.</b></p>
+            <label class="label">Roster CSV</label><input class="input" type="file">
+            <p class="hint">Last import: 21 of 24 matched.</p>
+            <button class="btn btn-secondary btn-sm">Import roster</button></div>
+        </div>
+      </div>
+
+      <div class="blind writer">Blind review is <b>on</b>: hiring managers see anonymised labels. Recruiters see names below.</div>
+      <div class="tblwrap"><table class="table">
+        <tr><th>Candidate</th><th>Source</th><th>Status</th><th>Taleo status</th><th></th></tr>
+        <tr><td>Alex Sample</td><td>Taleo PDF</td><td><span class="pill pill-parsed">parsed</span></td><td>Screening</td><td><a href="#">View</a></td></tr>
+        <tr><td>Riley Testperson</td><td>ZIP</td><td><span class="pill pill-parsed">parsed</span></td><td>Applied</td><td><a href="#">View</a></td></tr>
+        <tr><td>Jordan Exemplar</td><td>Single</td><td><span class="pill pill-parsing">parsing</span></td><td>&mdash;</td><td><a href="#">View</a></td></tr>
+        <tr><td>Casey Placeholder</td><td>ZIP</td><td><span class="pill pill-failed">failed</span></td><td>Applied</td><td><a href="#">Retry</a></td></tr>
+        <tr><td>Sam Fakename</td><td>Taleo PDF</td><td><span class="pill pill-withdrawn">withdrawn</span></td><td>Withdrawn</td><td><a href="#">View</a></td></tr>
+      </table></div>
+      <p class="hint">Showing 5 of 24.</p>
+    </div>
+  </div>
+
+  <!-- Requirements -->
+  <div class="panel" id="p-requirements">
+    <div class="card">
+      <div class="row sp"><h2 class="s">Parsed requirements</h2>
+        <span class="writer"><button class="btn btn-secondary btn-sm" onclick="tg('reqEdit')">Edit</button> <button class="btn btn-secondary btn-sm">Re-parse JD</button></span></div>
+      <ul><li>Diploma or degree in a related field <span class="pill pill-parsed">required</span></li>
+        <li>2+ years in student or client services <span class="pill pill-parsed">required</span></li>
+        <li>Experience with Banner or similar SIS <span class="pill pill-gray">preferred</span></li>
+        <li>Strong written communication <span class="pill pill-parsed">required</span></li></ul>
+      <p class="hint">12 requirements parsed on 20 Nov.</p>
+    </div>
+    <div class="card"><h2 class="s">Your additional requirements</h2>
+      <p>Must be available for evening orientation weeks. <span class="muted">(added by Recruiter Example)</span></p></div>
+    <div class="card drawer writer" id="reqEdit"><h2 class="s">Edit</h2>
+      <div class="form-group"><label class="label">Additional requirements</label><textarea class="textarea input" rows="3">Must be available for evening orientation weeks.</textarea></div>
+      <div class="form-group"><label class="label">Job description</label><textarea class="textarea input" rows="4">Admissions Coordinator &hellip;</textarea><p class="hint">Saving the description re-parses it and clears the shortlist.</p></div>
+      <button class="btn btn-primary btn-sm">Save &amp; re-parse</button></div>
+    <div class="note">Edit controls sit behind one "Edit" button instead of three always-present drawers.</div>
+  </div>
+
+  <!-- Shortlist -->
+  <div class="panel" id="p-shortlist">
+    <div class="row sp"><h2 class="s">Top 5 of 21 parsed</h2><a class="btn btn-primary btn-sm" href="#">Open full shortlist</a></div>
+    <div class="blind">Blind review: names are hidden for you. Labels are stable per candidate.</div>
+    <div class="cands">
+      <div class="card"><b>Candidate 3</b><div>Score 0.86</div><span class="pill pill-parsed">Advance</span></div>
+      <div class="card"><b>Candidate 11</b><div>Score 0.82</div><span class="pill pill-parsed">Advance</span></div>
+      <div class="card"><b>Candidate 7</b><div>Score 0.79</div><span class="pill pill-gray">Undecided</span></div>
+      <div class="card"><b>Candidate 18</b><div>Score 0.74</div><span class="pill pill-withdrawn">Declined</span></div>
+      <div class="card"><b>Candidate 2</b><div>Score 0.71</div><span class="pill pill-gray">Undecided</span></div>
+    </div>
+    <div class="note">Teaser only; the full evidence-rich shortlist page stays as it is today. Auditor sees this read-only; hiring manager can record decisions.</div>
+  </div>
+
+  <!-- Settings -->
+  <div class="panel writer" id="p-settings">
+    <div class="card"><h2 class="s">Department &amp; campus</h2>
+      <div class="row"><input class="input grow" value="Student Services"><input class="input grow" value="Burnaby (BBY)"><button class="btn btn-primary btn-sm">Save</button></div></div>
+    <div class="card"><h2 class="s">Hiring managers</h2><p>Manager Example <button class="btn btn-secondary btn-sm">Remove</button></p>
+      <div class="row"><input class="input grow" placeholder="username"><button class="btn btn-primary btn-sm">Add</button></div></div>
+    <div class="card"><h2 class="s">Blind review</h2><label class="checkbox-row"><input type="checkbox" checked> Hide candidate names from hiring managers</label></div>
+    <div class="card danger"><h2 class="s">Danger zone</h2><p class="hint">Closing stops intake; the shortlist stays viewable.</p>
+      <button class="btn btn-secondary btn-sm">Close job</button> <button class="btn btn-danger btn-sm">Archive job</button></div>
+  </div>
+</section>
+
+<!-- ======================= OPTION B ======================= -->
+<section class="opt" id="optB">
+  <div class="note">Idea: the job is a 4-step flow with a left rail. Each step shows only its own controls; finished steps collapse to a one-line summary. Best for first-time recruiters; slower for repeat visits.</div>
+  <div class="card"><h1 class="t">Admissions Coordinator <span class="pill pill-open">open</span></h1>
+    <div class="muted">Student Services &middot; Burnaby (BBY) &middot; <a href="#">Taleo req 7483 &#8599;</a></div></div>
+  <div class="rail">
+    <ol id="railList">
+      <li class="done"><button data-s="1">1 Set up job<small>Parsed, 12 requirements</small></button></li>
+      <li><button data-s="2" class="on">2 Add candidates<small>24 received</small></button></li>
+      <li><button data-s="3">3 Rank<small>Not run yet</small></button></li>
+      <li><button data-s="4">4 Review &amp; decide<small>Locked until ranked</small></button></li>
+    </ol>
+    <div>
+      <div class="bstep" id="b1">
+        <div class="card"><h2 class="s">Set up job</h2>
+          <details class="fold" open><summary>Department &amp; campus</summary><div class="row" style="margin-top:8px"><input class="input grow" value="Student Services"><input class="input grow" value="Burnaby (BBY)"></div></details>
+          <details class="fold"><summary>Requirements (12 parsed) &amp; additional</summary><p class="hint">Edit job description, add requirements, re-parse.</p></details>
+          <details class="fold"><summary>Hiring managers &amp; blind review</summary><p class="hint">Manager Example &middot; blind review on.</p></details>
+          <button class="btn btn-primary" onclick="setKey('step','2')">Continue to Add candidates</button></div>
+        <div class="note">Completed step collapses to "Parsed, 12 requirements" in the rail.</div>
+      </div>
+      <div class="bstep" id="b2">
+        <div class="card"><h2 class="s">Add candidates</h2><p class="muted">Pick how they arrive:</p>
+          <div class="intake">
+            <div class="card"><h3><span class="num">1</span>One r&eacute;sum&eacute;</h3><p class="when">One emailed file.</p><button class="btn btn-secondary btn-sm">Choose&hellip;</button></div>
+            <div class="card"><h3><span class="num">2</span>ZIP of r&eacute;sum&eacute;s</h3><p class="when">A folder of files.</p><button class="btn btn-secondary btn-sm">Choose&hellip;</button></div>
+            <div class="card"><h3><span class="num">3</span>Taleo PDF</h3><p class="when">Combined HR export. 3 splits pending.</p><button class="btn btn-secondary btn-sm">Choose&hellip;</button></div>
+            <div class="card"><h3><span class="num">4</span>Taleo roster CSV</h3><p class="when">Enriches only; no r&eacute;sum&eacute;s.</p><button class="btn btn-secondary btn-sm">Choose&hellip;</button></div>
+          </div>
+          <p class="hint">24 received &middot; 21 parsed &middot; 2 failed &middot; 1 parsing</p>
+          <div class="row" style="margin-top:8px"><button class="btn btn-primary" onclick="setKey('step','3')">Continue to Rank</button><button class="btn btn-secondary">Export &#9662;</button></div></div>
+      </div>
+      <div class="bstep" id="b3"><div class="card"><h2 class="s">Rank</h2>
+        <p>21 parsed r&eacute;sum&eacute;s will be ranked against 12 requirements on the local model.</p>
+        <button class="btn btn-primary" onclick="setKey('step','4')">Run ranking</button></div></div>
+      <div class="bstep" id="b4"><div class="card"><h2 class="s">Review &amp; decide</h2>
+        <div class="blind">Blind review: Candidate 3, Candidate 11, Candidate 7 &hellip;</div>
+        <p>Top 5 ready. 3 of 5 decisions recorded.</p><a class="btn btn-primary" href="#">Open shortlist</a></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= OPTION C ======================= -->
+<section class="opt" id="optC">
+  <div class="note">Idea (cheap): keep the single scroll and today's partials, but group them under four headed sections with a sticky in-page nav, give intake four labelled cards, and collapse settings. Smallest change to the templates.</div>
+  <div class="card"><h1 class="t">Admissions Coordinator <span class="pill pill-open">open</span></h1>
+    <div class="muted">Student Services &middot; Burnaby (BBY) &middot; <a href="#">Taleo req 7483 &#8599;</a></div></div>
+  <nav class="sticky"><a href="#c-job">Job</a><a href="#c-cand">Candidates</a><a href="#c-short">Shortlist</a><a href="#c-set">Settings</a></nav>
+
+  <h2 class="sec-h" id="c-job">Job</h2>
+  <div class="card"><h3 class="s">Parsed requirements <button class="btn btn-secondary btn-sm" style="float:right">Re-parse</button></h3>
+    <p>12 requirements &middot; diploma in related field, 2+ yrs student services &hellip;</p>
+    <details class="fold"><summary>Edit description &amp; additional requirements</summary><textarea class="textarea input" rows="3">Admissions Coordinator &hellip;</textarea></details></div>
+
+  <h2 class="sec-h" id="c-cand">Candidates</h2>
+  <div class="intake" style="margin-bottom:16px">
+    <div class="card"><h3><span class="num">1</span>One r&eacute;sum&eacute;</h3><p class="when">One emailed file (+ optional cover letter).</p><input class="input" type="file"><button class="btn btn-primary btn-sm">Upload</button></div>
+    <div class="card"><h3><span class="num">2</span>Many (.zip)</h3><p class="when">A folder of files (+ optional manifest).</p><input class="input" type="file"><button class="btn btn-primary btn-sm">Upload</button></div>
+    <div class="card"><h3><span class="num">3</span>Taleo export PDF</h3><p class="when">Combined HR PDF; then review the split.</p><input class="input" type="file"><button class="btn btn-primary btn-sm">Split</button></div>
+    <div class="card"><h3><span class="num">4</span>Taleo roster CSV</h3><p class="when">Enrich only; adds no r&eacute;sum&eacute;s.</p><input class="input" type="file"><button class="btn btn-secondary btn-sm">Import</button></div>
+  </div>
+  <div class="row sp"><div class="filter-row" style="margin:0"><a class="active" href="#">All 24</a><a href="#">Failed 2</a></div><button class="btn btn-secondary btn-sm">Export &#9662;</button></div>
+  <div class="tblwrap" style="margin-top:8px"><table class="table"><tr><th>Candidate</th><th>Status</th></tr>
+    <tr><td>Alex Sample</td><td><span class="pill pill-parsed">parsed</span></td></tr>
+    <tr><td>Casey Placeholder</td><td><span class="pill pill-failed">failed</span></td></tr></table></div>
+
+  <h2 class="sec-h" id="c-short">Shortlist</h2>
+  <div class="card"><div class="blind">Blind review on: Candidate 3 (0.86, Advance) &middot; Candidate 11 (0.82, Advance) &middot; Candidate 7 (0.79, Undecided)</div>
+    <a class="btn btn-primary btn-sm" href="#">Open full shortlist</a></div>
+
+  <h2 class="sec-h" id="c-set">Settings</h2>
+  <details class="card"><summary><b>Department, campus, hiring managers, blind review, status</b></summary>
+    <p class="hint">Collapsed by default. Contains today's drawers and status transition, unchanged.</p>
+    <button class="btn btn-secondary btn-sm">Close job</button></details>
+</section>
+
+</main>
+
+<script>
+function setKey(k,v){
+  document.body.dataset[k]=v;
+  document.querySelectorAll('.seg[data-key="'+k+'"] button').forEach(function(b){b.classList.toggle('on',b.dataset.v===v)});
+  if(k==='step'){document.querySelectorAll('#railList button').forEach(function(b){b.classList.toggle('on',b.dataset.s===v)})}
+  if(k==='view'){document.querySelectorAll('.hm-only').forEach(function(e){e.style.display=v==='hm'?'block':'none'});
+    if(v==='hm'&&document.body.dataset.tab==='settings')go('overview')}
+}
+function go(t){document.body.dataset.tab=t;document.querySelectorAll('.tabs button').forEach(function(b){b.classList.toggle('on',b.dataset.t===t)})}
+function openPanel(o){var d=document.getElementById('intake1');if(d)d.classList.toggle('open',!!o)}
+function togglePanel(){var d=document.getElementById('intake1');d.classList.toggle('open')}
+function tg(id){document.getElementById(id).classList.toggle('open')}
+document.querySelectorAll('.seg[data-key] button').forEach(function(b){b.onclick=function(){setKey(b.parentNode.dataset.key,b.dataset.v)}});
+document.querySelectorAll('.tabs button').forEach(function(b){b.onclick=function(){go(b.dataset.t)}});
+document.querySelectorAll('#railList button').forEach(function(b){b.onclick=function(){setKey('step',b.dataset.s)}});
+</script>
+</body>
+</html>
