@@ -129,6 +129,11 @@ services:
 
   worker:
     restart: unless-stopped
+    # Loads `.env` like api and frontend. Without it a setting that lives only
+    # in `.env` never reaches the worker: TALEO_ENABLED=true enabled the API
+    # while every `sync_taleo_jobs` run (which executes HERE) still read false
+    # and skipped. The `environment:` block below still wins, as for api.
+    env_file: [.env]
     build:
       context: ./core
       dockerfile: Dockerfile
