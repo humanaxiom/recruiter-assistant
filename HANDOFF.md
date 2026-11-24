@@ -8,53 +8,39 @@ lessons lists verbatim, is archived at
 
 ---
 
-### 1. Start here — `feat/interview-questions` (worktree `C:\repos\ra-interview-q`)
+### 1. Start here — `feat/decision-record` (worktree `C:\repos\ra-interview-q`)
 
-**State, 2026-11-22.** Built, **not merged, PR not opened.** Feature 3, the
-interview-question generator, for a candidate's shortlist entry page.
+**State, 2026-11-24.** Built, gates green, hand-over done. **Not pushed, no PR
+opened: awaiting the user's consent to push and open the PR.**
 
 **Done:**
-- **S1, pure layer:** `core/src/services/interview_questions.py` (gap selection,
-  evidence-cliff refusal, scrub, filter, prompt input is gaps only).
-- **S2, table and worker:** `interview_questions` table;
-  `core/src/services/interview_question_service.py` (atomic claim, settle);
-  `core/src/worker/interview_tasks.py`; routes in
-  `core/src/api/routes/shortlist.py` (`POST` 202 claim-and-enqueue, `GET` read);
-  audit action `generate_interview_questions`.
-- **S3, panel:** `core/frontend/templates/_interview_questions_panel.html`,
-  included from `shortlist_entry.html`.
-- Three review rounds done. No ADR (fails the ADR bar); the reasoning is in the
-  module docstrings and commit messages.
-- Merged, for reference: the in-app Taleo split and résumé export (#110, #112).
-  Details: ADR-017 amendment 2026-11-21, ADR-011 amendment, and
-  [docs/archive/](docs/archive/).
+- Human decision record: `core/src/schemas/decisions.py`,
+  `core/src/services/decision_service.py`, `core/src/api/routes/decisions.py`
+  (`POST`/`GET /shortlist/{entry_id}/human-decisions`,
+  `GET /jobs/{job_id}/decisions/latest`), `decision_records` in
+  `core/src/models/ddl.py`, frontend `POST /shortlist/<id>/decision-record`,
+  `_decision_panel.html`, badges in `shortlist_cards.html`.
+- ADR-014 amendment, 2026-11-24 (scope reversal; no new ADR). Residuals are
+  recorded in ROADMAP under the item.
+- Interview-question generator merged (PR #113). S4, the model-check profile for
+  `interview_questions_v1`, is still open (ROADMAP §5).
 
-**Hand-over results (2026-11-22, isolated `recruiter-stress` stack at 1442d0f, CAS off, 127.0.0.1):**
-
-- `smoke.sh` on the real model: 10 ERROR at setup — the 3 fixture résumés were
-  still parsing at the 900s wait (gb10 shared with a foreign `gpt-oss:120b`).
-  Contention, not this branch. Re-run on the stub (`LLM_BASE_URL=http://llmstub:8000/v1`):
-  `10 passed in 16.28s`.
+**Hand-over results (2026-11-24, isolated `recruiter-stress` stack, CAS off, stub LLM):**
+- `smoke.sh`: `10 passed`.
 - `doctor.sh`: one finding, `deploy.auth_disabled` — expected on this stack.
-- By hand (curl through Flask, page CSRF token, polling the panel fragment):
-  - stub, all evidence `met`: Generate → 302 → pending (polls every 3s) →
-    "no gaps to probe" + Retry; row `refused|no_gaps`. Audit row details
-    `{"model": "gpt-oss:20b", "prompt_version": "interview_questions_v1"}` only.
-  - real `gpt-oss:20b` on gb10, Kubernetes `partial` (quote holds the
-    candidate's name and phone) + AWS `missing` set by SQL: ready in ~21s (worker
-    18.17s), one question per gap, no name or phone in either.
-  - blind OFF, evidence changed → "evidence has changed" + Regenerate →
-    regenerated non-blind set (3 groups) → blind ON → "This job is now blind
-    review… hidden" + Regenerate. Row `blind_review=f`.
-  - Not driven: `llm_unavailable` / `stalled` (covered by integration tests only).
+- By hand (curl through Flask):
+  - CRLF rationale stored as LF.
+  - Exact repeat by the same reviewer: no new row.
+  - Supersede: history shows newest first.
+  - Too-short and zero-width rationale: rejected with a flash, no row.
+  - Audit `details` carry no rationale.
+  - Badge present on the full page and on the poll fragment.
+- Not driven: hiring-manager and auditor paths (need CAS on). Covered by unit
+  and integration tests only.
 
-**Not done:** S4, the model-check profile for `interview_questions_v1`. It is
-not measured: gb10 has been contended by a foreign `gpt-oss:120b` all session.
-The call uses `REASONING_JSON_MIN_TOKENS=8192` (`interview_questions.py:413`),
-which is unmeasured for this prompt. Residuals are recorded under ROADMAP §5.
-
-**Next step, exactly:** finish hand-over, open the PR, then S4 when gb10 is
-uncontended, then features 2, 4, 5.
+**Owed:** after deploy, `doctor.sh` on the pilot box plus a signed-in by-hand
+drive (§3). **Next step:** on the user's consent, push `feat/decision-record`
+and open the PR.
 
 **Before this reaches the pilot box (CAS on):** the rule in §3 applies. `smoke.sh`
 cannot run there, so the obligation is `doctor.sh` plus a by-hand drive signed
@@ -214,5 +200,5 @@ merges.
 bind-mounts `./core:/app` into api, worker and frontend, with uvicorn `--reload`
 and Flask `--debug`. A `git checkout` changes what the box executes and renders
 within seconds. Never switch branches while smoke, doctor, a hand-drive or a user
-is on the stack. This branch lives in its own `git worktree`
-(`C:\repos\ra-taleo-split`); keep it that way.
+is on the stack. Each work branch lives in its own `git worktree` (this one is
+`C:\repos\ra-interview-q`); keep it that way.
