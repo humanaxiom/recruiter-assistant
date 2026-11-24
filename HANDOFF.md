@@ -8,51 +8,63 @@ lessons lists verbatim, is archived at
 
 ---
 
-### 1. Start here — `feat/decision-record` (worktree `C:\repos\ra-interview-q`)
+### 1. Start here — account hand-over, 2026-11-24
 
-**State, 2026-11-24.** Built, gates green, hand-over done. **Not pushed, no PR
-opened: awaiting the user's consent to push and open the PR.**
+The product owner moved this project to a new Claude account after this
+iteration. **New session: read in this order.**
 
-**Done:**
-- Human decision record: `core/src/schemas/decisions.py`,
-  `core/src/services/decision_service.py`, `core/src/api/routes/decisions.py`
-  (`POST`/`GET /shortlist/{entry_id}/human-decisions`,
-  `GET /jobs/{job_id}/decisions/latest`), `decision_records` in
-  `core/src/models/ddl.py`, frontend `POST /shortlist/<id>/decision-record`,
-  `_decision_panel.html`, badges in `shortlist_cards.html`.
-- ADR-014 amendment, 2026-11-24 (scope reversal; no new ADR). Residuals are
-  recorded in ROADMAP under the item.
-- Interview-question generator merged (PR #113). S4, the model-check profile for
-  `interview_questions_v1`, is still open (ROADMAP §5).
+1. [CLAUDE.md](CLAUDE.md), then this file.
+2. [docs/handover/OPERATOR-NOTES.md](docs/handover/OPERATOR-NOTES.md): standing
+   orders, the two stacks, how to deploy, host gotchas. This was previously in
+   private Claude memory that may not have carried over.
+3. [docs/history/ORAL-HISTORY.md](docs/history/ORAL-HISTORY.md): how and why
+   the project got here.
+4. [docs/practice/fleet-project-playbook.md](docs/practice/fleet-project-playbook.md):
+   how the product owner runs work through the agent fleet.
 
-**Hand-over results (2026-11-24, isolated `recruiter-stress` stack, CAS off, stub LLM):**
-- `smoke.sh`: `10 passed`.
-- `doctor.sh`: one finding, `deploy.auth_disabled` — expected on this stack.
-- By hand (curl through Flask):
-  - CRLF rationale stored as LF.
-  - Exact repeat by the same reviewer: no new row.
-  - Supersede: history shows newest first.
-  - Too-short and zero-width rationale: rejected with a flash, no row.
-  - Audit `details` carry no rationale.
-  - Badge present on the full page and on the poll fragment.
-- Not driven: hiring-manager and auditor paths (need CAS on). Covered by unit
-  and integration tests only.
+**State, 2026-11-24.**
 
-**Owed:** after deploy, `doctor.sh` on the pilot box plus a signed-in by-hand
-drive (§3). **Next step:** on the user's consent, push `feat/decision-record`
-and open the PR.
+- **`main` = `eb39d03`.** Merged this iteration:
+  - #112: in-app Taleo split and anonymised résumé export.
+  - #113: interview-question generator.
+  - #114: human decision record.
+  - #115: the worker now loads `.env`, so `TALEO_ENABLED` reaches the Taleo
+    import.
+- **The pilot box runs exactly `main`** (tree-identical; deploy recipe in
+  OPERATOR-NOTES §3).
+  - Clean slate 2026-11-24: all hiring data and the audit log wiped at the
+    product owner's request; 2 accounts kept.
+  - Taleo import ran once by hand: 32 SFU postings landed as drafts and are
+    parsing (~5.5 min each, 4 at a time).
+  - `doctor.sh` is healthy.
+- **Managers are testing the core functions now.** Don't change what they see
+  mid-test: any UI change ships behind a default-off flag.
 
-**Before this reaches the pilot box (CAS on):** the rule in §3 applies. `smoke.sh`
-cannot run there, so the obligation is `doctor.sh` plus a by-hand drive signed
-in as a real principal.
+**Next, in the product owner's order:**
+
+1. **Checkpoint H1** on the job-page redesign:
+   [docs/plans/2026-11-job-page-redesign/README.md](docs/plans/2026-11-job-page-redesign/README.md)
+   and `mockups.html` beside it. Recommended: option A (workspace tabs), behind
+   `JOB_PAGE_V2`. Five open questions, each with a default. Waiting on the
+   product owner.
+2. Feature 4, "Ask the pool"; then feature 5, the department picklist. Neither
+   has been started.
+3. Owed, not built:
+   - S4 model-check profile for `interview_questions_v1`, once gb10 is
+     uncontended.
+   - A signed-in drive on the pilot box of the decision record and interview
+     questions. Every check of those on the pilot box so far ran without a
+     sign-in; the managers' UAT is the first real one.
+   - The Dependabot alert on `main` (high, `black`, GitHub Action
+     `required-version`).
 
 ### 2. The objective
 
 The four people on the pilot box can do their real hiring work in it, and what
 they hit gets fixed before anything they haven't hit gets built. User-sourced
-work outranks self-sourced work. ROADMAP §0 still carries the 2026-09-09 pause on
-feature work pending hardware; the next step in §1 is the user's own
-instruction, and §0 should be updated when the pause is lifted.
+work outranks self-sourced work. The 2026-09-09 hardware pause in ROADMAP §0 was
+lifted in practice: the product owner ordered features 1–5 in November. Update
+§0 to say so the next time ROADMAP is edited.
 
 ### 3. The pilot box and deployment
 
@@ -70,7 +82,13 @@ file was last written; confirm whether it has been run.
   LAN and confirm a first-time colleague lands on pending-access; make one real
   write on the live site and confirm it does not 403 behind the proxy; assign a
   hiring manager from the job page and confirm they see only their jobs.
-- The stack serves the **working tree**, not an image (see §8).
+- The stack serves the **working tree**, not an image (see §8). The live tree
+  sits on local branch `fix/cas-local-origin`, whose tree equals `main`. Deploy
+  with the tree-identical commit recipe in OPERATOR-NOTES §3; never check out a
+  branch there.
+- **Upload only appears on an OPEN job**, for admins and recruiters. On a box
+  whose jobs are all parsing drafts, the product owner reasonably concluded upload
+  had been deleted. When handing a box over, walk the empty-state path first.
 
 ### 4. Lessons the roster and pilot work paid for
 
