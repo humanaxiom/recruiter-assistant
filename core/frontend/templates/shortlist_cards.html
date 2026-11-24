@@ -228,6 +228,13 @@
          detail route -- no CSRF slot, a GET mints nothing and consumes
          nothing. #}
       <a class="link-sm" href="{{ url_for('shortlist_entry_detail', entry_id=entry.id) }}">Why this rank?</a>
+      {# Read-only human-decision badge: informational, never a filter, never
+         reorders. Carries no form and mints no token. #}
+      {% set decision_badge = (latest_decisions or {}).get(entry.resume_id|string) %}
+      {% if decision_badge %}
+      <span class="muted decision-badge">Human decision: {{ decision_badge.decision }}
+        by {{ decision_badge.decided_by }} on {{ decision_badge.decided_at | day }}</span>
+      {% endif %}
       {% if is_writer and entry.blinded %}
       {# FU-1: audited reveal straight from the card. POST-only (a reveal is a
          deliberate, logged act); it records who/what/when and opens the résumé

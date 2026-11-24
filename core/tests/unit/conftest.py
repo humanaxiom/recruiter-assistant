@@ -59,3 +59,30 @@ def csrf_client() -> Any:
         session[csrf.PAGE_SESSION_KEY] = TEST_PAGE_TOKEN
     client.environ_base["HTTP_X_CSRF_TOKEN"] = TEST_PAGE_TOKEN
     return client
+
+
+#: Modules that exercise the REAL decision client functions through their own
+#: ``httpx.MockTransport``; the default stub below must not shadow them.
+_REAL_DECISION_CLIENT_MODULES = frozenset({"test_frontend_api_client_decisions"})
+
+
+@pytest.fixture(autouse=True)
+def _default_decision_fetches(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Benign default for the human-decision fetches.
+
+    Existing page-rendering tests stub only the older api_client calls, and an
+    unstubbed fetch to http://api:8000 costs ~8s per render. Tests that care
+    install their own stub afterwards, which overrides this one.
+    """
+    from frontend import api_client
+
+    if request.module.__name__.rsplit(".", 1)[-1] in _REAL_DECISION_CLIENT_MODULES:
+        return
+    monkeypatch.setattr(
+        api_client,
+        "get_human_decisions",
+        lambda *_a, **_k: {"latest": None, "history": []},
+    )
+    monkeypatch.setattr(api_client, "get_job_latest_decisions", lambda *_a, **_k: [])

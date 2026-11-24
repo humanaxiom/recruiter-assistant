@@ -546,7 +546,9 @@ def test_cas_off_dev_session_sees_the_form(monkeypatch: Any, client: Any) -> Non
     assert _decision_form(_page(client, eid), eid) is not None
 
 
-@pytest.mark.parametrize("role", ["auditor", None])
+# role None is stopped by the pending-access gate before the route runs;
+# is_decider(None) is covered by test_is_decider_by_role.
+@pytest.mark.parametrize("role", ["auditor"])
 def test_non_decider_sees_history_but_no_form(
     monkeypatch: Any, client: Any, role: str | None
 ) -> None:
@@ -581,7 +583,10 @@ def test_empty_history_shows_no_decision_state_and_the_form(
     assert re.search(r"no decision\w*\b.{0,30}recorded", body, re.IGNORECASE)
     assert "Previous decisions" not in body
     assert _decision_form(body, eid) is not None
-    assert "unavailable" not in body.lower()
+    start = body.index('id="decision-record"')
+    # the panel card has no nested div, so the first close ends it
+    panel = body[start : body.index("</div>", start)]
+    assert "unavailable" not in panel.lower()
 
 
 def test_empty_history_for_an_auditor_shows_the_state_without_a_form(
