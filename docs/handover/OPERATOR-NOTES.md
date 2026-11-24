@@ -117,8 +117,11 @@ retried. **Deploying needs the product owner's consent.**
 | `C:\repos\recruiter-assistant` | `fix/cas-local-origin` (local) | **live tree**, identical to main `eb39d03` |
 | `C:\repos\ra-interview-q` | `chore/handover-2026-11` | this hand-over and the redesign proposal |
 | `C:\repos\ra-taleo-split` | detached `eb39d03` | stress-stack runner (holds the stress `.env`) |
-| `C:\repos\ra-taleo-split-svc` | `feat/taleo-split-service` | **superseded** by #112. Safe to delete with consent. |
-| scratchpad `wt-pr110` | `fix/pr110-rebase` | **superseded** by #110. Safe to delete with consent. |
+
+
+`feat/taleo-split-service` (superseded by #112) and `fix/pr110-rebase` (superseded by #110) were
+deleted with the product owner's consent on 2026-11-24, along with their worktrees. Neither had ever
+been pushed.
 
 ## 7. Subagent fleet
 
