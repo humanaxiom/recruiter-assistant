@@ -2010,6 +2010,7 @@ def _render_shortlist_cards(
         job_id=job_id,
         entries=entries,
         shortlist_status=shortlist_status,
+        latest_decisions=_fetch_latest_decisions(job_id),
         conflict_reason=conflict_reason,
         jd_has_no_requirements=jd_has_no_requirements,
         attempt=attempt,

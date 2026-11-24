@@ -26,7 +26,12 @@ RATIONALE_MAX = 1000
 # C0 controls and DEL, except TAB (0x09) and LF (0x0a), which carry real
 # formatting in a multi-line rationale. NUL in particular would be rejected by
 # Postgres at INSERT time.
-_FORBIDDEN_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+#
+# Also rejected: C1 controls, zero-width / bidi-override and isolate characters,
+# which are invisible in the rendered record and can disguise its content.
+_FORBIDDEN_CONTROL = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"
+)
 
 
 class DecisionIn(BaseModel):
@@ -41,7 +46,9 @@ class DecisionIn(BaseModel):
         # Strip BEFORE the length constraints so padding cannot satisfy them.
         if not isinstance(value, str):
             return value
-        stripped = value.strip()
+        # Normalise line endings first: a browser submits CRLF, which would
+        # otherwise count two characters per newline against the 1000 limit.
+        stripped = value.replace("\r\n", "\n").replace("\r", "\n").strip()
         if _FORBIDDEN_CONTROL.search(stripped):
             raise ValueError("rationale contains control characters")
         return stripped

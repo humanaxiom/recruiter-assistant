@@ -104,6 +104,13 @@ async def record(
     written and nothing is audited."""
     actor_kind, actor_user_id, actor_service = actor_fields_from_user(user)
     async with conn.transaction():
+        # Serialise concurrent writers for this pair so an exact repeat cannot
+        # race past the idempotence check and insert twice.
+        await conn.fetchval(
+            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+            str(entry.job_id),
+            str(entry.resume_id),
+        )
         latest = await conn.fetchrow(_LATEST_SQL, entry.job_id, entry.resume_id)
         if (
             latest is not None

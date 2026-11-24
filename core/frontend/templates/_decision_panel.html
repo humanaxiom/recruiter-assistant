@@ -44,6 +44,9 @@
     <label><input type="radio" name="decision" value="accept" required> accept</label>
     <label><input type="radio" name="decision" value="reject"> reject</label>
     <label><input type="radio" name="decision" value="hold"> hold</label>
+    {% if entry.blinded %}
+    <p class="muted">This is a blind review &mdash; do not include the candidate's name or anything that could identify them.</p>
+    {% endif %}
     <textarea name="rationale" minlength="10" maxlength="1000" required
               rows="3" placeholder="Why? (10 to 1000 characters)"></textarea>
     <button type="submit" class="btn btn-secondary btn-sm">Record decision</button>
