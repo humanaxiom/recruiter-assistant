@@ -21,6 +21,7 @@ from src.api.deps import log_auth_mode, require_role_assigned
 from src.api.routes import (
     audit,
     auth,
+    decisions,
     job_assignees,
     jobs,
     resume_export,
@@ -124,6 +125,7 @@ app.include_router(resumes.router, dependencies=[Depends(require_role_assigned)]
 app.include_router(resume_splits.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(resume_export.router, dependencies=[Depends(require_role_assigned)])
 app.include_router(shortlist.router, dependencies=[Depends(require_role_assigned)])
+app.include_router(decisions.router, dependencies=[Depends(require_role_assigned)])
 # /users is gated by its own, stricter _require_admin_session (the CAS
 # session role) — see src.api.routes.users's module docstring — so it is
 # deliberately NOT wrapped in require_role_assigned here.

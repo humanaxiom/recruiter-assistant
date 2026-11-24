@@ -3,8 +3,9 @@
 The review-workflow decision/stage routes (``/shortlist/{id}/decision`` /
 ``/shortlist/{id}/stage``) from hris are CUT and must never exist — there is
 deliberately no route defined for them here, so hitting them is FastAPI's own
-unmatched-route 404 (proving the route table itself has no entry), never a
-401/403.
+unmatched-route 404, never a 401/403. The human decision record (ADR-014
+amendment, 2026-11-24) is a separate resource at ``/shortlist/{id}/human-decisions``
+in ``routes/decisions.py``.
 """
 
 from __future__ import annotations

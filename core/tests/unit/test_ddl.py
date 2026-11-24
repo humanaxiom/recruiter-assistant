@@ -78,6 +78,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         # worker and held until expires_at.
         "resume_export_requests",
         "interview_questions",
+        "decision_records",
     }
 )
 

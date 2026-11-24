@@ -429,9 +429,17 @@ HR and the CIO will ask next.**
 ## Also on the table (one-liners)
 
 - **Inclusive-JD linter** — pre-create, the local model flags exclusionary language or unrealistic requirements in a JD and suggests rewrites. Improves fairness at the top of the funnel.
-- **Interview-question generator** — for a shortlisted candidate, generate targeted questions from the requirements whose evidence was *weak or missing*. Closes ranking → interview. **Built on `feat/interview-questions`, not merged;** S4 and residuals under §5.
+- **Interview-question generator** — for a shortlisted candidate, generate targeted questions from the requirements whose evidence was *weak or missing*. Closes ranking → interview. **Merged (PR #113).** S4 (model-check profile) and residuals under §5.
 - **Evidence highlighting** — render the résumé with matched evidence spans highlighted inline; visual, grounded, redaction-aware.
 - **Human decision record** — capture accept/reject/hold separately from the algorithmic score, with reviewer, timestamp and job-related rationale, without altering source evidence. Makes "what did the human decide, and why did they differ?" reconstructable. See [CodeX/plan.md](../CodeX/plan.md) §7.
+  **Built on `feat/decision-record`, not merged** (ADR-014 amendment, 2026-11-24). Residuals:
+  - Rationale free text may identify a candidate on a blind job; the form shows a hint only ([_decision_panel.html:47-49](../core/frontend/templates/_decision_panel.html#L47)).
+  - Reviewer names are visible on blind jobs ([_decision_panel.html:11](../core/frontend/templates/_decision_panel.html#L11)).
+  - A 422 (e.g. too-short rationale) loses the typed text on redirect ([app.py:2111-2115](../core/frontend/app.py#L2111)).
+  - No "differs from system" computation or decision packet yet; the snapshot is stored but never compared ([decision_service.py:132-135](../core/src/services/decision_service.py#L132)).
+  - Conflicting reviewers resolve as later-wins, no approval step ([decision_service.py:28-34](../core/src/services/decision_service.py#L28)).
+  - Idempotency is exact-match per reviewer ([decision_service.py:115-121](../core/src/services/decision_service.py#L115)).
+  - The history query has no LIMIT ([decision_service.py:44-49](../core/src/services/decision_service.py#L44)).
 - **Consent-erasure (ADR-026 §4 revoke-and-purge)** — the repo's first destructive PII operation; needs an HR decision on semantics plus its own security review before any code. Cross-listed under [open item 1](#1-operating-a-real-deployment).
 
 ---

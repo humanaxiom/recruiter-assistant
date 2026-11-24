@@ -1,6 +1,6 @@
 # ADR-014: Workflow UI — Flask + HTMX Recruiter Interface
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-24: human decision record, see Amendment at the end)
 **Date:** 2026-07-17
 
 ## Context
@@ -231,3 +231,35 @@ needed.
 - **Building the reverse-match UI now, as part of this feature** — deferred rather than rejected: scoped as
   optional slice S9, cut for time; the backend surface is unchanged and ready, so it is a clean, separately
   gate-able follow-up rather than a decision this feature needed to resolve.
+
+## Amendment — 2026-11-24: human decision record
+
+**Scope reversal.** §3 excluded "the review/decision workflow — no approve/reject". That exclusion is
+reversed for one narrow surface: a human decision recorded **alongside** the ranking, never in place of it.
+
+- Admins, recruiters, and hiring managers assigned to the job can record `accept`, `reject` or `hold` on a
+  shortlisted candidate. A written rationale is always required (10–1000 characters; CRLF normalised;
+  C0/C1 controls and zero-width or bidi characters rejected). Auditors are read-only; a hiring manager not
+  assigned to the job gets a 404.
+- Stored in `decision_records`. Append-only: a new decision supersedes the previous one by being newer
+  (`seq`). Nothing is updated or deleted. Each row snapshots the rank and score at the time it was made.
+- The decision **never feeds back into rank or score**. The decision path only INSERTs and SELECTs
+  `decision_records` (`core/src/services/decision_service.py`). The shortlist card shows a badge (decision, reviewer, time) without
+  the rationale.
+- Audit action `record_decision`. Its `details` hold ids, the decision, the snapshot and the blind-review
+  flag, never the rationale.
+- Concurrent writes for one (job, resume) pair are serialised by an advisory lock. An exact repeat by the
+  same reviewer is idempotent (no row, no audit). Conflicting reviewers resolve as later-wins; there is no
+  approval step.
+
+**Still cut:** pipeline stages, review queues and approval, JD-Harmonizer, comment threads and admin console.
+CAS is no longer cut (ADR-019). The `ShortlistDecision*` and `StageTransition*` schemas stay deleted (ADR-006).
+
+**Stale:** the Architecture Diagram above predates this amendment and does not show
+`/shortlist/<id>/human-decisions` or `/jobs/<id>/decisions/latest`. Route definitions:
+`core/src/api/routes/decisions.py`.
+
+**Known gaps, recorded in [ROADMAP](../ROADMAP.md) under the human decision record:** rationale text can
+identify a candidate on a blind job (the form shows a hint only); reviewer names are visible on blind jobs;
+no "differs from system" computation yet; idempotency is exact-match per reviewer; the history query is
+unbounded.

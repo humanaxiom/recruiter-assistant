@@ -251,8 +251,11 @@ activity report: [docs/activity/phase-7-evals-viewer.md](docs/activity/phase-7-e
 job, upload résumés, generate a shortlist, review ranked candidates, and export, all from the browser at
 `:5000`. This is a **post-v1 feature** (not "Phase 8" — the extraction plan's phase table ends at Phase 7
 and stays closed) that replaces Phase 7's minimal read-only viewer. It reproduces the recruiter workflow
-from the source `hris` Next.js frontend, scoped strictly to **job → résumé → shortlist** — the
-review/decision workflow, JD-Harmonizer, comment threads, admin console, and CAS auth all stay cut.
+from the source `hris` Next.js frontend, scoped to **job → résumé → shortlist** plus a **human decision
+record**: a reviewer (admin, recruiter, or assigned hiring manager) records accept / reject / hold on a
+shortlisted candidate with a required rationale. It is an append-only history shown as a badge beside the
+ranking and never changes rank or score (ADR-014 amendment, 2026-11-24). The approval and pipeline
+workflow, JD-Harmonizer, comment threads and admin console all stay cut. (CAS sign-in has since been added; see ADR-019.)
 
 **Stack: Flask + HTMX + a hand-authored `app.css`, not a Node/Tailwind build.** HTMX is vendored
 (`static/vendor/htmx.min.js`, 2.0.4, served locally — no CDN) and drives 3-second polling

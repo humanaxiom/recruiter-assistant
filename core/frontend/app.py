@@ -326,6 +326,11 @@ def _csrf_gate() -> Any:
 
 _WRITER_ROLES = ("admin", "recruiter")
 
+# Who may RECORD a human decision. Wider than ``_WRITER_ROLES`` on purpose: an
+# assigned hiring manager decides on candidates but may not write elsewhere.
+# Compensating UX control only -- the backend gate is the real boundary.
+_DECIDER_ROLES = ("admin", "recruiter", "hiring_manager")
+
 
 def _is_writer_session() -> bool:
     """Item 2/5 — the same compensating-UX-control check
@@ -397,6 +402,8 @@ def inject_current_user() -> dict[str, Any]:
     return {
         "current_user": current_user,
         "is_writer": is_writer,
+        "is_decider": current_user is None
+        or current_user.get("role") in _DECIDER_ROLES,
         # ADR-046 -- only an admin SESSION can trigger the Taleo sync, so only an
         # admin sees the control. Same compensating-UX-control caveat as
         # ``is_writer`` above: the backend gate is the real boundary, this just
@@ -1872,6 +1879,7 @@ def job_shortlist(job_id: UUID) -> Any:
     return render_template(
         "shortlist_list.html",
         job_id=job_id,
+        latest_decisions=_fetch_latest_decisions(job_id),
         entries=entries,
         shortlist_status=shortlist_status,
         any_resume_parsed=_any_resume_parsed(resumes),
@@ -1898,6 +1906,20 @@ def job_shortlist(job_id: UUID) -> Any:
         # (see the `_render_...` context processor), so nothing extra is
         # minted here.
     )
+
+
+def _fetch_latest_decisions(job_id: UUID) -> dict[str, dict[str, Any]]:
+    """Latest human decision per résumé id (string key), for the read-only
+    card badges. Tolerant: any failure means no badges, never a broken page."""
+    try:
+        raw = api_client.get_job_latest_decisions(job_id)
+    except api_client.BackendError:
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    return {
+        str(b["resume_id"]): b for b in raw if isinstance(b, dict) and "resume_id" in b
+    }
 
 
 @app.post("/jobs/<uuid:job_id>/shortlist")
@@ -1988,6 +2010,7 @@ def _render_shortlist_cards(
         job_id=job_id,
         entries=entries,
         shortlist_status=shortlist_status,
+        latest_decisions=_fetch_latest_decisions(job_id),
         conflict_reason=conflict_reason,
         jd_has_no_requirements=jd_has_no_requirements,
         attempt=attempt,
@@ -2055,8 +2078,41 @@ def shortlist_entry_detail(entry_id: UUID) -> Any:
         entry=entry,
         explanation=explanation,
         iq=_fetch_interview_questions(entry_id),
+        decisions=_fetch_decisions(entry_id),
         entry_id=entry_id,
     )
+
+
+def _fetch_decisions(entry_id: UUID) -> dict[str, Any]:
+    """The decision panel's state, tolerant: any failure (or a payload that is
+    not an object) degrades to ``unavailable``, which the template renders
+    WITHOUT the form -- never an empty history that would invite a decision
+    recorded blind to what is already there."""
+    try:
+        raw = api_client.get_human_decisions(entry_id)
+    except api_client.BackendError:
+        return {"unavailable": True}
+    if not isinstance(raw, dict):
+        return {"unavailable": True}
+    return raw
+
+
+@app.post("/shortlist/<uuid:entry_id>/decision-record")
+def record_human_decision(entry_id: UUID) -> Any:
+    """Record a human decision, then PRG back to the entry page. Ordinary
+    page-token CSRF (shared budget; no per-card one-shot token). Who decided
+    comes from the session on the backend, never from this form."""
+    decision = request.form.get("decision", "")
+    rationale = request.form.get("rationale", "")
+    try:
+        api_client.record_human_decision(entry_id, decision, rationale)
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BadRequest as exc:
+        flash(_format_error(exc.detail))
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("shortlist_entry_detail", entry_id=entry_id))
 
 
 def _fetch_interview_questions(entry_id: UUID) -> dict[str, Any]:

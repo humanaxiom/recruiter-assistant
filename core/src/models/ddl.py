@@ -792,6 +792,33 @@ _STATEMENTS: tuple[str, ...] = (
     # Review round 2 (G1): every winning claim mints a fresh id; settles and
     # heartbeats are scoped to it so a stale run cannot overwrite a newer one.
     "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS claim_id uuid",
+    # Human decision record. Append-only: nothing in src UPDATEs or DELETEs it
+    # (rows go only by CASCADE). Keyed on (job, resume), NOT shortlist_entries,
+    # so a regenerate (delete + reinsert of every entry) leaves it intact.
+    # ``seq`` orders a pair's decisions (newest wins); the identity and
+    # snapshot columns carry no FK on purpose -- the record must outlive a
+    # deleted user or a regenerated entry.
+    """
+    CREATE TABLE IF NOT EXISTS decision_records (
+        id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        seq                BIGINT GENERATED ALWAYS AS IDENTITY,
+        job_id             UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        resume_id          UUID NOT NULL REFERENCES resumes (id) ON DELETE CASCADE,
+        decision           TEXT NOT NULL CHECK (decision IN ('accept','reject','hold')),
+        rationale          TEXT NOT NULL
+                           CHECK (char_length(btrim(rationale)) BETWEEN 10 AND 1000),
+        decided_by         TEXT NOT NULL,
+        decided_by_user_id UUID,
+        decided_by_role    TEXT NOT NULL,
+        decided_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        snap_rank          INTEGER,
+        snap_score_final   DOUBLE PRECISION,
+        snap_entry_id      UUID,
+        snap_blind_review  BOOLEAN NOT NULL DEFAULT false
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS decision_records_job_resume_idx "
+    "ON decision_records (job_id, resume_id, seq DESC)",
 )
 
 

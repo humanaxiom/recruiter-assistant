@@ -1,0 +1,56 @@
+{#
+  Human-decision panel. Fed ``decisions`` (the JSON dict from the API, so every
+  timestamp is a STRING -- hence the ``day`` filter, never ``.strftime``) and
+  ``entry_id``. ``decisions.unavailable`` renders a notice with NO form: a
+  failed read must never look like an empty history. The form uses the shared
+  page token, not a one-shot slot.
+#}
+{% macro decision_item(d) %}
+<p>
+  <strong>{{ d.decision }}</strong>
+  by {{ d.decided_by }}{% if d.decided_by_role %} ({{ d.decided_by_role | replace('_', ' ') }}){% endif %}
+  on {{ d.decided_at | day }}
+  {% if d.snap_rank is not none or d.snap_score_final is not none %}
+  <span class="muted">&mdash; at the time:
+    {% if d.snap_rank is not none %}rank #{{ d.snap_rank }}{% endif %}
+    {% if d.snap_rank is not none and d.snap_score_final is not none %}, {% endif %}
+    {% if d.snap_score_final is not none %}score {{ '%.2f' | format(d.snap_score_final) }}{% endif %}
+  </span>
+  {% endif %}
+</p>
+<p>{{ d.rationale }}</p>
+{% endmacro %}
+<div id="decision-record" class="card">
+  <h3>Human decision</h3>
+  {% if decisions.unavailable %}
+  <p class="muted">The decision record is unavailable right now. Reload the page to try again.</p>
+  {% else %}
+  {% if decisions.latest %}
+  {{ decision_item(decisions.latest) }}
+  {% set older = (decisions.history or [])[1:] %}
+  {% if older %}
+  <h4>Previous decisions</h4>
+  {% for d in older %}
+  {{ decision_item(d) }}
+  {% endfor %}
+  {% endif %}
+  {% else %}
+  <p class="muted">No decision has been recorded yet.</p>
+  {% endif %}
+  <p class="muted">Recording a decision does not change the candidate's rank or score.</p>
+  {% if is_decider %}
+  <form method="post" action="/shortlist/{{ entry_id }}/decision-record">
+    <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+    <label><input type="radio" name="decision" value="accept" required> accept</label>
+    <label><input type="radio" name="decision" value="reject"> reject</label>
+    <label><input type="radio" name="decision" value="hold"> hold</label>
+    {% if entry.blinded %}
+    <p class="muted">This is a blind review &mdash; do not include the candidate's name or anything that could identify them.</p>
+    {% endif %}
+    <textarea name="rationale" minlength="10" maxlength="1000" required
+              rows="3" placeholder="Why? (10 to 1000 characters)"></textarea>
+    <button type="submit" class="btn btn-secondary btn-sm">Record decision</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>
