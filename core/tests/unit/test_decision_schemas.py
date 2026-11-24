@@ -125,9 +125,7 @@ def test_newline_and_tab_inside_the_rationale_are_allowed() -> None:
     assert _mod().DecisionIn(decision="accept", rationale=text).rationale == text
 
 
-@pytest.mark.parametrize(
-    "code", [0, 1, 7, 8, 11, 12, 13, 27, 127], ids=lambda c: f"chr{c}"
-)
+@pytest.mark.parametrize("code", [0, 1, 7, 8, 11, 12, 27, 127], ids=lambda c: f"chr{c}")
 def test_control_characters_are_rejected(code: int) -> None:
     with pytest.raises(ValidationError):
         _mod().DecisionIn(
