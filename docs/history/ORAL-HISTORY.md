@@ -646,8 +646,9 @@ turnaround, which "usually dominates"; cycles run one at a time because they sha
 gates worsen the testcontainers flake; budget one to two review rounds.
 
 The first project run under it is the job-page redesign proposal (`docs/plans/2026-11-job-page-redesign/`,
-status PROPOSED, waiting on checkpoint H1, the PO's choice among three options with Option A, "workspace tabs",
-recommended). The proposal's evidence is a plain user quote ("so cluttered and confusing") plus the feature
+three options with Option A, "workspace tabs", recommended). The PO decided checkpoint H1 the same day, Option A
+with all five recommended defaults: "Assuming above 1-5 are approved Go A plan." H1 took hours, not days. That
+was the playbook's claim that checkpoint turnaround dominates delivery, demonstrated in its first run. The proposal's evidence is a plain user quote ("so cluttered and confusing") plus the feature
 that seemed to vanish after the clean slate: "A layout that hides a feature without saying why reads as a
 regression." It also records the biggest non-visual risk: 27 CSRF tokens on the page, so moving a form
 silently 400s if its token is no longer minted where it renders.
@@ -679,8 +680,9 @@ silently 400s if its token is no longer minted where it renders.
 
 ### Open (from `HANDOFF.md`, `docs/ROADMAP.md`, `docs/OPEN_DECISIONS.md`)
 
-1. **The job-page redesign** waits on checkpoint H1 (the PO's choice of option). It is a template and handler
-   change only, with every POST route and the API unchanged.
+1. **The job-page redesign** is approved (Option A, H1 decided 2026-11-24) and ready for S0; see the plan's
+   §7 and §12. It is a template and handler change only, with every POST route and the API unchanged, behind
+   `JOB_PAGE_V2` (default off).
 2. **The GitHub Support purge** of the 99 MiB of résumés, and the decision whether the repos should be public.
    Still open at the time `HANDOFF.md` section 6 was written.
 3. **Operating a real deployment** (ROADMAP item 1): retention is stored and never enforced; no `pg.jobs_stuck`

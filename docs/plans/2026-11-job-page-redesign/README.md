@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | PROPOSED. Waiting on checkpoint H1, the product owner's choice of option. |
+| **Status** | **APPROVED 2026-11-24: Option A with all five §7 defaults** (H1, below). Next: S0. Nothing built yet. |
 | **Opened** | 2026-11-24 |
 | **Product owner** | the user, who approves, decides and accepts |
 | **Coordinator** | the main Claude Code session, which plans, dispatches, verifies and reports |
@@ -133,7 +133,21 @@ defaults to **off**:
 3. Managers compare both layouts (H4).
 4. Flip the default (H5). Delete v1 one release later.
 
-## 7. Open questions for H1 (each has a recommended default)
+## 7. H1 decisions (DECIDED 2026-11-24)
+
+The product owner's words: *"Assuming above 1-5 are approved Go A plan, update the handoff
+accordingly."* All five defaults below are therefore **decisions, not suggestions**. Don't re-open
+them without the product owner.
+
+| # | Question | Decided |
+|---|---|---|
+| 1 | Option | **A, workspace tabs** |
+| 2 | Tab names | **Overview · Candidates · Requirements · Shortlist · Settings** |
+| 3 | Roster CSV | **Intake card 4**, labelled "adds no résumés" |
+| 4 | Preview mechanism | **Per-user toggle** behind `JOB_PAGE_V2` (default off). No second deployment. |
+| 5 | Scope | The shortlist and entry pages are **out of scope**, apart from the Shortlist-tab teaser |
+
+The original wording of the questions:
 
 1. **Option.** Default: **A**.
 2. **Tab names.** Default: Overview · Candidates · Requirements · Shortlist · Settings.
@@ -177,7 +191,7 @@ single biggest lever the product owner has on delivery.
 
 | ID | When | Decision | Input |
 |---|---|---|---|
-| **H1** | now | Option, plus the open questions in §7 | this doc and mockups.html |
+| **H1** | ✅ 2026-11-24 | Option A plus the five §7 defaults | this doc and mockups.html |
 | **H2** | after S2 | Is the Candidates tab right? This is the riskiest slice, and the first one worth seeing. | preview link + screenshots |
 | **H3** | after R | Push and open the PR; merge | PR with evidence |
 | **H4** | after deploy, flag on for one manager | Manager UAT: does it fix the complaint? | manager feedback |
@@ -197,4 +211,24 @@ single biggest lever the product owner has on delivery.
 
 | Slice | Estimate | Actual | Review findings | Notes |
 |---|---|---|---|---|
-| S0 | | | | |
+| H1 | — | answered the same day | — | A + all defaults |
+| S0 | ~1 h | | | |
+
+## 12. How to start S0 (for the next session)
+
+1. **Branch.** `git worktree add C:\repos\ra-job-page-v2 -b feat/job-page-v2 origin/main`, then work
+   only there. Never work in the live tree.
+2. **Planner** (sonnet). Have it write `docs/plans/2026-11-job-page-redesign/S-contract.md`. For each
+   of S1–S5 it should list:
+   - the exact templates and handlers touched;
+   - **every one of the 15 one-shot CSRF slots and where each is minted**;
+   - the existing tests whose spec changes. These are rewritten by the tester in red and never by the
+     coder.
+3. **Setting.** `JOB_PAGE_V2` goes in `core/src/settings.py` (pydantic-settings, default `False`),
+   plus a per-user override. The planner proposes how to store it. If storing it means a schema
+   change, that change rides with S1 and needs `./scripts/verify.sh all`.
+4. **Visual reference.** `mockups.html`, Option A. The empty state for a parsing draft must say why
+   intake is unavailable and how long the parse takes. That is the 2026-11-24 incident.
+5. **Each slice** runs red, then green, then the coordinator verifies, following
+   [the playbook §3](../../practice/fleet-project-playbook.md#3-definition-of-done-per-slice-and-for-the-project).
+   **H2 comes after S2:** show the product owner the Candidates tab before building S3.

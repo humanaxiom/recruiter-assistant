@@ -13,7 +13,11 @@ lessons lists verbatim, is archived at
 The product owner moved this project to a new Claude account after this
 iteration. **New session: read in this order.**
 
-1. [CLAUDE.md](CLAUDE.md), then this file.
+1. [CLAUDE.md](CLAUDE.md), then this file, then
+   [docs/handover/DECISION-LOG.md](docs/handover/DECISION-LOG.md): every
+   product-owner decision and correction that could be recovered. **Search it
+   before starting anything.** If a decision there covers your work, follow it;
+   don't re-ask and don't silently reverse it.
 2. [docs/handover/OPERATOR-NOTES.md](docs/handover/OPERATOR-NOTES.md): standing
    orders, the two stacks, how to deploy, host gotchas. This was previously in
    private Claude memory that may not have carried over.
@@ -42,11 +46,25 @@ iteration. **New session: read in this order.**
 
 **Next, in the product owner's order:**
 
-1. **Checkpoint H1** on the job-page redesign:
-   [docs/plans/2026-11-job-page-redesign/README.md](docs/plans/2026-11-job-page-redesign/README.md)
-   and `mockups.html` beside it. Recommended: option A (workspace tabs), behind
-   `JOB_PAGE_V2`. Five open questions, each with a default. Waiting on the
-   product owner.
+1. **Build the job-page redesign. Option A is APPROVED (H1, 2026-11-24)** with
+   all five defaults. The product owner's words: *"Assuming above 1-5 are
+   approved Go A plan."*
+   - **Plan:** [docs/plans/2026-11-job-page-redesign/README.md](docs/plans/2026-11-job-page-redesign/README.md).
+     §7 holds the decisions, which are not open questions; §12 says how to
+     start S0. `mockups.html` beside it is the visual reference.
+   - **What it is:** workspace tabs (Overview · Candidates · Requirements ·
+     Shortlist · Settings). Four separate intake cards: one résumé, a zip, the
+     Taleo export PDF, and the roster CSV, which adds no résumés. An empty
+     state that explains itself.
+   - **Rollout:** behind `JOB_PAGE_V2`, default **off**, with a per-user
+     preview toggle. The managers testing today must see no change until the
+     product owner flips it.
+   - **Shape:** one branch (`feat/job-page-v2`), one PR, slices S1–S5, then
+     review, then hand-over.
+   - **Estimate:** 20–25 h of fleet time, 3–4 working days. **H2**, the
+     product owner reviewing the Candidates tab, comes after S2.
+   - **Top risk:** re-homing the 15 one-shot CSRF tokens. A form whose token
+     is minted on the wrong tab fails silently with a 400.
 2. Feature 4, "Ask the pool"; then feature 5, the department picklist. Neither
    has been started.
 3. Owed, not built:
