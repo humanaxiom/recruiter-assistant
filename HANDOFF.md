@@ -25,8 +25,13 @@ iteration. **New session: read in this order.**
    the project got here.
 4. [docs/practice/fleet-project-playbook.md](docs/practice/fleet-project-playbook.md):
    how the product owner runs work through the agent fleet.
+5. **Setting up a new box?** Use
+   [docs/deploy/FRESH-INSTALL.md](docs/deploy/FRESH-INSTALL.md). It starts
+   from an empty machine and covers a new LLM host (`model-check.sh` before
+   users) and the offline release bundle.
 
-**State, 2026-11-24.**
+**State, 2026-11-24.** External access to sfuai.ca was confirmed by the product
+owner the same day.
 
 - **`main` = `eb39d03`.** Merged this iteration:
   - #112: in-app Taleo split and anonymised résumé export.
