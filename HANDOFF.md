@@ -30,6 +30,23 @@ iteration. **New session: read in this order.**
    from an empty machine and covers a new LLM host (`model-check.sh` before
    users) and the offline release bundle.
 
+**2026-11-25: the product owner is moving to the new box and the Teams account
+now.** The exact sequence is
+[FRESH-INSTALL §0a](docs/deploy/FRESH-INSTALL.md#0a-the-short-path-in-order).
+Leave sfuai.ca running on the old box until the new box passes the signed-in
+drive (§0a step 6), so the managers' testing isn't interrupted. Development
+happens **on the new box**, in a worktree, never in its live tree.
+
+**Fixed 2026-11-25 (`fix/cas-overlay-drift`):** login from `localhost:29500`
+timed out at sfuai.ca, the third recurrence. The 11-24 deploys used a plain
+`docker compose up`, which dropped `CAS_LOCAL_*` (they lived only in
+`compose.cas.yml`).
+- The defaults now also live in `docker-compose.yml`.
+- `doctor.sh` fails with `deploy.cas_local_origin_unset` when they're missing.
+- Every `.env` should carry `COMPOSE_FILE=docker-compose.yml;compose.cas.yml`.
+  The old box's `.env` now does.
+- **After any deploy, check both origins** (DECISION-LOG §5).
+
 **State, 2026-11-24.** External access to sfuai.ca was confirmed by the product
 owner the same day.
 

@@ -216,8 +216,11 @@ single biggest lever the product owner has on delivery.
 
 ## 12. How to start S0 (for the next session)
 
-1. **Branch.** `git worktree add C:\repos\ra-job-page-v2 -b feat/job-page-v2 origin/main`, then work
-   only there. Never work in the live tree.
+1. **Branch.** S0 starts on the **new box** under the Teams account (2026-11-25), once that box has
+   passed [FRESH-INSTALL §0a](../../deploy/FRESH-INSTALL.md#0a-the-short-path-in-order) step 6.
+   Run `git worktree add C:\repos\ra-job-page-v2 -b feat/job-page-v2 origin/main`, then work only
+   there. Never work in the live tree. For the e2e/smoke stack, make a second worktree with its own
+   CAS-off `.env` (FRESH-INSTALL §5).
 2. **Planner** (sonnet). Have it write `docs/plans/2026-11-job-page-redesign/S-contract.md`. For each
    of S1–S5 it should list:
    - the exact templates and handlers touched;

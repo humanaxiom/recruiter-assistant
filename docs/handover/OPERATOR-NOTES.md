@@ -72,9 +72,19 @@ which equals `eb39d03`. To deploy a newer main without checking out a branch in 
 cd /c/repos/recruiter-assistant && git fetch origin && M=$(git rev-parse origin/main)
 NEW=$(git commit-tree "$M^{tree}" -p HEAD -p $M -m "chore: put the pilot box on main ($M)")
 git merge --ff-only $NEW          # files change now
-docker compose up -d --build api worker frontend   # DDL runs on API start
+docker compose -f docker-compose.yml -f compose.cas.yml up -d --build api worker frontend   # DDL runs on API start
 ./scripts/doctor.sh
+curl -s -o /dev/null -w '%{redirect_url}\n' http://localhost:29500/   # must be http://localhost:29800/auth/cas/login...
 ```
+
+**Always name both compose files.** The live stack was started by `quickstart.ps1` with
+`-f docker-compose.yml -f compose.cas.yml`. A plain `docker compose up` recreates the containers
+from `docker-compose.yml` alone. On 2026-11-24 that dropped `CAS_LOCAL_*`, and `localhost:29500`
+logins then timed out at sfuai.ca until 11-25. The defaults now also live in `docker-compose.yml`,
+and `doctor.sh` fails with `deploy.cas_local_origin_unset` if they're missing. Even so, use the
+overlay so the two files never diverge. To make plain `docker compose` commands safe, the owner can
+add `COMPOSE_FILE=docker-compose.yml;compose.cas.yml` to the live `.env` (`;` is the separator on
+Windows).
 
 Before you do, check that nobody is using the box (frontend log over the last 10 minutes) and that no
 parses are in flight. A worker restart drops nothing that's queued, but an in-flight LLM call is
@@ -115,7 +125,7 @@ retried. **Deploying needs the product owner's consent.**
 | Path | Branch | State |
 |---|---|---|
 | `C:\repos\recruiter-assistant` | `fix/cas-local-origin` (local) | **live tree**, identical to main `eb39d03` |
-| `C:\repos\ra-interview-q` | `chore/handover-2026-11` | this hand-over and the redesign proposal |
+| `C:\repos\ra-interview-q` | `fix/cas-overlay-drift`, then detached on `main` once merged | general-purpose worktree on the old box |
 | `C:\repos\ra-taleo-split` | detached `eb39d03` | stress-stack runner (holds the stress `.env`) |
 
 

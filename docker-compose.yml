@@ -97,6 +97,14 @@ services:
       # fails when this drops below the profile's recommendation, so the two
       # cannot drift apart again.
       LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-900}"
+      # The same stack reached at localhost ON THE BOX, where a public name
+      # like sfuai.ca does not resolve back to it (fix/cas-local-origin, #111).
+      # Used only for a request whose Host is loopback; inert with CAS off.
+      # These live HERE, not only in compose.cas.yml: a deploy that recreated
+      # api+frontend from this file alone dropped them, and localhost logins
+      # timed out at sfuai.ca (2026-11-24). doctor.sh fails if they are unset.
+      CAS_LOCAL_SERVICE_BASE_URL: "${CAS_LOCAL_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
+      CAS_LOCAL_FRONTEND_BASE_URL: "${CAS_LOCAL_FRONTEND_BASE_URL:-http://localhost:${FRONTEND_PORT:-5000}}"
       STORAGE_DIR: /data
       PII_KEY: ${PII_KEY:?PII_KEY must be set — 32 random bytes, base64}
       # ADR-008: required — an empty salt would key every non-vocab Skill
@@ -178,6 +186,8 @@ services:
       # this, enabling auth (any API_KEY_* configured above) 401s every
       # backend call the frontend makes on a browser's behalf.
       API_KEY_RECRUITER: ${API_KEY_RECRUITER:-}
+      # Localhost CAS origin — see the api service's note on these.
+      CAS_LOCAL_SERVICE_BASE_URL: "${CAS_LOCAL_SERVICE_BASE_URL:-http://localhost:${API_PORT:-8000}}"
     volumes: ["./core:/app"]
     depends_on: [api]
 
