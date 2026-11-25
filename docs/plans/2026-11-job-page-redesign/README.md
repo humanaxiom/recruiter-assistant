@@ -212,7 +212,7 @@ single biggest lever the product owner has on delivery.
 | Slice | Estimate | Actual | Review findings | Notes |
 |---|---|---|---|---|
 | H1 | — | answered the same day | — | A + all defaults |
-| S0 | ~1 h | | | |
+| S0 | ~1 h | ~1 h (planner 9 min, 189k tokens; coordinator verification) | 7 plan premises corrected ([S-contract §1](S-contract.md)): 1 one-shot CSRF slot, not 15; CSRF failure is a 403, not a 400 | Contract re-estimates 23–27 h (S2 at 2 cycles). Awaiting PO review. |
 
 ## 12. How to start S0 (for the next session)
 
