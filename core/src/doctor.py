@@ -470,6 +470,38 @@ async def _check_model_profile(settings: Any, profile_dir: Path) -> list[Finding
     return found
 
 
+async def _check_cas_local_origin(settings: Any) -> list[Finding]:
+    """CAS on, but no localhost CAS origin: the box's own operator is locked out.
+
+    A request on http://localhost:<port> is redirected to the PUBLIC CAS
+    origin, which hairpin NAT makes unreachable from inside the LAN. The
+    setting once lived only in compose.cas.yml and a deploy that omitted the
+    overlay dropped it silently (2026-11-24).
+    """
+    if settings is None or not getattr(settings, "cas_enabled", False):
+        return []
+    if getattr(settings, "cas_local_service_base_url", ""):
+        return []
+    return [
+        Finding(
+            check="deploy.cas_local_origin_unset",
+            severity="fail",
+            count=1,
+            detail=(
+                "CAS is on but CAS_LOCAL_SERVICE_BASE_URL is empty, so a login "
+                "on http://localhost is sent to the public CAS origin, which "
+                "this box cannot reach (ERR_CONNECTION_TIMED_OUT)"
+            ),
+            remedy=(
+                "Recreate api and frontend from a docker-compose.yml that sets "
+                "CAS_LOCAL_SERVICE_BASE_URL / CAS_LOCAL_FRONTEND_BASE_URL, with "
+                "compose.cas.yml as on the live box: docker compose -f "
+                "docker-compose.yml -f compose.cas.yml up -d api frontend"
+            ),
+        )
+    ]
+
+
 async def run_checks(
     *,
     pg: Any,
@@ -494,6 +526,7 @@ async def run_checks(
         ("pg.export", lambda: _check_export_requests(pg)),
         ("neo4j", lambda: _check_neo4j(neo4j)),
         ("model", lambda: _check_model_profile(settings, profiles)),
+        ("deploy", lambda: _check_cas_local_origin(settings)),
     ]
     for name, run in checks:
         try:
