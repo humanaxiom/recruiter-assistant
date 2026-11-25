@@ -8,6 +8,36 @@ file is only the build.
 **Nothing in this guide copies data from the old box.** The new box starts empty. Migrating pilot
 data is a separate, deliberate decision (§9).
 
+## 0a. The short path, in order
+
+The rest of this file explains each step. This is the sequence:
+
+1. **Install:** Docker Desktop, Git, `gh`, PowerShell 7, and Tailscale if the LLM host is on the
+   tailnet. Run `gh auth login`.
+2. **Clone into the live tree:** `git clone https://github.com/humanaxiom/recruiter-assistant.git
+   C:\repos\recruiter-assistant`. Then `docker ps` to confirm nothing holds 29500/29800/29432/29379/
+   29474/29687.
+3. **`.env`:** `copy .env.example .env` and set the keys in §2. That includes
+   `COMPOSE_FILE=docker-compose.yml;compose.cas.yml`, `CAS_ENABLED=true`, your
+   `DEFAULT_ADMIN_CAS_USERNAME`, the CAS URLs, the LLM host and models, and `TALEO_ENABLED=false`.
+4. **Boot:** `pwsh -ExecutionPolicy Bypass -File .\scripts\quickstart.ps1 -Build`. Read the output:
+   both models must be found. **Copy `PII_KEY` to somewhere offline.**
+5. **Check:** `docker compose ps`, then `./scripts/doctor.sh`, then check that both login origins
+   redirect correctly (§3).
+6. **Drive it signed in:** at `http://localhost:29500`, sign in and land as admin. Create a job, wait
+   for the parse, **open** it, upload one résumé, generate the shortlist, record a decision, and
+   generate interview questions (§5).
+7. **New LLM host or model:**
+   1. Copy `fixtures/` over an approved channel.
+   2. Run `./scripts/model-check.sh`.
+   3. Set `LLM_TIMEOUT_S` from the profile, then `docker compose up -d`, then doctor.
+   4. Commit the profile on a `chore/` branch (§4).
+
+   Do this **before** anyone else uses the box.
+8. **Start development in a worktree, never the live tree:**
+   `git worktree add C:/repos/ra-job-page-v2 -b feat/job-page-v2 origin/main`. Open Claude Code there
+   and begin with HANDOFF.md, then the redesign plan §12.
+
 ## 0. What you need before you start
 
 | Need | Notes |
@@ -57,6 +87,7 @@ Then edit these keys. Leave everything else at the `.env.example` values unless 
 
 | Key | Set to | Why |
 |---|---|---|
+| `COMPOSE_FILE` | `docker-compose.yml;compose.cas.yml` (`;` on Windows, `:` on Linux) | Makes every plain `docker compose` command include the CAS overlay, as `quickstart.ps1` does. Without it, a recreate once dropped the localhost CAS origin (2026-11-24). |
 | `LLM_BASE_URL` | the new LLM host, e.g. `http://<host>:11434/v1` | §4 |
 | `LLM_TIMEOUT_S` | `900` for `gpt-oss:20b` on a shared GPU | It is coupled to throughput. Re-measure on a new host (§4). |
 | `LLM_MODEL_GENERATION` / `LLM_MODEL_EMBEDDING` | the model names on that host | Changing the embedding model also means changing `LLM_EMBEDDING_DIM` **and** rebuilding the vector indexes. Avoid it unless you have to. |
@@ -92,7 +123,15 @@ Postgres tables and the Neo4j indexes are created when the API starts; there is 
 ```bash
 docker compose ps                      # six services, the datastores healthy
 ./scripts/doctor.sh                    # must print ✅ healthy
+# Both login origins. The localhost one must stay on localhost:
+curl -s -o /dev/null -w '%{redirect_url}\n' http://localhost:29500/
+#   expect http://localhost:29800/auth/cas/login?next=%2F
+curl -sk -o /dev/null -w '%{redirect_url}\n' --resolve <host>:<port>:127.0.0.1 https://<host>:<port>/
+#   expect https://<host>:<port>/auth/cas/login?next=%2F (only once a public URL exists, §6)
 ```
+
+Until a public URL exists, set both `CAS_SERVICE_BASE_URL` and `CAS_FRONTEND_BASE_URL` to the
+localhost values (`http://localhost:29800` and `http://localhost:29500`).
 
 ## 4. A new LLM host or model: measure before trusting
 
@@ -173,7 +212,11 @@ TLS-termination config, compose ports, `.env` keys, cutover and revert. For a ne
 
 - **Deploy a newer `main`:** see OPERATOR-NOTES §3. The tree-identical-commit recipe applies if the
   live checkout sits on a non-main branch. On a fresh clone that's simply `main`, so use
-  `git pull --ff-only` and then `docker compose up -d --build api worker frontend`.
+  `git pull --ff-only` and then
+  `docker compose -f docker-compose.yml -f compose.cas.yml up -d --build api worker frontend`.
+  **Always name both files**, as `quickstart.ps1` does. A plain `docker compose up` once dropped the
+  localhost CAS origin, and localhost logins timed out at the public URL. Adding
+  `COMPOSE_FILE=docker-compose.yml;compose.cas.yml` to `.env` makes plain commands safe.
 - **Gates** (before every commit): `./scripts/verify.sh` (about 39 min), or `./scripts/verify.sh all`
   for `models/ api/ services/ worker/`.
 - **Logging everyone out:** rotating `FLASK_SECRET_KEY` does it; tell users first.
