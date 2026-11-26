@@ -69,7 +69,7 @@ The header needs `get_job` everywhere.
 
 | Tab | Reads beyond `get_job` | Mints a one-shot token? |
 |---|---|---|
-| Overview | none (the résumé-status fragment lazy-loads; the checklist derives from job fields only, Q4) | no |
+| Overview | `list_resumes`, for the résumé count only. *Amended at R (2026-11-26):* this is the same read v1 makes on every render, so a failure is no worse than v1. The résumé-status fragment lazy-loads, and the checklist derives from job fields only (Q4). | no |
 | Candidates | `list_resumes`; writer only: `list_resume_splits`, `get_latest_resume_export` | **yes**, one: export download, only if the latest export is `ready` |
 | Requirements | none | no |
 | Shortlist | `list_shortlist` (teaser, top N) | **no. This is a tested invariant, §4.4.** |
@@ -212,7 +212,7 @@ The mockup shows description and additional requirements as one "Edit" panel wit
 | Touches | Where |
 |---|---|
 | New | `_job_v2_tab_shortlist.html` |
-| `frontend/app.py` | Shortlist branch reads `api_client.list_shortlist(job_id)` (`app.py:1853` usage pattern) and shows the top 5 with rank, score label and the existing zero-requirements and degraded disclosures (reuse `_fetch_jd_has_no_requirements`, `app.py:808`). |
+| `frontend/app.py` | Shortlist branch reads `api_client.list_shortlist(job_id)` (`app.py:1853` usage pattern) and shows the first 5 rows **in the backend's order** with rank, score label and the existing zero-requirements disclosure (reuse `_fetch_jd_has_no_requirements`, `app.py:808`). *Amended at R (2026-11-26):* the backend lists `not_eligible` candidates last, and a `metrics_invalidated` row shows "—" and no score, as `shortlist_cards.html` does, so the teaser never re-sorts. The degraded-résumé disclosure stays on the full shortlist page, because computing it needs `list_resumes`, which §2.4 keeps off this tab. |
 
 **The teaser has no per-card forms and no tokens.** There is no reveal, withdraw or decision control. Decisions stay on the shortlist page (`_DECIDER_ROLES`, `app.py:332`). The shortlist page mints 2 one-shot tokens per card up to k=50, which is 100 slots against a cap of 64 (`csrf.py:61-69`). A teaser that did the same would evict the export slot.
 
