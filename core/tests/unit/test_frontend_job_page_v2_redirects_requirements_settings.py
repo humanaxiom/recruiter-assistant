@@ -82,10 +82,15 @@ def _form_from_page(
     client: Any, tab: str, suffix: str, *, to: str | None = None
 ) -> Node:
     body = client.get(f"/jobs/{JOB_ID}?tab={tab}").get_data(as_text=True)
-    # Scoped to the tab's own wrapper: the header "Open for applicants" form
-    # sits outside it on every tab and is not the tab's form.
-    scope = dom.tab_root(dom.parse(body), tab)
-    assert scope is not None, f'no data-job-tab="{tab}" element'
+    # v2: scoped to the tab's own wrapper, because the header "Open for
+    # applicants" form sits outside it on every tab and is not the tab's form.
+    # v1 has no wrappers (and must not), so it is searched whole; a v2 page
+    # missing its wrapper is a failure, never a silent fallback.
+    root = dom.parse(body)
+    scope = dom.tab_root(root, tab)
+    if scope is None:
+        assert 'data-job-layout="v2"' not in body, f'no data-job-tab="{tab}" element'
+        scope = root
     found = dom.forms_posting_to(scope, f"/jobs/{JOB_ID}{suffix}")
     if to is not None:
         found = [f for f in found if dom.hidden_inputs(f).get("to") == to]
