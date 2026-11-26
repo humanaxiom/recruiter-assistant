@@ -31,7 +31,7 @@ from frontend import app as frontend_app_module
 from src.schemas.auth import User
 from src.schemas.jobs import JDExtracted, JobOut, Skill
 from src.schemas.matching import ScoreBreakdown, ShortlistEntry
-from src.schemas.resumes import ResumeListItem
+from src.schemas.resumes import ResumeListItem, WorkAuthorization
 from src.settings import Settings
 
 JOB_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -385,6 +385,7 @@ def make_shortlist_entry(
     display_label: str | None = None,
     blinded: bool = False,
     resume_index: int | None = None,
+    work_authorization: WorkAuthorization = "unknown",
 ) -> dict[str, Any]:
     """One ``/jobs/{id}/shortlist`` row (the ``ShortlistEntry`` DTO, JSON mode).
 
@@ -411,6 +412,7 @@ def make_shortlist_entry(
         generated_at=TS,
         blinded=blinded,
         display_label=display_label or f"Candidate {rank}",
+        work_authorization=work_authorization,
     ).model_dump(mode="json")
 
 

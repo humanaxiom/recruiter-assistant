@@ -156,13 +156,12 @@ def test_a_full_shortlist_shows_at_most_five_rows(
     assert len(_rows(_tab(client))) == min(count, 5)
 
 
-def test_rows_show_rank_label_and_score_in_rank_order(
+def test_rows_show_rank_label_and_score_in_the_backends_order(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dom.install(monkeypatch)
     entries = _entries(7)
-    # The API orders by rank; the teaser must not depend on that to pick the top.
-    dom.stub_shortlist(monkeypatch, list(reversed(entries)))
+    dom.stub_shortlist(monkeypatch, entries)
     rows = _rows(_tab(client))
     assert len(rows) == 5
     for rank, row in enumerate(rows, start=1):
@@ -174,6 +173,54 @@ def test_rows_show_rank_label_and_score_in_rank_order(
     ranks = [r.text() for r in rows]
     assert "Candidate 6" not in " ".join(ranks)
     assert "Candidate 7" not in " ".join(ranks)
+
+
+# ── the backend's order is authoritative (reviewer finding, SPONSOR O2) ─────
+#
+# ``list_shortlist`` orders ``not_eligible`` candidates LAST, whatever their
+# stored rank (shortlist_service.py ORDER BY (... = 'not_eligible') ASC, rank).
+# Their rank and score are rank-time values the product cannot stand behind
+# (``metrics_invalidated``), so the full page shows "—" and no score. A teaser
+# that re-sorted by ``rank`` would put such a candidate back at "#1 92 %".
+
+
+def _top_scorer_later_declared_not_eligible() -> list[dict[str, Any]]:
+    # Backend order: eligible ranks 2..6 first, the voided rank-1 row last.
+    voided = dom.make_shortlist_entry(
+        1, score=0.92, display_label="Voided Top", work_authorization="not_eligible"
+    )
+    return [dom.make_shortlist_entry(r) for r in range(2, 7)] + [voided]
+
+
+def test_the_teaser_keeps_the_backends_order_and_never_re_sorts_by_rank(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dom.install(monkeypatch)
+    dom.stub_shortlist(monkeypatch, _top_scorer_later_declared_not_eligible())
+    labels = [r.text() for r in _rows(_tab(client))]
+    assert len(labels) == 5
+    assert "Voided Top" not in " ".join(labels), labels
+    assert "Candidate 2" in labels[0], labels
+
+
+@_ANY
+def test_a_voided_candidate_shows_no_rank_and_no_score(
+    client: Any, monkeypatch: pytest.MonkeyPatch, role: str | None
+) -> None:
+    dom.install(monkeypatch, role=role)
+    voided = dom.make_shortlist_entry(
+        1, score=0.92, display_label="Voided Top", work_authorization="not_eligible"
+    )
+    assert voided["metrics_invalidated"] is True
+    dom.stub_shortlist(monkeypatch, [dom.make_shortlist_entry(2), voided])
+    rows = _rows(_tab(client))
+    assert len(rows) == 2
+    text = rows[1].text()
+    assert "Voided Top" in text
+    assert "—" in text, text
+    assert "#1" not in text.split(), text
+    assert "92" not in text.replace("%", " ").split(), text
+    assert "%" not in text, text
 
 
 def test_a_non_blind_job_shows_the_label_the_backend_sent(
