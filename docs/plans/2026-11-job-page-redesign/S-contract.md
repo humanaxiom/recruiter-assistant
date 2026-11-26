@@ -242,6 +242,31 @@ The mockup shows description and additional requirements as one "Edit" panel wit
 **DoD:** `./scripts/verify.sh` offline and then `./scripts/verify.sh all` both green with output pasted. `smoke.sh` is run twice on a local CAS-off dev stack (once `SMOKE_EXPECT_JOB_PAGE=v1`, once with `JOB_PAGE_V2=true` and `=v2`) and the output is pasted verbatim. `doctor.sh` is pasted. Docs updated.
 **Estimate:** 1 cycle (about 3 h), which includes the docs.
 
+### S6. Editable job details (added 2026-11-26 by the product owner after review)
+
+**Ask:** *"JD uploaded should be editable. Especially the title..etc"*.
+
+**Decisions (product owner, 2026-11-26):**
+- **Description:** editable on a **draft only**, as today. On a non-draft job, the description is shown read-only with a note: to change the posting text, close this job and create a new one.
+- **Fields:** one **Job details** form holding **title, minimum years, seniority, employment type, department and campus**.
+- **Placement (coordinator default):** the form replaces the Settings tab's "Department & campus" form (same route, `POST /jobs/<id>/details`, success → `?tab=settings`). Writers also get an **Edit details** link in the header, on every tab, pointing to `?tab=settings#job-details`. HM and auditor: no form, no link.
+- **v1:** unchanged. Its form still posts only department and location; the shared handler only reads fields that were submitted.
+
+| Touches | What |
+|---|---|
+| `core/src/services/job_service.py` `update_job` | When `title` is in the update, also set `title_provisional = false`, in the same UPDATE. Without this, a title typed while the JD is still parsing is overwritten when the parse finishes (`job_service.py:104-106`). |
+| `core/frontend/app.py` `edit_job_details`, `_EDITABLE_DETAIL_FIELDS` | Accept `title`, `min_years`, `seniority`, `employment_type`, as well as department and location. A field the form did not submit is still not sent. |
+| | Validate before calling the API. A blank or 1-character title, a non-integer `min_years`, `min_years` outside 0–50, or a seniority or employment type outside the schema's `Literal` values all re-render the v2 Settings tab with **400** and a message, and make **no PATCH**. |
+| | A blank `min_years`, seniority or employment type sends `None` (unset). |
+| `_job_v2_tab_settings.html` | The Job details form (`id="job-details"`), prefilled. Seniority and employment type are `<select>`s with a blank option plus the schema values, labelled readably. Minimum years is a number input, 0–50. |
+| | A hint: *changing the title or minimum years changes how candidates are ranked; regenerate the shortlist afterwards*. |
+| `_job_v2_header.html` | **Edit details** link for writers. |
+| `_job_v2_tab_requirements.html` | On a non-draft job, the description shows read-only with the close-and-recreate note. |
+
+**Ranking note:** the title (an embedding against the candidate's recent title, `orchestrator.py:646`) and `min_years` (`orchestrator.py:600-619`) feed the score. Seniority and employment type do not. An edit does not regenerate the shortlist; the hint says so.
+
+**Verify mode:** `all`, because the change touches `services/`. Major feature: the by-hand drive and `smoke.sh` v2 run before hand-over.
+
 ### 3.1 PRG table: every POST handler that lands on the job page
 
 "Lines" are in `frontend/app.py`. "v2 tab" applies only when v2 is on. With v2 off, every `Location` stays the bare `/jobs/<id>`.
