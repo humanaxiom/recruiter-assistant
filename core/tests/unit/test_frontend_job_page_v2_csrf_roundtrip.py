@@ -1,10 +1,14 @@
 """S2 (job-page redesign, Option A) -- the CSRF round trip, Candidates rows.
 
 RED: the Candidates tab renders no forms yet (S1 placeholder), and
-``_render_job_detail`` mints the export one-shot token on every tab.
+``_render_job_detail`` mints the export one-shot token on every tab. The S3
+rows (below the Candidates ones) are RED because the Requirements and Settings
+tabs are placeholders too.
 
 Spec: ``S-contract.md`` section 4.3, rows 9 to 13: upload (cards 1 and 2),
 start export, split upload, roster, and the one-shot export download.
+S3 adds rows 1 to 8: details, requirements, re-parse, description, assignee
+remove and add, the Settings and header status forms, and blind review.
 
 **Why a plain client and not the ``csrf_client`` fixture.** ``csrf_client``
 presents the page token in an ``X-CSRF-Token`` header on every request, so the
@@ -43,6 +47,8 @@ from tests.unit.job_page_v2_dom import EXPORT_ID, JOB_ID, Node
 _SPLIT_ID = UUID("55555555-5555-4555-8555-555555555555")
 _ZIP = b"PK\x03\x04 fake zip bytes"
 _DISPOSITION = 'attachment; filename="job-resumes.zip"'
+_DANA = dom.make_user(1, cas_username="dana", display_name="Dana Lee")
+_PRIYA = dom.make_user(2, cas_username="priya", display_name="Priya Singh")
 
 
 @pytest.fixture
@@ -87,6 +93,11 @@ class _Case:
     returns: Any
     extra: Callable[[], dict[str, Any]]
     lands_on_tab: bool  # False: success goes to the split review page
+    tab: str = "candidates"  # the tab the form is rendered on AND redirects to
+    state: str = "open"  # the job state the fixture is in
+    to: str | None = None  # a status form is picked by its hidden `to`
+    whole_tab: bool = False  # no card or menu: search the whole tab wrapper
+    header: bool = False  # the form lives in the header, outside the wrapper
 
 
 _CASES: dict[str, _Case] = {
@@ -130,12 +141,110 @@ _CASES: dict[str, _Case] = {
         extra=lambda: {"file": _csv()},
         lands_on_tab=True,
     ),
+    # ── S3: contract 4.3 rows 1 to 8 (Settings and Requirements forms) ──────
+    "details": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/details",
+        api="patch_job",
+        returns={},
+        extra=lambda: {"department": "School of Medicine", "location": "Burnaby"},
+        lands_on_tab=True,
+        tab="settings",
+        whole_tab=True,
+    ),
+    "requirements": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/requirements",
+        api="patch_job",
+        returns={},
+        extra=lambda: {"additional_requirements": "Must have MEG analysis."},
+        lands_on_tab=True,
+        tab="requirements",
+        whole_tab=True,
+    ),
+    "reparse": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/reparse",
+        api="reparse_job",
+        returns={},
+        extra=lambda: {},
+        lands_on_tab=True,
+        tab="requirements",
+        state="failed",
+        whole_tab=True,
+    ),
+    "description": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/description",
+        api="patch_job",
+        returns={},
+        extra=lambda: {"description_raw": "A corrected job description."},
+        lands_on_tab=True,
+        tab="requirements",
+        state="parsed",
+        whole_tab=True,
+    ),
+    "assignee_remove": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/assignees/{_DANA['id']}/remove",
+        api="remove_job_assignee",
+        returns=None,
+        extra=lambda: {},
+        lands_on_tab=True,
+        tab="settings",
+        whole_tab=True,
+    ),
+    "assignee_add": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/assignees",
+        api="add_job_assignee",
+        returns={},
+        extra=lambda: {"user_id": _PRIYA["id"]},
+        lands_on_tab=True,
+        tab="settings",
+        whole_tab=True,
+    ),
+    "status_settings": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/status",
+        api="transition_status",
+        returns={},
+        extra=lambda: {},
+        lands_on_tab=True,
+        tab="settings",
+        to="closed",
+        whole_tab=True,
+    ),
+    "status_header": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/status",
+        api="transition_status",
+        returns={},
+        extra=lambda: {},
+        lands_on_tab=True,
+        tab="requirements",
+        state="parsed",
+        to="open",
+        header=True,
+    ),
+    "blind_review": _Case(
+        card=None,
+        suffix=f"/jobs/{JOB_ID}/blind-review",
+        api="patch_job",
+        returns={},
+        extra=lambda: {},
+        lands_on_tab=True,
+        tab="settings",
+        whole_tab=True,
+    ),
 }
 
 
 def _scope(root: Node, case: _Case) -> Node:
-    tab = dom.tab_root(root)
-    assert tab is not None, 'no data-job-tab="candidates" element'
+    tab = dom.tab_root(root, case.tab)
+    assert tab is not None, f'no data-job-tab="{case.tab}" element'
+    if case.whole_tab:
+        return tab
     if case.card is None:
         found = tab.find(attrs={"data-export-menu": None})
     else:
@@ -145,7 +254,17 @@ def _scope(root: Node, case: _Case) -> Node:
 
 
 def _form(root: Node, case: _Case) -> Node:
-    forms = dom.forms_posting_to(_scope(root, case), case.suffix)
+    if case.header:
+        wrapper = dom.tab_root(root, case.tab)
+        forms = [
+            f
+            for f in dom.forms_posting_to(root, case.suffix)
+            if wrapper is None or not f.within(wrapper)
+        ]
+    else:
+        forms = dom.forms_posting_to(_scope(root, case), case.suffix)
+    if case.to is not None:
+        forms = [f for f in forms if dom.hidden_inputs(f).get("to") == case.to]
     assert len(forms) == 1, f"expected one form posting to {case.suffix}"
     return forms[0]
 
@@ -154,6 +273,11 @@ def _stub(monkeypatch: pytest.MonkeyPatch, case: _Case) -> MagicMock:
     spy = MagicMock(return_value=case.returns)
     monkeypatch.setattr(api_client, case.api, spy)
     return spy
+
+
+def _arm(monkeypatch: pytest.MonkeyPatch, case: _Case) -> None:
+    dom.install(monkeypatch, state=case.state)
+    dom.stub_settings_reads(monkeypatch, assignees=[_DANA], users=[_DANA, _PRIYA])
 
 
 def _submit(client: Any, form: Node, case: _Case, *, token: bool = True) -> Any:
@@ -171,9 +295,9 @@ def test_form_roundtrips(
     client: Any, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     case = _CASES[name]
-    dom.install(monkeypatch)
+    _arm(monkeypatch, case)
     spy = _stub(monkeypatch, case)
-    body = _get(client)
+    body = _get(client, case.tab)
     form = _form(dom.parse(body), case)
     token = dom.hidden_inputs(form).get("csrf_token")
     assert token, "the form carries no csrf_token"
@@ -186,7 +310,7 @@ def test_form_roundtrips(
     where = urlsplit(resp.headers["Location"])
     if case.lands_on_tab:
         assert where.path == f"/jobs/{JOB_ID}"
-        assert parse_qs(where.query) == {"tab": ["candidates"]}
+        assert parse_qs(where.query) == {"tab": [case.tab]}
     else:
         assert where.path == f"/resume-splits/{_SPLIT_ID}"
 
@@ -196,9 +320,9 @@ def test_a_form_with_its_token_stripped_is_403_not_a_silent_success(
     client: Any, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     case = _CASES[name]
-    dom.install(monkeypatch)
+    _arm(monkeypatch, case)
     spy = _stub(monkeypatch, case)
-    form = _form(dom.parse(_get(client)), case)
+    form = _form(dom.parse(_get(client, case.tab)), case)
 
     resp = _submit(client, form, case, token=False)
 
@@ -211,9 +335,9 @@ def test_a_form_with_a_forged_token_is_403(
     client: Any, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     case = _CASES[name]
-    dom.install(monkeypatch)
+    _arm(monkeypatch, case)
     spy = _stub(monkeypatch, case)
-    form = _form(dom.parse(_get(client)), case)
+    form = _form(dom.parse(_get(client, case.tab)), case)
     data: dict[str, Any] = dom.hidden_inputs(form)
     data["csrf_token"] = "forged-" + data["csrf_token"]
     data.update(case.extra())
@@ -247,6 +371,66 @@ def test_every_post_form_on_the_candidates_tab_has_a_nonempty_token(
     for form in forms:
         token = dom.hidden_inputs(form).get("csrf_token")
         assert token, f"form {form.get('action')!r} has an empty csrf_token"
+
+
+# ── the structural guard, all five tabs (contract 4.3) ──────────────────────
+
+_ALL_TABS = ("overview", "candidates", "requirements", "shortlist", "settings")
+_WRITERS = ("admin", "recruiter")
+
+
+def _get_as(client: Any, tab: str) -> str:
+    resp = client.get(
+        f"/jobs/{JOB_ID}?tab={tab}", headers={"Cookie": "ra_session=tok-live"}
+    )
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 200, body[:400]
+    return body
+
+
+@pytest.mark.parametrize("state", ["parsing", "open", "closed"])
+@pytest.mark.parametrize("role", ["admin", "recruiter", "hiring_manager", "auditor"])
+@pytest.mark.parametrize("tab", _ALL_TABS)
+def test_every_post_form_on_every_v2_tab_has_a_nonempty_token(
+    client: Any, monkeypatch: pytest.MonkeyPatch, tab: str, role: str, state: str
+) -> None:
+    dom.install(
+        monkeypatch,
+        role=role,
+        state=state,
+        splits=[dom.make_split(1)],
+        export=dom.make_export("ready"),
+    )
+    dom.stub_settings_reads(monkeypatch, assignees=[_DANA], users=[_DANA, _PRIYA])
+    root = dom.parse(_get_as(client, tab))
+    forms = [
+        f for f in root.find_all("form") if (f.get("method") or "").lower() == "post"
+    ]
+    for form in forms:
+        token = dom.hidden_inputs(form).get("csrf_token")
+        assert token, f"{tab}/{role}/{state}: {form.get('action')!r} has no token"
+    if role in _WRITERS and tab in ("requirements", "settings"):
+        assert forms, f"a writer's {tab} tab has no POST form at all"
+
+
+@pytest.mark.parametrize("tab", ["requirements", "settings"])
+def test_every_form_on_a_tab_carries_the_page_token_not_a_one_shot(
+    client: Any, monkeypatch: pytest.MonkeyPatch, tab: str
+) -> None:
+    dom.install(monkeypatch, state="failed", export=dom.make_export("ready"))
+    dom.stub_settings_reads(monkeypatch, assignees=[_DANA], users=[_DANA, _PRIYA])
+    body = _get(client, tab)
+    root = dom.parse(body)
+    wrapper = dom.tab_root(root, tab)
+    assert wrapper is not None, f'no data-job-tab="{tab}" element'
+    forms = [
+        f for f in wrapper.find_all("form") if (f.get("method") or "").lower() == "post"
+    ]
+    assert forms, f"the {tab} tab has no POST form"
+    for form in forms:
+        token = dom.hidden_inputs(form).get("csrf_token")
+        assert token == page_token(body), f"{form.get('action')!r}: not the page token"
+    assert _slots(client) == {}, f"the {tab} tab minted a one-shot token"
 
 
 # ── row 13: the one-shot export download ────────────────────────────────────

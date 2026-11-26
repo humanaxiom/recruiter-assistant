@@ -28,6 +28,7 @@ import pytest
 
 from frontend import api_client
 from frontend import app as frontend_app_module
+from src.schemas.auth import User
 from src.schemas.jobs import JDExtracted, JobOut, Skill
 from src.schemas.resumes import ResumeListItem
 from src.settings import Settings
@@ -311,4 +312,63 @@ def install(
     monkeypatch.setattr(api_client, "list_job_assignees", lambda jid, **kw: [])
     monkeypatch.setattr(api_client, "list_users", lambda **kw: [])
     monkeypatch.setattr(api_client, "list_shortlist", lambda jid, **kw: [])
+    return spies
+
+
+# ── S3: Settings reads and user rows ────────────────────────────────────────
+
+
+def make_user(
+    index: int = 1,
+    *,
+    cas_username: str | None = None,
+    display_name: str | None = None,
+    role: str = "hiring_manager",
+) -> dict[str, Any]:
+    """One ``users`` row as the API returns it (the ``User`` DTO, JSON mode)."""
+    return User(
+        id=UUID(int=0x77777777000000000000000000000000 + index),
+        cas_username=cas_username or f"manager{index}",
+        display_name=display_name,
+        email=None,
+        role=role,
+        active=True,
+        created_at=TS,
+        last_seen_at=TS,
+    ).model_dump(mode="json")
+
+
+@dataclass
+class ReadSpies:
+    """The reads ``install`` stubs with plain lambdas, as spies."""
+
+    list_job_assignees: MagicMock
+    list_users: MagicMock
+    list_shortlist: MagicMock
+
+    def all(self) -> list[MagicMock]:
+        return [self.list_job_assignees, self.list_users, self.list_shortlist]
+
+
+def stub_settings_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    assignees: Any = None,
+    users: Any = None,
+) -> ReadSpies:
+    """Replace the Settings-tab reads with spies. Call AFTER ``install``.
+
+    ``assignees`` / ``users`` are a list of user rows (default: empty) or an
+    Exception instance to make the call raise (the handler maps a backend
+    failure on ``list_job_assignees`` to ``None``, which the page words as
+    "could not be loaded").
+    """
+    spies = ReadSpies(
+        list_job_assignees=_as_mock(assignees if assignees is not None else []),
+        list_users=_as_mock(users if users is not None else []),
+        list_shortlist=MagicMock(return_value=[]),
+    )
+    monkeypatch.setattr(api_client, "list_job_assignees", spies.list_job_assignees)
+    monkeypatch.setattr(api_client, "list_users", spies.list_users)
+    monkeypatch.setattr(api_client, "list_shortlist", spies.list_shortlist)
     return spies
