@@ -213,6 +213,9 @@ single biggest lever the product owner has on delivery.
 |---|---|---|---|---|
 | H1 | — | answered the same day | — | A + all defaults |
 | S0 | ~1 h | ~1 h (planner 9 min, 189k tokens; coordinator verification) | 7 plan premises corrected ([S-contract §1](S-contract.md)): 1 one-shot CSRF slot, not 15; CSRF failure is a 403, not a 400 | Contract re-estimates 23–27 h (S2 at 2 cycles). Awaiting PO review. |
+| S1 | 3 h (1 cycle) | red ~2 h 8 m, green ~41 m; 1 gate iteration | — | goldens captured on red run 1 |
+| S1a | 3–4.5 h | red ~1 h 1 m, green ~1 h 33 m (2 `all` runs) | 4 additive inventory edits to existing tests, made in red by the coordinator and disclosed | added by the Q1 decision (column + allowlist) |
+| S2 | 6 h (2 cycles) | red ~56 m, green ~42 m; 1 gate iteration | — | came in at ~1 cycle, not 2. H2 drive on the stress stack, 2026-11-26 |
 
 ## 12. How to start S0 (for the next session)
 
