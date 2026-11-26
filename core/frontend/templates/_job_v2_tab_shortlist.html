@@ -1,0 +1,31 @@
+{# Job page v2, Shortlist tab (S-contract section 3 S4): a read-only teaser of
+   the top five. No forms and no per-card tokens (2.4); every decision control
+   lives on the full shortlist page, which the link opens. Labels are whatever
+   the backend sent, so a blind job shows pseudonyms. #}
+<div data-job-tab="shortlist">
+  <div class="card">
+    {% if jd_has_no_requirements %}
+    <p id="jd-no-requirements" class="warning">
+      This job description yielded no requirements at all (no required and no
+      nice-to-have skills). The manager's additional requirements alone are not
+      enough to rank against. Re-parse or replace the JD.
+    </p>
+    {% endif %}
+    {% if shortlist_entries is none %}
+    <p class="muted">The shortlist could not be loaded.</p>
+    {% elif not shortlist_entries %}
+    <p class="muted">There are no ranked candidates yet.</p>
+    {% else %}
+    <ol style="list-style:none;padding:0;margin:0">
+      {% for e in shortlist_entries %}
+      <li data-shortlist-row style="padding:6px 0;border-bottom:1px solid #eee">
+        <strong>#{{ e.rank }}</strong>
+        {{ e.display_label }}
+        <span class="muted">{{ (e.score_final * 100) | round | int }} %</span>
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+    <p><a href="{{ url_for('job_shortlist', job_id=job.id) }}">Open full shortlist</a></p>
+  </div>
+</div>

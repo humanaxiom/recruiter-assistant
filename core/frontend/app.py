@@ -965,6 +965,23 @@ def _job_page_url(job_id: UUID, tab: str = "candidates") -> str:
     return url_for("job_detail", job_id=job_id)
 
 
+def _fetch_shortlist_teaser(job_id: UUID) -> list[dict[str, Any]] | None:
+    """Top five ranked entries for the v2 Shortlist tab, by rank; `None` when the
+    read failed (the template says so rather than claiming an empty shortlist).
+    Reads `list_shortlist` only and mints no one-shot token (contract 2.4)."""
+    try:
+        entries = api_client.list_shortlist(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        return None
+    ranked = [e for e in entries if isinstance(e, dict)]
+    ranked.sort(key=lambda e: e.get("rank", 0))
+    return ranked[:5]
+
+
 def _render_job_detail(
     job_id: UUID,
     *,
@@ -979,7 +996,7 @@ def _render_job_detail(
         # the other v2 tabs read the list exactly as before.
         resumes: list[Any] = (
             []
-            if v2_tab in ("requirements", "settings")
+            if v2_tab in ("requirements", "settings", "shortlist")
             else api_client.list_resumes(job_id)
         )
     except api_client.NotFound:
@@ -995,6 +1012,9 @@ def _render_job_detail(
     pending_splits: list[dict[str, Any]] = []
     export_latest: dict[str, Any] | None = None
     export_csrf_token: str | None = None
+    shortlist_entries: list[dict[str, Any]] | None = None
+    if v2_tab == "shortlist":
+        shortlist_entries = _fetch_shortlist_teaser(job_id)
     # v1 reads these on every render; v2 only on the tab that shows them.
     if _is_writer_session() and (v2_tab is None or v2_tab == "candidates"):
         pending_splits = _list_pending_splits(job_id, job)
@@ -1017,6 +1037,8 @@ def _render_job_detail(
                 pending_splits=pending_splits,
                 export_latest=export_latest,
                 export_csrf_token=export_csrf_token,
+                shortlist_entries=shortlist_entries,
+                jd_has_no_requirements=_jd_yielded_no_requirements(job),
             ),
             status_code,
         )
@@ -1103,6 +1125,8 @@ def upload_resumes(job_id: UUID) -> Any:
             pairing_manifest=pairing_manifest,
         )
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         return _render_job_detail(
             job_id,
             error=_format_error(exc.detail),
@@ -1201,6 +1225,8 @@ def upload_candidate_roster(job_id: UUID) -> Any:
             upload.content_type or "text/csv",
         )
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         return _render_job_detail(
             job_id,
             error=_format_error(exc.detail),
@@ -1421,6 +1447,8 @@ def split_upload(job_id: UUID) -> Any:
     try:
         result = api_client.split_upload(job_id, files, consent_acknowledged=True)
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         flash(_format_error(exc.detail))
         return redirect(_job_page_url(job_id))
     except api_client.NotFound:
