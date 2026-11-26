@@ -20,7 +20,9 @@ intake routes. The latter is a defect found while writing this file:
 ``export_start`` catch ``BadRequest`` and turn the backend's 403 into a 400
 re-render or a flash plus a redirect, while ``transition_status``, ``edit_job_*``,
 ``reparse_job``, the assignee routes and ``blind_review`` abort with the real
-status. See the report that accompanies this file.
+status. See the report that accompanies this file. ``export_start`` is the
+exception: its flash-and-return on a backend 403 is pinned by an existing v1
+test, so it keeps it, and is pinned here as never reporting success.
 """
 
 from __future__ import annotations
@@ -367,13 +369,12 @@ _HIDDEN: list[tuple[str, str, str, Callable[[], dict[str, Any]]]] = [
         "upload_candidate_roster",
         lambda: {"file": (io.BytesIO(b"a,b\n1,2\n"), "roster.csv")},
     ),
-    (
-        "export-start",
-        f"/jobs/{JOB_ID}/resumes/exports",
-        "start_resume_export",
-        lambda: {},
-    ),
 ]
+# ``export-start`` is deliberately absent. Its v1 refusal is pinned as "flash
+# the backend's reason and return to the job" by
+# test_frontend_resume_export_job.py::test_start_rejected_by_the_backend_
+# flashes_and_returns_to_the_job[403], and v1 does not change. Its own test,
+# below, pins that the refusal is never presented as a started export.
 
 
 @pytest.mark.parametrize("role", _READER_ROLES)
@@ -403,3 +404,25 @@ def test_a_hidden_controls_route_still_403s_when_the_backend_refuses(
         f"{route}: expected 403, got {resp.status_code} "
         f"(Location={resp.headers.get('Location')!r})"
     )
+
+
+@pytest.mark.parametrize("role", _READER_ROLES)
+def test_a_refused_export_start_returns_to_candidates_with_the_reason_not_success(
+    client: Any, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    dom.install(monkeypatch, role=role)
+    refused = MagicMock(side_effect=_forbidden())
+    monkeypatch.setattr(api_client, "start_resume_export", refused)
+
+    resp = client.post(
+        f"/jobs/{JOB_ID}/resumes/exports",
+        headers={"Cookie": "ra_session=tok-live"},
+    )
+
+    assert refused.call_count == 1, f"never reached ({resp.status_code})"
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith(f"/jobs/{JOB_ID}?tab=candidates")
+    with client.session_transaction() as sess:
+        flashes = [str(m) for _cat, m in sess.get("_flashes", [])]
+    assert flashes, "the refusal was not explained"
+    assert not any("Export started" in m for m in flashes), flashes
