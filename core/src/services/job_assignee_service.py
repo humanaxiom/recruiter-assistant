@@ -63,7 +63,7 @@ async def list_assigned_job_ids(conn: DbConn, user_id: UUID) -> list[UUID]:
 
 _LIST_ASSIGNEES_SQL = """
 SELECT u.id, u.cas_username, u.display_name, u.email, u.role, u.active,
-       u.created_at, u.last_seen_at
+       u.created_at, u.last_seen_at, u.job_page_v2
 FROM job_assignees ja
 JOIN users u ON u.id = ja.user_id
 WHERE ja.job_id = $1

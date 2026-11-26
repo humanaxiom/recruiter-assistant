@@ -308,5 +308,6 @@ async def cas_user(request: Request, db: Db) -> JSONResponse:
             "authenticated": user is not None,
             "cas_enabled": True,
             "role": user.role if user else None,
+            "job_page_v2": user.job_page_v2 if user else False,
         }
     )

@@ -880,12 +880,14 @@ def _use_job_page_v2() -> bool:
     """True when the v2 job page should render for this request.
 
     Sources, any one of which is enough: the global ``job_page_v2`` flag, or the
-    signed-in CAS username being in ``job_page_v2_users``. A CAS-off session has
-    no identity, so only the global flag counts there.
+    signed-in CAS username being in ``job_page_v2_users``, or the user's own
+    ``job_page_v2`` column (via ``g.cas_user``) being exactly True. A CAS-off
+    session has no identity, so only the global flag counts there.
     """
     settings = get_settings()
     cas_user = getattr(g, "cas_user", None)
     username = cas_user.get("username") if cas_user else None
+    column_on = (cas_user.get("job_page_v2") if cas_user else None) is True
     allowlist = {
         name.strip().lower()
         for name in settings.job_page_v2_users.split(",")
@@ -894,6 +896,7 @@ def _use_job_page_v2() -> bool:
     sources = (
         settings.job_page_v2,
         isinstance(username, str) and username.strip().lower() in allowlist,
+        column_on,
     )
     return any(sources)
 
@@ -2788,6 +2791,39 @@ def admin_users() -> Any:
     return render_template(
         "admin_users.html", users=users, roles=_ASSIGNABLE_ROLES, error=None
     )
+
+
+@app.post("/admin/users/<uuid:user_id>/job-page-preview")
+def admin_set_user_job_page_preview(user_id: UUID) -> Any:
+    """S1a — turn the new job page preview on or off for one user. The form
+    field ``enabled`` must be exactly ``true`` or ``false`` (else 400, no API
+    call). A backend 403/422 re-renders the roster with the status and message."""
+    _require_admin_page()
+    raw = request.form.get("enabled")
+    if raw not in ("true", "false"):
+        abort(400)
+    try:
+        api_client.set_user_job_page_preview(user_id, raw == "true")
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BadRequest as exc:
+        try:
+            users = api_client.list_users()
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        status = 403 if exc.status_code == 403 else 400
+        return (
+            render_template(
+                "admin_users.html",
+                users=users,
+                roles=_ASSIGNABLE_ROLES,
+                error=_format_error(exc.detail),
+            ),
+            status,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("admin_users"))
 
 
 @app.get("/audit")

@@ -672,6 +672,13 @@ _STATEMENTS: tuple[str, ...] = (
     # never touch existing row data.
     "ALTER TABLE users ALTER COLUMN role DROP DEFAULT",
     "ALTER TABLE users ALTER COLUMN role DROP NOT NULL",
+    # S1a: per-user job page v2 preview. NOT NULL with a DEFAULT so every
+    # pre-existing row backfills to false and a first-login INSERT that omits
+    # it still succeeds.
+    (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+        "job_page_v2 BOOLEAN NOT NULL DEFAULT false"
+    ),
     # ── audit_log (ADR-019 §1.4/§6, FU-5 slice 1: schema only) ───────────────
     # Generalized, append-only audit sink replacing reveal-only reveal_audit.
     # Every row names EXACTLY ONE actor: a human (actor_kind='user', with
