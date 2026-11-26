@@ -82,8 +82,11 @@ def _form_from_page(
     client: Any, tab: str, suffix: str, *, to: str | None = None
 ) -> Node:
     body = client.get(f"/jobs/{JOB_ID}?tab={tab}").get_data(as_text=True)
-    root = dom.parse(body)
-    found = dom.forms_posting_to(root, f"/jobs/{JOB_ID}{suffix}")
+    # Scoped to the tab's own wrapper: the header "Open for applicants" form
+    # sits outside it on every tab and is not the tab's form.
+    scope = dom.tab_root(dom.parse(body), tab)
+    assert scope is not None, f'no data-job-tab="{tab}" element'
+    found = dom.forms_posting_to(scope, f"/jobs/{JOB_ID}{suffix}")
     if to is not None:
         found = [f for f in found if dom.hidden_inputs(f).get("to") == to]
     assert len(found) == 1, f"expected one {suffix} form (to={to}) on {tab}"

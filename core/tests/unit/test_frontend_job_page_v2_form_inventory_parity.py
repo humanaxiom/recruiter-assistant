@@ -130,9 +130,19 @@ def _v2(
 
 
 def _union(per_tab: dict[str, Counter[_Key]]) -> Counter[_Key]:
-    total: Counter[_Key] = Counter()
-    for counts in per_tab.values():
-        total.update(counts)
+    """The v2 inventory, with the page chrome counted once.
+
+    Forms present on every tab (the header's "Open for applicants" form) are
+    one control the user sees on whichever tab they are on, not five. Count
+    the intersection over all tabs once, then each tab's remainder.
+    """
+    tabs = list(per_tab.values())
+    chrome: Counter[_Key] = tabs[0].copy()
+    for counts in tabs[1:]:
+        chrome &= counts
+    total: Counter[_Key] = chrome.copy()
+    for counts in tabs:
+        total.update(counts - chrome)
     return total
 
 
