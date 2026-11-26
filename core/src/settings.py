@@ -393,6 +393,10 @@ class Settings(BaseSettings):
     # ── Flask viewer ─────────────────────────────────────────────────────────
     api_base_url: str = "http://api:8000"
     flask_secret_key: str = "dev-only"
+    # Job page v2 (redesign Option A). Off means the existing page, unchanged.
+    # ``job_page_v2_users``: comma-separated CAS usernames, case-insensitive.
+    job_page_v2: bool = False
+    job_page_v2_users: str = ""
 
     # ── Build provenance (Phase 4c) ───────────────────────────────────────────
     # Optional build-provenance metadata threaded into PipelineMeta.git_sha via

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }}{% endblock %}
+{% block content %}
+{# Job page v2 (redesign Option A). Rendered only when the v2 flag or allowlist
+   selects it; v1 is job_detail.html and is untouched. ``tab`` is always one of
+   the app's own enum constants, never request input. #}
+<div data-job-layout="v2">
+  {% if error %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% include "_job_v2_header.html" %}
+
+  <nav class="tab-nav" aria-label="Job sections"
+       style="display:flex;gap:16px;margin:16px 0;border-bottom:1px solid #ddd">
+    {% for name in tabs %}
+    <a href="{{ url_for('job_detail', job_id=job.id, tab=(none if name == 'overview' else name)) }}"
+       {% if name == tab %}aria-current="page" style="font-weight:600"{% endif %}>{{ name | capitalize }}</a>
+    {% endfor %}
+  </nav>
+
+  {% if tab == "overview" %}
+    {% include "_job_v2_tab_overview.html" %}
+  {% elif tab == "candidates" %}
+    <div class="card"><p class="muted">The Candidates tab is coming in S2.</p></div>
+  {% elif tab == "requirements" %}
+    <div class="card"><p class="muted">The Requirements tab is coming in S3.</p></div>
+  {% elif tab == "shortlist" %}
+    <div class="card"><p class="muted">The Shortlist tab is coming in S3.</p></div>
+  {% elif tab == "settings" %}
+    <div class="card"><p class="muted">The Settings tab is coming in S4.</p></div>
+  {% endif %}
+</div>
+{% endblock %}

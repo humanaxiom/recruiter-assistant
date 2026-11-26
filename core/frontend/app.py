@@ -865,8 +865,64 @@ def _fetch_job_assignees_and_hiring_managers(
     return assignees, hiring_managers
 
 
+#: Job page v2 tabs, in nav order. ``settings`` is a writer-only tab.
+_JOB_TABS: tuple[str, ...] = (
+    "overview",
+    "candidates",
+    "requirements",
+    "shortlist",
+    "settings",
+)
+_JOB_TABS_WRITER_ONLY: frozenset[str] = frozenset({"settings"})
+
+
+def _use_job_page_v2() -> bool:
+    """True when the v2 job page should render for this request.
+
+    Sources, any one of which is enough: the global ``job_page_v2`` flag, or the
+    signed-in CAS username being in ``job_page_v2_users``. A CAS-off session has
+    no identity, so only the global flag counts there.
+    """
+    settings = get_settings()
+    cas_user = getattr(g, "cas_user", None)
+    username = cas_user.get("username") if cas_user else None
+    allowlist = {
+        name.strip().lower()
+        for name in settings.job_page_v2_users.split(",")
+        if name.strip()
+    }
+    sources = (
+        settings.job_page_v2,
+        isinstance(username, str) and username.strip().lower() in allowlist,
+    )
+    return any(sources)
+
+
+def _job_tabs_for_session() -> tuple[str, ...]:
+    """The tabs this session is offered (HM and auditor get no Settings)."""
+    if _is_writer_session():
+        return _JOB_TABS
+    return tuple(t for t in _JOB_TABS if t not in _JOB_TABS_WRITER_ONLY)
+
+
+def _validated_job_tab(raw: str | None) -> str:
+    """Map a raw ``tab`` value onto the enum. Anything else is Overview.
+
+    The result is always one of this module's own constants, never ``raw``, so
+    it is safe to reflect or put in a URL.
+    """
+    for tab in _job_tabs_for_session():
+        if raw == tab:
+            return tab
+    return "overview"
+
+
 def _render_job_detail(
-    job_id: UUID, *, error: str | None = None, status_code: int = 200
+    job_id: UUID,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    tab: str = "overview",
 ) -> Any:
     try:
         job = api_client.get_job(job_id)
@@ -908,6 +964,20 @@ def _render_job_detail(
             export_latest = None  # none yet, or a convenience that must not break
         if export_latest is not None and export_latest.get("status") == "ready":
             export_csrf_token = csrf.ensure_token(export_latest["id"], action="export")
+    if _use_job_page_v2():
+        return (
+            render_template(
+                "job_detail_v2.html",
+                job=job,
+                job_id=job_id,
+                error=error,
+                tab=_validated_job_tab(tab),
+                tabs=_job_tabs_for_session(),
+                resumes=resumes,
+                next_states=next_states,
+            ),
+            status_code,
+        )
     return (
         render_template(
             "job_detail.html",
@@ -1562,7 +1632,7 @@ def resumes_table(job_id: UUID) -> Any:
 
 @app.get("/jobs/<uuid:job_id>")
 def job_detail(job_id: UUID) -> Any:
-    return _render_job_detail(job_id)
+    return _render_job_detail(job_id, tab=request.args.get("tab", ""))
 
 
 @app.get("/jobs/<uuid:job_id>/parse-status")
@@ -1583,11 +1653,14 @@ def parse_status(job_id: UUID) -> Any:
 @app.post("/jobs/<uuid:job_id>/status")
 def transition_status(job_id: UUID) -> Any:
     to = (request.form.get("to") or "").strip()
+    # v2 only: a hidden ``tab`` says where the click came from. It is mapped
+    # onto the tab enum and never used raw; v1 ignores it entirely.
+    tab = _validated_job_tab(request.form.get("tab")) if _use_job_page_v2() else ""
     try:
         api_client.transition_status(job_id, to)
     except api_client.Conflict as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id, error=_format_error(exc.detail), status_code=409, tab=tab
         )
     except api_client.NotFound:
         abort(404)
@@ -1600,6 +1673,8 @@ def transition_status(job_id: UUID) -> Any:
         # propagated as an unhandled 500 for a hiring_manager/auditor clicking
         # the control. Render the actual backend status (usually 403) instead.
         abort(exc.status_code)
+    if tab and tab != "overview":
+        return redirect(url_for("job_detail", job_id=job_id, tab=tab))
     return redirect(url_for("job_detail", job_id=job_id))
 
 
