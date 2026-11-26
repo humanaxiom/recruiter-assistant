@@ -44,9 +44,9 @@ as a regression.** That is the strongest evidence for this project.
 Four of these sections add or enrich candidates (9, 11, 12, plus the zip variant inside 9). They are
 interleaved with settings and an export. Two facts constrain the redesign:
 
-- **27 CSRF tokens on the page.** There are 15 one-shot `csrf_token` slots and 12 uses of
-  `csrf_page_token`. Moving a form so that its token is no longer minted where it renders fails
-  silently, as a 400 on submit. This risk is not visual, and it is the biggest one in the project.
+- **13 CSRF token uses on the page** (corrected by S0, [S-contract §1](S-contract.md)): 1 one-shot
+  slot (the export download) and 12 uses of `csrf_page_token`. Moving a form so that its token is
+  no longer minted where it renders fails, as a 403 on submit. This risk is not visual, and it is the biggest one in the project.
 - **The page polls.** Parse status and résumé status refresh through HTMX and must keep working
   wherever they end up.
 
@@ -216,6 +216,10 @@ single biggest lever the product owner has on delivery.
 | S1 | 3 h (1 cycle) | red ~2 h 8 m, green ~41 m; 1 gate iteration | — | goldens captured on red run 1 |
 | S1a | 3–4.5 h | red ~1 h 1 m, green ~1 h 33 m (2 `all` runs) | 4 additive inventory edits to existing tests, made in red by the coordinator and disclosed | added by the Q1 decision (column + allowlist) |
 | S2 | 6 h (2 cycles) | red ~56 m, green ~42 m; 1 gate iteration | — | came in at ~1 cycle, not 2. H2 drive on the stress stack, 2026-11-26 |
+| S3 | 3 h (1 cycle) | red ~45 m, green ~3 runs (~2 h) | 2 coordinator spec fixes in red (3abb975, b45d7fe): the header Open form renders on every tab | stress stack driven by hand: Requirements and Settings forms land on their tabs |
+| S4 | 3 h (1 cycle) | red ~45 m, green 2 runs (~1 h 20 m) | spec amended in red (45c67a3): `export_start` keeps its pinned v1 flash on a backend 403 | upload, roster and split now abort(403) on a backend 403 |
+| S5 | 3 h (1 cycle) | red ~45 m, green ~50 m (offline + integration) | — | smoke v1: 11 passed, 12 skipped; smoke v2: 23 passed; doctor (stress): only `deploy.auth_disabled` |
+| R | — | reviewer + security in parallel with S5 | security PASS; reviewer 1 major (teaser re-sorted voided candidates, fixed red 516619a, green b63c0e5), 2 minor (contract amended), 2 nits (not recorded) | |
 
 ## 12. How to start S0 (for the next session)
 

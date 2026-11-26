@@ -68,25 +68,27 @@ owner the same day.
 
 **Next, in the product owner's order:**
 
-1. **Build the job-page redesign. Option A is APPROVED (H1, 2026-11-24)** with
-   all five defaults. The product owner's words: *"Assuming above 1-5 are
-   approved Go A plan."*
-   - **Plan:** [docs/plans/2026-11-job-page-redesign/README.md](docs/plans/2026-11-job-page-redesign/README.md).
-     §7 holds the decisions, which are not open questions; §12 says how to
-     start S0. `mockups.html` beside it is the visual reference.
-   - **What it is:** workspace tabs (Overview · Candidates · Requirements ·
-     Shortlist · Settings). Four separate intake cards: one résumé, a zip, the
-     Taleo export PDF, and the roster CSV, which adds no résumés. An empty
-     state that explains itself.
-   - **Rollout:** behind `JOB_PAGE_V2`, default **off**, with a per-user
-     preview toggle. The managers testing today must see no change until the
-     product owner flips it.
-   - **Shape:** one branch (`feat/job-page-v2`), one PR, slices S1–S5, then
-     review, then hand-over.
-   - **Estimate:** 20–25 h of fleet time, 3–4 working days. **H2**, the
-     product owner reviewing the Candidates tab, comes after S2.
-   - **Top risk:** re-homing the 15 one-shot CSRF tokens. A form whose token
-     is minted on the wrong tab fails silently with a 400.
+1. **The job-page redesign (Option A) is BUILT on `feat/job-page-v2`.** S1–S5
+   and review are done, and it is awaiting **H3** (push, PR, merge), which
+   needs the product owner's consent. Contract:
+   [S-contract.md](docs/plans/2026-11-job-page-redesign/S-contract.md); actuals
+   are in README §11.
+   - **Rollout:** `JOB_PAGE_V2` is off by default. A per-user preview is set by
+     the `JOB_PAGE_V2_USERS` allowlist or the `users.job_page_v2` column. An
+     admin toggles the column on the Users screen. With the flag off, v1 is
+     byte-identical (golden test).
+   - **Next:**
+     - **H3.**
+     - Deploy the merge to the pilot. The DDL adds
+       `users.job_page_v2 … DEFAULT false` on startup.
+     - **H4:** turn the preview on for one manager.
+     - The **HR demo** runs from the local stress stack (`recruiter-stress`,
+       http://localhost:28500, CAS off, v2 on). Refresh it to branch HEAD and
+       give it realistic data first.
+   - **`smoke.sh` now requires `SMOKE_EXPECT_JOB_PAGE=v1|v2`** and refuses to
+     run without it.
+   - **CSRF, measured:** the page has 1 one-shot slot (the export download,
+     minted on the Candidates tab only), not 15. A wrong page token is a 403.
 2. Feature 4, "Ask the pool"; then feature 5, the department picklist. Neither
    has been started.
 3. Owed, not built:
