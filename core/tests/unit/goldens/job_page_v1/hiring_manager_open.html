@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multimedia Specialist</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+</head>
+
+<body hx-headers='{"X-CSRF-Token": "<TOKEN>"}'>
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="nav-logo" href="/">recruiter-assistant</a>
+      <nav class="nav-links">
+        <a href="/">Jobs</a>
+        
+        
+        
+        
+        <span class="nav-user">jordan (hiring_manager)</span>
+        <a class="nav-logout" href="http://localhost:8000/auth/cas/logout">Logout</a>
+        
+      </nav>
+    </div>
+  </header>
+  <main class="container">
+    
+    
+    
+    
+
+
+
+<div class="card">
+  <div class="card-header">
+    <h1 style="margin:0">Multimedia Specialist</h1>
+    <span class="pill pill-open">open</span>
+    
+    
+    
+    
+  </div>
+  <p class="muted">
+    School of Medicine
+     · Burnaby
+     · 3+ yrs
+  </p>
+
+  
+  
+
+  
+  
+
+  
+  
+
+  
+  
+  
+
+  
+
+  <h3>Parsed requirements</h3>
+  
+<div id="parse-status">
+  
+  <div class="skills">
+    
+    
+    <span class="pill pill-skill">Video editing</span>
+    
+    <span class="pill pill-skill">Photography</span>
+    
+    
+  </div>
+  
+  
+</div>
+
+  
+  
+  
+
+  
+  
+
+  
+  
+
+  
+</div>
+
+<div class="card">
+  <p><a href="/jobs/11111111-1111-4111-8111-111111111111/shortlist">View shortlist</a></p>
+
+  
+
+  
+
+  
+
+  
+
+  <h3>Résumé status</h3>
+  
+  <div id="resume-status-breakdown"
+       hx-get="/jobs/11111111-1111-4111-8111-111111111111/resume-status"
+       hx-trigger="load"
+       hx-swap="outerHTML">
+    <p class="muted">Loading résumé status…</p>
+  </div>
+
+  <h3>Résumés</h3>
+  
+<div id="resumes-table"
+     hx-get="/jobs/11111111-1111-4111-8111-111111111111/resumes-table"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  
+  <span class="htmx-indicator spinner">refreshing…</span>
+  
+  <table class="table">
+    <thead>
+      <tr><th>Candidate</th><th>File</th><th>Status</th><th>Uploaded</th></tr>
+    </thead>
+    <tbody>
+      
+      <tr>
+        <td>Ada Lovelace</td>
+        <td>ada.pdf</td>
+        <td>
+          <span class="pill pill-parsed">parsed</span>
+        </td>
+        <td class="muted">2026-09-03T08:30:00Z</td>
+      </tr>
+      
+      <tr>
+        <td>—</td>
+        <td>grace.pdf</td>
+        <td>
+          <span class="pill pill-parsing">parsing</span>
+        </td>
+        <td class="muted">2026-09-03T08:30:00Z</td>
+      </tr>
+      
+    </tbody>
+  </table>
+</div>
+</div>
+
+  </main>
+</body>
+</html>
