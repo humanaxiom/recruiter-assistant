@@ -19,9 +19,17 @@
     <ol style="list-style:none;padding:0;margin:0">
       {% for e in shortlist_entries %}
       <li data-shortlist-row style="padding:6px 0;border-bottom:1px solid #eee">
+        {# Keyed off metrics_invalidated only (see shortlist_cards.html): an
+           ineligible candidate shows no rank and no score. #}
+        {% if e.metrics_invalidated %}
+        <strong>—</strong>
+        {{ e.display_label }}
+        <span class="muted">Ranked last: no Canadian work authorization.</span>
+        {% else %}
         <strong>#{{ e.rank }}</strong>
         {{ e.display_label }}
         <span class="muted">{{ (e.score_final * 100) | round | int }} %</span>
+        {% endif %}
       </li>
       {% endfor %}
     </ol>

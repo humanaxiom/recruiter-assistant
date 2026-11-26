@@ -966,7 +966,8 @@ def _job_page_url(job_id: UUID, tab: str = "candidates") -> str:
 
 
 def _fetch_shortlist_teaser(job_id: UUID) -> list[dict[str, Any]] | None:
-    """Top five ranked entries for the v2 Shortlist tab, by rank; `None` when the
+    """First five entries for the v2 Shortlist tab, in the backend's order (never
+    re-sorted: the backend deliberately puts `not_eligible` last); `None` when the
     read failed (the template says so rather than claiming an empty shortlist).
     Reads `list_shortlist` only and mints no one-shot token (contract 2.4)."""
     try:
@@ -978,7 +979,6 @@ def _fetch_shortlist_teaser(job_id: UUID) -> list[dict[str, Any]] | None:
     ):
         return None
     ranked = [e for e in entries if isinstance(e, dict)]
-    ranked.sort(key=lambda e: e.get("rank", 0))
     return ranked[:5]
 
 
