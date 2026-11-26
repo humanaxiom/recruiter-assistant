@@ -30,6 +30,7 @@ from frontend import api_client
 from frontend import app as frontend_app_module
 from src.schemas.auth import User
 from src.schemas.jobs import JDExtracted, JobOut, Skill
+from src.schemas.matching import ScoreBreakdown, ShortlistEntry
 from src.schemas.resumes import ResumeListItem
 from src.settings import Settings
 
@@ -372,3 +373,52 @@ def stub_settings_reads(
     monkeypatch.setattr(api_client, "list_users", spies.list_users)
     monkeypatch.setattr(api_client, "list_shortlist", spies.list_shortlist)
     return spies
+
+
+# ── S4: the Shortlist teaser ────────────────────────────────────────────────
+
+
+def make_shortlist_entry(
+    rank: int = 1,
+    *,
+    score: float | None = None,
+    display_label: str | None = None,
+    blinded: bool = False,
+    resume_index: int | None = None,
+) -> dict[str, Any]:
+    """One ``/jobs/{id}/shortlist`` row (the ``ShortlistEntry`` DTO, JSON mode).
+
+    ``score`` defaults to a value that is distinct for every rank, so a test can
+    tell one row's score label from another's.
+    """
+    index = resume_index if resume_index is not None else rank
+    final = score if score is not None else max(0.0, 0.99 - rank * 0.01)
+    return ShortlistEntry(
+        id=UUID(int=0x55555555000000000000000000000000 + rank),
+        job_id=JOB_ID,
+        resume_id=UUID(int=0x22222222000000000000000000000000 + index),
+        rank=rank,
+        score_final=final,
+        score_breakdown=ScoreBreakdown(
+            skill=0.5,
+            experience=0.5,
+            education=0.5,
+            seniority=0.5,
+            vector=0.5,
+            structured=0.5,
+        ),
+        evidence=None,
+        generated_at=TS,
+        blinded=blinded,
+        display_label=display_label or f"Candidate {rank}",
+    ).model_dump(mode="json")
+
+
+def stub_shortlist(monkeypatch: pytest.MonkeyPatch, entries: Any) -> MagicMock:
+    """Replace ``list_shortlist`` with a spy. Call AFTER ``install``.
+
+    ``entries`` is a list of rows or an Exception instance to make it raise.
+    """
+    spy = _as_mock(entries)
+    monkeypatch.setattr(api_client, "list_shortlist", spy)
+    return spy
