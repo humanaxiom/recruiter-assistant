@@ -1,0 +1,112 @@
+{# Job page v2, Requirements tab (S-contract section 3 S3). Ported from
+   job_detail.html: the manager's note read-back, the parse-status poll, the
+   re-parse recovery and the two editors. The description editor and the
+   additional-requirements editor stay TWO forms posting to TWO routes (Q9):
+   the requirements save costs an LLM call and does not re-rank, the
+   description save clears the parse. Controls are writer-only; the read-back,
+   the parsed skills and the zero-requirements warning are for every role. #}
+{% set jd_yielded_no_requirements = (
+  job.status == 'draft' and job.parsed_at and job.description_parsed
+  and not job.description_parsed.required_skills
+  and not job.description_parsed.nice_to_have_skills
+) %}
+<div data-job-tab="requirements">
+  {% if job.additional_requirements %}
+  <div class="card">
+  <div class="manager-note">
+    <h3 style="margin-top:0">Your additional requirements</h3>
+    <p class="muted">{{ job.additional_requirements }}</p>
+    {% if job.additional_requirements_parsed %}
+    <p class="hint">
+      Scored as:
+      {% for s in job.additional_requirements_parsed.must_have_skills %}
+      <span class="chip chip-manager">{{ s.name }} · required</span>
+      {% endfor %}
+      {% for s in job.additional_requirements_parsed.nice_to_have_skills %}
+      <span class="chip chip-manager">{{ s.name }}</span>
+      {% endfor %}
+      {% if job.additional_requirements_parsed.other_requirements %}
+      <br>Not scored as skills (shown to reviewers only):
+      {{ job.additional_requirements_parsed.other_requirements | join('; ') }}
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h3 style="margin-top:0">Parsed requirements</h3>
+    {% include "parse_status.html" %}
+
+    {# Deliberately OUTSIDE the polled #parse-status fragment: it is swapped
+       wholesale every 3s, which would tear out a form the user is mid-click
+       on. Offered only when there is something to retry: a failed parse, or a
+       draft whose parse finished with zero requirements. #}
+    {% if is_writer and (job.failure_reason or jd_yielded_no_requirements) %}
+    <div class="parse-failed">
+      <form action="{{ url_for('reparse_job', job_id=job.id) }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+        <button class="btn btn-secondary btn-sm" type="submit">Re-parse JD</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if is_writer %}
+  <div class="card">
+    <h3 style="margin-top:0">Skills &amp; experience you are looking for</h3>
+    <form action="{{ url_for('edit_job_requirements', job_id=job.id) }}"
+          method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-additional-requirements">
+          Additional requirements</label>
+        <textarea class="textarea" id="job-additional-requirements"
+                  name="additional_requirements" maxlength="4000"
+                  style="min-height:90px"
+                  placeholder="e.g. Must have MEG analysis experience. Kafka in production is a bonus. Willing to travel to Burnaby weekly."
+                  >{{ job.additional_requirements or '' }}</textarea>
+        <p class="hint">
+          Special skills or experience you are looking for, whether or not the
+          posting mentions them. Anything you state plainly is treated as
+          <strong>required</strong>; write "nice to have", "bonus" or "ideally"
+          to soften one. These are scored separately from the posting, so the
+          shortlist can show which requirements came from you.
+        </p>
+      </div>
+      <p class="hint">
+        Saving re-reads these requirements straight away. It does <strong>not</strong>
+        re-rank anyone — use <strong>Regenerate</strong> on the shortlist when
+        you want the new requirements applied to the candidates.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save requirements</button>
+      </div>
+    </form>
+  </div>
+
+  {% if job.status == 'draft' %}
+  <div class="card">
+    <h3 style="margin-top:0">Edit job description</h3>
+    <form action="{{ url_for('edit_job_description', job_id=job.id) }}"
+          method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-description-raw">Job description</label>
+        <textarea class="textarea" id="job-description-raw"
+                  name="description_raw" style="min-height:160px"
+                  >{{ job.description_raw or '' }}</textarea>
+        <p class="hint">
+          Saving re-parses this job from the new text — the current parsed
+          requirements are cleared and a fresh parse is queued.
+        </p>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save &amp; re-parse</button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>

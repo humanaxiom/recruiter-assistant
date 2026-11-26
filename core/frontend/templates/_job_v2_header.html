@@ -28,6 +28,12 @@
     {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
     · Updated {{ job.updated_at | day }}
   </p>
+  {% if job.title_provisional %}
+  <p class="hint">
+    This title came from the uploaded filename. The JD parse replaces it with
+    the title stated in the posting.
+  </p>
+  {% endif %}
 
   <ol class="stepper" style="display:flex;gap:16px;list-style:none;padding:0;margin:8px 0">
     {% for name in ['Draft', 'Parsed', 'Open', 'Closed'] %}

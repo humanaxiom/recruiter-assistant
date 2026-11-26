@@ -972,18 +972,25 @@ def _render_job_detail(
     status_code: int = 200,
     tab: str = "overview",
 ) -> Any:
+    v2_tab = _validated_job_tab(tab) if _use_job_page_v2() else None
     try:
         job = api_client.get_job(job_id)
-        resumes = api_client.list_resumes(job_id)
+        # Requirements and Settings show no résumé data (contract 2.4); v1 and
+        # the other v2 tabs read the list exactly as before.
+        resumes: list[Any] = (
+            []
+            if v2_tab in ("requirements", "settings")
+            else api_client.list_resumes(job_id)
+        )
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
-    v2_tab = _validated_job_tab(tab) if _use_job_page_v2() else None
     assignees: list[Any] | None = []
     hiring_managers: list[Any] | None = []
-    if v2_tab is None and _is_writer_session():
+    # v1 reads these on every render; v2 only on Settings. Writers only.
+    if v2_tab in (None, "settings") and _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
     pending_splits: list[dict[str, Any]] = []
     export_latest: dict[str, Any] | None = None
@@ -1004,6 +1011,9 @@ def _render_job_detail(
                 resumes=resumes,
                 resumes_pending=_any_resume_pending(resumes),
                 next_states=next_states,
+                transition_labels=_TRANSITION_LABELS,
+                job_assignees=assignees,
+                hiring_managers=hiring_managers,
                 pending_splits=pending_splits,
                 export_latest=export_latest,
                 export_csrf_token=export_csrf_token,
@@ -1765,7 +1775,7 @@ def edit_job_details(job_id: UUID) -> Any:
             continue
         payload[field] = (request.form.get(field) or "").strip() or None
     if not payload:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "settings"))
     try:
         api_client.patch_job(job_id, payload)
     except api_client.NotFound:
@@ -1774,7 +1784,7 @@ def edit_job_details(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/requirements")
@@ -1800,7 +1810,7 @@ def edit_job_requirements(job_id: UUID) -> Any:
     forwarded, so a crafted extra field cannot ride along.
     """
     if "additional_requirements" not in request.form:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "requirements"))
     note = (request.form.get("additional_requirements") or "").strip() or None
     try:
         api_client.patch_job(job_id, {"additional_requirements": note})
@@ -1812,7 +1822,7 @@ def edit_job_requirements(job_id: UUID) -> Any:
         # Same ADR-033 lesson as ``transition_status``: a non-writer session
         # gets a 403 from the backend, and leaving it uncaught is a 500.
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/reparse")
@@ -1828,7 +1838,10 @@ def reparse_job(job_id: UUID) -> Any:
         api_client.reparse_job(job_id)
     except api_client.Conflict as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=409,
+            tab="requirements",
         )
     except api_client.NotFound:
         abort(404)
@@ -1836,7 +1849,7 @@ def reparse_job(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/assignees")
@@ -1860,7 +1873,7 @@ def add_job_assignee_route(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/assignees/<uuid:user_id>/remove")
@@ -1875,7 +1888,7 @@ def remove_job_assignee_route(job_id: UUID, user_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/description")
@@ -1888,7 +1901,7 @@ def edit_job_description(job_id: UUID) -> Any:
     level gate) re-renders the job-detail page with the reason, exactly like
     ``reparse_job``'s own ``Conflict`` handling, rather than aborting."""
     if "description_raw" not in request.form:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "requirements"))
     description_raw = request.form.get("description_raw") or ""
     try:
         api_client.patch_job(job_id, {"description_raw": description_raw})
@@ -1899,7 +1912,10 @@ def edit_job_description(job_id: UUID) -> Any:
         # Mirrors `reparse_job`'s own Conflict handling exactly: re-render
         # the whole job-detail page with the reason.
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=409,
+            tab="requirements",
         )
     except api_client.NotFound:
         abort(404)
@@ -1907,7 +1923,7 @@ def edit_job_description(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/blind-review")
@@ -1927,7 +1943,7 @@ def blind_review(job_id: UUID) -> Any:
     except api_client.BadRequest as exc:
         # See the identical F4 comment on transition_status above.
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 def _mint_card_tokens(

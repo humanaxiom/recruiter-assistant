@@ -24,11 +24,11 @@
   {% elif tab == "candidates" %}
     {% include "_job_v2_tab_candidates.html" %}
   {% elif tab == "requirements" %}
-    <div class="card"><p class="muted">The Requirements tab is coming in S3.</p></div>
+    {% include "_job_v2_tab_requirements.html" %}
   {% elif tab == "shortlist" %}
     <div class="card"><p class="muted">The Shortlist tab is coming in S3.</p></div>
   {% elif tab == "settings" %}
-    <div class="card"><p class="muted">The Settings tab is coming in S4.</p></div>
+    {% include "_job_v2_tab_settings.html" %}
   {% endif %}
 </div>
 {% endblock %}
