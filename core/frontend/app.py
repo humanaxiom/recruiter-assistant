@@ -920,6 +920,51 @@ def _validated_job_tab(raw: str | None) -> str:
     return "overview"
 
 
+def _list_pending_splits(job_id: UUID, job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pending combined-export splits for the job page; never breaks the page."""
+    try:
+        listed = api_client.list_resume_splits(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        listed = []  # the listing is a convenience; never break the job page
+    blind = bool(job.get("blind_review"))
+    return [
+        {**s, "source_filename": None if blind else s.get("source_filename")}
+        for s in listed
+    ]
+
+
+def _latest_export_and_token(
+    job_id: UUID,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The latest export and, only when it is ready, its one-shot download token."""
+    try:
+        export_latest = api_client.get_latest_resume_export(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        return None, None  # none yet, or a convenience that must not break
+    if export_latest is not None and export_latest.get("status") == "ready":
+        return export_latest, csrf.ensure_token(export_latest["id"], action="export")
+    return export_latest, None
+
+
+def _job_page_url(job_id: UUID, tab: str = "candidates") -> str:
+    """The job page URL a candidate handler lands on.
+
+    Bare ``/jobs/<id>`` when v2 is off (the v1 ``Location`` exactly); with v2 on
+    it carries ``?tab=``. ``tab`` is a caller constant, never request input.
+    """
+    if _use_job_page_v2():
+        return url_for("job_detail", job_id=job_id, tab=tab)
+    return url_for("job_detail", job_id=job_id)
+
+
 def _render_job_detail(
     job_id: UUID,
     *,
@@ -935,49 +980,33 @@ def _render_job_detail(
     except api_client.BackendUnavailable as exc:
         return _unavailable(exc)
     next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
+    v2_tab = _validated_job_tab(tab) if _use_job_page_v2() else None
     assignees: list[Any] | None = []
     hiring_managers: list[Any] | None = []
-    if _is_writer_session():
+    if v2_tab is None and _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
     pending_splits: list[dict[str, Any]] = []
-    if _is_writer_session():
-        try:
-            listed = api_client.list_resume_splits(job_id)
-        except (
-            api_client.BackendUnavailable,
-            api_client.BadRequest,
-            api_client.NotFound,
-        ):
-            listed = []  # the listing is a convenience; never break the job page
-        blind = bool(job.get("blind_review"))
-        pending_splits = [
-            {**s, "source_filename": None if blind else s.get("source_filename")}
-            for s in listed
-        ]
     export_latest: dict[str, Any] | None = None
     export_csrf_token: str | None = None
-    if _is_writer_session():
-        try:
-            export_latest = api_client.get_latest_resume_export(job_id)
-        except (
-            api_client.BackendUnavailable,
-            api_client.BadRequest,
-            api_client.NotFound,
-        ):
-            export_latest = None  # none yet, or a convenience that must not break
-        if export_latest is not None and export_latest.get("status") == "ready":
-            export_csrf_token = csrf.ensure_token(export_latest["id"], action="export")
-    if _use_job_page_v2():
+    # v1 reads these on every render; v2 only on the tab that shows them.
+    if _is_writer_session() and (v2_tab is None or v2_tab == "candidates"):
+        pending_splits = _list_pending_splits(job_id, job)
+        export_latest, export_csrf_token = _latest_export_and_token(job_id)
+    if v2_tab is not None:
         return (
             render_template(
                 "job_detail_v2.html",
                 job=job,
                 job_id=job_id,
                 error=error,
-                tab=_validated_job_tab(tab),
+                tab=v2_tab,
                 tabs=_job_tabs_for_session(),
                 resumes=resumes,
+                resumes_pending=_any_resume_pending(resumes),
                 next_states=next_states,
+                pending_splits=pending_splits,
+                export_latest=export_latest,
+                export_csrf_token=export_csrf_token,
             ),
             status_code,
         )
@@ -1011,6 +1040,7 @@ def upload_resumes(job_id: UUID) -> Any:
     if not consent:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="You must confirm the candidate consented to this processing.",
             status_code=400,
         )
@@ -1027,6 +1057,7 @@ def upload_resumes(job_id: UUID) -> Any:
     if not files:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select at least one résumé file (PDF/DOCX, or a .zip of many).",
             status_code=400,
         )
@@ -1063,7 +1094,10 @@ def upload_resumes(job_id: UUID) -> Any:
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=400
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            tab="candidates",
         )
     except api_client.NotFound:
         abort(404)
@@ -1075,7 +1109,7 @@ def upload_resumes(job_id: UUID) -> Any:
     # strings, never filename-derived candidate PII.
     for message in _summarise_upload(results):
         flash(message)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 def _summarise_upload(results: Any) -> list[str]:
@@ -1144,6 +1178,7 @@ def upload_candidate_roster(job_id: UUID) -> Any:
     if upload is None or not upload.filename:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select a candidate-roster CSV file to upload.",
             status_code=400,
         )
@@ -1157,7 +1192,10 @@ def upload_candidate_roster(job_id: UUID) -> Any:
         )
     except api_client.BadRequest as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=400
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            tab="candidates",
         )
     except api_client.NotFound:
         abort(404)
@@ -1165,7 +1203,7 @@ def upload_candidate_roster(job_id: UUID) -> Any:
         return _unavailable(exc)
     for message in _summarise_roster_report(report):
         flash(message)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 _PAGE_ITEM = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
@@ -1325,6 +1363,7 @@ def _render_split_review(
     return (
         render_template(
             "split_review.html",
+            back_tab="candidates" if _use_job_page_v2() else None,
             split=view,
             rows=rows,
             ignored=ignored_text,
@@ -1349,6 +1388,7 @@ def split_upload(job_id: UUID) -> Any:
     if not consent:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="You must confirm the candidates' consent to this processing.",
             status_code=400,
         )
@@ -1364,6 +1404,7 @@ def split_upload(job_id: UUID) -> Any:
     if not files:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select at least one combined Taleo export (PDF).",
             status_code=400,
         )
@@ -1371,7 +1412,7 @@ def split_upload(job_id: UUID) -> Any:
         result = api_client.split_upload(job_id, files, consent_acknowledged=True)
     except api_client.BadRequest as exc:
         flash(_format_error(exc.detail))
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -1385,7 +1426,7 @@ def split_upload(job_id: UUID) -> Any:
             continue
     if not ids:
         flash("The export was not queued; please try again.")
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     if len(ids) > 1:
         flash(
             f"{len(ids)} exports queued. Review this one first; the others are "
@@ -1410,7 +1451,7 @@ def export_start(job_id: UUID) -> Any:
         flash(_format_error(exc.detail))
     else:
         flash("Export started. It is built in the background; refresh to see it.")
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 @app.post("/resume-exports/<uuid:export_id>/download")
@@ -1445,7 +1486,7 @@ def export_download(export_id: UUID) -> Any:
             job_id = UUID((request.form.get("job_id") or "").strip())
         except ValueError:
             return redirect(url_for("index"))
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     except api_client.BadRequest as exc:
         abort(exc.status_code)
     return Response(
@@ -1564,7 +1605,7 @@ def _redirect_to_split_job(split_id: UUID) -> Any:
         job_id = UUID(str(api_client.get_resume_split(split_id).get("job_id")))
     except (api_client.BackendError, ValueError):
         return redirect(url_for("index"))
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 @app.post("/resume-splits/<uuid:split_id>/accept")

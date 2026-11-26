@@ -16,7 +16,7 @@
     {% if source_filename %} · {{ source_filename }}{% endif %}
     · status: {{ split.status }}
   </p>
-  <p><a href="{{ url_for('job_detail', job_id=split.job_id) }}">Back to the job</a></p>
+  <p><a href="{{ url_for('job_detail', job_id=split.job_id, tab=back_tab) }}">Back to the job</a></p>
 
   {% if split.status in ("queued", "segmenting") %}
   <p>Still working: this export is {{ split.status }}. Refresh this page in a
