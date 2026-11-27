@@ -28,6 +28,9 @@
     {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
     · Updated {{ job.updated_at | day }}
   </p>
+  {% if is_writer %}
+  <p><a href="{{ url_for('job_detail', job_id=job.id, tab='settings') }}#job-details">Edit details</a></p>
+  {% endif %}
   {% if job.title_provisional %}
   <p class="hint">
     This title came from the uploaded filename. The JD parse replaces it with

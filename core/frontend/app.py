@@ -17,7 +17,7 @@ import datetime as dt
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -37,6 +37,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
+from src.schemas.jobs import EmploymentType, Seniority
 from src.schemas.matching import ShortlistEntry
 from src.services.cas_origin import is_loopback_host
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
@@ -1039,6 +1040,10 @@ def _render_job_detail(
                 export_csrf_token=export_csrf_token,
                 shortlist_entries=shortlist_entries,
                 jd_has_no_requirements=_jd_yielded_no_requirements(job),
+                seniority_options=[(v, _readable(v)) for v in _SENIORITY_VALUES],
+                employment_type_options=[
+                    (v, _readable(v)) for v in _EMPLOYMENT_TYPE_VALUES
+                ],
             ),
             status_code,
         )
@@ -1766,7 +1771,49 @@ def transition_status(job_id: UUID) -> Any:
 #: it permanently un-blinds every résumé under the job) or ``description_raw``
 #: through a form that renders neither. ``update_job`` has its own
 #: ``_UPDATABLE_JOB_COLUMNS`` allowlist; this is the same discipline one hop out.
-_EDITABLE_DETAIL_FIELDS = ("department", "location")
+_EDITABLE_DETAIL_FIELDS = (
+    "title",
+    "min_years",
+    "seniority",
+    "employment_type",
+    "department",
+    "location",
+)
+
+_SENIORITY_VALUES: tuple[str, ...] = get_args(Seniority)
+_EMPLOYMENT_TYPE_VALUES: tuple[str, ...] = get_args(EmploymentType)
+
+
+def _readable(code: str) -> str:
+    return code.replace("_", " ").capitalize()
+
+
+def _validate_detail_payload(payload: dict[str, Any]) -> str | None:
+    """Validate (and normalise in place) the Job details fields before any PATCH.
+
+    Returns a message for the first problem, else ``None``. ``min_years`` is
+    converted to ``int`` in ``payload``; blank optionals stay ``None`` (unset).
+    """
+    if "title" in payload:
+        title = payload["title"]
+        if title is None or len(title) < 2:
+            return "The title must be at least 2 characters."
+    if "min_years" in payload and payload["min_years"] is not None:
+        raw = payload["min_years"]
+        if not re.fullmatch(r"[0-9]+", raw):
+            return "Minimum years must be a whole number from 0 to 50."
+        years = int(raw)
+        if not 0 <= years <= 50:
+            return "Minimum years must be a whole number from 0 to 50."
+        payload["min_years"] = years
+    for field, allowed in (
+        ("seniority", _SENIORITY_VALUES),
+        ("employment_type", _EMPLOYMENT_TYPE_VALUES),
+    ):
+        value = payload.get(field)
+        if value is not None and value not in allowed:
+            return f"{_readable(field)} must be one of the listed options."
+    return None
 
 
 @app.post("/jobs/<uuid:job_id>/details")
@@ -1802,6 +1849,11 @@ def edit_job_details(job_id: UUID) -> Any:
         if field not in request.form:
             continue
         payload[field] = (request.form.get(field) or "").strip() or None
+    problem = _validate_detail_payload(payload)
+    if problem is not None:
+        return _render_job_detail(
+            job_id, error=problem, status_code=400, tab="settings"
+        )
     if not payload:
         return redirect(_job_page_url(job_id, "settings"))
     try:

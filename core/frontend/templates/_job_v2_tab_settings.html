@@ -6,9 +6,38 @@
 <div data-job-tab="settings">
   {% if is_writer %}
   <div class="card">
-    <h3 style="margin-top:0">Department &amp; campus</h3>
-    <form action="{{ url_for('edit_job_details', job_id=job.id) }}" method="post">
+    <h3 style="margin-top:0">Job details</h3>
+    <form id="job-details" action="{{ url_for('edit_job_details', job_id=job.id) }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-title">Title</label>
+        <input class="input" id="job-title" name="title" type="text"
+               maxlength="200" required value="{{ job.title or '' }}">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-min-years">Minimum years of experience</label>
+        <input class="input" id="job-min-years" name="min_years" type="number"
+               min="0" max="50" step="1"
+               value="{{ job.min_years if job.min_years is not none else '' }}">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-seniority">Seniority</label>
+        <select class="input" id="job-seniority" name="seniority">
+          <option value=""></option>
+          {% for value, label in seniority_options %}
+          <option value="{{ value }}"{% if job.seniority == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-employment-type">Employment type</label>
+        <select class="input" id="job-employment-type" name="employment_type">
+          <option value=""></option>
+          {% for value, label in employment_type_options %}
+          <option value="{{ value }}"{% if job.employment_type == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
       <div class="form-group">
         <label class="label" for="job-department">Department</label>
         <input class="input" id="job-department" name="department" type="text"
@@ -32,6 +61,10 @@
       <p class="hint">
         Whatever you set here wins: a re-parse fills these only when they are
         empty, and never replaces a value you entered.
+      </p>
+      <p class="hint">
+        Changing the title or minimum years changes how candidates are ranked;
+        regenerate the shortlist afterwards.
       </p>
       <div class="form-actions">
         <button class="btn btn-primary btn-sm" type="submit">Save</button>

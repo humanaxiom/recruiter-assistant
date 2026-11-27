@@ -819,6 +819,11 @@ async def update_job(
     for col, val in fields.items():
         args.append(val)
         set_clauses.append(f"{col} = ${len(args)}")
+    if "title" in fields:
+        # A human-typed title must survive a parse that lands later
+        # (record_parsed only replaces a still-provisional title). Literal in
+        # the same UPDATE: no window, no extra bind argument.
+        set_clauses.append("title_provisional = false")
     query = (
         f"UPDATE jobs SET {', '.join(set_clauses)}, updated_at = now() "
         f"WHERE id = $1 RETURNING {_JOB_COLS}"

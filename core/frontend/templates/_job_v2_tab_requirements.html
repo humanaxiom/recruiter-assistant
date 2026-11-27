@@ -107,6 +107,15 @@
       </div>
     </form>
   </div>
+  {% else %}
+  <div class="card">
+    <h3 style="margin-top:0">Job description</h3>
+    <p class="hint">
+      The posting text can only be edited while the job is a draft. To change
+      it, close this job and create a new one.
+    </p>
+    <pre class="muted" style="white-space:pre-wrap">{{ job.description_raw or '' }}</pre>
+  </div>
   {% endif %}
   {% endif %}
 </div>
