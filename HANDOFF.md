@@ -68,8 +68,10 @@ owner the same day.
 
 **Next, in the product owner's order:**
 
-1. **The job-page redesign (Option A) is BUILT on `feat/job-page-v2`.** S1–S5
-   and review are done, and it is awaiting **H3** (push, PR, merge), which
+1. **The job-page redesign (Option A) is BUILT on `feat/job-page-v2`.** S1–S5,
+   review and S6 (editable job details, asked for by the PO after review) are
+   done. An edited title clears `title_provisional`, so a parse never
+   overwrites it. It is awaiting **H3** (push, PR, merge), which
    needs the product owner's consent. Contract:
    [S-contract.md](docs/plans/2026-11-job-page-redesign/S-contract.md); actuals
    are in README §11.

@@ -220,6 +220,7 @@ single biggest lever the product owner has on delivery.
 | S4 | 3 h (1 cycle) | red ~45 m, green 2 runs (~1 h 20 m) | spec amended in red (45c67a3): `export_start` keeps its pinned v1 flash on a backend 403 | upload, roster and split now abort(403) on a backend 403 |
 | S5 | 3 h (1 cycle) | red ~45 m, green ~50 m (offline + integration) | — | smoke v1: 11 passed, 12 skipped; smoke v2: 23 passed; doctor (stress): only `deploy.auth_disabled` |
 | R | — | reviewer + security in parallel with S5 | security PASS; reviewer 1 major (teaser re-sorted voided candidates, fixed red 516619a, green b63c0e5), 2 minor (contract amended), 2 nits (not recorded) | |
+| S6 | added after review by the PO (editable job details) | red ~1 h 35 m (9ee6dde, 73 unit fails), green 2 `all` runs (929c63d) | — | 1 gate iteration: the Edit details link left `div.actions` (pinned by the roles test). Offline 9654 passed, 92%; integration 988 passed. Stress stack driven by hand: edit, 400 on invalid input, clear, edited title survives a re-parse, read-only description on an open job. Smoke v2: 23 passed; doctor (stress): only `deploy.auth_disabled` |
 
 ## 12. How to start S0 (for the next session)
 

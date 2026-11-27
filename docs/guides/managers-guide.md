@@ -281,7 +281,7 @@ you come back to the tab you were on.
 | **Candidates** | Four ways to add candidates, each a card: **One résumé**, **Many résumés (.zip)**, **Taleo export PDF** (with any **Pending splits**) and **Taleo roster CSV**. Below the cards are **Export**, **Résumé status** and the **Résumés** table, which shows withdrawn candidates. | §4, §5, §8 "Exports" |
 | **Requirements** | **Your additional requirements**, **Parsed requirements**, **Skills & experience you are looking for**, re-parse when a parse failed, and **Edit job description** (drafts only) | §2 "Additional requirements", §3 |
 | **Shortlist** | The top five ranked candidates, a link to **Open full shortlist**, and the zero-requirements warning. Decisions, reveals and withdrawals stay on the full shortlist page. | §7, §8 |
-| **Settings** (writers only) | **Department & campus**, **Assigned hiring managers**, **Status** (open, close, archive) and **Blind review** | §1 assignments, §2 "Department and campus after the fact", §3 "Opening the job", "Blind review" |
+| **Settings** (writers only) | **Job details** (title, minimum years, seniority, employment type, department, campus), **Assigned hiring managers**, **Status** (open, close, archive) and **Blind review** | §1 assignments, §2 "Department and campus after the fact", §3 "Opening the job", "Blind review" |
 
 **Hiring managers and auditors** see four tabs, with no Settings tab. Candidates
 shows only the table, with the note **"Read-only for your role"**. Requirements
@@ -291,6 +291,24 @@ shows the requirements without any forms.
 added yet. A job that is still parsing says it takes about five minutes per
 posting. A parsed draft offers **Open for applicants** in the same place. The
 Taleo PDF and roster cards stay available on drafts, as they do on today's page.
+
+### Editing job details
+
+Writers get an **Edit details** link in the header, on every tab. It opens the
+**Job details** form on Settings: **Title**, **Minimum years** (a whole number
+from 0 to 50), **Seniority**, **Employment type**, **Department** and
+**Campus**. Leave an optional field blank to clear it. If a value is invalid,
+nothing is saved and the form tells you which one to fix.
+
+- **Two of these change the ranking.** The title is compared with each
+  candidate's recent job titles, and minimum years feeds the experience and
+  seniority scores. Seniority and employment type are for display only.
+- **A title you type is final.** A job made by bulk import starts with a title
+  taken from the file name, and the parse replaces it once. After you edit the
+  title, no parse will overwrite it.
+- **The job description can be edited only on a draft.** On an open, closed or
+  archived job, Requirements shows it read-only. To change it, close the job
+  and create a new one.
 
 > ### ⚠️ Be aware
 >
