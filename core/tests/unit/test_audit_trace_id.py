@@ -32,7 +32,9 @@ def test_insert_sql_writes_trace_id() -> None:
 async def test_record_audit_binds_the_current_trace_id() -> None:
     conn = MagicMock()
     conn.execute = AsyncMock(return_value="INSERT 0 1")
-    with trace.get_tracer("t").start_as_current_span("POST /resumes/{id}/reveal") as span:
+    with trace.get_tracer("t").start_as_current_span(
+        "POST /resumes/{id}/reveal"
+    ) as span:
         await audit_service.record_audit(
             conn,
             actor_kind="user",

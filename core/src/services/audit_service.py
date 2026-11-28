@@ -29,6 +29,8 @@ import json
 from typing import Any
 from uuid import UUID
 
+from sfu_telemetry import current_trace_id
+
 from src.schemas.audit import AuditDetail, AuditLogItem
 from src.services import DbConn
 
@@ -140,8 +142,8 @@ def redact_audit_details(action: str, details: Any) -> Any:
 _INSERT_SQL = """
 INSERT INTO audit_log (
     actor_kind, actor_user_id, actor_service, action, subject_type,
-    subject_id, job_id, context, details
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+    subject_id, job_id, context, details, trace_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
 """
 
 
@@ -180,6 +182,8 @@ async def record_audit(
         job_id,
         context,
         json.dumps(details) if details is not None else None,
+        # ADR-048: None outside a request/job span.
+        current_trace_id(),
     )
 
 

@@ -36,9 +36,11 @@ import random
 import re
 import time
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ValidationError
+from sfu_telemetry.llm import llm_span
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -186,6 +188,8 @@ class LLMClient:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
+        # Host only (no scheme/port/path) for the GenAI span's server.address.
+        self._server_address = urlparse(self._base).hostname or ""
         # Ollama's native API lives at the host root, not under /v1.
         self._native_chat = native_chat
         self._native_root = self._base.removesuffix("/v1")
@@ -426,73 +430,104 @@ class LLMClient:
     async def _post_json(
         self, path: str, body: dict[str, Any], *, url: str | None = None
     ) -> dict[str, Any]:
-        self._check_breaker()
         # ``path`` is the log label; ``url`` overrides the target for
         # endpoints that don't live under the OpenAI /v1 base (native Ollama).
         url = url or f"{self._base}{path}"
         prompt_hash = self._prompt_hash(body.get("messages") or body.get("input"))
+        model = str(body.get("model", ""))
+        # ADR-048: one GenAI CLIENT span per logical call, retries included.
+        # It records model, tokens, attempts and the prompt HASH — never a body,
+        # and on failure only the exception TYPE (llm_span never records a
+        # message, which here could reflect résumé text).
+        with llm_span(
+            "embeddings" if path == "/embeddings" else "chat",
+            model=model,
+            provider="ollama",
+            server_address=self._server_address,
+            prompt_hash=prompt_hash,
+        ) as call:
+            self._check_breaker()
+            last_exc: Exception | None = None
+            for attempt in range(self._max_retries + 1):
+                call.record_attempt()
+                start = time.perf_counter()
+                try:
+                    response = await self._http.post(url, json=body)
+                except (
+                    httpx.ConnectError,
+                    httpx.ReadTimeout,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    last_exc = exc
+                    self._on_failure()
+                    self._log_attempt(
+                        path, prompt_hash, attempt, start, model=model, error=str(exc)
+                    )
+                    await self._sleep_backoff(attempt)
+                    continue
 
-        last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            start = time.perf_counter()
-            try:
-                response = await self._http.post(url, json=body)
-            except (
-                httpx.ConnectError,
-                httpx.ReadTimeout,
-                httpx.RemoteProtocolError,
-            ) as exc:
-                last_exc = exc
-                self._on_failure()
-                self._log_attempt(path, prompt_hash, attempt, start, error=str(exc))
-                await self._sleep_backoff(attempt)
-                continue
+                if response.status_code in _RETRY_STATUSES:
+                    last_exc = httpx.HTTPStatusError(
+                        f"{response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                    self._on_failure()
+                    self._log_attempt(
+                        path,
+                        prompt_hash,
+                        attempt,
+                        start,
+                        model=model,
+                        status=response.status_code,
+                    )
+                    await self._sleep_backoff(attempt)
+                    continue
 
-            if response.status_code in _RETRY_STATUSES:
-                last_exc = httpx.HTTPStatusError(
-                    f"{response.status_code}",
-                    request=response.request,
-                    response=response,
-                )
-                self._on_failure()
+                if response.status_code >= 400:
+                    # 4xx (non-429): not retryable, fail fast.
+                    self._on_failure()
+                    self._log_attempt(
+                        path,
+                        prompt_hash,
+                        attempt,
+                        start,
+                        model=model,
+                        status=response.status_code,
+                    )
+                    # Do NOT embed ``response.text`` — an upstream 4xx body can
+                    # reflect the request (résumé/prompt text, candidate PII), and
+                    # this message flows into the cleartext, blind-review-exposed
+                    # ``resumes.failure_reason`` column. Status code alone is the
+                    # PII-free diagnostic; full body detail stays in ``_log_attempt``.
+                    raise LLMUnavailableError(f"HTTP {response.status_code}")
+
+                payload: dict[str, Any] = response.json()
+                self._on_success()
+                usage = payload.get("usage") or {}
+                # OpenAI-compat reports ``usage``; Ollama's native /api/chat
+                # reports ``prompt_eval_count`` / ``eval_count`` instead.
+                tokens_in = usage.get("prompt_tokens", payload.get("prompt_eval_count"))
+                tokens_out = usage.get("completion_tokens", payload.get("eval_count"))
+                call.record_usage(tokens_in, tokens_out)
+                call.record_response_model(payload.get("model"))
                 self._log_attempt(
-                    path, prompt_hash, attempt, start, status=response.status_code
+                    path,
+                    prompt_hash,
+                    attempt,
+                    start,
+                    model=model,
+                    status=response.status_code,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    ok=True,
                 )
-                await self._sleep_backoff(attempt)
-                continue
+                return payload
 
-            if response.status_code >= 400:
-                # 4xx (non-429): not retryable, fail fast.
-                self._on_failure()
-                self._log_attempt(
-                    path, prompt_hash, attempt, start, status=response.status_code
-                )
-                # Do NOT embed ``response.text`` — an upstream 4xx body can
-                # reflect the request (résumé/prompt text, candidate PII), and
-                # this message flows into the cleartext, blind-review-exposed
-                # ``resumes.failure_reason`` column. Status code alone is the
-                # PII-free diagnostic; full body detail stays in ``_log_attempt``.
-                raise LLMUnavailableError(f"HTTP {response.status_code}")
-
-            payload: dict[str, Any] = response.json()
-            self._on_success()
-            usage = payload.get("usage") or {}
-            self._log_attempt(
-                path,
-                prompt_hash,
-                attempt,
-                start,
-                status=response.status_code,
-                tokens_in=usage.get("prompt_tokens"),
-                tokens_out=usage.get("completion_tokens"),
-                ok=True,
+            # exhausted retries
+            raise LLMUnavailableError(
+                f"all {self._max_retries + 1} attempts failed: {last_exc!r}"
             )
-            return payload
-
-        # exhausted retries
-        raise LLMUnavailableError(
-            f"all {self._max_retries + 1} attempts failed: {last_exc!r}"
-        )
 
     def _check_breaker(self) -> None:
         if self._opened_at is None:
@@ -536,6 +571,7 @@ class LLMClient:
         attempt: int,
         start: float,
         *,
+        model: str | None = None,
         status: int | None = None,
         tokens_in: int | None = None,
         tokens_out: int | None = None,
@@ -550,6 +586,7 @@ class LLMClient:
             "llm.attempt",
             extra={
                 "path": path,
+                "model": model,
                 "attempt": attempt,
                 "status": status,
                 "ok": ok,

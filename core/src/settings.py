@@ -12,6 +12,7 @@ contracts that other modules assert against:
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -405,6 +406,26 @@ class Settings(BaseSettings):
     # None when unset — matches the prior (pre-Settings) `os.environ.get`
     # behaviour exactly.
     git_sha: str | None = None
+
+    # ── Telemetry (ADR-048: the shared SFU telemetry library) ────────────────
+    # Logs are JSON on stdout in every process (``log_format=text`` for a human
+    # at a terminal) and carry the request's ``trace_id``. EXPORT is a separate
+    # switch and DEFAULTS OFF: a fresh checkout, a CI run, the test suite and an
+    # airgapped deploy never open a telemetry socket. When an operator sets
+    # ``TELEMETRY_EXPORT=otlp``, spans and metrics go to
+    # ``TELEMETRY_OTLP_ENDPOINT`` — a collector inside the same security zone,
+    # never a vendor. What is exported is metadata only: there is deliberately
+    # NO setting for the data class or the content level; ``src.telemetry``
+    # fixes them at ``S`` / ``minimal`` so candidate data cannot be configured
+    # into telemetry.
+    telemetry_export: Literal["off", "otlp", "console"] = "off"
+    telemetry_otlp_endpoint: str = "http://otel-collector:4318"
+    telemetry_environment: str = "dev"
+    telemetry_zone: str = ""
+    # Falls back to ``git_sha`` when empty.
+    telemetry_service_version: str = ""
+    log_format: Literal["json", "text"] = "json"
+    log_level: str = "INFO"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

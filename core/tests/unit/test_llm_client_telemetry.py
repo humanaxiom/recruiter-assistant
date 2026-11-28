@@ -23,7 +23,9 @@ BASE_URL = "http://aria-gb10:11434/v1"
 
 
 def _client(handler: Any) -> LLMClient:
-    c = LLMClient(BASE_URL, "gpt-oss:20b", "nomic-embed-text", max_retries=1, expected_dim=3)
+    c = LLMClient(
+        BASE_URL, "gpt-oss:20b", "nomic-embed-text", max_retries=1, expected_dim=3
+    )
     c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return c
 
@@ -95,7 +97,9 @@ async def test_retries_are_counted_and_exhaustion_marks_error_by_type(
 
 
 @pytest.mark.asyncio
-async def test_llm_attempt_log_carries_the_model(caplog: pytest.LogCaptureFixture) -> None:
+async def test_llm_attempt_log_carries_the_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO, logger="src.pipeline.llm.client")
     await _client(_chat_ok).chat([{"role": "user", "content": "x"}])
     (rec,) = [r for r in caplog.records if r.getMessage() == "llm.attempt"]

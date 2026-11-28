@@ -125,7 +125,9 @@ async def test_api_lifespan_instruments_its_arq_pool(tmp_path: Any) -> None:
         patch("src.api.main.create_pool", AsyncMock(return_value=pool)),
     ):
         async with lifespan(fresh):
-            assert getattr(fresh.state.arq.enqueue_job, "_sfu_instrumented", False) is True
+            assert (
+                getattr(fresh.state.arq.enqueue_job, "_sfu_instrumented", False) is True
+            )
 
 
 def test_worker_uses_telemetry_startup_and_job_hooks() -> None:
@@ -168,7 +170,9 @@ async def test_worker_startup_instruments_the_enqueue_pool(tmp_path: Any) -> Non
     )
     with (
         patch("src.worker.main.get_settings", return_value=settings),
-        patch("src.worker.main.asyncpg.create_pool", AsyncMock(return_value=MagicMock())),
+        patch(
+            "src.worker.main.asyncpg.create_pool", AsyncMock(return_value=MagicMock())
+        ),
         patch("src.worker.main.init_schema", AsyncMock()),
         patch("src.worker.main.AsyncGraphDatabase.driver", return_value=driver),
         patch("src.worker.main.bootstrap_neo4j_schema", AsyncMock()),

@@ -33,6 +33,7 @@ from flask import (
     url_for,
 )
 from pydantic import ValidationError
+from sfu_telemetry.flask_ext import instrument_flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from frontend import api_client, csrf
@@ -188,6 +189,10 @@ app.secret_key = _settings.flask_secret_key
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 _install_proxy_fix(app, _settings)
 _configure_session_cookie(app, _settings)
+# ADR-048: one SERVER span per browser request, named by the URL RULE (never
+# the raw path), with X-Request-ID on the response. Only registers request
+# hooks; logging/exporter setup happens in ``frontend.wsgi`` at process start.
+instrument_flask(app)
 API = _settings.api_base_url
 
 

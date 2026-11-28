@@ -16,6 +16,8 @@ from arq.connections import RedisSettings
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from neo4j import AsyncGraphDatabase
+from sfu_telemetry.arq_ext import instrument_arq_pool
+from sfu_telemetry.asgi import TelemetryMiddleware
 
 from src.api.deps import log_auth_mode, require_role_assigned
 from src.api.routes import (
@@ -35,6 +37,7 @@ from src.models.ddl import init_schema
 from src.models.pool import close_pool, init_pool
 from src.settings import Settings, get_settings, validate_startup_auth_config
 from src.storage.blob_store import BlobStore
+from src.telemetry import setup_telemetry
 from src.worker.neo4j_bootstrap import bootstrap_neo4j_schema
 
 
@@ -75,13 +78,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Filesystem blob primitive — Phase-6 routes reach it via get_blob_store.
     app.state.blob_store = BlobStore(s.storage_dir)
 
-    app.state.arq = await create_pool(RedisSettings.from_dsn(s.redis_url))
+    # ADR-048: an enqueue inside a request writes the request's trace context
+    # to a short-lived Redis key, so the worker's spans join the same trace.
+    app.state.arq = instrument_arq_pool(
+        await create_pool(RedisSettings.from_dsn(s.redis_url))
+    )
     try:
         yield
     finally:
         await app.state.arq.close()
         await driver.close()
         await close_pool(app)
+
+
+@asynccontextmanager
+async def telemetry_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Production lifespan: configure telemetry, then run :func:`lifespan`.
+
+    Kept separate (ADR-048) so unit tests that drive ``lifespan`` directly, or
+    swap the router's lifespan out, never reconfigure process-wide logging.
+    """
+    setup_telemetry("api")
+    async with lifespan(app):
+        yield
 
 
 def _build_app(settings: Settings) -> FastAPI:
@@ -98,7 +117,7 @@ def _build_app(settings: Settings) -> FastAPI:
         return FastAPI(
             title="Recruiter Assistant API",
             version="0.1.0",
-            lifespan=lifespan,
+            lifespan=telemetry_lifespan,
             docs_url=None,
             redoc_url=None,
             openapi_url=None,
@@ -106,11 +125,16 @@ def _build_app(settings: Settings) -> FastAPI:
     return FastAPI(
         title="Recruiter Assistant API",
         version="0.1.0",
-        lifespan=lifespan,
+        lifespan=telemetry_lifespan,
     )
 
 
 app = _build_app(get_settings())
+
+# ADR-048: one SERVER span per request (continuing an incoming traceparent),
+# named by the route TEMPLATE, plus an X-Request-ID response header carrying the
+# trace id. ``/health`` is excluded so the healthcheck does not flood traces.
+app.add_middleware(TelemetryMiddleware, excluded_paths=("/health",))
 
 # auth stays UNGATED — a no-role user must still be able to see their own
 # status (GET /auth/cas/user) and log out; every business router below is
