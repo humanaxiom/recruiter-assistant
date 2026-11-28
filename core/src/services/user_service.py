@@ -45,7 +45,7 @@ _ADMIN_ROLE = "admin"
 
 _GET_BY_ID_SQL = """
 SELECT id, cas_username, display_name, email, role, active, created_at,
-       last_seen_at
+       last_seen_at, job_page_v2
 FROM users WHERE id = $1
 """
 
@@ -62,7 +62,7 @@ ON CONFLICT (cas_username) DO UPDATE
         display_name = COALESCE(EXCLUDED.display_name, users.display_name),
         email = COALESCE(EXCLUDED.email, users.email)
 RETURNING id, cas_username, display_name, email, role, active, created_at,
-          last_seen_at, (xmax = 0) AS was_created
+          last_seen_at, job_page_v2, (xmax = 0) AS was_created
 """
 
 
@@ -114,13 +114,13 @@ async def get_by_id(conn: DbConn, user_id: UUID) -> User | None:
 
 _LIST_USERS_SQL = """
 SELECT id, cas_username, display_name, email, role, active, created_at,
-       last_seen_at
+       last_seen_at, job_page_v2
 FROM users ORDER BY created_at
 """
 
 _LIST_USERS_BY_ROLE_SQL = """
 SELECT id, cas_username, display_name, email, role, active, created_at,
-       last_seen_at
+       last_seen_at, job_page_v2
 FROM users WHERE role = $1 ORDER BY created_at
 """
 
@@ -171,3 +171,12 @@ async def count_active_admins(conn: DbConn) -> int:
     """
     count: int = await conn.fetchval(_COUNT_ACTIVE_ADMINS_SQL)
     return count
+
+
+_SET_JOB_PAGE_V2_SQL = "UPDATE users SET job_page_v2 = $2 WHERE id = $1"
+
+
+async def set_job_page_v2(conn: DbConn, user_id: UUID, enabled: bool) -> None:
+    """Set ``users.job_page_v2`` (S1a). The caller runs this inside the same
+    ``conn.transaction()`` as the paired audit write."""
+    await conn.execute(_SET_JOB_PAGE_V2_SQL, user_id, enabled)

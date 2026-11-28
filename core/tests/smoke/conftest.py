@@ -49,6 +49,33 @@ _RANK_TIMEOUT = 900
 _REASON = "smoke: withdrawn to verify the audited reveal end to end"
 
 
+def _expected_layout() -> str:
+    """The job-page layout this run asserts, from ``SMOKE_EXPECT_JOB_PAGE``.
+
+    Mandatory and exact (``v1`` or ``v2``): ``scripts/smoke.sh`` refuses to run
+    without it, and this refuses anything else, so a run can never silently
+    drive one layout while believing it drove the other.
+    """
+    raw = os.environ.get("SMOKE_EXPECT_JOB_PAGE")
+    if raw not in ("v1", "v2"):
+        raise RuntimeError(
+            f"SMOKE_EXPECT_JOB_PAGE must be 'v1' or 'v2', got {raw!r}. "
+            "Run smoke through scripts/smoke.sh."
+        )
+    return raw
+
+
+#: Which job-page layout the stack under test is supposed to be serving.
+EXPECT_LAYOUT: str = _expected_layout()
+
+
+def job_page_url(job_id: str, tab: str = "candidates") -> str:
+    """The job-page path for ``tab``: ``?tab=`` only when the stack is v2 (v1
+    has one bare page and ignores the parameter)."""
+    base = f"/jobs/{job_id}"
+    return f"{base}?tab={tab}" if EXPECT_LAYOUT == "v2" else base
+
+
 @pytest.fixture(scope="session")
 def client() -> Iterator[httpx.Client]:
     """A browser-like client: same-origin header on every request, cookies kept

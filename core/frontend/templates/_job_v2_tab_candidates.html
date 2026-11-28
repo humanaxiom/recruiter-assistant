@@ -1,0 +1,226 @@
+{# Job page v2, Candidates tab (S-contract section 3 S2, section 8).
+   Everything that adds, enriches, exports or lists candidates. Cards 1 and 2
+   post to the same route, so every element id carries its card's prefix. The
+   résumé table and the status placeholder are the unchanged v1 fragments. #}
+{% set j_parsing = job.status == 'draft' and job.parsed_at is none and not job.failure_reason %}
+{% set j_failed = job.status == 'draft' and job.failure_reason %}
+{% set j_parsed = job.status == 'draft' and job.parsed_at is not none and not job.failure_reason %}
+<div data-job-tab="candidates">
+  {% if is_writer %}
+  {% if j_parsing %}
+  <div class="card" data-intake-banner="parsing">
+    <p><strong>You can't add résumés yet.</strong> Résumé upload opens once the
+      job is <strong>open</strong>, and a job can only be opened after its
+      description has been parsed. That takes about 5 minutes per posting;
+      several postings parse at once, so it may be longer.</p>
+    <p><a href="{{ url_for('job_detail', job_id=job.id, tab='candidates') }}">Refresh status</a></p>
+  </div>
+  {% elif j_failed %}
+  <div class="card" data-intake-banner="failed">
+    <p class="error">The job description could not be parsed: {{ job.failure_reason }}</p>
+    <p>Re-parse it on the <a href="{{ url_for('job_detail', job_id=job.id, tab='requirements') }}">Requirements</a>
+      tab, then open the job.</p>
+  </div>
+  {% elif j_parsed %}
+  <div class="card" data-intake-banner="parsed">
+    <p>The job is parsed but not open. Open it to accept résumés.</p>
+    <form action="{{ url_for('transition_status', job_id=job.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <input type="hidden" name="to" value="open">
+      <input type="hidden" name="tab" value="candidates">
+      <button type="submit" class="btn btn-primary">Open for applicants</button>
+    </form>
+  </div>
+  {% elif job.status == 'closed' %}
+  <div class="card" data-intake-banner="closed">
+    <p>This job is closed and no longer accepts résumés.</p>
+  </div>
+  {% elif job.status == 'archived' %}
+  <div class="card" data-intake-banner="archived">
+    <p>This job is archived.</p>
+  </div>
+  {% endif %}
+
+  {% if job.status == 'open' %}
+  <div class="card" data-intake-card="single">
+    <h3>One résumé</h3>
+    <p class="hint">Use when a single candidate emailed you their file.</p>
+    <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
+          enctype="multipart/form-data" hx-encoding="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="single-files">Résumé file — PDF/DOCX</label>
+        <input class="input" id="single-files" name="files" type="file">
+        <p class="hint">Parsing runs on the local model; a large PDF can take
+          ~1–2 minutes. The table below updates to <strong>parsed</strong> when
+          it is done.</p>
+      </div>
+      <div class="form-group">
+        <label class="label" for="single-cover-letter-file">Cover letter file
+          (optional) — PDF/DOCX/RTF/TXT</label>
+        <input class="input" id="single-cover-letter-file" name="cover_letter_file"
+               type="file">
+      </div>
+      <div class="form-group">
+        <label class="label" for="single-cover-letter-text">…or paste cover
+          letter text (optional)</label>
+        <textarea class="textarea" id="single-cover-letter-text"
+                  name="cover_letter_text"
+                  placeholder="Paste an optional cover letter…"></textarea>
+      </div>
+      <div class="form-group checkbox-row">
+        <input type="checkbox" id="single-consent" name="consent_acknowledged"
+               value="true" required>
+        <label class="label" for="single-consent" style="margin:0">
+          I confirm the candidate consented to this processing (PIPEDA/FIPPA)</label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Upload</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card" data-intake-card="zip">
+    <h3>Many résumés (.zip)</h3>
+    <p class="hint">Use when you have a folder of separate files.</p>
+    <form action="{{ url_for('upload_resumes', job_id=job.id) }}" method="post"
+          enctype="multipart/form-data" hx-encoding="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="zip-files">Résumé files — PDF/DOCX, or a .zip
+          of many</label>
+        <input class="input" id="zip-files" name="files" type="file" multiple>
+      </div>
+      <div class="form-group">
+        <label class="label" for="zip-pairing-manifest">Pairing manifest
+          (manifest.json)</label>
+        <input class="input" id="zip-pairing-manifest" name="pairing_manifest"
+               type="file" accept=".json,application/json">
+        <p class="hint">Optional — pairs each résumé with its cover letter by
+          name. Upload as its own file, NOT inside the résumé zip.</p>
+      </div>
+      <div class="form-group checkbox-row">
+        <input type="checkbox" id="zip-consent" name="consent_acknowledged"
+               value="true" required>
+        <label class="label" for="zip-consent" style="margin:0">
+          I confirm the candidates consented to this processing (PIPEDA/FIPPA)</label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Upload</button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="card" data-intake-card="taleo-pdf">
+    <h3>Taleo export PDF</h3>
+    <p class="hint">Use for the one combined PDF HR downloads from Taleo; you
+      review the split before anything is imported.</p>
+    <form action="{{ url_for('split_upload', job_id=job.id) }}" method="post"
+          enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="split-files">Combined Taleo export(s) — PDF</label>
+        <input class="input" id="split-files" name="files" type="file" multiple
+               accept=".pdf,application/pdf">
+      </div>
+      <div class="form-group checkbox-row">
+        <input type="checkbox" id="split-consent" name="consent_acknowledged"
+               value="true" required>
+        <label class="label" for="split-consent" style="margin:0">
+          I confirm the candidates consented to this processing (PIPEDA/FIPPA)</label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="submit">Split export</button>
+      </div>
+    </form>
+    {% if pending_splits %}
+    <div data-pending-splits>
+      <h4>Pending splits</h4>
+      <ul>
+        {% for s in pending_splits %}
+        <li>
+          <a href="{{ url_for('split_review', split_id=s.id) }}">Review split</a>
+          · {{ s.status }}
+          {% if s.page_count %} · {{ s.page_count }} page(s){% endif %}
+          {% if s.created_at %} · {{ s.created_at | day }}{% endif %}
+          {% if s.source_filename %} · {{ s.source_filename }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card" data-intake-card="roster">
+    <h3>Taleo roster CSV</h3>
+    <p class="hint">Use to enrich candidates already added. <strong>Adds no
+      résumés.</strong> Upload after the résumés have finished parsing.</p>
+    <form action="{{ url_for('upload_candidate_roster', job_id=job.id) }}"
+          method="post" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="roster-file">Taleo "All Candidates" export
+          (CSV)</label>
+        <input class="input" id="roster-file" name="file" type="file"
+               accept=".csv,text/csv">
+        <p class="hint">Reconciles work-authorization and SFU-internal (APSA/
+          CUPE) status onto this job's résumés by name/email match. An existing
+          shortlist does not reflect this update until it is regenerated.</p>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" type="submit">Import roster</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card" data-export-menu>
+    <h3>Export</h3>
+    <form action="{{ url_for('export_start', job_id=job.id) }}" method="post"
+          style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <button class="btn" type="submit">Export résumés (as-is + anonymized)</button>
+    </form>
+    {% if export_latest %}
+    <p class="hint">Your latest export:
+      <strong data-export-status="{{ export_latest.status }}">{{ export_latest.status }}</strong>
+      {% if export_latest.counts and export_latest.counts.applicants is not none %}
+      ({{ export_latest.counts.applicants }} applicants,
+      {{ export_latest.counts.anonymized }} anonymized)
+      {% endif %}
+      {% if export_latest.status in ('queued', 'building') %}
+      &mdash; it is built in the background; refresh to see it.
+      {% elif export_latest.status == 'failed' %}
+      &mdash; the build failed; start it again.
+      {% elif export_latest.status == 'expired' %}
+      &mdash; it expired; start it again.
+      {% endif %}
+    </p>
+    {% if export_latest.status == 'ready' and export_csrf_token %}
+    <form action="{{ url_for('export_download', export_id=export_latest.id) }}"
+          method="post" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ export_csrf_token }}">
+      <input type="hidden" name="job_id" value="{{ job.id }}">
+      <button class="btn btn-secondary" type="submit">Download the export (audited)</button>
+    </form>
+    <p class="hint">Contains every applicant's file. Do not forward the as-is
+      folder to blind reviewers. Deleted after it expires.</p>
+    {% endif %}
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">Read-only for your role.</p>
+  {% endif %}
+
+  <div class="card">
+    <h3>Résumé status</h3>
+    <div id="resume-status-breakdown"
+         hx-get="{{ url_for('resume_status_widget', job_id=job.id) }}"
+         hx-trigger="load"
+         hx-swap="outerHTML">
+      <p class="muted">Loading résumé status…</p>
+    </div>
+    <h3>Résumés</h3>
+    {% include "resumes_table.html" %}
+  </div>
+</div>

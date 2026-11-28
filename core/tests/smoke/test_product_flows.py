@@ -40,6 +40,7 @@ from typing import Any
 
 import httpx
 import pytest
+from conftest import job_page_url
 
 from tests.e2e.driver import form_for, hidden_value
 
@@ -122,7 +123,7 @@ def test_a_withdrawn_candidate_is_marked_on_the_job_page(
 ) -> None:
     """Retained, not hidden (ADR-026 "exclude and retain") — but visibly
     marked, or withdrawal looks like it did nothing."""
-    body = client.get(f"/jobs/{ranked_job['job_id']}").text
+    body = client.get(job_page_url(ranked_job["job_id"], "candidates")).text
     assert "withdrawn" in body.lower()
 
 

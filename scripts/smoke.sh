@@ -20,6 +20,9 @@
 # nothing is worse than no smoke run. Pair-test the authenticated paths in a
 # browser afterwards.
 #
+# Smoke must be told which job-page layout to expect (SMOKE_EXPECT_JOB_PAGE=v1
+# or v2) and refuses to run without it, so a flag left in the wrong state fails.
+#
 # Creates a job and uploads résumés from ./fixtures, so the LLM must be
 # reachable; the local model parses every résumé, so allow several minutes.
 set -euo pipefail
@@ -55,5 +58,6 @@ docker run --rm \
   -e PYTHONPATH=/repo/core \
   -e SMOKE_FRONTEND="${SMOKE_FRONTEND:-http://frontend:5000}" \
   -e SMOKE_FIXTURES="${SMOKE_FIXTURES:-/repo/fixtures}" \
+  -e SMOKE_EXPECT_JOB_PAGE="${SMOKE_EXPECT_JOB_PAGE:?v1 or v2}" \
   "$IMAGE" \
   python -m pytest tests/smoke -q -p no:cacheprovider "$@"

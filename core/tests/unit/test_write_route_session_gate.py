@@ -132,6 +132,9 @@ _KNOWN_GATED_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     # the reason the registry exists: it must carry a session-role gate, and
     # for this route the attributable session IS the feature.
     ("POST", "/audit/log/{audit_id}/reveal"),
+    # Job page v2 S1a (PO, 2026-11-25) — an admin sets one user's preview
+    # flag, with a job_page_preview_changed audit row. Admin session only.
+    ("PATCH", "/users/{user_id}/job-page-preview"),
 )
 
 # The write routes explicitly exempted — see the module docstring for why.

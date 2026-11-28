@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multimedia Specialist</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+</head>
+
+<body hx-headers='{"X-CSRF-Token": "<TOKEN>"}'>
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="nav-logo" href="/">recruiter-assistant</a>
+      <nav class="nav-links">
+        <a href="/">Jobs</a>
+        
+        
+        
+        <a href="/audit">Access record</a>
+        
+        
+      </nav>
+    </div>
+  </header>
+  <main class="container">
+    
+    
+    
+    
+
+
+
+<div class="card">
+  <div class="card-header">
+    <h1 style="margin:0">Multimedia Specialist</h1>
+    <span class="pill pill-open">open</span>
+    
+    
+    
+    
+  </div>
+  <p class="muted">
+    School of Medicine
+     · Burnaby
+     · 3+ yrs
+  </p>
+
+  
+  
+  <details class="card" style="margin-top:12px"
+           >
+    <summary>Edit department &amp; campus</summary>
+    <form action="/jobs/11111111-1111-4111-8111-111111111111/details" method="post"
+          style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="<TOKEN>">
+      <div class="form-group">
+        <label class="label" for="job-department">Department</label>
+        <input class="input" id="job-department" name="department" type="text"
+               maxlength="100" value="School of Medicine"
+               placeholder="e.g. School of Medicine">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-location">Campus</label>
+        <input class="input" id="job-location" name="location" type="text"
+               list="campus-options" autocomplete="off" maxlength="200"
+               value="Burnaby">
+        <datalist id="campus-options">
+          <option value="Burnaby"></option><option value="Vancouver"></option><option value="Surrey"></option>
+        </datalist>
+        <span class="muted">
+          
+          Burnaby (BBY) · 
+          Vancouver (YVR) · 
+          Surrey (SRY). Codes are accepted; anything else is kept as typed.
+        </span>
+      </div>
+      <p class="hint">
+        Whatever you set here wins: a re-parse fills these only when they are
+        empty, and never replaces a value you entered.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
+  </details>
+  
+
+  
+  
+
+  
+  
+
+  
+  
+  
+  <details class="card" style="margin-top:12px"
+           open>
+    <summary>
+      Add
+      skills &amp; experience you are looking for</summary>
+    <form action="/jobs/11111111-1111-4111-8111-111111111111/requirements"
+          method="post" style="margin-top:12px">
+      <input type="hidden" name="csrf_token" value="<TOKEN>">
+      <div class="form-group">
+        <label class="label" for="job-additional-requirements">
+          Additional requirements</label>
+        <textarea class="textarea" id="job-additional-requirements"
+                  name="additional_requirements" maxlength="4000"
+                  style="min-height:90px"
+                  placeholder="e.g. Must have MEG analysis experience. Kafka in production is a bonus. Willing to travel to Burnaby weekly."
+                  ></textarea>
+        <p class="hint">
+          Special skills or experience you are looking for, whether or not the
+          posting mentions them. Anything you state plainly is treated as
+          <strong>required</strong>; write "nice to have", "bonus" or "ideally"
+          to soften one. These are scored separately from the posting, so the
+          shortlist can show which requirements came from you.
+        </p>
+      </div>
+      
+      <p class="hint">
+        Saving re-reads these requirements straight away. It does <strong>not</strong>
+        re-rank anyone — use <strong>Regenerate</strong> on the shortlist when
+        you want the new requirements applied to the candidates.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save requirements</button>
+      </div>
+    </form>
+  </details>
+  
+
+  
+
+  <h3>Parsed requirements</h3>
+  
+<div id="parse-status">
+  
+  <div class="skills">
+    
+    
+    <span class="pill pill-skill">Video editing</span>
+    
+    <span class="pill pill-skill">Photography</span>
+    
+    
+  </div>
+  
+  
+</div>
+
+  
+  
+  
+
+  
+  
+
+  
+  
+  <h3>Assigned hiring managers</h3>
+  
+  <p class="warning">No hiring manager is assigned — this requisition is invisible to hiring managers.</p>
+  
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/assignees"
+        method="post" class="form-actions">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <select name="user_id">
+      
+    </select>
+    <button class="btn btn-primary btn-sm" type="submit">Add</button>
+  </form>
+  
+
+  
+  <h3>Status</h3>
+  <div class="filter-row">
+    
+    <form action="/jobs/11111111-1111-4111-8111-111111111111/status"
+          method="post" style="display:inline">
+      <input type="hidden" name="csrf_token" value="<TOKEN>">
+      <input type="hidden" name="to" value="closed">
+      <button class="btn btn-secondary btn-sm" type="submit">
+        Close
+      </button>
+    </form>
+    
+    <form action="/jobs/11111111-1111-4111-8111-111111111111/status"
+          method="post" style="display:inline">
+      <input type="hidden" name="csrf_token" value="<TOKEN>">
+      <input type="hidden" name="to" value="archived">
+      <button class="btn btn-secondary btn-sm" type="submit">
+        Archive
+      </button>
+    </form>
+    
+  </div>
+  
+  
+
+  <h3>Blind review</h3>
+  <p class="muted">Currently
+    <strong>off</strong>.</p>
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/blind-review" method="post">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <input type="hidden" name="blind_review"
+           value="true">
+    <button class="btn btn-secondary btn-sm" type="submit">
+      Turn on blind review
+    </button>
+  </form>
+  
+</div>
+
+<div class="card">
+  <p><a href="/jobs/11111111-1111-4111-8111-111111111111/shortlist">View shortlist</a></p>
+
+  
+  <h3>Upload résumés</h3>
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/resumes" method="post"
+        enctype="multipart/form-data" hx-encoding="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <div class="form-group">
+      <label class="label" for="resume-files">Résumé file(s) — PDF/DOCX, or a
+        .zip of many</label>
+      <input class="input" id="resume-files" name="files" type="file" multiple>
+      <p class="hint">Parsing runs on the local model — a large PDF can take
+        ~1–2 minutes each. The table below updates to <strong>parsed</strong>
+        when it's done.</p>
+    </div>
+    <div class="form-group">
+      <label class="label" for="cover_letter_file">Cover letter file (optional)
+        — PDF/DOCX/RTF/TXT</label>
+      <input class="input" id="cover_letter_file" name="cover_letter_file"
+             type="file">
+    </div>
+    <div class="form-group">
+      <label class="label" for="pairing_manifest">Pairing manifest
+        (manifest.json)</label>
+      <input class="input" id="pairing_manifest" name="pairing_manifest"
+             type="file" accept=".json,application/json">
+      <p class="hint">Optional — pairs each résumé with its cover letter by name.
+        Upload as its own file, NOT inside the résumé zip.</p>
+    </div>
+    <div class="form-group">
+      <label class="label" for="cover_letter_text">…or paste cover letter text
+        (optional)</label>
+      <textarea class="textarea" id="cover_letter_text" name="cover_letter_text"
+                placeholder="Paste an optional cover letter…"></textarea>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="consent_acknowledged" name="consent_acknowledged"
+             value="true" required>
+      <label class="label" for="consent_acknowledged" style="margin:0">
+        I confirm the candidate consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">Upload</button>
+    </div>
+  </form>
+  
+
+  
+  <h3>Export résumés</h3>
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/resumes/exports" method="post"
+        style="display:inline">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <button class="btn" type="submit">Export résumés (as-is + anonymized)</button>
+  </form>
+  
+  
+
+  
+  <h3>Split a combined Taleo export</h3>
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/resumes/split-upload" method="post"
+        enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <div class="form-group">
+      <label class="label" for="split-files">Combined Taleo export(s) — PDF</label>
+      <input class="input" id="split-files" name="files" type="file" multiple
+             accept=".pdf,application/pdf">
+      <p class="hint">One PDF holding many applicants. You review how it was
+        divided before anything is imported.</p>
+    </div>
+    <div class="form-group checkbox-row">
+      <input type="checkbox" id="split_consent_acknowledged"
+             name="consent_acknowledged" value="true" required>
+      <label class="label" for="split_consent_acknowledged" style="margin:0">
+        I confirm the candidates consented to this processing (PIPEDA/FIPPA)</label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Split export</button>
+    </div>
+  </form>
+  
+  
+
+  
+  <h3>Import candidate roster (Taleo)</h3>
+  <form action="/jobs/11111111-1111-4111-8111-111111111111/candidate-roster"
+        method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="<TOKEN>">
+    <div class="form-group">
+      <label class="label" for="roster-file">Taleo "All Candidates" export
+        (CSV)</label>
+      <input class="input" id="roster-file" name="file" type="file"
+             accept=".csv,text/csv">
+      <p class="hint">Reconciles work-authorization and SFU-internal (APSA/
+        CUPE) status onto this job's résumés by name/email match. An
+        existing shortlist does not reflect this update until it is
+        regenerated.</p>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" type="submit">Import roster</button>
+    </div>
+  </form>
+  
+
+  <h3>Résumé status</h3>
+  
+  <div id="resume-status-breakdown"
+       hx-get="/jobs/11111111-1111-4111-8111-111111111111/resume-status"
+       hx-trigger="load"
+       hx-swap="outerHTML">
+    <p class="muted">Loading résumé status…</p>
+  </div>
+
+  <h3>Résumés</h3>
+  
+<div id="resumes-table"
+     hx-get="/jobs/11111111-1111-4111-8111-111111111111/resumes-table"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  
+  <span class="htmx-indicator spinner">refreshing…</span>
+  
+  <table class="table">
+    <thead>
+      <tr><th>Candidate</th><th>File</th><th>Status</th><th>Uploaded</th></tr>
+    </thead>
+    <tbody>
+      
+      <tr>
+        <td>Ada Lovelace</td>
+        <td>ada.pdf</td>
+        <td>
+          <span class="pill pill-parsed">parsed</span>
+        </td>
+        <td class="muted">2026-09-03T08:30:00Z</td>
+      </tr>
+      
+      <tr>
+        <td>—</td>
+        <td>grace.pdf</td>
+        <td>
+          <span class="pill pill-parsing">parsing</span>
+        </td>
+        <td class="muted">2026-09-03T08:30:00Z</td>
+      </tr>
+      
+    </tbody>
+  </table>
+</div>
+</div>
+
+  </main>
+</body>
+</html>

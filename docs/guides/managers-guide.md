@@ -243,6 +243,84 @@ value you entered.
 
 ---
 
+## 2a. The new job page (preview)
+
+Sections 3 to 5 describe the job page as most people see it today: one long
+page. A redesigned job page exists as a **preview**. It does exactly the same
+things, but it splits the page into tabs. Nothing about what a role can do
+changes.
+
+### Who sees it
+
+An admin turns it on for one person at a time: header → **Users** → the **New
+job page preview** column → **Turn on** (or **Turn off**). It takes effect on
+that person's next page load. Everyone else keeps today's page.
+
+### The header (on every tab)
+
+Above the tabs is the job's title, status and department, then a row of four
+steps: **Draft → Parsed → Open → Closed**. The current step is in bold. Next to
+the steps is the **one thing to do next**:
+
+| The job is… | A writer sees | A hiring manager or auditor sees |
+|---|---|---|
+| a draft, still parsing | **Waiting for parse…** (greyed out) and **Refresh status** | View shortlist |
+| a draft whose parse failed | **Re-parse the job description** (takes you to Requirements) | View shortlist |
+| a parsed draft | **Open for applicants** | View shortlist |
+| open | **Add candidates** (takes you to Candidates) and **View shortlist** | View shortlist |
+| closed | **View shortlist** | View shortlist |
+
+### The five tabs
+
+Every control from today's page is on exactly one tab. After you press a button,
+you come back to the tab you were on.
+
+| Tab | What is on it | Today's section |
+|---|---|---|
+| **Overview** | A summary of the job, its required skills, the job description and the résumé-status counts | §3 "What you see" |
+| **Candidates** | Four ways to add candidates, each a card: **One résumé**, **Many résumés (.zip)**, **Taleo export PDF** (with any **Pending splits**) and **Taleo roster CSV**. Below the cards are **Export**, **Résumé status** and the **Résumés** table, which shows withdrawn candidates. | §4, §5, §8 "Exports" |
+| **Requirements** | **Your additional requirements**, **Parsed requirements**, **Skills & experience you are looking for**, re-parse when a parse failed, and **Edit job description** (drafts only) | §2 "Additional requirements", §3 |
+| **Shortlist** | The top five ranked candidates, a link to **Open full shortlist**, and the zero-requirements warning. Decisions, reveals and withdrawals stay on the full shortlist page. | §7, §8 |
+| **Settings** (writers only) | **Job details** (title, minimum years, seniority, employment type, department, campus), **Assigned hiring managers**, **Status** (open, close, archive) and **Blind review** | §1 assignments, §2 "Department and campus after the fact", §3 "Opening the job", "Blind review" |
+
+**Hiring managers and auditors** see four tabs, with no Settings tab. Candidates
+shows only the table, with the note **"Read-only for your role"**. Requirements
+shows the requirements without any forms.
+
+**While a job is not open,** the Candidates tab explains why résumés cannot be
+added yet. A job that is still parsing says it takes about five minutes per
+posting. A parsed draft offers **Open for applicants** in the same place. The
+Taleo PDF and roster cards stay available on drafts, as they do on today's page.
+
+### Editing job details
+
+Writers get an **Edit details** link in the header, on every tab. It opens the
+**Job details** form on Settings: **Title**, **Minimum years** (a whole number
+from 0 to 50), **Seniority**, **Employment type**, **Department** and
+**Campus**. Leave an optional field blank to clear it. If a value is invalid,
+nothing is saved and the form tells you which one to fix.
+
+- **Two of these change the ranking.** The title is compared with each
+  candidate's recent job titles, and minimum years feeds the experience and
+  seniority scores. Seniority and employment type are for display only.
+- **A title you type is final.** A job made by bulk import starts with a title
+  taken from the file name, and the parse replaces it once. After you edit the
+  title, no parse will overwrite it.
+- **The job description can be edited only on a draft.** On an open, closed or
+  archived job, Requirements shows it read-only. To change it, close the job
+  and create a new one.
+
+> ### ⚠️ Be aware
+>
+> - **The page is a preview.** If something looks wrong, an admin can turn it
+>   off for that person, and they are back on today's page at once.
+> - **The Shortlist tab is a summary, not the shortlist.** Recording decisions
+>   and revealing identities happen on the full shortlist page, as before.
+> - **The header's parse status does not update by itself.** Press **Refresh
+>   status**, the same as today's page.
+
+---
+
 ## 3. The JD parse
 
 ### What you see

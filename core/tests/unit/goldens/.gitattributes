@@ -1,0 +1,2 @@
+# Goldens are compared byte for byte; never let git rewrite line endings.
+*.html -text

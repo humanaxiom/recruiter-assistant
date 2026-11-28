@@ -60,6 +60,9 @@ class User(BaseModel):
     active: bool
     created_at: dt.datetime
     last_seen_at: dt.datetime
+    # S1a: per-user opt-in to the job page v2 layout; default keeps every
+    # existing User(...) call site valid.
+    job_page_v2: bool = False
 
 
 class Session(BaseModel):
@@ -74,6 +77,14 @@ class Session(BaseModel):
     user_agent: str | None
     ip_addr: str | None
     created_at: dt.datetime
+
+
+class JobPagePreview(BaseModel):
+    """``PATCH /users/{id}/job-page-preview``'s request body (S1a)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 class RoleAssignment(BaseModel):

@@ -1,0 +1,158 @@
+{# Job page v2, Settings tab (S-contract section 3 S3). Writer only: the
+   route falls back to Overview for any other role, and every control is
+   guarded again here. Ported from job_detail.html: department and campus,
+   assigned hiring managers, status, blind review. The provisional-title note
+   lives in the header. #}
+<div data-job-tab="settings">
+  {% if is_writer %}
+  <div class="card">
+    <h3 style="margin-top:0">Job details</h3>
+    <form id="job-details" action="{{ url_for('edit_job_details', job_id=job.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <div class="form-group">
+        <label class="label" for="job-title">Title</label>
+        <input class="input" id="job-title" name="title" type="text"
+               maxlength="200" required value="{{ job.title or '' }}">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-min-years">Minimum years of experience</label>
+        <input class="input" id="job-min-years" name="min_years" type="number"
+               min="0" max="50" step="1"
+               value="{{ job.min_years if job.min_years is not none else '' }}">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-seniority">Seniority</label>
+        <select class="input" id="job-seniority" name="seniority">
+          <option value=""></option>
+          {% for value, label in seniority_options %}
+          <option value="{{ value }}"{% if job.seniority == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-employment-type">Employment type</label>
+        <select class="input" id="job-employment-type" name="employment_type">
+          <option value=""></option>
+          {% for value, label in employment_type_options %}
+          <option value="{{ value }}"{% if job.employment_type == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-department">Department</label>
+        <input class="input" id="job-department" name="department" type="text"
+               maxlength="100" value="{{ job.department or '' }}"
+               placeholder="e.g. School of Medicine">
+      </div>
+      <div class="form-group">
+        <label class="label" for="job-location">Campus</label>
+        <input class="input" id="job-location" name="location" type="text"
+               list="campus-options" autocomplete="off" maxlength="200"
+               value="{{ job.location or '' }}">
+        <datalist id="campus-options">
+          {% for campus in campuses %}<option value="{{ campus }}"></option>{% endfor %}
+        </datalist>
+        <span class="muted">
+          {% for campus, code in campus_codes.items() %}
+          {{ campus }} ({{ code }}){% if not loop.last %} · {% endif %}
+          {%- endfor %}. Codes are accepted; anything else is kept as typed.
+        </span>
+      </div>
+      <p class="hint">
+        Whatever you set here wins: a re-parse fills these only when they are
+        empty, and never replaces a value you entered.
+      </p>
+      <p class="hint">
+        Changing the title or minimum years changes how candidates are ranked;
+        regenerate the shortlist afterwards.
+      </p>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Assigned hiring managers</h3>
+    {% if job_assignees is none %}
+    <p class="warning">Assignments could not be loaded.</p>
+    {% elif job_assignees %}
+    <ul class="assignee-list">
+      {% for assignee in job_assignees %}
+      <li>
+        {{ assignee.display_name or assignee.cas_username }}
+        <form action="{{ url_for('remove_job_assignee_route', job_id=job.id, user_id=assignee.id) }}"
+              method="post" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+          <button class="btn btn-secondary btn-sm" type="submit">Remove</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="warning">No hiring manager is assigned — this requisition is invisible to hiring managers.</p>
+    {% endif %}
+    <form action="{{ url_for('add_job_assignee_route', job_id=job.id) }}"
+          method="post" class="form-actions">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <select name="user_id">
+        {% for hm in hiring_managers or [] %}
+        <option value="{{ hm.id }}">{{ hm.display_name or hm.cas_username }}
+          ({{ hm.cas_username }})</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn-primary btn-sm" type="submit">Add</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Status</h3>
+    <div class="filter-row">
+      {% for to in next_states %}
+      <form action="{{ url_for('transition_status', job_id=job.id) }}"
+            method="post" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+        <input type="hidden" name="to" value="{{ to }}">
+        <input type="hidden" name="tab" value="settings">
+        <button class="btn btn-secondary btn-sm" type="submit"
+          {%- if to == 'open' and job.parsed_at is none %} disabled
+          {%- if job.failure_reason %}
+          title="Parsing failed — re-parse the JD before opening for applicants."
+          {%- else %}
+          title="Wait for the LLM to finish parsing the JD."
+          {%- endif %}{% endif %}>
+          {{ transition_labels.get(to, to) }}
+        </button>
+      </form>
+      {% endfor %}
+    </div>
+    {# Still blocked on a parse either way, but "wait" is only true advice
+       while something is actually running. #}
+    {% if 'open' in next_states and job.parsed_at is none %}
+      {% if job.failure_reason %}
+    <p class="hint">Parsing failed, so this job cannot be opened for applicants
+      yet. Re-parse the JD on the
+      <a href="{{ url_for('job_detail', job_id=job.id, tab='requirements') }}">Requirements</a>
+      tab to try again.</p>
+      {% else %}
+    <p class="hint">Wait for the LLM to finish parsing the JD before opening for
+      applicants.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Blind review</h3>
+    <p class="muted">Currently
+      <strong>{{ 'on' if job.blind_review else 'off' }}</strong>.</p>
+    <form action="{{ url_for('blind_review', job_id=job.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+      <input type="hidden" name="blind_review"
+             value="{{ 'false' if job.blind_review else 'true' }}">
+      <button class="btn btn-secondary btn-sm" type="submit">
+        {{ 'Turn off blind review' if job.blind_review else 'Turn on blind review' }}
+      </button>
+    </form>
+  </div>
+  {% endif %}
+</div>

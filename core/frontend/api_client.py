@@ -616,6 +616,20 @@ def set_user_role(
     return response.json()
 
 
+def set_user_job_page_preview(
+    user_id: UUID, enabled: bool, *, client: httpx.Client | None = None
+) -> Any:
+    """PATCH /users/{id}/job-page-preview (JSON ``{enabled}``) — S1a. 404 is
+    ``NotFound``; 403/422 are ``BadRequest``; 5xx is ``BackendUnavailable``."""
+    response = _request(
+        "PATCH",
+        f"/users/{user_id}/job-page-preview",
+        json={"enabled": enabled},
+        client=client,
+    )
+    return response.json()
+
+
 def get_cas_user(*, client: httpx.Client | None = None) -> Any:
     """GET /auth/cas/user — the CAS session-status endpoint (slice 6). Never
     401s server-side (returns ``{authenticated: False, ...}`` when there is no

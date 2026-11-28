@@ -11,7 +11,7 @@
   <thead>
     <tr>
       <th>Username</th><th>Display name</th><th>Email</th>
-      <th>Role</th><th>Active</th><th>Assign role</th>
+      <th>Role</th><th>Active</th><th>Assign role</th><th>New job page preview</th>
     </tr>
   </thead>
   <tbody>
@@ -34,9 +34,18 @@
           <button class="btn btn-secondary btn-sm" type="submit">Save</button>
         </form>
       </td>
+      <td>
+        <form action="{{ url_for('admin_set_user_job_page_preview', user_id=user.id) }}"
+              method="post" style="display:flex; gap:8px; align-items:center">
+          <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+          <input type="hidden" name="enabled" value="{{ 'false' if user.job_page_v2 else 'true' }}">
+          <span class="muted">New job page preview: {{ 'on' if user.job_page_v2 else 'off' }}</span>
+          <button class="btn btn-secondary btn-sm" type="submit">{{ 'Turn off' if user.job_page_v2 else 'Turn on' }}</button>
+        </form>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">No users yet.</td></tr>
+    <tr><td colspan="7" class="muted">No users yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>

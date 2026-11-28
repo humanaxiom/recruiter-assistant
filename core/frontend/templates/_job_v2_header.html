@@ -1,0 +1,71 @@
+{# Header: title, state pills, lifecycle stepper and the single next action.
+   Every condition is derived from ``job`` fields alone. #}
+{% set parsing = job.status == 'draft' and job.parsed_at is none and not job.failure_reason %}
+{% set failed = job.status == 'draft' and job.parsed_at is none and job.failure_reason %}
+{% if job.status == 'draft' %}
+  {% set step = 'Draft' if job.parsed_at is none else 'Parsed' %}
+{% elif job.status == 'open' %}
+  {% set step = 'Open' %}
+{% else %}
+  {% set step = 'Closed' %}
+{% endif %}
+<div class="card">
+  <div class="card-header">
+    <h1 style="margin:0">{{ job.title }}</h1>
+    <span class="pill pill-{{ job.status }}">{{ job.status }}</span>
+    {% if job.source and job.source != 'manual' %}
+    <span class="pill pill-sourced">{{ job.source }}</span>
+    {% endif %}
+    {% if failed %}
+    <span class="badge-failed">parse failed</span>
+    {% elif parsing %}
+    <span class="badge-parsing">parsing…</span>
+    {% endif %}
+  </div>
+  <p class="muted">
+    {{ job.department or '—' }}
+    {% if job.location %} · {{ job.location }}{% endif %}
+    {% if job.min_years %} · {{ job.min_years }}+ yrs{% endif %}
+    · Updated {{ job.updated_at | day }}
+  </p>
+  {% if is_writer %}
+  <p><a href="{{ url_for('job_detail', job_id=job.id, tab='settings') }}#job-details">Edit details</a></p>
+  {% endif %}
+  {% if job.title_provisional %}
+  <p class="hint">
+    This title came from the uploaded filename. The JD parse replaces it with
+    the title stated in the posting.
+  </p>
+  {% endif %}
+
+  <ol class="stepper" style="display:flex;gap:16px;list-style:none;padding:0;margin:8px 0">
+    {% for name in ['Draft', 'Parsed', 'Open', 'Closed'] %}
+    <li {% if name == step %}aria-current="step" style="font-weight:600"{% else %}class="muted"{% endif %}>{{ name }}</li>
+    {% endfor %}
+  </ol>
+
+  <div class="actions" style="display:flex;gap:12px;align-items:center">
+    {% if is_writer %}
+      {% if parsing %}
+      <button type="button" class="btn btn-primary" disabled>Waiting for parse…</button>
+      <a href="{{ url_for('job_detail', job_id=job.id, tab=(none if tab == 'overview' else tab)) }}">Refresh status</a>
+      {% elif failed %}
+      <a href="{{ url_for('job_detail', job_id=job.id, tab='requirements') }}">Re-parse the job description</a>
+      {% elif job.status == 'draft' %}
+      <form action="{{ url_for('transition_status', job_id=job.id) }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_page_token }}">
+        <input type="hidden" name="to" value="open">
+        <input type="hidden" name="tab" value="{{ tab }}">
+        <button type="submit" class="btn btn-primary">Open for applicants</button>
+      </form>
+      {% elif job.status == 'open' %}
+      <a class="btn btn-primary" href="{{ url_for('job_detail', job_id=job.id, tab='candidates') }}">Add candidates</a>
+      <a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a>
+      {% elif job.status == 'closed' %}
+      <a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a>
+      {% endif %}
+    {% else %}
+      <a href="{{ url_for('job_shortlist', job_id=job.id) }}">View shortlist</a>
+    {% endif %}
+  </div>
+</div>

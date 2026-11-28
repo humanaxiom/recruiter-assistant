@@ -65,6 +65,7 @@ WITHHELD = "<withheld>"
 #: control the reveal route exists to provide.
 _DISCLOSABLE_DETAIL_KEYS: dict[str, frozenset[str]] = {
     "role_changed": frozenset({"old_role", "new_role"}),
+    "job_page_preview_changed": frozenset({"old_value", "new_value"}),
     "reveal_audit_detail": frozenset({"revealed_action"}),
 }
 

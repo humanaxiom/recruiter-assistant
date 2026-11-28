@@ -303,6 +303,8 @@ async def test_admin_session_response_exposes_exactly_the_expected_fields_pg(
         "active",
         "created_at",
         "last_seen_at",
+        # S1a (PO, 2026-11-25): the admin page shows each user's preview state.
+        "job_page_v2",
     }
     assert item["cas_username"] == username
     assert item["email"] == "gabby@example.org"

@@ -29,10 +29,15 @@ from uuid import UUID
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from src.api.deps import actor_fields_from_user, get_arq, resolve_user
+from src.api.deps import (
+    actor_fields_from_user,
+    get_arq,
+    require_session_role,
+    resolve_user,
+)
 from src.errors import ConflictError, NotFoundError
 from src.models.pool import Db
-from src.schemas.auth import RoleAssignment, User
+from src.schemas.auth import JobPagePreview, Role, RoleAssignment, User
 from src.services import audit_service, user_service
 
 router = APIRouter()
@@ -195,6 +200,45 @@ async def set_user_role(
         )
 
     return target.model_copy(update={"role": new_role})
+
+
+@router.patch(
+    "/users/{user_id}/job-page-preview",
+    dependencies=[Depends(require_session_role(Role.ADMIN))],
+)
+async def set_user_job_page_preview(
+    user_id: UUID,
+    payload: JobPagePreview,
+    db: Db,
+    acting_admin: Annotated[User, Depends(_require_admin_session)],
+) -> User:
+    """An admin session turns the job page v2 preview on or off for one user.
+
+    UPDATE and audit row share one transaction; a no-op (value unchanged)
+    returns 200 and writes no audit row. Audit details carry only the old and
+    new booleans, never the target's name or email.
+    """
+    async with db.transaction():
+        target = await user_service.get_by_id(db, user_id)
+        if target is None:
+            raise NotFoundError(f"user {user_id} not found", user_id=str(user_id))
+        if target.job_page_v2 == payload.enabled:
+            return target
+
+        await user_service.set_job_page_v2(db, user_id, payload.enabled)
+        actor_kind, actor_user_id, actor_service = actor_fields_from_user(acting_admin)
+        await audit_service.record_audit(
+            db,
+            actor_kind=actor_kind,
+            actor_user_id=actor_user_id,
+            actor_service=actor_service,
+            action="job_page_preview_changed",
+            subject_type="user",
+            subject_id=user_id,
+            details={"old_value": target.job_page_v2, "new_value": payload.enabled},
+        )
+
+    return target.model_copy(update={"job_page_v2": payload.enabled})
 
 
 __all__ = ["router"]

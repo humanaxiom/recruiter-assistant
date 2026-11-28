@@ -17,7 +17,7 @@ import datetime as dt
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -37,6 +37,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from frontend import api_client, csrf
 from src.campus import CAMPUS_CODES
+from src.schemas.jobs import EmploymentType, Seniority
 from src.schemas.matching import ShortlistEntry
 from src.services.cas_origin import is_loopback_host
 from src.services.explanation import ShortlistExplanation, shortlist_entry_explanation
@@ -865,12 +866,140 @@ def _fetch_job_assignees_and_hiring_managers(
     return assignees, hiring_managers
 
 
+#: Job page v2 tabs, in nav order. ``settings`` is a writer-only tab.
+_JOB_TABS: tuple[str, ...] = (
+    "overview",
+    "candidates",
+    "requirements",
+    "shortlist",
+    "settings",
+)
+_JOB_TABS_WRITER_ONLY: frozenset[str] = frozenset({"settings"})
+
+
+def _use_job_page_v2() -> bool:
+    """True when the v2 job page should render for this request.
+
+    Sources, any one of which is enough: the global ``job_page_v2`` flag, or the
+    signed-in CAS username being in ``job_page_v2_users``, or the user's own
+    ``job_page_v2`` column (via ``g.cas_user``) being exactly True. A CAS-off
+    session has no identity, so only the global flag counts there.
+    """
+    settings = get_settings()
+    cas_user = getattr(g, "cas_user", None)
+    username = cas_user.get("username") if cas_user else None
+    column_on = (cas_user.get("job_page_v2") if cas_user else None) is True
+    allowlist = {
+        name.strip().lower()
+        for name in settings.job_page_v2_users.split(",")
+        if name.strip()
+    }
+    sources = (
+        settings.job_page_v2,
+        isinstance(username, str) and username.strip().lower() in allowlist,
+        column_on,
+    )
+    return any(sources)
+
+
+def _job_tabs_for_session() -> tuple[str, ...]:
+    """The tabs this session is offered (HM and auditor get no Settings)."""
+    if _is_writer_session():
+        return _JOB_TABS
+    return tuple(t for t in _JOB_TABS if t not in _JOB_TABS_WRITER_ONLY)
+
+
+def _validated_job_tab(raw: str | None) -> str:
+    """Map a raw ``tab`` value onto the enum. Anything else is Overview.
+
+    The result is always one of this module's own constants, never ``raw``, so
+    it is safe to reflect or put in a URL.
+    """
+    for tab in _job_tabs_for_session():
+        if raw == tab:
+            return tab
+    return "overview"
+
+
+def _list_pending_splits(job_id: UUID, job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pending combined-export splits for the job page; never breaks the page."""
+    try:
+        listed = api_client.list_resume_splits(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        listed = []  # the listing is a convenience; never break the job page
+    blind = bool(job.get("blind_review"))
+    return [
+        {**s, "source_filename": None if blind else s.get("source_filename")}
+        for s in listed
+    ]
+
+
+def _latest_export_and_token(
+    job_id: UUID,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The latest export and, only when it is ready, its one-shot download token."""
+    try:
+        export_latest = api_client.get_latest_resume_export(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        return None, None  # none yet, or a convenience that must not break
+    if export_latest is not None and export_latest.get("status") == "ready":
+        return export_latest, csrf.ensure_token(export_latest["id"], action="export")
+    return export_latest, None
+
+
+def _job_page_url(job_id: UUID, tab: str = "candidates") -> str:
+    """The job page URL a candidate handler lands on.
+
+    Bare ``/jobs/<id>`` when v2 is off (the v1 ``Location`` exactly); with v2 on
+    it carries ``?tab=``. ``tab`` is a caller constant, never request input.
+    """
+    if _use_job_page_v2():
+        return url_for("job_detail", job_id=job_id, tab=tab)
+    return url_for("job_detail", job_id=job_id)
+
+
+def _fetch_shortlist_teaser(job_id: UUID) -> list[dict[str, Any]] | None:
+    """First five entries for the v2 Shortlist tab, in the backend's order (never
+    re-sorted: the backend deliberately puts `not_eligible` last); `None` when the
+    read failed (the template says so rather than claiming an empty shortlist).
+    Reads `list_shortlist` only and mints no one-shot token (contract 2.4)."""
+    try:
+        entries = api_client.list_shortlist(job_id)
+    except (
+        api_client.BackendUnavailable,
+        api_client.BadRequest,
+        api_client.NotFound,
+    ):
+        return None
+    ranked = [e for e in entries if isinstance(e, dict)]
+    return ranked[:5]
+
+
 def _render_job_detail(
-    job_id: UUID, *, error: str | None = None, status_code: int = 200
+    job_id: UUID,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    tab: str = "overview",
 ) -> Any:
+    v2_tab = _validated_job_tab(tab) if _use_job_page_v2() else None
     try:
         job = api_client.get_job(job_id)
-        resumes = api_client.list_resumes(job_id)
+        # Requirements and Settings show no résumé data (contract 2.4); v1 and
+        # the other v2 tabs read the list exactly as before.
+        resumes: list[Any] = (
+            []
+            if v2_tab in ("requirements", "settings", "shortlist")
+            else api_client.list_resumes(job_id)
+        )
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -878,36 +1007,46 @@ def _render_job_detail(
     next_states = _LEGAL_TRANSITIONS.get(job.get("status", ""), ())
     assignees: list[Any] | None = []
     hiring_managers: list[Any] | None = []
-    if _is_writer_session():
+    # v1 reads these on every render; v2 only on Settings. Writers only.
+    if v2_tab in (None, "settings") and _is_writer_session():
         assignees, hiring_managers = _fetch_job_assignees_and_hiring_managers(job_id)
     pending_splits: list[dict[str, Any]] = []
-    if _is_writer_session():
-        try:
-            listed = api_client.list_resume_splits(job_id)
-        except (
-            api_client.BackendUnavailable,
-            api_client.BadRequest,
-            api_client.NotFound,
-        ):
-            listed = []  # the listing is a convenience; never break the job page
-        blind = bool(job.get("blind_review"))
-        pending_splits = [
-            {**s, "source_filename": None if blind else s.get("source_filename")}
-            for s in listed
-        ]
     export_latest: dict[str, Any] | None = None
     export_csrf_token: str | None = None
-    if _is_writer_session():
-        try:
-            export_latest = api_client.get_latest_resume_export(job_id)
-        except (
-            api_client.BackendUnavailable,
-            api_client.BadRequest,
-            api_client.NotFound,
-        ):
-            export_latest = None  # none yet, or a convenience that must not break
-        if export_latest is not None and export_latest.get("status") == "ready":
-            export_csrf_token = csrf.ensure_token(export_latest["id"], action="export")
+    shortlist_entries: list[dict[str, Any]] | None = None
+    if v2_tab == "shortlist":
+        shortlist_entries = _fetch_shortlist_teaser(job_id)
+    # v1 reads these on every render; v2 only on the tab that shows them.
+    if _is_writer_session() and (v2_tab is None or v2_tab == "candidates"):
+        pending_splits = _list_pending_splits(job_id, job)
+        export_latest, export_csrf_token = _latest_export_and_token(job_id)
+    if v2_tab is not None:
+        return (
+            render_template(
+                "job_detail_v2.html",
+                job=job,
+                job_id=job_id,
+                error=error,
+                tab=v2_tab,
+                tabs=_job_tabs_for_session(),
+                resumes=resumes,
+                resumes_pending=_any_resume_pending(resumes),
+                next_states=next_states,
+                transition_labels=_TRANSITION_LABELS,
+                job_assignees=assignees,
+                hiring_managers=hiring_managers,
+                pending_splits=pending_splits,
+                export_latest=export_latest,
+                export_csrf_token=export_csrf_token,
+                shortlist_entries=shortlist_entries,
+                jd_has_no_requirements=_jd_yielded_no_requirements(job),
+                seniority_options=[(v, _readable(v)) for v in _SENIORITY_VALUES],
+                employment_type_options=[
+                    (v, _readable(v)) for v in _EMPLOYMENT_TYPE_VALUES
+                ],
+            ),
+            status_code,
+        )
     return (
         render_template(
             "job_detail.html",
@@ -938,6 +1077,7 @@ def upload_resumes(job_id: UUID) -> Any:
     if not consent:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="You must confirm the candidate consented to this processing.",
             status_code=400,
         )
@@ -954,6 +1094,7 @@ def upload_resumes(job_id: UUID) -> Any:
     if not files:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select at least one résumé file (PDF/DOCX, or a .zip of many).",
             status_code=400,
         )
@@ -989,8 +1130,13 @@ def upload_resumes(job_id: UUID) -> Any:
             pairing_manifest=pairing_manifest,
         )
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=400
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            tab="candidates",
         )
     except api_client.NotFound:
         abort(404)
@@ -1002,7 +1148,7 @@ def upload_resumes(job_id: UUID) -> Any:
     # strings, never filename-derived candidate PII.
     for message in _summarise_upload(results):
         flash(message)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 def _summarise_upload(results: Any) -> list[str]:
@@ -1071,6 +1217,7 @@ def upload_candidate_roster(job_id: UUID) -> Any:
     if upload is None or not upload.filename:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select a candidate-roster CSV file to upload.",
             status_code=400,
         )
@@ -1083,8 +1230,13 @@ def upload_candidate_roster(job_id: UUID) -> Any:
             upload.content_type or "text/csv",
         )
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=400
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=400,
+            tab="candidates",
         )
     except api_client.NotFound:
         abort(404)
@@ -1092,7 +1244,7 @@ def upload_candidate_roster(job_id: UUID) -> Any:
         return _unavailable(exc)
     for message in _summarise_roster_report(report):
         flash(message)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 _PAGE_ITEM = re.compile(r"(\d+)(?:\s*-\s*(\d+))?")
@@ -1252,6 +1404,7 @@ def _render_split_review(
     return (
         render_template(
             "split_review.html",
+            back_tab="candidates" if _use_job_page_v2() else None,
             split=view,
             rows=rows,
             ignored=ignored_text,
@@ -1276,6 +1429,7 @@ def split_upload(job_id: UUID) -> Any:
     if not consent:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="You must confirm the candidates' consent to this processing.",
             status_code=400,
         )
@@ -1291,14 +1445,17 @@ def split_upload(job_id: UUID) -> Any:
     if not files:
         return _render_job_detail(
             job_id,
+            tab="candidates",
             error="Select at least one combined Taleo export (PDF).",
             status_code=400,
         )
     try:
         result = api_client.split_upload(job_id, files, consent_acknowledged=True)
     except api_client.BadRequest as exc:
+        if exc.status_code == 403:
+            abort(403)
         flash(_format_error(exc.detail))
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     except api_client.NotFound:
         abort(404)
     except api_client.BackendUnavailable as exc:
@@ -1312,7 +1469,7 @@ def split_upload(job_id: UUID) -> Any:
             continue
     if not ids:
         flash("The export was not queued; please try again.")
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     if len(ids) > 1:
         flash(
             f"{len(ids)} exports queued. Review this one first; the others are "
@@ -1337,7 +1494,7 @@ def export_start(job_id: UUID) -> Any:
         flash(_format_error(exc.detail))
     else:
         flash("Export started. It is built in the background; refresh to see it.")
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 @app.post("/resume-exports/<uuid:export_id>/download")
@@ -1372,7 +1529,7 @@ def export_download(export_id: UUID) -> Any:
             job_id = UUID((request.form.get("job_id") or "").strip())
         except ValueError:
             return redirect(url_for("index"))
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id))
     except api_client.BadRequest as exc:
         abort(exc.status_code)
     return Response(
@@ -1491,7 +1648,7 @@ def _redirect_to_split_job(split_id: UUID) -> Any:
         job_id = UUID(str(api_client.get_resume_split(split_id).get("job_id")))
     except (api_client.BackendError, ValueError):
         return redirect(url_for("index"))
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id))
 
 
 @app.post("/resume-splits/<uuid:split_id>/accept")
@@ -1562,7 +1719,7 @@ def resumes_table(job_id: UUID) -> Any:
 
 @app.get("/jobs/<uuid:job_id>")
 def job_detail(job_id: UUID) -> Any:
-    return _render_job_detail(job_id)
+    return _render_job_detail(job_id, tab=request.args.get("tab", ""))
 
 
 @app.get("/jobs/<uuid:job_id>/parse-status")
@@ -1583,11 +1740,14 @@ def parse_status(job_id: UUID) -> Any:
 @app.post("/jobs/<uuid:job_id>/status")
 def transition_status(job_id: UUID) -> Any:
     to = (request.form.get("to") or "").strip()
+    # v2 only: a hidden ``tab`` says where the click came from. It is mapped
+    # onto the tab enum and never used raw; v1 ignores it entirely.
+    tab = _validated_job_tab(request.form.get("tab")) if _use_job_page_v2() else ""
     try:
         api_client.transition_status(job_id, to)
     except api_client.Conflict as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id, error=_format_error(exc.detail), status_code=409, tab=tab
         )
     except api_client.NotFound:
         abort(404)
@@ -1600,6 +1760,8 @@ def transition_status(job_id: UUID) -> Any:
         # propagated as an unhandled 500 for a hiring_manager/auditor clicking
         # the control. Render the actual backend status (usually 403) instead.
         abort(exc.status_code)
+    if tab and tab != "overview":
+        return redirect(url_for("job_detail", job_id=job_id, tab=tab))
     return redirect(url_for("job_detail", job_id=job_id))
 
 
@@ -1609,7 +1771,49 @@ def transition_status(job_id: UUID) -> Any:
 #: it permanently un-blinds every résumé under the job) or ``description_raw``
 #: through a form that renders neither. ``update_job`` has its own
 #: ``_UPDATABLE_JOB_COLUMNS`` allowlist; this is the same discipline one hop out.
-_EDITABLE_DETAIL_FIELDS = ("department", "location")
+_EDITABLE_DETAIL_FIELDS = (
+    "title",
+    "min_years",
+    "seniority",
+    "employment_type",
+    "department",
+    "location",
+)
+
+_SENIORITY_VALUES: tuple[str, ...] = get_args(Seniority)
+_EMPLOYMENT_TYPE_VALUES: tuple[str, ...] = get_args(EmploymentType)
+
+
+def _readable(code: str) -> str:
+    return code.replace("_", " ").capitalize()
+
+
+def _validate_detail_payload(payload: dict[str, Any]) -> str | None:
+    """Validate (and normalise in place) the Job details fields before any PATCH.
+
+    Returns a message for the first problem, else ``None``. ``min_years`` is
+    converted to ``int`` in ``payload``; blank optionals stay ``None`` (unset).
+    """
+    if "title" in payload:
+        title = payload["title"]
+        if title is None or len(title) < 2:
+            return "The title must be at least 2 characters."
+    if "min_years" in payload and payload["min_years"] is not None:
+        raw = payload["min_years"]
+        if not re.fullmatch(r"[0-9]+", raw):
+            return "Minimum years must be a whole number from 0 to 50."
+        years = int(raw)
+        if not 0 <= years <= 50:
+            return "Minimum years must be a whole number from 0 to 50."
+        payload["min_years"] = years
+    for field, allowed in (
+        ("seniority", _SENIORITY_VALUES),
+        ("employment_type", _EMPLOYMENT_TYPE_VALUES),
+    ):
+        value = payload.get(field)
+        if value is not None and value not in allowed:
+            return f"{_readable(field)} must be one of the listed options."
+    return None
 
 
 @app.post("/jobs/<uuid:job_id>/details")
@@ -1645,8 +1849,13 @@ def edit_job_details(job_id: UUID) -> Any:
         if field not in request.form:
             continue
         payload[field] = (request.form.get(field) or "").strip() or None
+    problem = _validate_detail_payload(payload)
+    if problem is not None:
+        return _render_job_detail(
+            job_id, error=problem, status_code=400, tab="settings"
+        )
     if not payload:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "settings"))
     try:
         api_client.patch_job(job_id, payload)
     except api_client.NotFound:
@@ -1655,7 +1864,7 @@ def edit_job_details(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/requirements")
@@ -1681,7 +1890,7 @@ def edit_job_requirements(job_id: UUID) -> Any:
     forwarded, so a crafted extra field cannot ride along.
     """
     if "additional_requirements" not in request.form:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "requirements"))
     note = (request.form.get("additional_requirements") or "").strip() or None
     try:
         api_client.patch_job(job_id, {"additional_requirements": note})
@@ -1693,7 +1902,7 @@ def edit_job_requirements(job_id: UUID) -> Any:
         # Same ADR-033 lesson as ``transition_status``: a non-writer session
         # gets a 403 from the backend, and leaving it uncaught is a 500.
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/reparse")
@@ -1709,7 +1918,10 @@ def reparse_job(job_id: UUID) -> Any:
         api_client.reparse_job(job_id)
     except api_client.Conflict as exc:
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=409,
+            tab="requirements",
         )
     except api_client.NotFound:
         abort(404)
@@ -1717,7 +1929,7 @@ def reparse_job(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/assignees")
@@ -1741,7 +1953,7 @@ def add_job_assignee_route(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/assignees/<uuid:user_id>/remove")
@@ -1756,7 +1968,7 @@ def remove_job_assignee_route(job_id: UUID, user_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 @app.post("/jobs/<uuid:job_id>/description")
@@ -1769,7 +1981,7 @@ def edit_job_description(job_id: UUID) -> Any:
     level gate) re-renders the job-detail page with the reason, exactly like
     ``reparse_job``'s own ``Conflict`` handling, rather than aborting."""
     if "description_raw" not in request.form:
-        return redirect(url_for("job_detail", job_id=job_id))
+        return redirect(_job_page_url(job_id, "requirements"))
     description_raw = request.form.get("description_raw") or ""
     try:
         api_client.patch_job(job_id, {"description_raw": description_raw})
@@ -1780,7 +1992,10 @@ def edit_job_description(job_id: UUID) -> Any:
         # Mirrors `reparse_job`'s own Conflict handling exactly: re-render
         # the whole job-detail page with the reason.
         return _render_job_detail(
-            job_id, error=_format_error(exc.detail), status_code=409
+            job_id,
+            error=_format_error(exc.detail),
+            status_code=409,
+            tab="requirements",
         )
     except api_client.NotFound:
         abort(404)
@@ -1788,7 +2003,7 @@ def edit_job_description(job_id: UUID) -> Any:
         return _unavailable(exc)
     except api_client.BadRequest as exc:
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "requirements"))
 
 
 @app.post("/jobs/<uuid:job_id>/blind-review")
@@ -1808,7 +2023,7 @@ def blind_review(job_id: UUID) -> Any:
     except api_client.BadRequest as exc:
         # See the identical F4 comment on transition_status above.
         abort(exc.status_code)
-    return redirect(url_for("job_detail", job_id=job_id))
+    return redirect(_job_page_url(job_id, "settings"))
 
 
 def _mint_card_tokens(
@@ -2713,6 +2928,39 @@ def admin_users() -> Any:
     return render_template(
         "admin_users.html", users=users, roles=_ASSIGNABLE_ROLES, error=None
     )
+
+
+@app.post("/admin/users/<uuid:user_id>/job-page-preview")
+def admin_set_user_job_page_preview(user_id: UUID) -> Any:
+    """S1a — turn the new job page preview on or off for one user. The form
+    field ``enabled`` must be exactly ``true`` or ``false`` (else 400, no API
+    call). A backend 403/422 re-renders the roster with the status and message."""
+    _require_admin_page()
+    raw = request.form.get("enabled")
+    if raw not in ("true", "false"):
+        abort(400)
+    try:
+        api_client.set_user_job_page_preview(user_id, raw == "true")
+    except api_client.NotFound:
+        abort(404)
+    except api_client.BadRequest as exc:
+        try:
+            users = api_client.list_users()
+        except api_client.BackendUnavailable as unavail:
+            return _unavailable(unavail)
+        status = 403 if exc.status_code == 403 else 400
+        return (
+            render_template(
+                "admin_users.html",
+                users=users,
+                roles=_ASSIGNABLE_ROLES,
+                error=_format_error(exc.detail),
+            ),
+            status,
+        )
+    except api_client.BackendUnavailable as exc:
+        return _unavailable(exc)
+    return redirect(url_for("admin_users"))
 
 
 @app.get("/audit")
