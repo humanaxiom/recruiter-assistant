@@ -30,6 +30,8 @@ Read automatically by Claude Code every session. This governs ALL work in this r
   (`TELEMETRY_OTLP_ENDPOINT`). It is gated by `TELEMETRY_EXPORT`, which
   **defaults to `off`**. What crosses is metadata only: `src/telemetry.py`
   pins data class `S` and `minimal` content, and no setting can raise either.
+  Container logs are collected only from api/worker/frontend, and only when
+  `compose.telemetry.yml` opts them in. No datastore is ever on that network.
 - Everything except Ollama runs in Docker (`docker compose up -d`)
 
 ## Non-negotiable gates — run before EVERY commit

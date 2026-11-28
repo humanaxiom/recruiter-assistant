@@ -75,6 +75,20 @@ is the pilot.
    current span by `record_audit`, so the provenance ledger can link an audit
    event to its trace.
 
+7. **Trust and collection boundaries** (from the review and security audit):
+   - **Trace context:** the Flask BFF is the public edge and ignores a
+     browser's `traceparent`, so no client can choose the trace id written
+     next to its audit rows. The API continues the BFF's trace
+     (`trust_incoming_context=True`); its callers are the BFF and key-holding
+     services.
+   - **Log collection is opt-in per container.** The zone collector can read
+     every container's log file on a host, so it ingests only lines from
+     containers labelled `sfu.telemetry=opt-in`. `compose.telemetry.yml` opts in
+     api, worker and frontend, never a datastore.
+   - **Log arguments are redacted (class S).** The JSON formatter renders
+     every log argument as `[redacted]` unless it is an id, a number, a flag or
+     None. ruff `G004` forbids f-string log messages, which would bypass that.
+
 ## Consequences
 
 - **Egress carve-out #2, stated per `CLAUDE.md` §Stack.**
@@ -94,6 +108,10 @@ is the pilot.
 - **The vendored wheel** is replaced by an index pin once SFU has an internal
   package index. The `+sfu` local version cannot be published to PyPI, so no
   public package can shadow it in the meantime.
-- **Not done here:** an audit hash chain at source (the ledger chains on
-  ingestion), a read-only DB role for the audit shipper (it opens its
-  connection with `default_transaction_read_only`), and a model gateway.
+- **Not done here:** shipping `audit_log` rows to the zone ledger. It needs a
+  server-side read-only Postgres role for the shipper and a decision on
+  exposing the database to the zone network, so `compose.telemetry.yml`
+  does not put Postgres on that network. (The pilot's end-to-end run proved
+  the path with a session-only overlay.) Also not done: an audit hash chain
+  at source (the ledger chains on ingestion), a SHA-256 pin for the vendored
+  wheel, and a model gateway.

@@ -8,7 +8,7 @@ line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "ASYNC"]
+select = ["E", "F", "I", "N", "UP", "B", "ASYNC", "G004"]  # G004 (ADR-048): no f-string log messages
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

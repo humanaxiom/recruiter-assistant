@@ -131,10 +131,15 @@ def _build_app(settings: Settings) -> FastAPI:
 
 app = _build_app(get_settings())
 
-# ADR-048: one SERVER span per request (continuing an incoming traceparent),
-# named by the route TEMPLATE, plus an X-Request-ID response header carrying the
-# trace id. ``/health`` is excluded so the healthcheck does not flood traces.
-app.add_middleware(TelemetryMiddleware, excluded_paths=("/health",))
+# ADR-048: one SERVER span per request, named by the route TEMPLATE, plus an
+# X-Request-ID response header carrying the trace id. ``/health`` is excluded
+# so the healthcheck does not flood traces. The API CONTINUES an incoming
+# traceparent: its callers are the Flask BFF and key-holding services. The BFF,
+# the public edge, ignores a browser's traceparent (library default), so no
+# client can choose the trace id written next to its audit rows.
+app.add_middleware(
+    TelemetryMiddleware, excluded_paths=("/health",), trust_incoming_context=True
+)
 
 # auth stays UNGATED — a no-role user must still be able to see their own
 # status (GET /auth/cas/user) and log out; every business router below is
