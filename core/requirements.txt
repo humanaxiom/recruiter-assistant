@@ -38,4 +38,4 @@ striprtf>=0.0.26        # lazy-imported by the RTF branch only
 # PyPI (PyPI rejects local versions), so no public package can shadow it.
 # Paths are relative to core/ — where CI, the Dockerfile and verify.sh install.
 # It pulls opentelemetry-api/-sdk/-exporter-otlp-proto-http from the index.
-./vendor/sfu_telemetry-0.1.0+sfu-py3-none-any.whl
+./vendor/sfu_telemetry-0.1.1+sfu-py3-none-any.whl

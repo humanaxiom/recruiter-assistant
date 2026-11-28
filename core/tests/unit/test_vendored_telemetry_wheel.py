@@ -32,7 +32,9 @@ def _wheel_line() -> str:
 def test_requirements_names_exactly_one_vendored_wheel_that_exists() -> None:
     path = CORE / _wheel_line()
     assert path.is_file(), path
-    assert [p.name for p in (CORE / "vendor").glob("sfu_telemetry-*.whl")] == [path.name]
+    assert [p.name for p in (CORE / "vendor").glob("sfu_telemetry-*.whl")] == [
+        path.name
+    ]
 
 
 def test_installed_version_is_the_vendored_one() -> None:
