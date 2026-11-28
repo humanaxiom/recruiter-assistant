@@ -5,7 +5,7 @@
 #   docker compose -f docker-compose.yml -f compose.telemetry.yml up -d
 #   (or add it to COMPOSE_FILE in .env alongside compose.cas.yml)
 #
-# Needs the reference stack (humanaxiom/sfu-observability, `stack/`) running on
+# Needs the reference stack (sfu-aria/sfu-observability, `stack/`) running on
 # the same host: it creates the external network `sfu-telemetry` and the
 # collector at http://otel-collector:4318.
 #

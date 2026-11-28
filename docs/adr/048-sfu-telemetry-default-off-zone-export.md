@@ -69,7 +69,7 @@ is the pilot.
    Access logs use the route template, with no query string and no client address.
 5. **Export is a separate switch and DEFAULTS OFF** (`TELEMETRY_EXPORT=off`). With
    `otlp`, spans and metrics go to `TELEMETRY_OTLP_ENDPOINT`, a collector inside
-   the same security zone (the SFU reference stack, `humanaxiom/sfu-observability`).
+   the same security zone (the SFU reference stack, `sfu-aria/sfu-observability`).
    Logs never need export: the collector reads container stdout on the same host.
 6. **`audit_log.trace_id TEXT NULL`** is added idempotently and written from the
    current span by `record_audit`, so the provenance ledger can link an audit
