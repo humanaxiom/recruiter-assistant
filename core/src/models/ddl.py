@@ -707,6 +707,10 @@ _STATEMENTS: tuple[str, ...] = (
         )
     )
     """,
+    # ADR-048: the trace that wrote the row (32 hex chars), so the provenance
+    # ledger can link an audit event to its request trace. Nullable: rows from
+    # before this column, and rows written outside any request, have none.
+    "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS trace_id TEXT",
     # ── sessions (ADR-019 §10 step 4, FU-5 slice 3) ──────────────────────────
     # The ported hris session store: an opaque, server-held session row behind
     # an httpOnly cookie. ``id`` is TEXT (a ``secrets.token_urlsafe(32)``

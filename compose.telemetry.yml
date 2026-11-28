@@ -1,0 +1,56 @@
+# Telemetry overlay (ADR-048): opt the APP containers into the SFU zone
+# collector and turn span/metric export on. Opt-in; the base stack exports
+# nothing and its logs are not collected.
+#
+#   docker compose -f docker-compose.yml -f compose.telemetry.yml up -d
+#   (or add it to COMPOSE_FILE in .env alongside compose.cas.yml)
+#
+# Needs the reference stack (sfu-aria/sfu-observability, `stack/`) running on
+# the same host: it creates the external network `sfu-telemetry` and the
+# collector at http://otel-collector:4318.
+#
+# Log collection is opt-in per container: the collector ingests a line only
+# when the container has the label `sfu.telemetry: opt-in` AND its json-file
+# logging lists that label. Only api, worker and frontend opt in.
+#
+# Postgres, Neo4j and Redis are deliberately NOT in this file. Their logs can
+# carry row values (a Postgres constraint error prints the key), and putting the
+# PII-bearing database on a shared network would be a separate carve-out.
+# Shipping audit_log rows to the zone ledger needs its own decision and a
+# server-side read-only role (ADR-048, "Not done here").
+x-telemetry-env: &telemetry_env
+  TELEMETRY_EXPORT: ${TELEMETRY_EXPORT:-otlp}
+  TELEMETRY_OTLP_ENDPOINT: ${TELEMETRY_OTLP_ENDPOINT:-http://otel-collector:4318}
+  TELEMETRY_ENVIRONMENT: ${TELEMETRY_ENVIRONMENT:-dev}
+  TELEMETRY_ZONE: ${TELEMETRY_ZONE:-dev-zone}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    labels: "com.docker.compose.project,com.docker.compose.service,sfu.telemetry"
+
+x-opt-in: &opt_in
+  sfu.telemetry: opt-in
+
+networks:
+  sfu-telemetry:
+    external: true
+
+services:
+  api:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    labels: *opt_in
+    logging: *logging
+  worker:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    labels: *opt_in
+    logging: *logging
+  frontend:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    labels: *opt_in
+    logging: *logging

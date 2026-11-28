@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-dev.txt ./
+COPY vendor/ ./vendor/
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
 
 COPY . .
