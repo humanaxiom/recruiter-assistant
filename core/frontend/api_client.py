@@ -30,6 +30,7 @@ from uuid import UUID
 
 import httpx
 from flask import has_request_context, request
+from sfu_telemetry.httpx_hooks import sync_event_hooks
 
 from src.settings import get_settings
 
@@ -127,6 +128,9 @@ def build_client() -> httpx.Client:
         headers=httpx.Headers(headers, encoding="utf-8"),
         cookies=cookies,
         timeout=_HTTP_TIMEOUT,
+        # ADR-048: forward the browser request's trace to the API (adds only
+        # ``traceparent``; never reads or logs the URL or body).
+        event_hooks=sync_event_hooks(),
     )
 
 

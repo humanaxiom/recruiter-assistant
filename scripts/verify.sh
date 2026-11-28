@@ -124,6 +124,8 @@ docker run "${DOCKER_ARGS[@]}" python:3.11-slim bash -lc "
   SAFE_DIRS=${SAFE_DIRS_LITERAL}
   for d in \"\${SAFE_DIRS[@]}\"; do git config --global --add safe.directory \"\$d\"; done
   find /repo/core -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-  pip install -q -r core/requirements.txt -r core/requirements-dev.txt
+  # From core/, like CI and the Dockerfile: requirements.txt names the vendored
+  # sfu-telemetry wheel by a core-relative path (ADR-048).
+  (cd core && pip install -q -r requirements.txt -r requirements-dev.txt)
   make ${TARGET}
 "

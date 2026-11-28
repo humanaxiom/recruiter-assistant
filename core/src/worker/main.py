@@ -37,11 +37,13 @@ import redis.asyncio as aioredis
 from arq import cron
 from arq.connections import RedisSettings, create_pool
 from neo4j import AsyncGraphDatabase
+from sfu_telemetry.arq_ext import instrument_arq_pool, job_hooks
 
 from src.models.ddl import init_schema
 from src.pipeline.llm import CachedEmbedder, LLMClient
 from src.settings import get_settings
 from src.storage.blob_store import BlobStore
+from src.telemetry import setup_telemetry
 from src.worker.export_tasks import build_resume_export, expire_resume_exports
 from src.worker.graph_tasks import project_to_graph
 from src.worker.interview_tasks import generate_interview_questions
@@ -135,7 +137,11 @@ async def startup(ctx: dict[str, Any]) -> None:
     # The queue client tasks use to enqueue OTHER jobs (the reconcile cron).
     # Distinct key, so it cannot be clobbered by the cache client above and a
     # reader cannot get the wrong type depending on startup ordering.
-    ctx["arq"] = await create_pool(RedisSettings.from_dsn(s.redis_url))
+    # Instrumented (ADR-048) so a job enqueued from inside another job — the
+    # reconcile cron re-queueing a stalled parse — carries its trace onward.
+    ctx["arq"] = instrument_arq_pool(
+        await create_pool(RedisSettings.from_dsn(s.redis_url))
+    )
     ctx["embedder"] = CachedEmbedder(
         llm,
         redis_client,
@@ -144,6 +150,27 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
 
     logger.info("worker.startup.ok")
+
+
+async def startup_with_telemetry(ctx: dict[str, Any]) -> None:
+    """Production ``on_startup``: configure telemetry, then :func:`startup`.
+
+    Separate from ``startup`` (ADR-048) so the wiring tests that call
+    ``startup`` directly never reconfigure process-wide logging. arq configures
+    its own ``arq`` logger before this runs; ``setup_telemetry`` routes it
+    through the JSON handler.
+    """
+    setup_telemetry("worker")
+    await startup(ctx)
+
+
+# ADR-048: rejoin the enqueuing request's trace for every job. The carrier is
+# read from ``ctx["arq"]`` (the plain ``ctx["redis"]`` is the embedding cache's
+# client — see the warning above). ``project_to_graph`` runs every 5s on its
+# own schedule; giving each tick a root trace would drown the useful ones.
+_on_job_start, _on_job_end = job_hooks(
+    redis_ctx_key="arq", skip_root=("project_to_graph",)
+)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -223,8 +250,10 @@ class WorkerSettings:
         # resume_exports/ blobs. Cron-only: never enqueued by name.
         cron(expire_resume_exports, minute={43}),
     ]
-    on_startup = startup
+    on_startup = startup_with_telemetry
     on_shutdown = shutdown
+    on_job_start = _on_job_start
+    on_job_end = _on_job_end
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # FU-7 (ADR-021 §3): the arq JOB-layer retry ceiling, sourced from the
     # SAME settings value `parse_resume`'s `LLMUnavailableError` boundary
