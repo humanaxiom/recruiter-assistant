@@ -1,0 +1,53 @@
+# Telemetry overlay (ADR-048): join the SFU zone collector's network and turn
+# span/metric export on. Opt-in; the base stack exports nothing.
+#
+#   docker compose -f docker-compose.yml -f compose.telemetry.yml up -d
+#   (or add it to COMPOSE_FILE in .env alongside compose.cas.yml)
+#
+# Needs the reference stack (humanaxiom/sfu-observability, `stack/`) running on
+# the same host: it creates the external network `sfu-telemetry` and the
+# collector at http://otel-collector:4318. Container stdout is collected by
+# that collector directly; the `labels` log option tags each line with its
+# compose service so logs are named in Grafana.
+x-telemetry-env: &telemetry_env
+  TELEMETRY_EXPORT: ${TELEMETRY_EXPORT:-otlp}
+  TELEMETRY_OTLP_ENDPOINT: ${TELEMETRY_OTLP_ENDPOINT:-http://otel-collector:4318}
+  TELEMETRY_ENVIRONMENT: ${TELEMETRY_ENVIRONMENT:-dev}
+  TELEMETRY_ZONE: ${TELEMETRY_ZONE:-dev-zone}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    labels: "com.docker.compose.project,com.docker.compose.service"
+
+networks:
+  sfu-telemetry:
+    external: true
+
+services:
+  api:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    logging: *logging
+  worker:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    logging: *logging
+  frontend:
+    environment: *telemetry_env
+    networks: [default, sfu-telemetry]
+    logging: *logging
+  postgres:
+    # Reachable by the zone's audit-shipper as recruiter-postgres; it opens
+    # its connection read-only (default_transaction_read_only).
+    networks:
+      default: {}
+      sfu-telemetry:
+        aliases: [recruiter-postgres]
+    logging: *logging
+  neo4j:
+    logging: *logging
+  redis:
+    logging: *logging

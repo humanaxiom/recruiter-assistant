@@ -24,6 +24,12 @@ Read automatically by Claude Code every session. This governs ALL work in this r
   privacy-officer sign-off, a named owner) — read the ADR before doing so.
   **Adding a second carve-out needs the same treatment: an ADR, a default-off
   flag, and a line here. Never a quiet import.**
+- **Carve-out #2, telemetry export:**
+  [ADR-048](docs/adr/048-sfu-telemetry-default-off-zone-export.md) lets spans
+  and metrics go to ONE operator-set collector inside the same trust zone
+  (`TELEMETRY_OTLP_ENDPOINT`). It is gated by `TELEMETRY_EXPORT`, which
+  **defaults to `off`**. What crosses is metadata only: `src/telemetry.py`
+  pins data class `S` and `minimal` content, and no setting can raise either.
 - Everything except Ollama runs in Docker (`docker compose up -d`)
 
 ## Non-negotiable gates — run before EVERY commit
